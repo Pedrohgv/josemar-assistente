@@ -6,7 +6,7 @@ on:
 
 jobs:
   hello-world:
-    runs-on: gitea
+    runs-on: gitea-hosted
     steps:
       - name: Print Hello World
         run: echo "Hello World"
