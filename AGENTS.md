@@ -717,6 +717,29 @@ docker-compose exec openclaw env | sort
 - Keep dependencies updated
 - Use read-only mounts where appropriate
 
+## Git Workflow for Agents
+
+### Git CLI Usage
+- **Always use the `gh` CLI** for git operations when working in this repository
+- The `gh` CLI provides better integration with GitHub workflows and is the preferred tool
+
+### Commit and Push Behavior
+- **ALWAYS ask the user** before executing `gh` commits and pushes
+- Do NOT automatically commit or push changes using `gh` CLI without explicit user confirmation
+- Exception: If the user explicitly stated in their instructions to "commit" or "push" without asking, then proceed directly
+- When asking for confirmation, clearly state what files will be committed and what the commit message will be
+
+Example confirmation prompt:
+```
+I'm ready to commit the following changes:
+- Modified: config/openclaw.json5
+- Added: .gitea/workflows/test.yaml
+
+Commit message: "Update configuration and add test workflow"
+
+Should I proceed with commit and push? (yes/no)
+```
+
 ## Additional Documentation
 
 - **Skills Documentation**: `skills/AGENTS.md` - Detailed skills system documentation
