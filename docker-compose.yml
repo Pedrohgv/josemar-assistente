@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  openclaw:
+    build: .
+    container_name: josemar-assistente
+    restart: unless-stopped
+    volumes:
+      # Mount configuration directory as source (entrypoint will copy)
+      - ./config:/root/.openclaw-source:ro
+      # Mount workspace for persistent data
+      - ./workspace:/root/.openclaw/workspace
+      # Optional: mount scripts directory for development
+      # - ./scripts:/app/scripts:ro
+      # Optional: mount skills directory for development
+      # - ./skills:/root/.openclaw-source/skills:ro
+    environment:
+      # Environment variables for API keys (to be set in .env file)
+      - ZAI_API_KEY=${ZAI_API_KEY:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      # Other environment variables
+      - OPENCLAW_LOG_LEVEL=info
+    ports:
+      # Optional: expose metrics port if needed
+      - "9090:9090"
+    networks:
+      - openclaw-network
+    # Health check
+    healthcheck:
+      test: ["CMD", "openclaw", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  openclaw-network:
+    driver: bridge

@@ -1,0 +1,992 @@
+# AGENTS.md
+
+This file provides guidance to AI coding assistants when working with OpenClaw configuration in this repository.
+
+## Configuration Overview
+
+OpenClaw uses JSON5 format for configuration, which is a superset of JSON that allows comments, trailing commas, and more readable syntax. The main configuration file is `openclaw.json5`.
+
+**Configuration Characteristics:**
+- **Format**: JSON5 (JSON with extensions)
+- **Location**: `config/openclaw.json5`
+- **Environment Variable Expansion**: `${VAR}` syntax
+- **Modular Structure**: Organized into logical sections
+- **Validation**: OpenClaw validates configuration on startup
+
+## JSON5 Format
+
+### Key Features
+
+**Comments:**
+```json5
+{
+  // This is a single-line comment
+  multi_line /* This is a multi-line comment */
+  key: "value"
+}
+```
+
+**Trailing Commas:**
+```json5
+{
+  "key1": "value1",  // Trailing comma is allowed
+  "key2": "value2",
+}
+```
+
+**Unquoted Keys:**
+```json5
+{
+  name: "Josemar",  // Keys don't need quotes
+  age: 30
+}
+```
+
+**Multiline Strings:**
+```json5
+{
+  description: `
+    This is a multiline string
+    that can span multiple lines
+    without escaping.
+  `
+}
+```
+
+### Environment Variable Expansion
+
+Use `${VARIABLE_NAME}` syntax to reference environment variables:
+
+```json5
+{
+  env: {
+    API_KEY: "${ZAI_API_KEY}",
+    BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
+  }
+}
+```
+
+**Notes:**
+- Variables are expanded at startup
+- Missing variables are replaced with empty strings
+- Use `.env` file to set variables
+- Never commit `.env` file with real values
+
+## Configuration Structure
+
+### Complete Configuration Template
+
+```json5
+{
+  // Environment variables for API keys and secrets
+  env: {
+    ZAI_API_KEY: "${ZAI_API_KEY}",
+    TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
+    DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
+  },
+
+  // Model providers configuration
+  models: {
+    mode: "merge",
+    providers: {
+      deepseek: {
+        baseUrl: "https://api.deepseek.com/v1",
+        apiKey: "${DEEPSEEK_API_KEY}",
+        api: "openai-completions",
+        models: [...]
+      }
+    }
+  },
+
+  // Agent configurations
+  agents: {
+    defaults: {
+      workspace: "~/.openclaw/workspace",
+      model: {
+        primary: "zai/glm-4.7",
+        fallbacks: ["deepseek/deepseek-reasoner"]
+      },
+      models: {
+        "zai/glm-4.7": { alias: "GLM 4.7" },
+        "deepseek/deepseek-reasoner": { alias: "DeepSeek Reasoner" }
+      }
+    },
+    list: [
+      {
+        id: "josemar",
+        default: true,
+        name: "Josemar",
+        workspace: "~/.openclaw/workspace",
+        model: "zai/glm-4.7",
+        identity: {...},
+        description: "Assistente pessoal..."
+      }
+    ]
+  },
+
+  // Channel configurations
+  channels: {
+    telegram: {
+      enabled: true,
+      botToken: "${TELEGRAM_BOT_TOKEN}",
+      useWebhook: false,
+      dmPolicy: "pairing",
+      groupPolicy: "open",
+      language: "pt-BR"
+    }
+  },
+
+  // Skills configuration
+  skills: {
+    entries: {
+      "pdf-extractor": { enabled: true }
+    }
+  },
+
+  // Agent system prompts
+  prompts: {
+    "josemar": "System prompt..."
+  },
+
+  // Session management
+  session: {
+    scope: "per-sender",
+    reset: { mode: "idle", idleMinutes: 60 },
+    store: "~/.openclaw/agents/josemar/sessions/sessions.json"
+  },
+
+  // Logging configuration
+  logging: {
+    level: "info",
+    consoleLevel: "info",
+    consoleStyle: "pretty",
+    redactSensitive: "tools"
+  }
+}
+```
+
+## Configuration Sections
+
+### 1. Environment Variables
+
+Define environment variables for secrets and configuration:
+
+```json5
+env: {
+  // API Keys
+  ZAI_API_KEY: "${ZAI_API_KEY}",
+  TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
+  DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
+  
+  // Optional configuration
+  TELEGRAM_USER_ID: "${TELEGRAM_USER_ID}",
+  CUSTOM_VAR: "${CUSTOM_VAR}",
+}
+```
+
+**Best Practices:**
+- Use environment variables for all secrets
+- Reference them in configuration sections
+- Never commit actual values to git
+- Document required variables in `.env.example`
+
+### 2. Model Providers
+
+Configure external LLM API providers:
+
+```json5
+models: {
+  mode: "merge",  // Options: "merge", "replace"
+  providers: {
+    // DeepSeek provider (OpenAI-compatible)
+    deepseek: {
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: "${DEEPSEEK_API_KEY}",
+      api: "openai-completions",
+      models: [
+        {
+          id: "deepseek-chat",
+          name: "DeepSeek Chat",
+          reasoning: false,
+          toolCall: true,
+          input: ["text"],
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+          },
+          contextWindow: 128000,
+          maxTokens: 8192,
+        },
+        {
+          id: "deepseek-reasoner",
+          name: "DeepSeek Reasoner",
+          reasoning: true,
+          toolCall: true,
+          input: ["text"],
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+          },
+          contextWindow: 128000,
+          maxTokens: 64000,
+        }
+      ]
+    }
+  }
+}
+```
+
+**Provider Configuration Fields:**
+- `baseUrl`: API endpoint URL
+- `apiKey`: Environment variable reference
+- `api`: API type (e.g., "openai-completions")
+- `models`: Array of model definitions
+
+**Model Definition Fields:**
+- `id`: Unique model identifier
+- `name`: Human-readable name
+- `reasoning`: Boolean, if model supports reasoning
+- `toolCall`: Boolean, if model supports tool calling
+- `input`: Array of input types
+- `cost`: Cost information (input, output, cache)
+- `contextWindow`: Maximum context size
+- `maxTokens`: Maximum output tokens
+
+**Adding Custom Providers:**
+
+```json5
+providers: {
+  custom-provider: {
+    baseUrl: "https://api.custom.com/v1",
+    apiKey: "${CUSTOM_API_KEY}",
+    api: "openai-completions",
+    models: [
+      {
+        id: "custom-model",
+        name: "Custom Model",
+        reasoning: false,
+        toolCall: true,
+        input: ["text"],
+        cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 64000,
+        maxTokens: 4096
+      }
+    ]
+  }
+}
+```
+
+### 3. Agents
+
+Configure AI agents with their settings:
+
+```json5
+agents: {
+  defaults: {
+    // Default workspace location
+    workspace: "~/.openclaw/workspace",
+    
+    // Default model configuration
+    model: {
+      primary: "zai/glm-4.7",
+      fallbacks: ["deepseek/deepseek-reasoner"]
+    },
+    
+    // Model aliases for easier reference
+    models: {
+      "zai/glm-4.7": {
+        alias: "GLM 4.7"
+      },
+      "deepseek/deepseek-reasoner": {
+        alias: "DeepSeek Reasoner"
+      },
+      "deepseek/deepseek-chat": {
+        alias: "DeepSeek Chat"
+      }
+    }
+  },
+  
+  list: [
+    {
+      id: "josemar",
+      default: true,
+      name: "Josemar",
+      workspace: "~/.openclaw/workspace",
+      model: "zai/glm-4.7",
+      identity: {
+        name: "Josemar",
+        theme: "helpful assistant",
+        emoji: "🤖"
+      },
+      description: "Assistente pessoal em Português Brasileiro especializado em processamento de PDFs e organização financeira"
+    }
+  ]
+}
+```
+
+**Agent Fields:**
+- `id`: Unique agent identifier
+- `default`: Boolean, if this is the default agent
+- `name`: Display name
+- `workspace`: Path to workspace directory
+- `model`: Primary model to use
+- `identity`: Agent personality (name, theme, emoji)
+- `description`: Agent description
+
+**Adding a New Agent:**
+
+```json5
+list: [
+  {
+    id: "specialist",
+    default: false,
+    name: "Specialist Agent",
+    workspace: "~/.openclaw/workspace",
+    model: "deepseek/deepseek-reasoner",
+    identity: {
+      name: "Specialist",
+      theme: "technical expert",
+      emoji: "🔬"
+    },
+    description: "Specialist agent for technical tasks"
+  }
+]
+```
+
+### 4. Channels
+
+Configure communication channels:
+
+```json5
+channels: {
+  telegram: {
+    enabled: true,
+    botToken: "${TELEGRAM_BOT_TOKEN}",
+    useWebhook: false,
+    dmPolicy: "pairing",
+    allowFrom: [],
+    groupPolicy: "open",
+    groups: {
+      "*": {
+        requireMention: true
+      }
+    },
+    language: "pt-BR"
+  }
+}
+```
+
+**Telegram Configuration Fields:**
+- `enabled`: Boolean, if Telegram is enabled
+- `botToken`: Bot API token from @BotFather
+- `useWebhook`: Boolean, use webhook instead of polling
+- `dmPolicy`: Direct message policy ("open", "pairing", "closed")
+- `allowFrom`: Array of allowed user IDs (empty means all)
+- `groupPolicy`: Group policy ("open", "mention", "closed")
+- `groups`: Group-specific settings
+- `language`: Bot language (e.g., "pt-BR", "en-US")
+
+**Direct Message Policies:**
+- `open`: Anyone can send messages
+- `pairing`: Users must pair with the bot first
+- `closed`: Only allowed users can send messages
+
+**Group Policies:**
+- `open`: Bot responds to all messages
+- `mention`: Bot only responds when mentioned
+- `closed`: Bot doesn't respond to groups
+
+### 5. Skills
+
+Configure custom skills:
+
+```json5
+skills: {
+  entries: {
+    "pdf-extractor": {
+      enabled: true
+    }
+  }
+}
+```
+
+**Skill Configuration Fields:**
+- Skill ID (key): Matches skill directory name
+- `enabled`: Boolean, if skill is enabled
+
+**Adding a New Skill:**
+
+```json5
+entries: {
+  "pdf-extractor": {
+    enabled: true
+  },
+  "my-custom-skill": {
+    enabled: true
+  }
+}
+```
+
+**Note:** Skills are automatically discovered from `/root/.openclaw/skills/` directory. The skill ID must match the directory name.
+
+### 6. Prompts
+
+Define system prompts for agents:
+
+```json5
+prompts: {
+  "josemar": `
+Você é o Josemar, um assistente pessoal inteligente que fala Português Brasileiro.
+
+## Sua Personalidade
+- Amigável e prestativo
+- Fala Português Brasileiro naturalmente
+- Focado em ajudar com tarefas práticas
+- Respeitoso e profissional
+- Interessado em organização e produtividade
+
+## O Que Você Faz
+- Processa e extrai dados de PDFs de faturas de cartão de crédito
+- Ajuda na organização financeira pessoal
+- Responde perguntas gerais de forma útil
+- Executa scripts e ferramentas personalizadas
+
+## Como Trabalhar
+1. Sempre responda em Português Brasileiro
+2. Use ferramentas quando disponíveis para executar tarefas específicas
+3. Seja claro e conciso em suas respostas
+4. Peça esclarecimentos se a solicitação for ambígua
+5. Mantenha um tom profissional, mas acessível
+
+## Ferramentas Disponíveis
+- pdf-extractor: Para extrair dados de PDFs de faturas
+
+Sempre que o usuário enviar um PDF ou pedir para extrair dados de uma fatura, use a ferramenta pdf-extractor.
+  `
+}
+```
+
+**Prompt Key:** Must match agent ID (e.g., "josemar")
+
+**Prompt Best Practices:**
+- Use template literals for multiline strings
+- Include clear instructions
+- Specify behavior and constraints
+- List available tools
+- Use agent's language (Portuguese for Josemar)
+
+**Adding a New Agent Prompt:**
+
+```json5
+prompts: {
+  "josemar": "...",
+  "specialist": `
+You are a technical specialist agent.
+
+## Your Expertise
+- Deep technical knowledge
+- Problem-solving skills
+- Code analysis and optimization
+
+## How You Work
+1. Analyze technical problems thoroughly
+2. Provide detailed solutions
+3. Explain technical concepts clearly
+4. Suggest best practices
+
+## Available Tools
+- code-analyzer: Analyze code
+- debugger: Debug applications
+  `
+}
+```
+
+### 7. Session Management
+
+Configure session behavior:
+
+```json5
+session: {
+  scope: "per-sender",
+  reset: {
+    mode: "idle",
+    idleMinutes: 60
+  },
+  store: "~/.openclaw/agents/josemar/sessions/sessions.json"
+}
+```
+
+**Session Fields:**
+- `scope`: Session scope ("per-sender", "global")
+- `reset.mode`: Reset mode ("idle", "manual", "never")
+- `reset.idleMinutes`: Idle time before reset (if mode is "idle")
+- `store`: Path to session storage file
+
+**Session Scopes:**
+- `per-sender`: Each user has their own session
+- `global`: All users share the same session
+
+**Reset Modes:**
+- `idle`: Reset after idle time
+- `manual`: Only reset manually
+- `never`: Never reset sessions
+
+### 8. Logging
+
+Configure logging behavior:
+
+```json5
+logging: {
+  level: "info",
+  consoleLevel: "info",
+  consoleStyle: "pretty",
+  redactSensitive: "tools"
+}
+```
+
+**Logging Fields:**
+- `level`: Global log level (debug, info, warn, error)
+- `consoleLevel`: Console log level
+- `consoleStyle`: Console style ("pretty", "json")
+- `redactSensitive`: What to redact ("tools", "all", "none")
+
+**Log Levels:**
+- `debug`: Detailed debugging information
+- `info`: General informational messages
+- `warn`: Warning messages
+- `error`: Error messages only
+
+**Console Styles:**
+- `pretty`: Human-readable format
+- `json`: Structured JSON format
+
+## Configuration Management
+
+### Editing Configuration
+
+**1. Edit configuration file:**
+```bash
+nano config/openclaw.json5
+```
+
+**2. Validate JSON5 syntax:**
+```bash
+# Use docker-compose to validate
+docker-compose run --rm openclaw sh -c "cat /root/.openclaw/openclaw.json5 | jq ."
+```
+
+**3. Test configuration:**
+```bash
+# Check if OpenClaw accepts the configuration
+docker-compose run --rm openclaw openclaw --validate-config
+```
+
+**4. Apply changes:**
+```bash
+# Restart the service
+docker-compose restart openclaw
+```
+
+### Environment Variables
+
+**1. Create `.env` file:**
+```bash
+cp .env.example .env
+nano .env
+```
+
+**2. Set required variables:**
+```bash
+ZAI_API_KEY=your_zai_api_key_here
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
+```
+
+**3. Verify variables are loaded:**
+```bash
+docker-compose exec openclaw env | grep -E "ZAI|TELEGRAM|DEEPSEEK"
+```
+
+**4. Restart to apply:**
+```bash
+docker-compose restart openclaw
+```
+
+### Configuration Best Practices
+
+**1. Use Comments:**
+```json5
+{
+  // Primary model for the Josemar agent
+  // Fallback to DeepSeek if Z.AI is unavailable
+  model: {
+    primary: "zai/glm-4.7",
+    fallbacks: ["deepseek/deepseek-reasoner"]
+  }
+}
+```
+
+**2. Group Related Settings:**
+```json5
+{
+  // Telegram Configuration
+  channels: {
+    telegram: {
+      enabled: true,
+      botToken: "${TELEGRAM_BOT_TOKEN}",
+      language: "pt-BR"
+    }
+  }
+}
+```
+
+**3. Use Multiline Strings for Prompts:**
+```json5
+{
+  prompts: {
+    "josemar": `
+Você é um assistente em Português Brasileiro.
+
+Seja amigável e prestativo.
+    `
+  }
+}
+```
+
+**4. Document Changes:**
+```json5
+{
+  // Added custom provider on 2025-01-15
+  // See: https://docs.custom-api.com
+  customProvider: {...}
+}
+```
+
+## Configuration Validation
+
+### JSON5 Validation
+
+**Using jq:**
+```bash
+# Validate JSON5 syntax
+cat config/openclaw.json5 | jq .
+
+# Check for specific field
+cat config/openclaw.json5 | jq '.agents.list[0].id'
+```
+
+**Using OpenClaw:**
+```bash
+# Validate configuration
+docker-compose run --rm openclaw openclaw --validate-config
+
+# Show configuration
+docker-compose run --rm openclaw openclaw config show
+```
+
+### Environment Variable Validation
+
+**Check required variables:**
+```bash
+# List all environment variables
+docker-compose exec openclaw env | sort
+
+# Check specific variables
+docker-compose exec openclaw env | grep ZAI_API_KEY
+docker-compose exec openclaw env | grep TELEGRAM_BOT_TOKEN
+```
+
+**Test variable expansion:**
+```bash
+# Create test configuration
+cat <<EOF > test-config.json5
+{
+  test: "${TEST_VAR}",
+  missing: "${MISSING_VAR}"
+}
+EOF
+
+# Parse and check
+echo "TEST_VAR=value" | docker-compose run --rm -T openclaw sh -c "export \$(cat) && cat test-config.json5 | jq ."
+```
+
+### Model Validation
+
+**Test model connectivity:**
+```bash
+# Test Z.AI API
+curl -X POST "https://api.z.ai/v1/chat/completions" \
+  -H "Authorization: Bearer ${ZAI_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "glm-4.7", "messages": [{"role": "user", "content": "Test"}]}'
+
+# Test DeepSeek API
+curl -X POST "https://api.deepseek.com/v1/chat/completions" \
+  -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "deepseek-chat", "messages": [{"role": "user", "content": "Test"}]}'
+```
+
+**Check model in OpenClaw:**
+```bash
+# List available models
+docker-compose exec openclaw openclaw models list
+
+# Test model
+docker-compose exec openclaw openclaw models test zai/glm-4.7
+```
+
+## Configuration Examples
+
+### Adding a New Provider
+
+**1. Define provider in configuration:**
+```json5
+providers: {
+  anthropic: {
+    baseUrl: "https://api.anthropic.com/v1",
+    apiKey: "${ANTHROPIC_API_KEY}",
+    api: "anthropic-completions",
+    models: [
+      {
+        id: "claude-3-opus",
+        name: "Claude 3 Opus",
+        reasoning: true,
+        toolCall: true,
+        input: ["text", "image"],
+        cost: { input: 0.015, output: 0.075, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 4096
+      }
+    ]
+  }
+}
+```
+
+**2. Add model to agent:**
+```json5
+models: {
+  "anthropic/claude-3-opus": {
+    alias: "Claude 3 Opus"
+  }
+}
+```
+
+**3. Use in agent:**
+```json5
+model: {
+  primary: "anthropic/claude-3-opus",
+  fallbacks: ["zai/glm-4.7"]
+}
+```
+
+**4. Set API key:**
+```bash
+echo "ANTHROPIC_API_KEY=your_key_here" >> .env
+```
+
+**5. Restart and test:**
+```bash
+docker-compose restart openclaw
+docker-compose exec openclaw openclaw models test anthropic/claude-3-opus
+```
+
+### Configuring Multiple Agents
+
+```json5
+agents: {
+  list: [
+    {
+      id: "josemar",
+      default: true,
+      name: "Josemar",
+      model: "zai/glm-4.7",
+      workspace: "~/.openclaw/workspace/josemar",
+      description: "Assistente pessoal em Português"
+    },
+    {
+      id: "assistant-en",
+      default: false,
+      name: "Assistant EN",
+      model: "deepseek/deepseek-chat",
+      workspace: "~/.openclaw/workspace/assistant-en",
+      description: "English speaking assistant"
+    },
+    {
+      id: "coder",
+      default: false,
+      name: "Coder",
+      model: "anthropic/claude-3-opus",
+      workspace: "~/.openclaw/workspace/coder",
+      description: "Coding assistant"
+    }
+  ]
+}
+```
+
+### Adding Skills with Configuration
+
+```json5
+skills: {
+  entries: {
+    "pdf-extractor": {
+      enabled: true,
+      config: {
+        maxFileSize: "10MB",
+        supportedFormats: ["pdf"]
+      }
+    },
+    "web-scraper": {
+      enabled: true,
+      config: {
+        timeout: 30,
+        maxPages: 10
+      }
+    }
+  }
+}
+```
+
+### Configuring Multiple Channels
+
+```json5
+channels: {
+  telegram: {
+    enabled: true,
+    botToken: "${TELEGRAM_BOT_TOKEN}",
+    language: "pt-BR"
+  },
+  discord: {
+    enabled: true,
+    botToken: "${DISCORD_BOT_TOKEN}",
+    language: "en-US"
+  },
+  slack: {
+    enabled: false,
+    botToken: "${SLACK_BOT_TOKEN}"
+  }
+}
+```
+
+## Troubleshooting
+
+### Configuration Errors
+
+**Error: "Configuration file not found"**
+```bash
+# Check if config directory is mounted
+docker-compose exec openclaw ls -la /root/.openclaw/
+
+# Check if configuration file exists
+docker-compose exec openclaw ls -la /root/.openclaw/openclaw.json5
+
+# Rebuild container
+docker-compose down
+docker-compose build
+docker-compose up -d
+```
+
+**Error: "Invalid JSON5 syntax"**
+```bash
+# Validate syntax with jq
+cat config/openclaw.json5 | jq .
+
+# Check for syntax errors
+# - Missing quotes
+# - Trailing commas in wrong places
+# - Unclosed brackets/braces
+# - Invalid escape sequences
+
+# Fix and restart
+nano config/openclaw.json5
+docker-compose restart openclaw
+```
+
+**Error: "Environment variable not found"**
+```bash
+# Check if variable is set
+docker-compose exec openclaw env | grep VARIABLE_NAME
+
+# Add to .env if missing
+echo "VARIABLE_NAME=value" >> .env
+
+# Restart to apply
+docker-compose restart openclaw
+```
+
+### Model Connection Errors
+
+**Error: "Failed to connect to model provider"**
+```bash
+# Check API key
+docker-compose exec openclaw env | grep API_KEY
+
+# Test API directly
+curl -X POST "https://api.provider.com/v1/chat/completions" \
+  -H "Authorization: Bearer ${API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "model-id", "messages": [{"role": "user", "content": "Test"}]}'
+
+# Check network connectivity
+docker-compose exec openclaw ping -c 3 api.provider.com
+
+# Verify provider configuration
+docker-compose exec openclaw openclaw config show | grep -A 10 providers
+```
+
+**Error: "Model not found"**
+```bash
+# List available models
+docker-compose exec openclaw openclaw models list
+
+# Check model ID in configuration
+cat config/openclaw.json5 | jq '.models.providers'
+
+# Verify model is in provider's model list
+```
+
+### Skill Loading Errors
+
+**Error: "Skill not found"**
+```bash
+# Check skill directory
+docker-compose exec openclaw ls -la /root/.openclaw/skills/
+
+# Check skill configuration
+cat config/openclaw.json5 | jq '.skills.entries'
+
+# Verify skill directory name matches configuration
+```
+
+**Error: "Skill execution failed"**
+```bash
+# Test skill manually
+echo '{"test": "data"}' | docker-compose exec -T openclaw /root/.openclaw/skills/skill-name/skill-name
+
+# Check skill permissions
+docker-compose exec openclaw ls -la /root/.openclaw/skills/skill-name/
+
+# Check skill dependencies
+docker-compose exec openclaw python3 -c "import required_module"
+```
+
+## Additional Resources
+
+- **OpenClaw Documentation**: https://docs.openclaw.dev
+- **JSON5 Format**: https://json5.org
+- **Z.AI API Documentation**: https://docs.z.ai
+- **DeepSeek API Documentation**: https://api-docs.deepseek.com
+- **Telegram Bot API**: https://core.telegram.org/bots/api
+
+## Support
+
+For configuration issues:
+1. Validate JSON5 syntax: `cat config/openclaw.json5 | jq .`
+2. Check environment variables: `docker-compose exec openclaw env | sort`
+3. Review OpenClaw logs: `docker-compose logs -f openclaw`
+4. Test configuration: `docker-compose run --rm openclaw openclaw --validate-config`
+5. Consult this documentation and OpenClaw docs at https://docs.openclaw.dev

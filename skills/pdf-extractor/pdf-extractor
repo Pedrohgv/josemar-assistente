@@ -1,0 +1,5 @@
+#!/bin/bash
+# PDF Extractor skill wrapper for OpenClaw
+
+# Call the Python script with stdin input
+python3 /app/scripts/pdf_extractor.py

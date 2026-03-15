@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "plan": {
+      "model": "opencode/kimi-k2.5"
+    },
+    "build": {
+      "model": "opencode/kimi-k2.5"
+    },
+    "general": {
+      "mode": "subagent",
+      "model": "opencode/minimax-m2.5"
+    }
+  }
+}
