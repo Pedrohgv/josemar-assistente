@@ -717,6 +717,48 @@ docker-compose exec openclaw env | sort
 - Keep dependencies updated
 - Use read-only mounts where appropriate
 
+## Documentation Maintenance
+
+When making changes to this repository, ensure relevant AGENTS.md files are kept up to date:
+
+### Update Triggers
+
+Update the corresponding AGENTS.md file when you:
+
+**Root AGENTS.md** (this file):
+- Changes to project structure or architecture
+- New development commands or workflows
+- Changes to Docker deployment
+- New testing procedures
+- Updates to best practices
+
+**skills/AGENTS.md**:
+- Adding, modifying, or removing skills
+- Changes to skill structure or patterns
+- Updates to skill development workflows
+- New skill categories or frontmatter fields
+
+**config/AGENTS.md**:
+- Changes to configuration structure
+- New configuration options or sections
+- Updates to JSON5 schema or validation rules
+- Changes to environment variable handling
+
+### Maintenance Checklist
+
+When making changes, ask yourself:
+1. Does this change affect how agents should work with the code?
+2. Is there a relevant subdirectory AGENTS.md that needs updating?
+3. Are there any cross-references between AGENTS.md files that need updating?
+4. Does the root AGENTS.md need a summary or reference update?
+
+### Cross-References
+
+Keep cross-references between AGENTS.md files in sync:
+- Root AGENTS.md references `skills/AGENTS.md` for detailed skill documentation
+- Root AGENTS.md references `config/AGENTS.md` for configuration details
+- If you add a new subdirectory with its own AGENTS.md, add a reference in the root file
+
 ## Git Workflow for Agents
 
 ### Git CLI Usage
