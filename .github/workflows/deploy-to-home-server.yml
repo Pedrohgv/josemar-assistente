@@ -1,0 +1,37 @@
+name: deploy-to-home-server
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create .env file
+        run: |
+          cat > .env << EOF
+          ZAI_API_KEY=${{ secrets.ZAI_API_KEY }}
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}
+          TELEGRAM_USER_ID=${{ secrets.TELEGRAM_USER_ID }}
+          EOF
+
+      - name: Stop existing services
+        run: docker compose down
+
+      - name: Clean up old Docker images
+        run: |
+          docker image prune -a -f
+          docker rmi $(docker images 'josemar-assistente*' -q) 2>/dev/null || true
+
+      - name: Build Docker image
+        run: docker compose build --no-cache
+
+      - name: Start services
+        run: docker compose up -d
+
+      - name: Verify deployment
+        run: docker ps | grep josemar-assistente
