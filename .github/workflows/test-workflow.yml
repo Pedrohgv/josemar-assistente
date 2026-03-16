@@ -1,0 +1,20 @@
+name: test-workflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hello-world:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Hello World
+        run: |
+          echo "Hello, World!"
+          echo "This workflow is running on a self-hosted runner."
+          echo "Runner name: ${{ runner.name }}"
+          echo "Runner OS: ${{ runner.os }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Branch: ${{ github.ref }}"
