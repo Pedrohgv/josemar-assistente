@@ -40,4 +40,4 @@ ENTRYPOINT ["docker-entrypoint.sh"]
 WORKDIR /app
 
 # Default command (OpenClaw gateway)
-CMD ["openclaw", "gateway"]
+CMD ["openclaw", "gateway", "--allow-unconfigured"]
