@@ -9,6 +9,13 @@
     DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
   },
 
+  // Gateway configuration
+  gateway: {
+    mode: "local",
+    bind: "loopback",
+    port: 18789,
+  },
+
   // Model providers configuration
   models: {
     mode: "merge",

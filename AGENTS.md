@@ -26,11 +26,24 @@ Josemar Assistente is a self-hosted OpenClaw-based AI assistant bot running in D
 
 ## Development Commands
 
+### Important: DO NOT Deploy Locally
+
+**Warning:** The Telegram bot token can only be used by one active deployment at a time. Running `docker compose up` locally will conflict with the production server deployment and cause the bot to stop responding on the server.
+
+**ALWAYS work in branches and push to the server for testing.** Never run the full service locally unless you are using a different Telegram bot token (e.g., a test bot from @BotFather).
+
+**Safe local operations (do not start the service):**
+- Build the image: `docker compose build` (builds but doesn't run)
+- Test configurations: `docker compose config` (validates compose file)
+- Lint Dockerfile: `docker run --rm -i hadolint/hadolint < Dockerfile`
+- Test scripts locally: `python3 scripts/pdf_extractor.py`
+
 ### Local Development
 
-**Start the bot:**
+**Start the bot (PRODUCTION SERVER ONLY - NEVER RUN LOCALLY):**
 ```bash
-# Start all services
+# ⚠️ WARNING: Only run this on the production server!
+# Running locally will disconnect the production bot.
 docker-compose up -d
 
 # View logs
