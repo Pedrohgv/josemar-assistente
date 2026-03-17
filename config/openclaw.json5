@@ -128,7 +128,7 @@
       botToken: "${TELEGRAM_BOT_TOKEN}",
       useWebhook: false,
       dmPolicy: "closed",
-      allowFrom: [190731460],
+      allowFrom: [],
       groupPolicy: "open",
       groups: {
         "*": {
