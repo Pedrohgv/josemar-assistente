@@ -1,9 +1,13 @@
 # Use official OpenClaw image as base
 FROM ghcr.io/openclaw/openclaw:latest
 
+# Switch to root user to install packages
+USER root
+
 # Install Python and PDF processing dependencies
-RUN apk add --no-cache python3 py3-pip \
-    && pip3 install --no-cache-dir pymupdf
+RUN apt-get update && apt-get install -y python3 python3-pip \
+    && pip3 install --no-cache-dir --break-system-packages pymupdf \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create scripts directory
 RUN mkdir -p /app/scripts

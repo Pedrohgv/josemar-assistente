@@ -10,6 +10,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Debug User Info
+        run: |
+          echo "Current user: $(whoami)"
+          echo "User ID: $(id -u)"
+          echo "Group ID: $(id -g)"
+          echo "Groups: $(id -Gn)"
+          echo "Docker group members: $(getent group docker)"
+          echo "Docker socket permissions: $(ls -la /var/run/docker.sock 2>/dev/null || echo 'Docker socket not found')"
+
       - name: Create .env file
         run: |
           cat > .env << EOF
