@@ -94,8 +94,12 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
   // Gateway configuration
   gateway: {
     mode: "local",
-    bind: "loopback",
+    bind: "lan",
     port: 18789,
+    auth: {
+      mode: "token",
+      token: "${GATEWAY_AUTH_TOKEN}",
+    },
   },
 
   // Model providers configuration

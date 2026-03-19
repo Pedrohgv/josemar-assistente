@@ -648,8 +648,47 @@ echo "test" | docker-compose exec -T openclaw sh -x /root/.openclaw/skills/pdf-e
 docker-compose run --rm openclaw sh -c "cat /root/.openclaw/openclaw.json5 | jq ."
 
 # Check environment variables
-docker-compose exec openclaw env | sort
+docker-compose exec openclaw env | grep -E "ZAI|TELEGRAM|DEEPSEEK"
+
+# Reload configuration
+docker-compose restart openclaw
 ```
+
+## Web UI Access
+
+The OpenClaw Gateway provides a web interface accessible via browser:
+
+### Accessing the UI
+
+**URL:** `http://localhost:18789/__openclaw__/canvas/?token=YOUR_TOKEN`
+
+**Requirements:**
+- Gateway authentication token (set in `GATEWAY_AUTH_TOKEN` env var)
+- Port 18789 exposed in Docker Compose
+
+### Configuration
+
+**1. Generate a secure token:**
+```bash
+openssl rand -hex 32
+```
+
+**2. Add to `.env`:**
+```bash
+GATEWAY_AUTH_TOKEN=your-generated-token
+```
+
+**3. Access the UI:**
+```
+http://localhost:18789/__openclaw__/canvas/?token=your-generated-token
+```
+
+### Security Notes
+
+- The token is required when `gateway.bind` is set to "lan" (non-loopback)
+- Never share your token publicly
+- The UI provides full control over the bot - protect it accordingly
+- Consider using a reverse proxy (nginx) with SSL for production
 
 ## Best Practices
 

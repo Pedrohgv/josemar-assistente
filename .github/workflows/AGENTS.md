@@ -10,12 +10,26 @@ All workflows in this directory **MUST** use `runs-on: self-hosted` unless expli
 
 The following secrets must be configured in the GitHub repository settings:
 
-| Secret | Description |
-|--------|-------------|
-| `ZAI_API_KEY` | API key for Z.AI provider (GLM models) |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather |
-| `DEEPSEEK_API_KEY` | (Optional) DeepSeek API key |
-| `TELEGRAM_USER_ID` | (Optional) Telegram user ID for pairing |
+| Secret | Description | Required |
+|--------|-------------|----------|
+| `ZAI_API_KEY` | API key for Z.AI provider (GLM models) | Yes |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather | Yes |
+| `DEEPSEEK_API_KEY` | DeepSeek API key (optional fallback) | No |
+| `PEDRO_TELEGRAM_ID` | Telegram user ID for the primary user | Yes |
+| `GATEWAY_AUTH_TOKEN` | Authentication token for OpenClaw web UI | Yes |
+
+### Generating GATEWAY_AUTH_TOKEN
+
+Generate a secure random token for accessing the OpenClaw web UI:
+
+```bash
+openssl rand -hex 32
+```
+
+Copy the output and add it as a GitHub secret named `GATEWAY_AUTH_TOKEN`.
+
+This token is required to access the web interface at:
+`http://your-server:18789/__openclaw__/canvas/?token=YOUR_TOKEN`
 
 ## Deployment Workflow
 

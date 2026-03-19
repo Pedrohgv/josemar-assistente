@@ -18,14 +18,17 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - PEDRO_TELEGRAM_ID=${PEDRO_TELEGRAM_ID:-}
+      - GATEWAY_AUTH_TOKEN=${GATEWAY_AUTH_TOKEN:-}
       # Additional users can be added here following the pattern:
       # - ALICE_TELEGRAM_ID=${ALICE_TELEGRAM_ID:-}
       # - BOB_TELEGRAM_ID=${BOB_TELEGRAM_ID:-}
       # Other environment variables
       - OPENCLAW_LOG_LEVEL=info
     ports:
-      # Optional: expose metrics port if needed
+      # Metrics port
       - "9090:9090"
+      # OpenClaw Gateway UI (requires GATEWAY_AUTH_TOKEN)
+      - "18789:18789"
     networks:
       - openclaw-network
     # Health check
