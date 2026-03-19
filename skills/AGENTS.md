@@ -1,16 +1,20 @@
 # AGENTS.md
 
-This file provides guidance to AI coding assistants when working with skills in this repository.
+**Purpose:** Guidance for AI assistants working with skills in this repository.
 
 ## Skills Overview
 
-The Josemar Assistente uses the OpenClaw skills system to extend functionality. Skills are external tools and utilities that can be called by the AI agent to perform specific tasks.
+The Josemar Assistente uses the OpenClaw skills system to extend functionality. Skills are external tools that can be called by the AI agent to perform specific tasks.
 
-**Skill Characteristics:**
-- **External Executables**: Skills are standalone scripts/executables
-- **Stdin/Stdout Communication**: Skills receive input via stdin and output JSON via stdout
-- **Self-Documenting**: Each skill has a `SKILL.md` file with frontmatter metadata
-- **Isolated**: Skills run in their own process for security and reliability
+## Current Implementation
+
+The only skill currently implemented is **PDF Extractor** at `skills/pdf-extractor/`.
+
+- **Purpose**: Extracts data from Brazilian credit card invoice PDFs
+- **Input**: PDF file path or raw text (via stdin)
+- **Output**: JSON with extracted expenses
+- **Implementation**: Python script at `scripts/pdf_extractor.py`
+- **Categories**: pdf, finance, extraction, brazilian
 
 ## Skill Structure
 
@@ -213,43 +217,6 @@ docker-compose exec openclaw openclaw skills info my-skill
 # Test skill execution
 docker-compose exec openclaw openclaw skills run my-skill '{"test": "data"}'
 ```
-
-## Existing Skills
-
-### PDF Extractor
-
-**Location**: `skills/pdf-extractor/`
-
-**Description**: Extracts text and expense data from Brazilian credit card invoice PDFs
-
-**Categories**: pdf, finance, extraction, brazilian
-
-**Usage**:
-```bash
-# Process PDF file
-echo "/path/to/invoice.pdf" | pdf-extractor
-
-# Process raw text
-cat invoice.txt | pdf-extractor
-```
-
-**Input**: File path or raw text (via stdin)
-
-**Output**: JSON structure with:
-- `success`: Boolean indicating success/failure
-- `source`: `"pdf_file"` or `"raw_text"`
-- `extraction`: Metadata (total expense, line count, text preview)
-- `parsed_expenses`: Array of expense objects
-- `summary`: Aggregated statistics
-
-**Dependencies**: Python 3, pymupdf
-
-**Implementation**:
-- `SKILL.md`: Complete skill documentation
-- `pdf-extractor`: Bash wrapper calling Python script
-- Python script location: `/app/scripts/pdf_extractor.py`
-
-**See**: `skills/pdf-extractor/SKILL.md` for complete documentation
 
 ## Skill Development Best Practices
 
@@ -650,84 +617,7 @@ signal.alarm(30)  # 30 second timeout
 
 ## Skill Examples
 
-### Example 1: Simple Calculator
-
-```bash
-#!/bin/bash
-# Simple calculator skill
-
-input=$(cat)
-num1=$(echo $input | jq -r '.num1')
-num2=$(echo $input | jq -r '.num2')
-operation=$(echo $input | jq -r '.operation')
-
-case $operation in
-    add)
-        result=$(echo "$num1 + $num2" | bc)
-        ;;
-    subtract)
-        result=$(echo "$num1 - $num2" | bc)
-        ;;
-    multiply)
-        result=$(echo "$num1 * $num2" | bc)
-        ;;
-    divide)
-        result=$(echo "scale=2; $num1 / $num2" | bc)
-        ;;
-    *)
-        echo '{"success": false, "error": "Invalid operation"}'
-        exit 1
-        ;;
-esac
-
-echo "{\"success\": true, \"result\": $result}"
-```
-
-### Example 2: Web Scraper
-
-```python
-#!/usr/bin/env python3
-import json
-import sys
-import requests
-from bs4 import BeautifulSoup
-
-def scrape_url(url):
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    
-    # Extract title
-    title = soup.find('title').text if soup.find('title') else ''
-    
-    # Extract all links
-    links = [a['href'] for a in soup.find_all('a', href=True)]
-    
-    return {
-        'title': title,
-        'url': url,
-        'links': links[:10]  # Limit to first 10 links
-    }
-
-def main():
-    input_data = json.loads(sys.stdin.read())
-    url = input_data.get('url')
-    
-    if not url:
-        print(json.dumps({'success': False, 'error': 'URL is required'}))
-        sys.exit(1)
-    
-    try:
-        result = scrape_url(url)
-        print(json.dumps({'success': True, 'data': result}, ensure_ascii=False))
-    except Exception as e:
-        print(json.dumps({'success': False, 'error': str(e)}), ensure_ascii=False)
-        sys.exit(1)
-
-if __name__ == '__main__':
-    main()
-```
-
-### Example 3: File Processor
+### Example: File Processor
 
 ```python
 #!/usr/bin/env python3

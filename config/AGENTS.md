@@ -487,6 +487,8 @@ entries: {
 
 **Example:** See `workspace/SOUL.md` in your local workspace for the bot's current personality configuration.
 
+**Note:** Agent prompts and personality are configured in workspace markdown files (SOUL.md, AGENTS.md), not in the JSON configuration.
+
 ### 7. Session Management
 
 Configure session behavior:
@@ -552,7 +554,7 @@ logging: {
 
 **1. Edit configuration file:**
 ```bash
-nano config/openclaw.json5
+nano config/openclaw.json
 ```
 
 **2. Validate JSON5 syntax:**
@@ -655,10 +657,10 @@ Seja amigável e prestativo.
 **Using jq:**
 ```bash
 # Validate JSON5 syntax
-cat config/openclaw.json5 | jq .
+cat config/openclaw.json | jq .
 
 # Check for specific field
-cat config/openclaw.json5 | jq '.agents.list[0].id'
+cat config/openclaw.json | jq '.agents.list[0].id'
 ```
 
 **Using OpenClaw:**
@@ -835,6 +837,8 @@ skills: {
 
 ### Configuring Multiple Channels
 
+**Note:** Currently only Telegram is fully implemented. Discord and Slack are shown below as examples of how to configure multiple channels.
+
 ```json5
 channels: {
   telegram: {
@@ -875,7 +879,7 @@ docker-compose up -d
 **Error: "Invalid JSON5 syntax"**
 ```bash
 # Validate syntax with jq
-cat config/openclaw.json5 | jq .
+cat config/openclaw.json | jq .
 
 # Check for syntax errors
 # - Missing quotes
@@ -884,7 +888,7 @@ cat config/openclaw.json5 | jq .
 # - Invalid escape sequences
 
 # Fix and restart
-nano config/openclaw.json5
+nano config/openclaw.json
 docker-compose restart openclaw
 ```
 
@@ -926,7 +930,7 @@ docker-compose exec openclaw openclaw config show | grep -A 10 providers
 docker-compose exec openclaw openclaw models list
 
 # Check model ID in configuration
-cat config/openclaw.json5 | jq '.models.providers'
+cat config/openclaw.json | jq '.models.providers'
 
 # Verify model is in provider's model list
 ```
@@ -939,7 +943,7 @@ cat config/openclaw.json5 | jq '.models.providers'
 docker-compose exec openclaw ls -la /root/.openclaw/skills/
 
 # Check skill configuration
-cat config/openclaw.json5 | jq '.skills.entries'
+cat config/openclaw.json | jq '.skills.entries'
 
 # Verify skill directory name matches configuration
 ```
@@ -967,7 +971,7 @@ docker-compose exec openclaw python3 -c "import required_module"
 ## Support
 
 For configuration issues:
-1. Validate JSON5 syntax: `cat config/openclaw.json5 | jq .`
+1. Validate JSON5 syntax: `cat config/openclaw.json | jq .`
 2. Check environment variables: `docker-compose exec openclaw env | sort`
 3. Review OpenClaw logs: `docker-compose logs -f openclaw`
 4. Test configuration: `docker-compose run --rm openclaw openclaw --validate-config`

@@ -1,6 +1,16 @@
 # AGENTS.md
 
-This file provides guidance to AI coding assistants when working with code in this repository.
+**Purpose:** Root guidance for AI assistants working with the Josemar Assistente project. This is your entry point - for detailed topics, see subdirectory AGENTS.md files.
+
+**Quick Navigation:**
+
+| Topic | Location |
+|-------|----------|
+| OpenClaw configuration | `config/AGENTS.md` |
+| Skill development | `skills/AGENTS.md` |
+| CI/CD workflows | `.github/workflows/AGENTS.md` |
+
+---
 
 ## Project Overview
 
@@ -207,48 +217,12 @@ josemar-assistente/
 - **Format**: JSON5 (allows comments and trailing commas)
 - **Location**: `config/openclaw.json`
 - **Features**: Environment variable expansion, modular configuration
+- **Reference**: See `config/AGENTS.md` for detailed configuration
 
 **4. Docker Integration**
 - **Volumes**: Configuration, workspace, and skills directories
 - **Network**: Custom bridge network for service communication
 - **Health Check**: Validates OpenClaw installation
-
-### OpenClaw Configuration
-
-**Main Configuration Sections:**
-
-1. **Environment Variables**: API keys and secrets
-   ```json5
-   env: {
-     ZAI_API_KEY: "${ZAI_API_KEY}",
-     TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
-     DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
-   }
-   ```
-
-2. **Model Providers**: LLM API configurations
-   - **Z.AI**: Primary provider with GLM 4.7 model
-   - **DeepSeek**: Optional provider with chat and reasoner models
-   - **Custom Providers**: Can add OpenAI-compatible providers
-
-3. **Agents**: AI agent configurations
-   - **Default Agent**: "josemar" - Brazilian Portuguese assistant
-   - **Models**: Primary model with fallback options
-   - **Workspace**: Persistent data storage
-   - **Identity**: Name, theme, emoji
-
-4. **Channels**: Communication interfaces
-   - **Telegram**: Bot token, policies, language settings
-   - **Direct Message Policy**: "pairing" requires user authorization
-   - **Group Policy**: "open" with mention requirement
-
-5. **Skills**: Custom tools and extensions
-   - **Enabled Skills**: List of active skills
-   - **Skill Discovery**: Automatic loading from skills directory
-
-6. **Prompts**: System prompts for agents
-   - **Portuguese Prompts**: Brazilian Portuguese instructions
-   - **Context**: Tools, personality, and working methods
 
 ### Key Patterns
 
@@ -436,114 +410,22 @@ docker-compose restart openclaw
 
 ## Skills System
 
-### Skill Structure
+Skills extend the assistant's capabilities via external executables. Each skill has:
+- A directory in `skills/`
+- A `SKILL.md` with frontmatter metadata
+- An executable that reads stdin and outputs JSON
 
-Each skill follows this structure:
-```
-skills/<skill-name>/
-├── SKILL.md          # Documentation with frontmatter
-└── <skill-name>      # Executable script
-```
+**Existing Skill:**
+- **PDF Extractor** (`skills/pdf-extractor/`) - Extracts data from Brazilian credit card invoice PDFs
 
-### Skill Frontmatter
-
-```markdown
----
-name: skill-name
-description: Brief description of what the skill does
-categories:
-  - category1
-  - category2
----
-```
-
-### Skill Development
-
-**Creating a new skill:**
-
-1. Create skill directory:
-```bash
-mkdir -p skills/my-skill
-```
-
-2. Create SKILL.md:
-```markdown
----
-name: my-skill
-description: Description of my skill
-categories:
-  - category1
----
-# My Skill
-
-Documentation here...
-```
-
-3. Create executable:
-```bash
-#!/bin/bash
-# Read JSON input from stdin
-input=$(cat)
-
-# Process input
-# ...
-
-# Output JSON result
-echo '{"result": "success"}'
-```
-
-4. Make executable:
-```bash
-chmod +x skills/my-skill/my-skill
-```
-
-5. Update configuration in `config/openclaw.json`:
-```json5
-skills: {
-  entries: {
-    "my-skill": {
-      enabled: true,
-    },
-  },
-}
-```
-
-6. Rebuild and restart:
-```bash
-docker-compose build
-docker-compose up -d
-```
-
-### Existing Skills
-
-**PDF Extractor**
-- **Location**: `skills/pdf-extractor/`
-- **Purpose**: Extract data from Brazilian credit card invoice PDFs
-- **Input**: PDF file path or raw text (via stdin)
-- **Output**: JSON with extracted expenses
-- **Dependencies**: pymupdf
-
-See `skills/AGENTS.md` for detailed skill documentation.
+See `skills/AGENTS.md` for complete skill development documentation.
 
 ## Configuration Reference
 
-### OpenClaw Configuration (JSON5)
-
-**Complete Configuration Structure:**
-
-```json5
-{
-  // Environment variables
-  env: {
-    ZAI_API_KEY: "${ZAI_API_KEY}",
-    TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
-    DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
-  },
-
-  // For complete, up-to-date configuration examples, see:
-  // config/AGENTS.md - Detailed OpenClaw configuration reference
-}
-```
+For detailed OpenClaw configuration reference, see `config/AGENTS.md`. Key points:
+- Configuration uses JSON5 format in `config/openclaw.json`
+- Environment variables use `${VAR}` syntax
+- Supports comments and trailing commas
 
 See `config/AGENTS.md` for detailed configuration reference including:
 - Model providers (DeepSeek, Z.AI)
@@ -726,45 +608,18 @@ http://localhost:18789/__openclaw__/canvas/?token=your-generated-token
 
 ## Documentation Maintenance
 
-When making changes to this repository, ensure relevant AGENTS.md files are kept up to date:
+When making changes to this repository, update the relevant AGENTS.md files:
 
-### Update Triggers
+**Update triggers by file:**
 
-Update the corresponding AGENTS.md file when you:
+| File | Update When |
+|------|-------------|
+| Root AGENTS.md | Project structure, development commands, Docker deployment, testing procedures |
+| skills/AGENTS.md | Adding/modifying skills, skill structure changes, new frontmatter fields |
+| config/AGENTS.md | Configuration structure changes, new options, schema updates |
+| .github/workflows/AGENTS.md | Workflow changes, CI/CD modifications |
 
-**Root AGENTS.md** (this file):
-- Changes to project structure or architecture
-- New development commands or workflows
-- Changes to Docker deployment
-- New testing procedures
-- Updates to best practices
-
-**skills/AGENTS.md**:
-- Adding, modifying, or removing skills
-- Changes to skill structure or patterns
-- Updates to skill development workflows
-- New skill categories or frontmatter fields
-
-**config/AGENTS.md**:
-- Changes to configuration structure
-- New configuration options or sections
-- Updates to JSON5 schema or validation rules
-- Changes to environment variable handling
-
-### Maintenance Checklist
-
-When making changes, ask yourself:
-1. Does this change affect how agents should work with the code?
-2. Is there a relevant subdirectory AGENTS.md that needs updating?
-3. Are there any cross-references between AGENTS.md files that need updating?
-4. Does the root AGENTS.md need a summary or reference update?
-
-### Cross-References
-
-Keep cross-references between AGENTS.md files in sync:
-- Root AGENTS.md references `skills/AGENTS.md` for detailed skill documentation
-- Root AGENTS.md references `config/AGENTS.md` for configuration details
-- If you add a new subdirectory with its own AGENTS.md, add a reference in the root file
+**Cross-references:** Keep subdirectory AGENTS.md links in sync. When adding a new subdirectory with its own AGENTS.md, add a reference in the root file's Quick Navigation table.
 
 ## Git Workflow for Agents
 
