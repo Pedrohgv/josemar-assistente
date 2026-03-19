@@ -112,22 +112,14 @@ echo "10/12 UBER TRIP 32,75" | docker-compose run --rm -T openclaw /root/.opencl
 
 **Production deployment:**
 ```bash
-# Use the deployment script
-./deploy.sh
+# Deploy via CI/CD (GitHub Actions workflow)
+# The deploy-to-home-server workflow handles deployment automatically
 
-# Deploy specific branch
-./deploy.sh main
-
-# Deploy with custom environment
-./deploy.sh main /path/to/custom.env
+# Or deploy manually (on the server):
+docker compose down
+docker compose build --no-cache
+docker compose up -d
 ```
-
-The deployment script:
-1. Checks out to the specified branch
-2. Pulls the latest changes
-3. Rebuilds the Docker image
-4. Restarts the services
-5. Validates configuration
 
 ### Environment Variables
 
@@ -169,7 +161,6 @@ josemar-assistente/
 ├── Dockerfile                  # Custom OpenClaw image with PDF support
 ├── docker-compose.yml          # Docker Compose deployment configuration
 ├── docker-entrypoint.sh        # Container entrypoint script
-├── deploy.sh                   # Automated deployment script
 ├── .env.example               # Environment variables template
 ├── config/                     # OpenClaw configuration
 │   └── openclaw.json         # Main configuration (JSON5 format in .json file)
@@ -498,7 +489,7 @@ curl -X POST "https://api.deepseek.com/v1/chat/completions" \
 3. **Update Configuration**: Add skill to `config/openclaw.json`
 4. **Test Locally**: Test skill with Python scripts
 5. **Test in Container**: Test in Docker environment
-6. **Deploy**: Use `./deploy.sh` for production deployment
+6. **Deploy**: Use GitHub Actions workflow or docker compose commands for production deployment
 7. **Monitor**: Check logs and monitor performance
 
 ### Debugging
