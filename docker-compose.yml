@@ -17,7 +17,10 @@ services:
       - ZAI_API_KEY=${ZAI_API_KEY:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
-      - TELEGRAM_USER_IDS=${TELEGRAM_USER_IDS:-}
+      - PEDRO_TELEGRAM_ID=${PEDRO_TELEGRAM_ID:-}
+      # Additional users can be added here following the pattern:
+      # - ALICE_TELEGRAM_ID=${ALICE_TELEGRAM_ID:-}
+      # - BOB_TELEGRAM_ID=${BOB_TELEGRAM_ID:-}
       # Other environment variables
       - OPENCLAW_LOG_LEVEL=info
     ports:

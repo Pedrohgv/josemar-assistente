@@ -159,7 +159,7 @@ chmod +x skills/my-skill/my-skill
 
 **5. Add to OpenClaw configuration:**
 
-Edit `config/openclaw.json5`:
+Edit `config/openclaw.json`:
 ```json5
 skills: {
   entries: {

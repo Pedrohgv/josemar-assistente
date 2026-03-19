@@ -78,7 +78,7 @@ OPENCLAW_LOG_LEVEL=info
 
 ### OpenClaw Configuration
 
-The main configuration is in `config/openclaw.json5` (JSON5 format):
+The main configuration is in `config/openclaw.json` (JSON5 format):
 
 ```json5
 {
@@ -183,7 +183,7 @@ josemar-assistente/
 ├── AGENTS.md              # Root project documentation
 ├── config/
 │   ├── AGENTS.md          # Configuration reference
-│   └── openclaw.json5    # OpenClaw configuration
+│   └── openclaw.json    # OpenClaw configuration
 ├── scripts/
 │   └── pdf_extractor.py   # PDF extraction script
 ├── skills/
@@ -226,7 +226,7 @@ docker compose down
 
 ### Updating Configuration
 
-1. Edit `config/openclaw.json5`
+1. Edit `config/openclaw.json`
 2. Restart service:
    ```bash
    docker compose restart

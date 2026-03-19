@@ -24,6 +24,16 @@ Josemar Assistente is a self-hosted OpenClaw-based AI assistant bot running in D
 - Custom skills system for extensibility
 - Workspace persistence for data
 
+## Development Environment Context
+
+**Unless explicitly stated otherwise by the user, assume you are in the user/developer/local machine environment.** This means:
+- Commands should target the local development setup
+- File operations affect the local filesystem
+- Docker operations run locally (unless specified otherwise)
+- Testing and debugging are performed in the local environment
+
+When working with deployment commands (like `docker-compose up/down`), always confirm the deployment context with the user if it is not explicitly stated.
+
 ## Development Commands
 
 ### Important: DO NOT Deploy Locally
@@ -70,7 +80,7 @@ docker-compose build --no-cache
 **Configuration management:**
 ```bash
 # Edit OpenClaw configuration
-nano config/openclaw.json5
+nano config/openclaw.json
 
 # Restart after configuration changes
 docker-compose restart openclaw
@@ -144,7 +154,7 @@ josemar-assistente/
 ├── deploy.sh                   # Automated deployment script
 ├── .env.example               # Environment variables template
 ├── config/                     # OpenClaw configuration
-│   └── openclaw.json5         # Main configuration (JSON5 format)
+│   └── openclaw.json         # Main configuration (JSON5 format in .json file)
 ├── scripts/                    # Python scripts for skills
 │   └── pdf_extractor.py       # PDF extraction implementation
 ├── skills/                     # Custom OpenClaw skills
@@ -187,7 +197,7 @@ josemar-assistente/
 
 **3. Configuration System**
 - **Format**: JSON5 (allows comments and trailing commas)
-- **Location**: `config/openclaw.json5`
+- **Location**: `config/openclaw.json`
 - **Features**: Environment variable expansion, modular configuration
 
 **4. Docker Integration**
@@ -479,7 +489,7 @@ echo '{"result": "success"}'
 chmod +x skills/my-skill/my-skill
 ```
 
-5. Update configuration in `config/openclaw.json5`:
+5. Update configuration in `config/openclaw.json`:
 ```json5
 skills: {
   entries: {
@@ -663,7 +673,7 @@ curl -X POST "https://api.deepseek.com/v1/chat/completions" \
 
 1. **Plan the Feature**: Understand requirements and data flow
 2. **Create Skill**: Develop skill with proper structure
-3. **Update Configuration**: Add skill to `config/openclaw.json5`
+3. **Update Configuration**: Add skill to `config/openclaw.json`
 4. **Test Locally**: Test skill with Python scripts
 5. **Test in Container**: Test in Docker environment
 6. **Deploy**: Use `./deploy.sh` for production deployment
@@ -792,7 +802,7 @@ Keep cross-references between AGENTS.md files in sync:
 Example confirmation prompt:
 ```
 I'm ready to commit the following changes:
-- Modified: config/openclaw.json5
+- Modified: config/openclaw.json
 - Added: .gitea/workflows/test.yaml
 
 Commit message: "Update configuration and add test workflow"

@@ -4,14 +4,21 @@ This file provides guidance to AI coding assistants when working with OpenClaw c
 
 ## Configuration Overview
 
-OpenClaw uses JSON5 format for configuration, which is a superset of JSON that allows comments, trailing commas, and more readable syntax. The main configuration file is `openclaw.json5`.
+OpenClaw uses JSON5 format for configuration, which is a superset of JSON that allows comments, trailing commas, and more readable syntax. The main configuration file is `openclaw.json`.
 
 **Configuration Characteristics:**
 - **Format**: JSON5 (JSON with extensions)
-- **Location**: `config/openclaw.json5`
+- **Location**: `config/openclaw.json`
 - **Environment Variable Expansion**: `${VAR}` syntax
 - **Modular Structure**: Organized into logical sections
 - **Validation**: OpenClaw validates configuration on startup
+
+**Important Notes:**
+- The file extension must be `.json`, not `.json5`
+- While the file supports JSON5 features (comments, trailing commas, unquoted keys), some JSON5 features do NOT work:
+  - ❌ **Backtick strings** (`` ` ``) - Use escaped newlines (`\n`) instead
+  - ❌ **ES6 Unicode escapes** (`\u{1F915}`) - Use actual emoji characters (🤕) instead
+- Always use `openclaw doctor --fix` after editing to validate the configuration
 
 ## JSON5 Format
 
@@ -45,13 +52,11 @@ OpenClaw uses JSON5 format for configuration, which is a superset of JSON that a
 **Multiline Strings:**
 ```json5
 {
-  description: `
-    This is a multiline string
-    that can span multiple lines
-    without escaping.
-  `
+  description: "This is a multiline string\nthat spans multiple lines\nwith escaped newlines."
 }
 ```
+
+**Note:** Backtick strings (`` ` ``) and ES6 Unicode escapes (`\u{1F915}`) are NOT supported. Use actual characters and escaped newlines instead.
 
 ### Environment Variable Expansion
 
@@ -178,9 +183,8 @@ env: {
   TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
   DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
   
-  // Optional configuration
-  TELEGRAM_USER_ID: "${TELEGRAM_USER_ID}",
-  CUSTOM_VAR: "${CUSTOM_VAR}",
+  // Telegram User IDs (see Channels section for usage pattern)
+  PEDRO_TELEGRAM_ID: "${PEDRO_TELEGRAM_ID}",
 }
 ```
 
@@ -366,37 +370,55 @@ channels: {
   telegram: {
     enabled: true,
     botToken: "${TELEGRAM_BOT_TOKEN}",
-    useWebhook: false,
-    dmPolicy: "pairing",
-    allowFrom: [],
-    groupPolicy: "open",
-    groups: {
-      "*": {
-        requireMention: true
-      }
-    },
-    language: "pt-BR"
+    dmPolicy: "allowlist",  // "pairing" | "allowlist" | "open" | "disabled"
+    // User IDs are loaded from environment variables (see below)
+    allowFrom: [
+      "${PEDRO_TELEGRAM_ID}",
+      // Add more users by adding their env var: "${ALICE_TELEGRAM_ID}",
+    ],
   }
 }
 ```
 
-**Telegram Configuration Fields:**
-- `enabled`: Boolean, if Telegram is enabled
-- `botToken`: Bot API token from @BotFather
-- `useWebhook`: Boolean, use webhook instead of polling
-- `dmPolicy`: Direct message policy ("open", "pairing", "closed")
-- `allowFrom`: Array of allowed user IDs (empty means all)
-- `groupPolicy`: Group policy ("open", "mention", "closed")
-- `groups`: Group-specific settings
-- `language`: Bot language (e.g., "pt-BR", "en-US")
+**Telegram User Access Configuration:**
+
+Users are managed via environment variables and explicitly listed in `allowFrom`:
+
+1. **Add the user's Telegram ID to `.env`:**
+   ```bash
+   # Primary user (required)
+   PEDRO_TELEGRAM_ID=123456789
+   
+   # Additional users (optional)
+   ALICE_TELEGRAM_ID=987654321
+   BOB_TELEGRAM_ID=555666777
+   ```
+
+2. **Reference them in `config/openclaw.json`:**
+   ```json5
+   allowFrom: [
+     "${PEDRO_TELEGRAM_ID}",
+     "${ALICE_TELEGRAM_ID}",  // Uncomment to add
+     // "${BOB_TELEGRAM_ID}",  // Add more as needed
+   ]
+   ```
 
 **Direct Message Policies:**
-- `open`: Anyone can send messages
+- `allowlist`: Only users in `allowFrom` can send messages (recommended)
 - `pairing`: Users must pair with the bot first
-- `closed`: Only allowed users can send messages
+- `open`: Anyone can send messages (not recommended for production)
+- `disabled`: DMs are disabled
 
-**Group Policies:**
-- `open`: Bot responds to all messages
+**Why this pattern?**
+- Explicit: Every allowed user is visible in one place (the config file)
+- Flexible: Easy to add/remove users without touching code
+- Safe: No Docker rebuild needed when changing users (just restart)
+
+**Important:** After changing the configuration file, you only need to restart the container:
+```bash
+docker compose restart
+```
+No Docker image rebuild is required!
 - `mention`: Bot only responds when mentioned
 - `closed`: Bot doesn't respond to groups
 

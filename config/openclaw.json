@@ -30,7 +30,6 @@
             id: "deepseek-chat",
             name: "DeepSeek Chat",
             reasoning: false,
-            toolCall: true,
             input: ["text"],
             cost: {
               input: 0,
@@ -45,7 +44,6 @@
             id: "deepseek-reasoner",
             name: "DeepSeek Reasoner",
             reasoning: true,
-            toolCall: true,
             input: ["text"],
             cost: {
               input: 0,
@@ -68,7 +66,6 @@
             id: "glm-4.7",
             name: "GLM 4.7",
             reasoning: false,
-            toolCall: true,
             input: ["text"],
             cost: {
               input: 0,
@@ -114,9 +111,8 @@
         identity: {
           name: "Josemar",
           theme: "helpful assistant",
-          emoji: "\u{1F915}",
+          emoji: "🤕",
         },
-        description: "Assistente pessoal em Português Brasileiro especializado em processamento de PDFs e organização financeira",
       },
     ],
   },
@@ -126,16 +122,13 @@
     telegram: {
       enabled: true,
       botToken: "${TELEGRAM_BOT_TOKEN}",
-      useWebhook: false,
-      dmPolicy: "closed",
-      allowFrom: [],
-      groupPolicy: "open",
-      groups: {
-        "*": {
-          requireMention: true,
-        },
-      },
-      language: "pt-BR",
+      dmPolicy: "allowlist",
+      // To add more users, add their {NAME}_TELEGRAM_ID env var and include it here:
+      allowFrom: [
+        "${PEDRO_TELEGRAM_ID}",
+        // "${ALICE_TELEGRAM_ID}",
+        // "${BOB_TELEGRAM_ID}",
+      ],
     },
   },
 
@@ -146,38 +139,6 @@
         enabled: true,
       },
     },
-  },
-
-  // Agent system prompts (Portuguese)
-  prompts: {
-    "josemar": `
-Você é o Josemar, um assistente pessoal inteligente que fala Português Brasileiro.
-
-## Sua Personalidade
-- Amigável e prestativo
-- Fala Português Brasileiro naturalmente
-- Focado em ajudar com tarefas práticas
-- Respeitoso e profissional
-- Interessado em organização e produtividade
-
-## O Que Você Faz
-- Processa e extrai dados de PDFs de faturas de cartão de crédito
-- Ajuda na organização financeira pessoal
-- Responde perguntas gerais de forma útil
-- Executa scripts e ferramentas personalizadas
-
-## Como Trabalhar
-1. Sempre responda em Português Brasileiro
-2. Use ferramentas quando disponíveis para executar tarefas específicas
-3. Seja claro e conciso em suas respostas
-4. Peça esclarecimentos se a solicitação for ambígua
-5. Mantenha um tom profissional, mas acessível
-
-## Ferramentas Disponíveis
-- pdf-extractor: Para extrair dados de PDFs de faturas
-
-Sempre que o usuário enviar um PDF ou pedir para extrair dados de uma fatura, use a ferramenta pdf-extractor.
-      `,
   },
 
   // Session configuration
