@@ -136,8 +136,16 @@ DEEPSEEK_API_KEY=your_deepseek_api_key_here
 # OpenClaw log level (default: info)
 OPENCLAW_LOG_LEVEL=info
 
-# Telegram user ID for pairing (optional)
-TELEGRAM_USER_ID=123456789
+# Telegram user ID for the primary user (Pedro)
+# This user will be pre-approved to chat with the bot without pairing
+# Get your ID from @userinfobot on Telegram
+PEDRO_TELEGRAM_ID=190731460
+
+# Additional users can be added following the pattern: {NAME}_TELEGRAM_ID
+# Example:
+# ALICE_TELEGRAM_ID=987654321
+# BOB_TELEGRAM_ID=555666777
+# Then add them to config/openclaw.json channels.telegram.allowFrom array
 ```
 
 See `.env.example` for template and detailed descriptions.
@@ -532,88 +540,20 @@ See `skills/AGENTS.md` for detailed skill documentation.
     DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
   },
 
-  // Model providers
-  models: {
-    mode: "merge",
-    providers: {
-      deepseek: {
-        baseUrl: "https://api.deepseek.com/v1",
-        apiKey: "${DEEPSEEK_API_KEY}",
-        api: "openai-completions",
-        models: [...],
-      },
-    },
-  },
-
-  // Agents
-  agents: {
-    defaults: {
-      workspace: "~/.openclaw/workspace",
-      model: {
-        primary: "zai/glm-4.7",
-        fallbacks: ["deepseek/deepseek-reasoner"],
-      },
-    },
-    list: [
-      {
-        id: "josemar",
-        default: true,
-        name: "Josemar",
-        workspace: "~/.openclaw/workspace",
-        model: "zai/glm-4.7",
-        identity: {...},
-        description: "Assistente pessoal em Português Brasileiro",
-      },
-    ],
-  },
-
-  // Channels
-  channels: {
-    telegram: {
-      enabled: true,
-      botToken: "${TELEGRAM_BOT_TOKEN}",
-      useWebhook: false,
-      dmPolicy: "pairing",
-      groupPolicy: "open",
-      language: "pt-BR",
-    },
-  },
-
-  // Skills
-  skills: {
-    entries: {
-      "pdf-extractor": {
-        enabled: true,
-      },
-    },
-  },
-
-  // Prompts
-  prompts: {
-    "josemar": "System prompt in Portuguese...",
-  },
-
-  // Session management
-  session: {
-    scope: "per-sender",
-    reset: {
-      mode: "idle",
-      idleMinutes: 60,
-    },
-    store: "~/.openclaw/agents/josemar/sessions/sessions.json",
-  },
-
-  // Logging
-  logging: {
-    level: "info",
-    consoleLevel: "info",
-    consoleStyle: "pretty",
-    redactSensitive: "tools",
-  },
+  // For complete, up-to-date configuration examples, see:
+  // config/AGENTS.md - Detailed OpenClaw configuration reference
 }
 ```
 
-See `config/AGENTS.md` for detailed configuration reference.
+See `config/AGENTS.md` for detailed configuration reference including:
+- Model providers (DeepSeek, Z.AI)
+- Agent definitions
+- Telegram channel configuration with user allowlist
+- Skills configuration
+- Session management
+- Logging settings
+
+**Note:** Agent prompts and personality are configured in workspace markdown files (SOUL.md, AGENTS.md), not in the JSON configuration.
 
 ## Testing
 

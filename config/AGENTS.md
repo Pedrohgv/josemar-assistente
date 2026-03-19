@@ -88,6 +88,14 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
     ZAI_API_KEY: "${ZAI_API_KEY}",
     TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
     DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
+    PEDRO_TELEGRAM_ID: "${PEDRO_TELEGRAM_ID}",
+  },
+
+  // Gateway configuration
+  gateway: {
+    mode: "local",
+    bind: "loopback",
+    port: 18789,
   },
 
   // Model providers configuration
@@ -97,6 +105,12 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
       deepseek: {
         baseUrl: "https://api.deepseek.com/v1",
         apiKey: "${DEEPSEEK_API_KEY}",
+        api: "openai-completions",
+        models: [...]
+      },
+      zai: {
+        baseUrl: "https://api.z.ai/api/paas/v4",
+        apiKey: "${ZAI_API_KEY}",
         api: "openai-completions",
         models: [...]
       }
@@ -123,8 +137,11 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
         name: "Josemar",
         workspace: "~/.openclaw/workspace",
         model: "zai/glm-4.7",
-        identity: {...},
-        description: "Assistente pessoal..."
+        identity: {
+          name: "Josemar",
+          theme: "helpful assistant",
+          emoji: "🤕"
+        }
       }
     ]
   },
@@ -134,29 +151,29 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
     telegram: {
       enabled: true,
       botToken: "${TELEGRAM_BOT_TOKEN}",
-      useWebhook: false,
-      dmPolicy: "pairing",
-      groupPolicy: "open",
-      language: "pt-BR"
+      dmPolicy: "allowlist",
+      allowFrom: [
+        "${PEDRO_TELEGRAM_ID}",
+      ]
     }
   },
 
   // Skills configuration
   skills: {
     entries: {
-      "pdf-extractor": { enabled: true }
+      "pdf-extractor": {
+        enabled: true
+      }
     }
   },
 
-  // Agent system prompts
-  prompts: {
-    "josemar": "System prompt..."
-  },
-
-  // Session management
+  // Session configuration
   session: {
     scope: "per-sender",
-    reset: { mode: "idle", idleMinutes: 60 },
+    reset: {
+      mode: "idle",
+      idleMinutes: 60
+    },
     store: "~/.openclaw/agents/josemar/sessions/sessions.json"
   },
 
@@ -212,7 +229,6 @@ models: {
           id: "deepseek-chat",
           name: "DeepSeek Chat",
           reasoning: false,
-          toolCall: true,
           input: ["text"],
           cost: {
             input: 0,
@@ -227,7 +243,6 @@ models: {
           id: "deepseek-reasoner",
           name: "DeepSeek Reasoner",
           reasoning: true,
-          toolCall: true,
           input: ["text"],
           cost: {
             input: 0,
@@ -254,7 +269,6 @@ models: {
 - `id`: Unique model identifier
 - `name`: Human-readable name
 - `reasoning`: Boolean, if model supports reasoning
-- `toolCall`: Boolean, if model supports tool calling
 - `input`: Array of input types
 - `cost`: Cost information (input, output, cache)
 - `contextWindow`: Maximum context size
@@ -273,7 +287,6 @@ providers: {
         id: "custom-model",
         name: "Custom Model",
         reasoning: false,
-        toolCall: true,
         input: ["text"],
         cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 64000,
@@ -325,8 +338,7 @@ agents: {
         name: "Josemar",
         theme: "helpful assistant",
         emoji: "🤖"
-      },
-      description: "Assistente pessoal em Português Brasileiro especializado em processamento de PDFs e organização financeira"
+      }
     }
   ]
 }
@@ -339,7 +351,6 @@ agents: {
 - `workspace`: Path to workspace directory
 - `model`: Primary model to use
 - `identity`: Agent personality (name, theme, emoji)
-- `description`: Agent description
 
 **Adding a New Agent:**
 
@@ -355,8 +366,7 @@ list: [
       name: "Specialist",
       theme: "technical expert",
       emoji: "🔬"
-    },
-    description: "Specialist agent for technical tasks"
+    }
   }
 ]
 ```
@@ -455,77 +465,23 @@ entries: {
 
 **Note:** Skills are automatically discovered from `/root/.openclaw/skills/` directory. The skill ID must match the directory name.
 
-### 6. Prompts
+### 6. Agent Prompts and Personality
 
-Define system prompts for agents:
+**Important:** Agent prompts and personality are **NOT** configured in `openclaw.json`. Instead, they are defined in **workspace markdown files** that OpenClaw reads on startup.
 
-```json5
-prompts: {
-  "josemar": `
-Você é o Josemar, um assistente pessoal inteligente que fala Português Brasileiro.
+**Workspace Files:**
+- `workspace/SOUL.md` - Core personality, boundaries, and "who you are"
+- `workspace/AGENTS.md` - Workspace-specific instructions and behavior
+- `workspace/USER.md` - Information about the user (optional)
+- `workspace/MEMORY.md` - Long-term memory and continuity
 
-## Sua Personalidade
-- Amigável e prestativo
-- Fala Português Brasileiro naturalmente
-- Focado em ajudar com tarefas práticas
-- Respeitoso e profissional
-- Interessado em organização e produtividade
+**Key Points:**
+- These files live in the `workspace/` directory (mounted to container)
+- They are **NOT versioned** in git (personal to your setup)
+- OpenClaw reads these files on startup to configure the agent
+- Changes to these files require a container restart to take effect
 
-## O Que Você Faz
-- Processa e extrai dados de PDFs de faturas de cartão de crédito
-- Ajuda na organização financeira pessoal
-- Responde perguntas gerais de forma útil
-- Executa scripts e ferramentas personalizadas
-
-## Como Trabalhar
-1. Sempre responda em Português Brasileiro
-2. Use ferramentas quando disponíveis para executar tarefas específicas
-3. Seja claro e conciso em suas respostas
-4. Peça esclarecimentos se a solicitação for ambígua
-5. Mantenha um tom profissional, mas acessível
-
-## Ferramentas Disponíveis
-- pdf-extractor: Para extrair dados de PDFs de faturas
-
-Sempre que o usuário enviar um PDF ou pedir para extrair dados de uma fatura, use a ferramenta pdf-extractor.
-  `
-}
-```
-
-**Prompt Key:** Must match agent ID (e.g., "josemar")
-
-**Prompt Best Practices:**
-- Use template literals for multiline strings
-- Include clear instructions
-- Specify behavior and constraints
-- List available tools
-- Use agent's language (Portuguese for Josemar)
-
-**Adding a New Agent Prompt:**
-
-```json5
-prompts: {
-  "josemar": "...",
-  "specialist": `
-You are a technical specialist agent.
-
-## Your Expertise
-- Deep technical knowledge
-- Problem-solving skills
-- Code analysis and optimization
-
-## How You Work
-1. Analyze technical problems thoroughly
-2. Provide detailed solutions
-3. Explain technical concepts clearly
-4. Suggest best practices
-
-## Available Tools
-- code-analyzer: Analyze code
-- debugger: Debug applications
-  `
-}
-```
+**Example:** See `workspace/SOUL.md` in your local workspace for the bot's current personality configuration.
 
 ### 7. Session Management
 
