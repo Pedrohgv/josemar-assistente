@@ -67,6 +67,20 @@
         api: "openai-completions",
         models: [
           {
+            id: "glm-5",
+            name: "GLM 5",
+            reasoning: false,
+            input: ["text"],
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+            },
+            contextWindow: 128000,
+            maxTokens: 8192,
+          },
+          {
             id: "glm-4.7",
             name: "GLM 4.7",
             reasoning: false,
@@ -90,18 +104,21 @@
     defaults: {
       workspace: "~/.openclaw/workspace",
       model: {
-        primary: "zai/glm-4.7",
-        fallbacks: ["deepseek/deepseek-reasoner"],
+        primary: "zai/glm-5",
+        fallbacks: ["zai/glm-4.7", "deepseek/deepseek-chat", "deepseek/deepseek-reasoner"],
       },
       models: {
+        "zai/glm-5": {
+          alias: "GLM 5",
+        },
         "zai/glm-4.7": {
           alias: "GLM 4.7",
         },
-        "deepseek/deepseek-reasoner": {
-          alias: "DeepSeek Reasoner",
-        },
         "deepseek/deepseek-chat": {
           alias: "DeepSeek Chat",
+        },
+        "deepseek/deepseek-reasoner": {
+          alias: "DeepSeek Reasoner",
         },
       },
     },
@@ -111,7 +128,7 @@
         default: true,
         name: "Josemar",
         workspace: "~/.openclaw/workspace",
-        model: "zai/glm-4.7",
+        model: "zai/glm-5",
         identity: {
           name: "Josemar",
           theme: "helpful assistant",

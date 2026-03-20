@@ -1,0 +1,23 @@
+name: stop-service
+
+on:
+  workflow_dispatch:
+
+jobs:
+  stop:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Stop services
+        run: docker compose down
+
+      - name: Verify services stopped
+        run: |
+          if docker ps | grep -q josemar-assistente; then
+            echo "ERROR: Container is still running!"
+            exit 1
+          else
+            echo "SUCCESS: Services stopped successfully"
+          fi
