@@ -7,9 +7,6 @@ jobs:
   stop:
     runs-on: self-hosted
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Stop services
         run: docker compose down
 
