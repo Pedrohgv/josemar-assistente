@@ -24,12 +24,17 @@ if [ -d "/root/.openclaw-source" ]; then
 fi
 
 # Validate configuration
-if [ -f /root/.openclaw/openclaw.json5 ]; then
+if [ -f /root/.openclaw/openclaw.json ]; then
     echo "✅ Configuration file found"
 else
-    echo "❌ Configuration file not found at /root/.openclaw/openclaw.json5"
+    echo "❌ Configuration file not found at /root/.openclaw/openclaw.json"
     echo "   Make sure config directory is mounted correctly."
     exit 1
+fi
+
+# Fix Telegram config if needed (change 'closed' to 'allowlist' if present)
+if [ -f /root/.openclaw/openclaw.json ]; then
+    sed -i 's/"dmPolicy": "closed"/"dmPolicy": "allowlist"/g' /root/.openclaw/openclaw.json
 fi
 
 # Run OpenClaw

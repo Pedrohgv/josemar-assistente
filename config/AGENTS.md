@@ -4,14 +4,21 @@ This file provides guidance to AI coding assistants when working with OpenClaw c
 
 ## Configuration Overview
 
-OpenClaw uses JSON5 format for configuration, which is a superset of JSON that allows comments, trailing commas, and more readable syntax. The main configuration file is `openclaw.json5`.
+OpenClaw uses JSON5 format for configuration, which is a superset of JSON that allows comments, trailing commas, and more readable syntax. The main configuration file is `openclaw.json`.
 
 **Configuration Characteristics:**
 - **Format**: JSON5 (JSON with extensions)
-- **Location**: `config/openclaw.json5`
+- **Location**: `config/openclaw.json`
 - **Environment Variable Expansion**: `${VAR}` syntax
 - **Modular Structure**: Organized into logical sections
 - **Validation**: OpenClaw validates configuration on startup
+
+**Important Notes:**
+- The file extension must be `.json`, not `.json5`
+- While the file supports JSON5 features (comments, trailing commas, unquoted keys), some JSON5 features do NOT work:
+  - ❌ **Backtick strings** (`` ` ``) - Use escaped newlines (`\n`) instead
+  - ❌ **ES6 Unicode escapes** (`\u{1F915}`) - Use actual emoji characters (🤕) instead
+- Always use `openclaw doctor --fix` after editing to validate the configuration
 
 ## JSON5 Format
 
@@ -45,13 +52,11 @@ OpenClaw uses JSON5 format for configuration, which is a superset of JSON that a
 **Multiline Strings:**
 ```json5
 {
-  description: `
-    This is a multiline string
-    that can span multiple lines
-    without escaping.
-  `
+  description: "This is a multiline string\nthat spans multiple lines\nwith escaped newlines."
 }
 ```
+
+**Note:** Backtick strings (`` ` ``) and ES6 Unicode escapes (`\u{1F915}`) are NOT supported. Use actual characters and escaped newlines instead.
 
 ### Environment Variable Expansion
 
@@ -83,6 +88,18 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
     ZAI_API_KEY: "${ZAI_API_KEY}",
     TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
     DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
+    PEDRO_TELEGRAM_ID: "${PEDRO_TELEGRAM_ID}",
+  },
+
+  // Gateway configuration
+  gateway: {
+    mode: "local",
+    bind: "lan",
+    port: 18789,
+    auth: {
+      mode: "token",
+      token: "${GATEWAY_AUTH_TOKEN}",
+    },
   },
 
   // Model providers configuration
@@ -92,6 +109,12 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
       deepseek: {
         baseUrl: "https://api.deepseek.com/v1",
         apiKey: "${DEEPSEEK_API_KEY}",
+        api: "openai-completions",
+        models: [...]
+      },
+      zai: {
+        baseUrl: "https://api.z.ai/api/paas/v4",
+        apiKey: "${ZAI_API_KEY}",
         api: "openai-completions",
         models: [...]
       }
@@ -118,8 +141,11 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
         name: "Josemar",
         workspace: "~/.openclaw/workspace",
         model: "zai/glm-4.7",
-        identity: {...},
-        description: "Assistente pessoal..."
+        identity: {
+          name: "Josemar",
+          theme: "helpful assistant",
+          emoji: "🤕"
+        }
       }
     ]
   },
@@ -129,29 +155,29 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
     telegram: {
       enabled: true,
       botToken: "${TELEGRAM_BOT_TOKEN}",
-      useWebhook: false,
-      dmPolicy: "pairing",
-      groupPolicy: "open",
-      language: "pt-BR"
+      dmPolicy: "allowlist",
+      allowFrom: [
+        "${PEDRO_TELEGRAM_ID}",
+      ]
     }
   },
 
   // Skills configuration
   skills: {
     entries: {
-      "pdf-extractor": { enabled: true }
+      "pdf-extractor": {
+        enabled: true
+      }
     }
   },
 
-  // Agent system prompts
-  prompts: {
-    "josemar": "System prompt..."
-  },
-
-  // Session management
+  // Session configuration
   session: {
     scope: "per-sender",
-    reset: { mode: "idle", idleMinutes: 60 },
+    reset: {
+      mode: "idle",
+      idleMinutes: 60
+    },
     store: "~/.openclaw/agents/josemar/sessions/sessions.json"
   },
 
@@ -178,9 +204,8 @@ env: {
   TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
   DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
   
-  // Optional configuration
-  TELEGRAM_USER_ID: "${TELEGRAM_USER_ID}",
-  CUSTOM_VAR: "${CUSTOM_VAR}",
+  // Telegram User IDs (see Channels section for usage pattern)
+  PEDRO_TELEGRAM_ID: "${PEDRO_TELEGRAM_ID}",
 }
 ```
 
@@ -208,7 +233,6 @@ models: {
           id: "deepseek-chat",
           name: "DeepSeek Chat",
           reasoning: false,
-          toolCall: true,
           input: ["text"],
           cost: {
             input: 0,
@@ -223,7 +247,6 @@ models: {
           id: "deepseek-reasoner",
           name: "DeepSeek Reasoner",
           reasoning: true,
-          toolCall: true,
           input: ["text"],
           cost: {
             input: 0,
@@ -250,7 +273,6 @@ models: {
 - `id`: Unique model identifier
 - `name`: Human-readable name
 - `reasoning`: Boolean, if model supports reasoning
-- `toolCall`: Boolean, if model supports tool calling
 - `input`: Array of input types
 - `cost`: Cost information (input, output, cache)
 - `contextWindow`: Maximum context size
@@ -269,7 +291,6 @@ providers: {
         id: "custom-model",
         name: "Custom Model",
         reasoning: false,
-        toolCall: true,
         input: ["text"],
         cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 64000,
@@ -321,8 +342,7 @@ agents: {
         name: "Josemar",
         theme: "helpful assistant",
         emoji: "🤖"
-      },
-      description: "Assistente pessoal em Português Brasileiro especializado em processamento de PDFs e organização financeira"
+      }
     }
   ]
 }
@@ -335,7 +355,6 @@ agents: {
 - `workspace`: Path to workspace directory
 - `model`: Primary model to use
 - `identity`: Agent personality (name, theme, emoji)
-- `description`: Agent description
 
 **Adding a New Agent:**
 
@@ -351,8 +370,7 @@ list: [
       name: "Specialist",
       theme: "technical expert",
       emoji: "🔬"
-    },
-    description: "Specialist agent for technical tasks"
+    }
   }
 ]
 ```
@@ -366,37 +384,55 @@ channels: {
   telegram: {
     enabled: true,
     botToken: "${TELEGRAM_BOT_TOKEN}",
-    useWebhook: false,
-    dmPolicy: "pairing",
-    allowFrom: [],
-    groupPolicy: "open",
-    groups: {
-      "*": {
-        requireMention: true
-      }
-    },
-    language: "pt-BR"
+    dmPolicy: "allowlist",  // "pairing" | "allowlist" | "open" | "disabled"
+    // User IDs are loaded from environment variables (see below)
+    allowFrom: [
+      "${PEDRO_TELEGRAM_ID}",
+      // Add more users by adding their env var: "${ALICE_TELEGRAM_ID}",
+    ],
   }
 }
 ```
 
-**Telegram Configuration Fields:**
-- `enabled`: Boolean, if Telegram is enabled
-- `botToken`: Bot API token from @BotFather
-- `useWebhook`: Boolean, use webhook instead of polling
-- `dmPolicy`: Direct message policy ("open", "pairing", "closed")
-- `allowFrom`: Array of allowed user IDs (empty means all)
-- `groupPolicy`: Group policy ("open", "mention", "closed")
-- `groups`: Group-specific settings
-- `language`: Bot language (e.g., "pt-BR", "en-US")
+**Telegram User Access Configuration:**
+
+Users are managed via environment variables and explicitly listed in `allowFrom`:
+
+1. **Add the user's Telegram ID to `.env`:**
+   ```bash
+   # Primary user (required)
+   PEDRO_TELEGRAM_ID=123456789
+   
+   # Additional users (optional)
+   ALICE_TELEGRAM_ID=987654321
+   BOB_TELEGRAM_ID=555666777
+   ```
+
+2. **Reference them in `config/openclaw.json`:**
+   ```json5
+   allowFrom: [
+     "${PEDRO_TELEGRAM_ID}",
+     "${ALICE_TELEGRAM_ID}",  // Uncomment to add
+     // "${BOB_TELEGRAM_ID}",  // Add more as needed
+   ]
+   ```
 
 **Direct Message Policies:**
-- `open`: Anyone can send messages
+- `allowlist`: Only users in `allowFrom` can send messages (recommended)
 - `pairing`: Users must pair with the bot first
-- `closed`: Only allowed users can send messages
+- `open`: Anyone can send messages (not recommended for production)
+- `disabled`: DMs are disabled
 
-**Group Policies:**
-- `open`: Bot responds to all messages
+**Why this pattern?**
+- Explicit: Every allowed user is visible in one place (the config file)
+- Flexible: Easy to add/remove users without touching code
+- Safe: No Docker rebuild needed when changing users (just restart)
+
+**Important:** After changing the configuration file, you only need to restart the container:
+```bash
+docker compose restart
+```
+No Docker image rebuild is required!
 - `mention`: Bot only responds when mentioned
 - `closed`: Bot doesn't respond to groups
 
@@ -433,77 +469,25 @@ entries: {
 
 **Note:** Skills are automatically discovered from `/root/.openclaw/skills/` directory. The skill ID must match the directory name.
 
-### 6. Prompts
+### 6. Agent Prompts and Personality
 
-Define system prompts for agents:
+**Important:** Agent prompts and personality are **NOT** configured in `openclaw.json`. Instead, they are defined in **workspace markdown files** that OpenClaw reads on startup.
 
-```json5
-prompts: {
-  "josemar": `
-Você é o Josemar, um assistente pessoal inteligente que fala Português Brasileiro.
+**Workspace Files:**
+- `workspace/SOUL.md` - Core personality, boundaries, and "who you are"
+- `workspace/AGENTS.md` - Workspace-specific instructions and behavior
+- `workspace/USER.md` - Information about the user (optional)
+- `workspace/MEMORY.md` - Long-term memory and continuity
 
-## Sua Personalidade
-- Amigável e prestativo
-- Fala Português Brasileiro naturalmente
-- Focado em ajudar com tarefas práticas
-- Respeitoso e profissional
-- Interessado em organização e produtividade
+**Key Points:**
+- These files live in the `workspace/` directory (mounted to container)
+- They are **NOT versioned** in git (personal to your setup)
+- OpenClaw reads these files on startup to configure the agent
+- Changes to these files require a container restart to take effect
 
-## O Que Você Faz
-- Processa e extrai dados de PDFs de faturas de cartão de crédito
-- Ajuda na organização financeira pessoal
-- Responde perguntas gerais de forma útil
-- Executa scripts e ferramentas personalizadas
+**Example:** See `workspace/SOUL.md` in your local workspace for the bot's current personality configuration.
 
-## Como Trabalhar
-1. Sempre responda em Português Brasileiro
-2. Use ferramentas quando disponíveis para executar tarefas específicas
-3. Seja claro e conciso em suas respostas
-4. Peça esclarecimentos se a solicitação for ambígua
-5. Mantenha um tom profissional, mas acessível
-
-## Ferramentas Disponíveis
-- pdf-extractor: Para extrair dados de PDFs de faturas
-
-Sempre que o usuário enviar um PDF ou pedir para extrair dados de uma fatura, use a ferramenta pdf-extractor.
-  `
-}
-```
-
-**Prompt Key:** Must match agent ID (e.g., "josemar")
-
-**Prompt Best Practices:**
-- Use template literals for multiline strings
-- Include clear instructions
-- Specify behavior and constraints
-- List available tools
-- Use agent's language (Portuguese for Josemar)
-
-**Adding a New Agent Prompt:**
-
-```json5
-prompts: {
-  "josemar": "...",
-  "specialist": `
-You are a technical specialist agent.
-
-## Your Expertise
-- Deep technical knowledge
-- Problem-solving skills
-- Code analysis and optimization
-
-## How You Work
-1. Analyze technical problems thoroughly
-2. Provide detailed solutions
-3. Explain technical concepts clearly
-4. Suggest best practices
-
-## Available Tools
-- code-analyzer: Analyze code
-- debugger: Debug applications
-  `
-}
-```
+**Note:** Agent prompts and personality are configured in workspace markdown files (SOUL.md, AGENTS.md), not in the JSON configuration.
 
 ### 7. Session Management
 
@@ -570,7 +554,7 @@ logging: {
 
 **1. Edit configuration file:**
 ```bash
-nano config/openclaw.json5
+nano config/openclaw.json
 ```
 
 **2. Validate JSON5 syntax:**
@@ -673,10 +657,10 @@ Seja amigável e prestativo.
 **Using jq:**
 ```bash
 # Validate JSON5 syntax
-cat config/openclaw.json5 | jq .
+cat config/openclaw.json | jq .
 
 # Check for specific field
-cat config/openclaw.json5 | jq '.agents.list[0].id'
+cat config/openclaw.json | jq '.agents.list[0].id'
 ```
 
 **Using OpenClaw:**
@@ -853,6 +837,8 @@ skills: {
 
 ### Configuring Multiple Channels
 
+**Note:** Currently only Telegram is fully implemented. Discord and Slack are shown below as examples of how to configure multiple channels.
+
 ```json5
 channels: {
   telegram: {
@@ -893,7 +879,7 @@ docker-compose up -d
 **Error: "Invalid JSON5 syntax"**
 ```bash
 # Validate syntax with jq
-cat config/openclaw.json5 | jq .
+cat config/openclaw.json | jq .
 
 # Check for syntax errors
 # - Missing quotes
@@ -902,7 +888,7 @@ cat config/openclaw.json5 | jq .
 # - Invalid escape sequences
 
 # Fix and restart
-nano config/openclaw.json5
+nano config/openclaw.json
 docker-compose restart openclaw
 ```
 
@@ -944,7 +930,7 @@ docker-compose exec openclaw openclaw config show | grep -A 10 providers
 docker-compose exec openclaw openclaw models list
 
 # Check model ID in configuration
-cat config/openclaw.json5 | jq '.models.providers'
+cat config/openclaw.json | jq '.models.providers'
 
 # Verify model is in provider's model list
 ```
@@ -957,7 +943,7 @@ cat config/openclaw.json5 | jq '.models.providers'
 docker-compose exec openclaw ls -la /root/.openclaw/skills/
 
 # Check skill configuration
-cat config/openclaw.json5 | jq '.skills.entries'
+cat config/openclaw.json | jq '.skills.entries'
 
 # Verify skill directory name matches configuration
 ```
@@ -985,7 +971,7 @@ docker-compose exec openclaw python3 -c "import required_module"
 ## Support
 
 For configuration issues:
-1. Validate JSON5 syntax: `cat config/openclaw.json5 | jq .`
+1. Validate JSON5 syntax: `cat config/openclaw.json | jq .`
 2. Check environment variables: `docker-compose exec openclaw env | sort`
 3. Review OpenClaw logs: `docker-compose logs -f openclaw`
 4. Test configuration: `docker-compose run --rm openclaw openclaw --validate-config`

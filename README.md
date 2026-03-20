@@ -32,17 +32,11 @@ cp .env.example .env
 ### 2. Build and Run
 
 ```bash
-./deploy.sh
-```
-
-Or manually:
-
-```bash
 docker compose build
 docker compose up -d
 ```
 
-**Note**: Use `docker compose` (with space) for Docker Compose V2, or `docker compose` (with hyphen) for V1. The deployment script will detect which is available.
+**Note**: Use `docker compose` (with space) for Docker Compose V2, or `docker-compose` (with hyphen) for V1.
 
 ### 3. Check Logs
 
@@ -78,7 +72,7 @@ OPENCLAW_LOG_LEVEL=info
 
 ### OpenClaw Configuration
 
-The main configuration is in `config/openclaw.json5` (JSON5 format):
+The main configuration is in `config/openclaw.json` (JSON5 format):
 
 ```json5
 {
@@ -179,11 +173,10 @@ josemar-assistente/
 ├── Dockerfile              # Custom OpenClaw image
 ├── docker compose.yml      # Deployment configuration
 ├── .env.example           # Environment variables template
-├── deploy.sh              # Automated deployment script
 ├── AGENTS.md              # Root project documentation
 ├── config/
 │   ├── AGENTS.md          # Configuration reference
-│   └── openclaw.json5    # OpenClaw configuration
+│   └── openclaw.json    # OpenClaw configuration
 ├── scripts/
 │   └── pdf_extractor.py   # PDF extraction script
 ├── skills/
@@ -192,8 +185,6 @@ josemar-assistente/
 │       ├── SKILL.md       # Skill documentation
 │       └── pdf-extractor  # Skill executable
 ├── workspace/             # OpenClaw workspace (mounted)
-├── test-config.py         # Configuration validation
-├── test-pdf-skill.sh     # PDF skill testing
 └── README.md              # This file
 ```
 
@@ -226,21 +217,19 @@ docker compose down
 
 ### Updating Configuration
 
-1. Edit `config/openclaw.json5`
+1. Edit `config/openclaw.json`
 2. Restart service:
    ```bash
    docker compose restart
    ```
 
-### Testing Configuration
+### Updating Configuration
 
-```bash
-# Validate JSON5 syntax
-python3 test-config.py
-
-# Test PDF extraction skill
-./test-pdf-skill.sh
-```
+1. Edit `config/openclaw.json`
+2. Restart service:
+   ```bash
+   docker compose restart
+   ```
 
 ## Model Providers
 
@@ -263,7 +252,7 @@ python3 test-config.py
 ### Common Issues
 
 1. **Missing API keys**: Ensure `.env` file exists with correct keys
-2. **Configuration errors**: Validate JSON5 syntax with `python3 test-config.py`
+2. **Configuration errors**: Check OpenClaw logs for startup errors (configuration is validated automatically)
 3. **Skill not working**: Check OpenClaw logs for skill execution errors
 4. **Telegram bot not responding**: Verify bot token and check privacy settings
 5. **Provider authentication**: Verify API keys are set and valid

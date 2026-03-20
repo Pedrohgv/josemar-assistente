@@ -39,5 +39,5 @@ ENTRYPOINT ["docker-entrypoint.sh"]
 # Set working directory
 WORKDIR /app
 
-# Default command (OpenClaw default)
-CMD ["openclaw", "serve"]
+# Default command (OpenClaw gateway)
+CMD ["openclaw", "gateway", "--allow-unconfigured"]

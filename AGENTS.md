@@ -1,6 +1,16 @@
 # AGENTS.md
 
-This file provides guidance to AI coding assistants when working with code in this repository.
+**Purpose:** Root guidance for AI assistants working with the Josemar Assistente project. This is your entry point - for detailed topics, see subdirectory AGENTS.md files.
+
+**Quick Navigation:**
+
+| Topic | Location |
+|-------|----------|
+| OpenClaw configuration | `config/AGENTS.md` |
+| Skill development | `skills/AGENTS.md` |
+| CI/CD workflows | `.github/workflows/AGENTS.md` |
+
+---
 
 ## Project Overview
 
@@ -24,13 +34,41 @@ Josemar Assistente is a self-hosted OpenClaw-based AI assistant bot running in D
 - Custom skills system for extensibility
 - Workspace persistence for data
 
+## Development Environment Context
+
+**Unless explicitly stated otherwise by the user, assume you are in the user/developer/local machine environment.** This means:
+- Commands should target the local development setup
+- File operations affect the local filesystem
+- Docker operations run locally (unless specified otherwise)
+- Testing and debugging are performed in the local environment
+
+When working with deployment commands (like `docker-compose up/down`), always confirm the deployment context with the user if it is not explicitly stated.
+
 ## Development Commands
+
+### Important: DO NOT Deploy Locally
+
+**Warning:** The Telegram bot token can only be used by one active deployment at a time. Running `docker compose up` locally will conflict with the production server deployment and cause the bot to stop responding on the server.
+
+**DEFAULT BEHAVIOR: ALWAYS work in branches and push to the server for testing.** Never run the full service locally unless you are using a different Telegram bot token (e.g., a test bot from @BotFather).
+
+**EXCEPTION: If the user EXPLICITLY asks you to deploy locally**, you may proceed with local deployment for debugging purposes. This should only be done when:
+- The production server is not running
+- You're using a test bot token
+- The user specifically instructs you to do so
+
+**Safe local operations (do not start the service):**
+- Build the image: `docker compose build` (builds but doesn't run)
+- Test configurations: `docker compose config` (validates compose file)
+- Lint Dockerfile: `docker run --rm -i hadolint/hadolint < Dockerfile`
+- Test scripts locally: `python3 scripts/pdf_extractor.py`
 
 ### Local Development
 
-**Start the bot:**
+**Start the bot (PRODUCTION SERVER ONLY - NEVER RUN LOCALLY):**
 ```bash
-# Start all services
+# ⚠️ WARNING: Only run this on the production server!
+# Running locally will disconnect the production bot.
 docker-compose up -d
 
 # View logs
@@ -52,7 +90,7 @@ docker-compose build --no-cache
 **Configuration management:**
 ```bash
 # Edit OpenClaw configuration
-nano config/openclaw.json5
+nano config/openclaw.json
 
 # Restart after configuration changes
 docker-compose restart openclaw
@@ -74,22 +112,14 @@ echo "10/12 UBER TRIP 32,75" | docker-compose run --rm -T openclaw /root/.opencl
 
 **Production deployment:**
 ```bash
-# Use the deployment script
-./deploy.sh
+# Deploy via CI/CD (GitHub Actions workflow)
+# The deploy-to-home-server workflow handles deployment automatically
 
-# Deploy specific branch
-./deploy.sh main
-
-# Deploy with custom environment
-./deploy.sh main /path/to/custom.env
+# Or deploy manually (on the server):
+docker compose down
+docker compose build --no-cache
+docker compose up -d
 ```
-
-The deployment script:
-1. Checks out to the specified branch
-2. Pulls the latest changes
-3. Rebuilds the Docker image
-4. Restarts the services
-5. Validates configuration
 
 ### Environment Variables
 
@@ -108,8 +138,16 @@ DEEPSEEK_API_KEY=your_deepseek_api_key_here
 # OpenClaw log level (default: info)
 OPENCLAW_LOG_LEVEL=info
 
-# Telegram user ID for pairing (optional)
-TELEGRAM_USER_ID=123456789
+# Telegram user ID for the primary user (Pedro)
+# This user will be pre-approved to chat with the bot without pairing
+# Get your ID from @userinfobot on Telegram
+PEDRO_TELEGRAM_ID=190731460
+
+# Additional users can be added following the pattern: {NAME}_TELEGRAM_ID
+# Example:
+# ALICE_TELEGRAM_ID=987654321
+# BOB_TELEGRAM_ID=555666777
+# Then add them to config/openclaw.json channels.telegram.allowFrom array
 ```
 
 See `.env.example` for template and detailed descriptions.
@@ -123,10 +161,9 @@ josemar-assistente/
 ├── Dockerfile                  # Custom OpenClaw image with PDF support
 ├── docker-compose.yml          # Docker Compose deployment configuration
 ├── docker-entrypoint.sh        # Container entrypoint script
-├── deploy.sh                   # Automated deployment script
 ├── .env.example               # Environment variables template
 ├── config/                     # OpenClaw configuration
-│   └── openclaw.json5         # Main configuration (JSON5 format)
+│   └── openclaw.json         # Main configuration (JSON5 format in .json file)
 ├── scripts/                    # Python scripts for skills
 │   └── pdf_extractor.py       # PDF extraction implementation
 ├── skills/                     # Custom OpenClaw skills
@@ -169,50 +206,14 @@ josemar-assistente/
 
 **3. Configuration System**
 - **Format**: JSON5 (allows comments and trailing commas)
-- **Location**: `config/openclaw.json5`
+- **Location**: `config/openclaw.json`
 - **Features**: Environment variable expansion, modular configuration
+- **Reference**: See `config/AGENTS.md` for detailed configuration
 
 **4. Docker Integration**
 - **Volumes**: Configuration, workspace, and skills directories
 - **Network**: Custom bridge network for service communication
 - **Health Check**: Validates OpenClaw installation
-
-### OpenClaw Configuration
-
-**Main Configuration Sections:**
-
-1. **Environment Variables**: API keys and secrets
-   ```json5
-   env: {
-     ZAI_API_KEY: "${ZAI_API_KEY}",
-     TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
-     DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
-   }
-   ```
-
-2. **Model Providers**: LLM API configurations
-   - **Z.AI**: Primary provider with GLM 4.7 model
-   - **DeepSeek**: Optional provider with chat and reasoner models
-   - **Custom Providers**: Can add OpenAI-compatible providers
-
-3. **Agents**: AI agent configurations
-   - **Default Agent**: "josemar" - Brazilian Portuguese assistant
-   - **Models**: Primary model with fallback options
-   - **Workspace**: Persistent data storage
-   - **Identity**: Name, theme, emoji
-
-4. **Channels**: Communication interfaces
-   - **Telegram**: Bot token, policies, language settings
-   - **Direct Message Policy**: "pairing" requires user authorization
-   - **Group Policy**: "open" with mention requirement
-
-5. **Skills**: Custom tools and extensions
-   - **Enabled Skills**: List of active skills
-   - **Skill Discovery**: Automatic loading from skills directory
-
-6. **Prompts**: System prompts for agents
-   - **Portuguese Prompts**: Brazilian Portuguese instructions
-   - **Context**: Tools, personality, and working methods
 
 ### Key Patterns
 
@@ -400,192 +401,32 @@ docker-compose restart openclaw
 
 ## Skills System
 
-### Skill Structure
+Skills extend the assistant's capabilities via external executables. Each skill has:
+- A directory in `skills/`
+- A `SKILL.md` with frontmatter metadata
+- An executable that reads stdin and outputs JSON
 
-Each skill follows this structure:
-```
-skills/<skill-name>/
-├── SKILL.md          # Documentation with frontmatter
-└── <skill-name>      # Executable script
-```
+**Existing Skill:**
+- **PDF Extractor** (`skills/pdf-extractor/`) - Extracts data from Brazilian credit card invoice PDFs
 
-### Skill Frontmatter
-
-```markdown
----
-name: skill-name
-description: Brief description of what the skill does
-categories:
-  - category1
-  - category2
----
-```
-
-### Skill Development
-
-**Creating a new skill:**
-
-1. Create skill directory:
-```bash
-mkdir -p skills/my-skill
-```
-
-2. Create SKILL.md:
-```markdown
----
-name: my-skill
-description: Description of my skill
-categories:
-  - category1
----
-# My Skill
-
-Documentation here...
-```
-
-3. Create executable:
-```bash
-#!/bin/bash
-# Read JSON input from stdin
-input=$(cat)
-
-# Process input
-# ...
-
-# Output JSON result
-echo '{"result": "success"}'
-```
-
-4. Make executable:
-```bash
-chmod +x skills/my-skill/my-skill
-```
-
-5. Update configuration in `config/openclaw.json5`:
-```json5
-skills: {
-  entries: {
-    "my-skill": {
-      enabled: true,
-    },
-  },
-}
-```
-
-6. Rebuild and restart:
-```bash
-docker-compose build
-docker-compose up -d
-```
-
-### Existing Skills
-
-**PDF Extractor**
-- **Location**: `skills/pdf-extractor/`
-- **Purpose**: Extract data from Brazilian credit card invoice PDFs
-- **Input**: PDF file path or raw text (via stdin)
-- **Output**: JSON with extracted expenses
-- **Dependencies**: pymupdf
-
-See `skills/AGENTS.md` for detailed skill documentation.
+See `skills/AGENTS.md` for complete skill development documentation.
 
 ## Configuration Reference
 
-### OpenClaw Configuration (JSON5)
+For detailed OpenClaw configuration reference, see `config/AGENTS.md`. Key points:
+- Configuration uses JSON5 format in `config/openclaw.json`
+- Environment variables use `${VAR}` syntax
+- Supports comments and trailing commas
 
-**Complete Configuration Structure:**
+See `config/AGENTS.md` for detailed configuration reference including:
+- Model providers (DeepSeek, Z.AI)
+- Agent definitions
+- Telegram channel configuration with user allowlist
+- Skills configuration
+- Session management
+- Logging settings
 
-```json5
-{
-  // Environment variables
-  env: {
-    ZAI_API_KEY: "${ZAI_API_KEY}",
-    TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
-    DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
-  },
-
-  // Model providers
-  models: {
-    mode: "merge",
-    providers: {
-      deepseek: {
-        baseUrl: "https://api.deepseek.com/v1",
-        apiKey: "${DEEPSEEK_API_KEY}",
-        api: "openai-completions",
-        models: [...],
-      },
-    },
-  },
-
-  // Agents
-  agents: {
-    defaults: {
-      workspace: "~/.openclaw/workspace",
-      model: {
-        primary: "zai/glm-4.7",
-        fallbacks: ["deepseek/deepseek-reasoner"],
-      },
-    },
-    list: [
-      {
-        id: "josemar",
-        default: true,
-        name: "Josemar",
-        workspace: "~/.openclaw/workspace",
-        model: "zai/glm-4.7",
-        identity: {...},
-        description: "Assistente pessoal em Português Brasileiro",
-      },
-    ],
-  },
-
-  // Channels
-  channels: {
-    telegram: {
-      enabled: true,
-      botToken: "${TELEGRAM_BOT_TOKEN}",
-      useWebhook: false,
-      dmPolicy: "pairing",
-      groupPolicy: "open",
-      language: "pt-BR",
-    },
-  },
-
-  // Skills
-  skills: {
-    entries: {
-      "pdf-extractor": {
-        enabled: true,
-      },
-    },
-  },
-
-  // Prompts
-  prompts: {
-    "josemar": "System prompt in Portuguese...",
-  },
-
-  // Session management
-  session: {
-    scope: "per-sender",
-    reset: {
-      mode: "idle",
-      idleMinutes: 60,
-    },
-    store: "~/.openclaw/agents/josemar/sessions/sessions.json",
-  },
-
-  // Logging
-  logging: {
-    level: "info",
-    consoleLevel: "info",
-    consoleStyle: "pretty",
-    redactSensitive: "tools",
-  },
-}
-```
-
-See `config/AGENTS.md` for detailed configuration reference.
+**Note:** Agent prompts and personality are configured in workspace markdown files (SOUL.md, AGENTS.md), not in the JSON configuration.
 
 ## Testing
 
@@ -645,10 +486,10 @@ curl -X POST "https://api.deepseek.com/v1/chat/completions" \
 
 1. **Plan the Feature**: Understand requirements and data flow
 2. **Create Skill**: Develop skill with proper structure
-3. **Update Configuration**: Add skill to `config/openclaw.json5`
+3. **Update Configuration**: Add skill to `config/openclaw.json`
 4. **Test Locally**: Test skill with Python scripts
 5. **Test in Container**: Test in Docker environment
-6. **Deploy**: Use `./deploy.sh` for production deployment
+6. **Deploy**: Use GitHub Actions workflow or docker compose commands for production deployment
 7. **Monitor**: Check logs and monitor performance
 
 ### Debugging
@@ -680,8 +521,47 @@ echo "test" | docker-compose exec -T openclaw sh -x /root/.openclaw/skills/pdf-e
 docker-compose run --rm openclaw sh -c "cat /root/.openclaw/openclaw.json5 | jq ."
 
 # Check environment variables
-docker-compose exec openclaw env | sort
+docker-compose exec openclaw env | grep -E "ZAI|TELEGRAM|DEEPSEEK"
+
+# Reload configuration
+docker-compose restart openclaw
 ```
+
+## Web UI Access
+
+The OpenClaw Gateway provides a web interface accessible via browser:
+
+### Accessing the UI
+
+**URL:** `http://localhost:18789/__openclaw__/canvas/?token=YOUR_TOKEN`
+
+**Requirements:**
+- Gateway authentication token (set in `GATEWAY_AUTH_TOKEN` env var)
+- Port 18789 exposed in Docker Compose
+
+### Configuration
+
+**1. Generate a secure token:**
+```bash
+openssl rand -hex 32
+```
+
+**2. Add to `.env`:**
+```bash
+GATEWAY_AUTH_TOKEN=your-generated-token
+```
+
+**3. Access the UI:**
+```
+http://localhost:18789/__openclaw__/canvas/?token=your-generated-token
+```
+
+### Security Notes
+
+- The token is required when `gateway.bind` is set to "lan" (non-loopback)
+- Never share your token publicly
+- The UI provides full control over the bot - protect it accordingly
+- Consider using a reverse proxy (nginx) with SSL for production
 
 ## Best Practices
 
@@ -719,45 +599,18 @@ docker-compose exec openclaw env | sort
 
 ## Documentation Maintenance
 
-When making changes to this repository, ensure relevant AGENTS.md files are kept up to date:
+When making changes to this repository, update the relevant AGENTS.md files:
 
-### Update Triggers
+**Update triggers by file:**
 
-Update the corresponding AGENTS.md file when you:
+| File | Update When |
+|------|-------------|
+| Root AGENTS.md | Project structure, development commands, Docker deployment, testing procedures |
+| skills/AGENTS.md | Adding/modifying skills, skill structure changes, new frontmatter fields |
+| config/AGENTS.md | Configuration structure changes, new options, schema updates |
+| .github/workflows/AGENTS.md | Workflow changes, CI/CD modifications |
 
-**Root AGENTS.md** (this file):
-- Changes to project structure or architecture
-- New development commands or workflows
-- Changes to Docker deployment
-- New testing procedures
-- Updates to best practices
-
-**skills/AGENTS.md**:
-- Adding, modifying, or removing skills
-- Changes to skill structure or patterns
-- Updates to skill development workflows
-- New skill categories or frontmatter fields
-
-**config/AGENTS.md**:
-- Changes to configuration structure
-- New configuration options or sections
-- Updates to JSON5 schema or validation rules
-- Changes to environment variable handling
-
-### Maintenance Checklist
-
-When making changes, ask yourself:
-1. Does this change affect how agents should work with the code?
-2. Is there a relevant subdirectory AGENTS.md that needs updating?
-3. Are there any cross-references between AGENTS.md files that need updating?
-4. Does the root AGENTS.md need a summary or reference update?
-
-### Cross-References
-
-Keep cross-references between AGENTS.md files in sync:
-- Root AGENTS.md references `skills/AGENTS.md` for detailed skill documentation
-- Root AGENTS.md references `config/AGENTS.md` for configuration details
-- If you add a new subdirectory with its own AGENTS.md, add a reference in the root file
+**Cross-references:** Keep subdirectory AGENTS.md links in sync. When adding a new subdirectory with its own AGENTS.md, add a reference in the root file's Quick Navigation table.
 
 ## Git Workflow for Agents
 
@@ -774,7 +627,7 @@ Keep cross-references between AGENTS.md files in sync:
 Example confirmation prompt:
 ```
 I'm ready to commit the following changes:
-- Modified: config/openclaw.json5
+- Modified: config/openclaw.json
 - Added: .gitea/workflows/test.yaml
 
 Commit message: "Update configuration and add test workflow"

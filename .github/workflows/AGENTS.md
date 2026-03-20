@@ -2,6 +2,17 @@
 
 This directory contains GitHub Actions workflows for the Josemar Assistente project.
 
+## Prerequisites
+
+**Self-Hosted Runner Required**
+
+All workflows require a self-hosted runner configured on your deployment server:
+
+1. Install GitHub Actions runner on the server
+2. Configure runner with repository access
+3. Ensure runner user has Docker permissions (member of `docker` group)
+4. Start and verify runner is online in GitHub Settings > Actions > Runners
+
 ## Runner Configuration
 
 All workflows in this directory **MUST** use `runs-on: self-hosted` unless explicitly specified otherwise. The project uses a self-hosted runner to deploy to the home server.
@@ -10,12 +21,41 @@ All workflows in this directory **MUST** use `runs-on: self-hosted` unless expli
 
 The following secrets must be configured in the GitHub repository settings:
 
-| Secret | Description |
-|--------|-------------|
-| `ZAI_API_KEY` | API key for Z.AI provider (GLM models) |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather |
-| `DEEPSEEK_API_KEY` | (Optional) DeepSeek API key |
-| `TELEGRAM_USER_ID` | (Optional) Telegram user ID for pairing |
+| Secret | Description | Required |
+|--------|-------------|----------|
+| `ZAI_API_KEY` | API key for Z.AI provider (GLM models) | Yes |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather | Yes |
+| `DEEPSEEK_API_KEY` | DeepSeek API key (optional fallback) | No |
+| `PEDRO_TELEGRAM_ID` | Telegram user ID for the primary user | Yes |
+| `GATEWAY_AUTH_TOKEN` | Authentication token for OpenClaw web UI | Yes |
+
+### Generating GATEWAY_AUTH_TOKEN
+
+Generate a secure random token for accessing the OpenClaw web UI:
+
+```bash
+openssl rand -hex 32
+```
+
+Copy the output and add it as a GitHub secret named `GATEWAY_AUTH_TOKEN`.
+
+This token is required to access the web interface at:
+`http://your-server:18789/__openclaw__/canvas/?token=YOUR_TOKEN`
+
+## Test Workflow
+
+### test-workflow
+
+Simple workflow for testing the self-hosted runner setup.
+
+**Trigger:** Manual only (`workflow_dispatch`)
+
+**Use Case:** Verify runner is working after setup or during troubleshooting.
+
+**Behavior:**
+1. Runs on self-hosted runner
+2. Echoes test messages
+3. Verifies runner connectivity and permissions
 
 ## Deployment Workflow
 
@@ -42,3 +82,68 @@ Deploys the Josemar Assistente to the self-hosted server.
 - Workspace data and configuration are preserved
 
 This ensures that user data, session data, and configuration remain intact during deployment.
+
+## Troubleshooting
+
+### Workflow Not Starting
+
+**Symptoms:** Workflow stays in "Queued" state indefinitely
+
+**Solutions:**
+1. Verify self-hosted runner is online:
+   - Go to GitHub Settings > Actions > Runners
+   - Check if runner shows as "Idle" (green dot)
+2. Check runner service on server:
+   ```bash
+   sudo systemctl status actions.runner.*
+   ```
+3. View runner logs:
+   ```bash
+   sudo journalctl -u actions.runner.* -f
+   ```
+
+### Permission Denied Errors
+
+**Symptoms:** Workflow fails with "permission denied" when running Docker commands
+
+**Solutions:**
+1. Add runner user to docker group:
+   ```bash
+   sudo usermod -aG docker $USER
+   ```
+2. Restart runner service:
+   ```bash
+   sudo systemctl restart actions.runner.*
+   ```
+3. Or reboot the server to apply group changes
+
+### Secrets Not Found
+
+**Symptoms:** Workflow fails with "secret not found" or empty values
+
+**Solutions:**
+1. Verify secrets are set in **Repository** settings (not Environment secrets)
+2. Check secret names match exactly (case-sensitive):
+   - `ZAI_API_KEY` (not `zai_api_key`)
+   - `TELEGRAM_BOT_TOKEN`
+   - `PEDRO_TELEGRAM_ID`
+3. Re-save secrets if recently added (may take a moment to propagate)
+
+### Deployment Failures
+
+**Symptoms:** Deploy workflow runs but bot doesn't respond
+
+**Solutions:**
+1. Check container logs:
+   ```bash
+   docker-compose logs -f openclaw
+   ```
+2. Verify `.env` file was created correctly:
+   ```bash
+   docker-compose exec openclaw env | grep -E "ZAI|TELEGRAM"
+   ```
+3. Validate configuration:
+   ```bash
+   docker-compose run --rm openclaw openclaw --validate-config
+   ```
+4. Check if Telegram bot token is valid (only one deployment can use the same token)
