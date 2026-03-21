@@ -18,6 +18,12 @@
       mode: "token",
       token: "${GATEWAY_AUTH_TOKEN}",
     },
+    controlUi: {
+      allowedOrigins: [
+        "http://192.168.15.200:18789",
+        "http://localhost:18789",
+      ],
+    },
   },
 
   // Model providers configuration
