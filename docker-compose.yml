@@ -6,8 +6,8 @@ services:
     volumes:
       # Mount configuration directory as source (entrypoint will copy)
       - ./config:/root/.openclaw-source:ro
-      # Mount workspace for persistent data
-      - ./workspace:/root/.openclaw/workspace
+      # Use named volume for persistent data (outside git repo, no permission issues)
+      - openclaw-workspace:/root/.openclaw/workspace
       # Optional: mount scripts directory for development
       # - ./scripts:/app/scripts:ro
       # Optional: mount skills directory for development
@@ -42,3 +42,7 @@ services:
 networks:
   openclaw-network:
     driver: bridge
+
+volumes:
+  openclaw-workspace:
+    driver: local

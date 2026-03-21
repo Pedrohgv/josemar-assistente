@@ -184,9 +184,13 @@ josemar-assistente/
 │   └── pdf-extractor/     # PDF extraction skill
 │       ├── SKILL.md       # Skill documentation
 │       └── pdf-extractor  # Skill executable
-├── workspace/             # OpenClaw workspace (mounted)
 └── README.md              # This file
 ```
+
+**Persistent Data Storage:**
+- Workspace data is stored in a named Docker volume `openclaw-workspace` (not in the repository)
+- Location on host: `/var/lib/docker/volumes/josemar-assistente_openclaw-workspace/_data/`
+- Contains: conversation history, personality files (SOUL.md, MEMORY.md), session data
 
 ## Development
 
@@ -297,7 +301,7 @@ If the service fails to start, check:
 - **Custom Layer**: Adds Python and pymupdf for PDF processing
 - **Volume Mounts**:
   - Config: `./config:/root/.openclaw-source` (copied by entrypoint)
-  - Workspace: `./workspace:/root/.openclaw/workspace` (persistent)
+  - Workspace: Named Docker volume `openclaw-workspace:/root/.openclaw/workspace` (persistent, outside git repo)
 - **Environment**: API keys and configuration passed via environment variables
 
 ### Skills System

@@ -65,21 +65,34 @@ Deploys the Josemar Assistente to the self-hosted server.
 
 **Trigger:** Manual only (`workflow_dispatch`)
 
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `fresh_start` | boolean | `false` | When enabled, removes the existing workspace volume and starts fresh. **Warning:** This deletes all conversation history, personality files (SOUL.md, MEMORY.md), and accumulated data. |
+
 **Behavior:**
 1. Checks out the repository
 2. Creates `.env` file from GitHub secrets
 3. Stops existing Docker services
-4. Cleans up old Docker images (preserves volumes)
-5. Builds the Docker image with no cache
-6. Starts the services
-7. Verifies the container is running
+4. Optionally removes workspace volume (if `fresh_start: true`)
+5. Cleans up old Docker images (preserves volumes)
+6. Builds the Docker image with no cache
+7. Starts the services
+8. Verifies the container is running
 
 **Data Safety:**
 - **DO NOT** use `docker system prune` (too broad)
 - **DO NOT** use `docker volume prune` (deletes data)
 - **DO NOT** use `--volumes` flag with `docker compose down`
 - Only Docker images are cleaned up, never volumes
-- Workspace data and configuration are preserved
+- Workspace data (stored in named Docker volume) and configuration are preserved
+
+**Workspace Persistence:**
+- Workspace data is stored in a named Docker volume (`openclaw-workspace`)
+- The volume persists across deployments and container rebuilds
+- Unlike bind mounts, named volumes are stored outside the git repository at `/var/lib/docker/volumes/`
+- This avoids permission conflicts and checkout issues
 
 This ensures that user data, session data, and configuration remain intact during deployment.
 

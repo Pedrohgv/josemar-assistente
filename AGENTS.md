@@ -170,9 +170,14 @@ josemar-assistente/
 │   └── pdf-extractor/          # PDF extraction skill
 │       ├── SKILL.md           # Skill documentation
 │       └── pdf-extractor      # Skill executable (bash wrapper)
-├── workspace/                  # OpenClaw workspace (persistent data)
 └── README.md                  # Project documentation
 ```
+
+**Workspace Storage:**
+- **Location**: Named Docker volume `openclaw-workspace` (not in git repo)
+- **Path**: `/var/lib/docker/volumes/josemar-assistente_openclaw-workspace/_data/`
+- **Purpose**: Persistent storage for conversation history, personality files (SOUL.md, MEMORY.md), and session data
+- **Management**: Docker automatically manages the volume lifecycle
 
 ### OpenClaw Architecture
 
@@ -309,7 +314,7 @@ josemar-assistente/
 
 **Volumes:**
 - **Config Source**: `./config:/root/.openclaw-source:ro` (read-only)
-- **Workspace**: `./workspace:/root/.openclaw/workspace` (persistent)
+- **Workspace**: Named volume `openclaw-workspace:/root/.openclaw/workspace` (persistent, stored in Docker managed location)
 - **Skills** (optional): `./skills:/root/.openclaw-source/skills:ro`
 - **Scripts** (optional): `./scripts:/app/scripts:ro`
 
@@ -348,11 +353,11 @@ docker-compose logs -f openclaw
 docker-compose build
 docker-compose up -d
 
-# Backup workspace
-tar -czf workspace-backup-$(date +%Y%m%d).tar.gz workspace/
+# Backup workspace (named Docker volume)
+docker run --rm -v josemar-assistente_openclaw-workspace:/data -v $(pwd):/backup alpine tar czf /backup/workspace-backup-$(date +%Y%m%d).tar.gz /data
 
-# Restore workspace
-tar -xzf workspace-backup-YYYYMMDD.tar.gz
+# Restore workspace (to named Docker volume)
+docker run --rm -v josemar-assistente_openclaw-workspace:/data -v $(pwd):/backup alpine tar xzf /backup/workspace-backup-YYYYMMDD.tar.gz -C /
 
 # Check service status
 docker-compose ps
@@ -587,7 +592,7 @@ http://localhost:18789/__openclaw__/canvas/?token=your-generated-token
 ### Logging and Monitoring
 - Use appropriate log levels (debug, info, warn, error)
 - Log important events and errors
-- Monitor disk usage (workspace can grow)
+- Monitor Docker volume usage: `docker volume inspect josemar-assistente_openclaw-workspace`
 - Set up log rotation for production
 
 ### Security
