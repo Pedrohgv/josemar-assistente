@@ -2,6 +2,12 @@ name: deploy-to-home-server
 
 on:
   workflow_dispatch:
+    inputs:
+      fresh_start:
+        description: 'Erase existing workspace and start fresh'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   deploy:
@@ -28,6 +34,14 @@ jobs:
           PEDRO_TELEGRAM_ID=${{ secrets.PEDRO_TELEGRAM_ID }}
           GATEWAY_AUTH_TOKEN=${{ secrets.GATEWAY_AUTH_TOKEN }}
           EOF
+
+      - name: Optional fresh start - remove workspace volume
+        if: github.event.inputs.fresh_start == 'true'
+        run: |
+          echo "Fresh start requested - removing workspace volume..."
+          docker compose down || true
+          docker volume rm josemar-assistente_openclaw-workspace 2>/dev/null || true
+          echo "Workspace volume removed"
 
       - name: Stop existing services
         run: docker compose down
