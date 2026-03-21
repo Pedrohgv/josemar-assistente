@@ -561,12 +561,102 @@ GATEWAY_AUTH_TOKEN=your-generated-token
 http://localhost:18789/__openclaw__/canvas/?token=your-generated-token
 ```
 
+### Remote Access via Cloudflared Tunnel
+
+For secure remote access to the Web UI from outside your local network, you can use a Cloudflare Tunnel. This setup uses your existing Cloudflared tunnel (running in an LXC container on Proxmox) to provide HTTPS termination, resolving the "control ui requires device identity" browser security error.
+
+**Prerequisites:**
+- Existing Cloudflared tunnel running in an LXC container on Proxmox
+- A Cloudflare-managed domain (e.g., `casabanana.casa`)
+- OpenClaw running on a VM accessible from the Cloudflared LXC
+
+**1. Add DNS Record in Cloudflare Dashboard:**
+1. Log into [dash.cloudflare.com](https://dash.cloudflare.com)
+2. Select your domain: `casabanana.casa`
+3. Go to **DNS** → **Records**
+4. Add new CNAME:
+   - **Name:** `josemar`
+   - **Target:** `<your-tunnel-id>.cfargotunnel.com`
+   - **TTL:** Auto
+   - **Proxy status:** Orange cloud (Proxied) ✓
+
+**2. Update OpenClaw Configuration:**
+The configuration already includes the HTTPS origin in `allowedOrigins`:
+```json5
+controlUi: {
+  allowedOrigins: [
+    "http://192.168.15.200:18789",
+    "http://localhost:18789",
+    "https://josemar.casabanana.casa",
+  ],
+},
+```
+
+**3. Add Ingress Rule to Cloudflared Config (in your LXC):**
+
+SSH into your Cloudflared LXC container and update the config:
+
+```bash
+# SSH into the LXC container
+ssh <your-user>@<cloudflared-lxc-ip>
+
+# Navigate to config directory
+cd /etc/cloudflared/
+
+# Backup current config
+sudo cp config.yml config.yml.backup.$(date +%Y%m%d)
+
+# Edit config
+sudo nano config.yml
+```
+
+Add this ingress rule to your existing `config.yml`:
+
+```yaml
+ingress:
+  # Your existing Home Assistant rule
+  - hostname: ha.casabanana.casa
+    service: http://192.168.X.X:8123
+  
+  # NEW: OpenClaw rule
+  - hostname: josemar.casabanana.casa
+    service: http://<DOCKER_VM_IP>:18789
+  
+  # Catch-all
+  - service: http_status:404
+```
+
+Replace `<DOCKER_VM_IP>` with the IP address of the VM running your OpenClaw Docker container (e.g., `192.168.15.200`).
+
+**4. Validate and Restart Cloudflared:**
+
+```bash
+# Validate the config
+sudo cloudflared tunnel ingress validate
+
+# Restart the service
+sudo systemctl restart cloudflared
+```
+
+**5. Access the Web UI:**
+
+Open your browser and navigate to:
+```
+https://josemar.casabanana.casa/__openclaw__/canvas/?token=YOUR_GATEWAY_AUTH_TOKEN
+```
+
+**Why This Works:**
+- Cloudflare provides SSL termination (HTTPS)
+- Browser sees a secure context (HTTPS origin)
+- OpenClaw accepts the origin via `allowedOrigins`
+- No "device identity" error since browser requirements are satisfied
+
 ### Security Notes
 
 - The token is required when `gateway.bind` is set to "lan" (non-loopback)
 - Never share your token publicly
 - The UI provides full control over the bot - protect it accordingly
-- Consider using a reverse proxy (nginx) with SSL for production
+- Cloudflare Tunnel provides secure access without exposing ports publicly
 
 ## Best Practices
 
