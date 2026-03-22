@@ -142,7 +142,7 @@
           name: "Josemar",
           theme: "helpful assistant",
           emoji: "🧓🏿",
-          avatar: "../avatars/avatar_josemar.jpeg",
+          avatar: "avatars/avatar_josemar.jpeg",
         },
       },
     ],
