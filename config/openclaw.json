@@ -69,7 +69,7 @@
       },
       // Z.AI provider for GLM models
       zai: {
-        baseUrl: "https://api.z.ai/api/paas/v4",
+        baseUrl: "https://api.z.ai/api/coding/paas/v4",
         apiKey: "${ZAI_API_KEY}",
         api: "openai-completions",
         models: [
