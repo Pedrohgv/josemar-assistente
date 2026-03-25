@@ -28,6 +28,7 @@ The following secrets must be configured in the GitHub repository settings:
 | `DEEPSEEK_API_KEY` | DeepSeek API key (optional fallback) | No |
 | `PEDRO_TELEGRAM_ID` | Telegram user ID for the primary user | Yes |
 | `GATEWAY_AUTH_TOKEN` | Authentication token for OpenClaw web UI | Yes |
+| `GOG_KEYRING_PASSWORD` | GOG keyring password for Galaxy integration | No |
 
 ### Generating GATEWAY_AUTH_TOKEN
 

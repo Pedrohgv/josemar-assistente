@@ -7,6 +7,7 @@
     ZAI_API_KEY: "${ZAI_API_KEY}",
     TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
     DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
+    GOG_KEYRING_PASSWORD: "${GOG_KEYRING_PASSWORD}",
   },
 
   // Gateway configuration

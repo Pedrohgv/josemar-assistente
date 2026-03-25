@@ -138,6 +138,10 @@ DEEPSEEK_API_KEY=your_deepseek_api_key_here
 # OpenClaw log level (default: info)
 OPENCLAW_LOG_LEVEL=info
 
+# GOG Keyring Password (optional, for GOG Galaxy integration)
+# Used for decrypting GOG credentials store for game library access
+GOG_KEYRING_PASSWORD=your_gog_keyring_password_here
+
 # Telegram user ID for the primary user (Pedro)
 # This user will be pre-approved to chat with the bot without pairing
 # Get your ID from @userinfobot on Telegram
@@ -708,6 +712,59 @@ When making changes to this repository, update the relevant AGENTS.md files:
 **Cross-references:** Keep subdirectory AGENTS.md links in sync. When adding a new subdirectory with its own AGENTS.md, add a reference in the root file's Quick Navigation table.
 
 ## Git Workflow for Agents
+
+### Branch Creation (Required)
+
+**ALWAYS create a new branch when working on:**
+- New features
+- Bug fixes
+- Code changes
+- Configuration changes
+- Documentation updates that are part of a feature/fix
+
+**Branch naming conventions:**
+- Features: `feature/description` (e.g., `feature/add-gog-integration`)
+- Bug fixes: `fix/description` (e.g., `fix/pdf-extractor-error`)
+- Updates: `update/description` (e.g., `update/dependency-versions`)
+
+**Workflow:**
+```bash
+# 1. Check current branch
+git branch
+
+# 2. Create and switch to new branch
+git checkout -b feature/my-feature-name
+
+# Or using gh CLI:
+gh repo view --json defaultBranchRef
+git checkout -b feature/my-feature-name
+
+# 3. Make your changes
+# ... edit files ...
+
+# 4. Stage and commit
+git add .
+git commit -m "Description of changes"
+
+# 5. Push to remote
+git push -u origin feature/my-feature-name
+```
+
+**Why branches matter:**
+- Keeps the main branch clean and stable
+- Enables pull requests for code review
+- Makes it easier to track and review changes
+- Allows easy rollback if issues arise
+- Supports parallel development
+
+**Exceptions (rare):**
+- Minor documentation fixes (typo fixes, link updates)
+- Emergency hotfixes explicitly requested by user to go directly to main
+
+**After pushing:**
+- Changes will be tested on the branch
+- Deploy via GitHub Actions workflow when ready
+- Production deployment happens from main after merge
 
 ### Git CLI Usage
 - **Always use the `gh` CLI** for git operations when working in this repository
