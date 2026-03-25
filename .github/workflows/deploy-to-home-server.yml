@@ -49,6 +49,7 @@ jobs:
       - name: Clean up old Docker images
         run: |
           docker image prune -a -f
+          docker builder prune -f
           docker rmi $(docker images 'josemar-assistente*' -q) 2>/dev/null || true
 
       - name: Build Docker image

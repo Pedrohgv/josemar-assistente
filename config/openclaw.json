@@ -141,7 +141,8 @@
         identity: {
           name: "Josemar",
           theme: "helpful assistant",
-          emoji: "🤕",
+          emoji: "🧓🏿",
+          avatar: "avatars/avatar_josemar.jpeg",
         },
       },
     ],

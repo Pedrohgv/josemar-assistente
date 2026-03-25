@@ -23,6 +23,13 @@ if [ -d "/root/.openclaw-source" ]; then
     cp -r /root/.openclaw-source/* /root/.openclaw/ 2>/dev/null || true
 fi
 
+# Copy avatars to workspace
+if [ -d "/root/.openclaw-source/avatars" ]; then
+    echo "📸 Copying avatars to workspace..."
+    mkdir -p /root/.openclaw/workspace/avatars
+    cp -r /root/.openclaw-source/avatars/* /root/.openclaw/workspace/avatars/
+fi
+
 # Validate configuration
 if [ -f /root/.openclaw/openclaw.json ]; then
     echo "✅ Configuration file found"

@@ -664,7 +664,7 @@ https://josemar.casabanana.casa/__openclaw__/canvas/?token=YOUR_GATEWAY_AUTH_TOK
 - Use environment variables for secrets (never commit to git)
 - Keep `.env.example` updated with all required variables
 - Document configuration changes in README.md
-- Use JSON5 comments to explain complex configurations
+- **Verify path accessibility**: When configuration references file paths (avatars, certificates, data files, etc.), always verify those paths are accessible within the container by checking volume mounts in `docker-compose.yml` and the entrypoint script.
 
 ### Skill Development
 - Always include `SKILL.md` with proper frontmatter
