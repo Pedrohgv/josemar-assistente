@@ -18,14 +18,15 @@ COPY scripts/pdf_extractor.py /app/scripts/
 # Make script executable
 RUN chmod +x /app/scripts/pdf_extractor.py
 
-# Create skills directory
+# Create skills directories
 RUN mkdir -p /root/.openclaw/skills
+RUN mkdir -p /root/.openclaw/repo-skills
 
 # Copy custom skills
-COPY skills/pdf-extractor /root/.openclaw/skills/pdf-extractor/
+COPY repo-skills/pdf-extractor /root/.openclaw/repo-skills/pdf-extractor/
 
 # Make skill executable
-RUN chmod +x /root/.openclaw/skills/pdf-extractor/pdf-extractor
+RUN chmod +x /root/.openclaw/repo-skills/pdf-extractor/pdf-extractor
 
 # Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/

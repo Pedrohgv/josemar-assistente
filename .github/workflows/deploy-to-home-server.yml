@@ -65,6 +65,18 @@ jobs:
       - name: Start services
         run: docker compose up -d
 
+      - name: Wait for container to be healthy
+        run: |
+          echo "Waiting for container to be healthy..."
+          for i in {1..30}; do
+            if docker compose ps | grep -q "healthy"; then
+              echo "✅ Container is healthy"
+              break
+            fi
+            echo "   Waiting... ($i/30)"
+            sleep 2
+          done
+
       - name: Verify deployment
         run: docker ps | grep josemar-assistente
 

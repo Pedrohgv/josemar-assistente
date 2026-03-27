@@ -37,35 +37,48 @@ if [ -d "/root/.openclaw-source-skills" ]; then
     echo "📦 Deploying repo-maintained skills..."
     mkdir -p /root/.openclaw/repo-skills
     
-    # Parse force overwrite list
-    IFS=',' read -ra FORCE_LIST <<< "$FORCE_OVERWRITE_SKILLS"
+    # Parse force overwrite list (handle empty value)
+    FORCE_LIST=""
+    if [ -n "$FORCE_OVERWRITE_SKILLS" ]; then
+        IFS=',' read -r FORCE_LIST <<< "$FORCE_OVERWRITE_SKILLS"
+    fi
     
-    for skill_source in /root/.openclaw-source-skills/*; do
-        [ -d "$skill_source" ] || continue  # Skip non-directories
-        
-        skill_name=$(basename "$skill_source")
-        skill_dest="/root/.openclaw/repo-skills/$skill_name"
-        
-        # Check if this skill is in the force overwrite list
-        force_overwrite=false
-        for forced_skill in "${FORCE_LIST[@]}"; do
-            [ "$forced_skill" = "$skill_name" ] && force_overwrite=true
-        done
-        
-        if [ -e "$skill_dest" ]; then
-            if [ "$force_overwrite" = true ]; then
-                echo "   🔄 Force overwriting $skill_name"
-                rm -rf "$skill_dest"
-                cp -r "$skill_source" "$skill_dest"
-            else
-                echo "   ⏭️  Skipping $skill_name (already exists - preserving agent version)"
+    # Check if there are any skills to deploy
+    if [ -n "$(ls -A /root/.openclaw-source-skills/ 2>/dev/null)" ]; then
+        for skill_source in /root/.openclaw-source-skills/*; do
+            [ -d "$skill_source" ] || continue  # Skip non-directories
+            
+            skill_name=$(basename "$skill_source")
+            skill_dest="/root/.openclaw/repo-skills/$skill_name"
+            
+            # Check if this skill is in the force overwrite list
+            force_overwrite=false
+            if [ -n "$FORCE_LIST" ]; then
+                for forced_skill in $FORCE_LIST; do
+                    if [ "$forced_skill" = "$skill_name" ]; then
+                        force_overwrite=true
+                        break
+                    fi
+                done
             fi
-        else
-            echo "   📥 Copying $skill_name"
-            cp -r "$skill_source" "$skill_dest"
-        fi
-    done
-    echo "✅ Repo skills deployment complete"
+            
+            if [ -e "$skill_dest" ]; then
+                if [ "$force_overwrite" = true ]; then
+                    echo "   🔄 Force overwriting $skill_name"
+                    rm -rf "$skill_dest"
+                    cp -r "$skill_source" "$skill_dest"
+                else
+                    echo "   ⏭️  Skipping $skill_name (already exists - preserving agent version)"
+                fi
+            else
+                echo "   📥 Copying $skill_name"
+                cp -r "$skill_source" "$skill_dest"
+            fi
+        done
+        echo "✅ Repo skills deployment complete"
+    else
+        echo "   ℹ️  No skills found in source directory"
+    fi
 else
     echo "ℹ️  No repo skills to deploy (source directory not mounted)"
 fi
