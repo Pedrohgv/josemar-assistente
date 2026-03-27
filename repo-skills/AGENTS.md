@@ -6,6 +6,85 @@
 
 The Josemar Assistente uses the OpenClaw skills system to extend functionality. Skills are external tools that can be called by the AI agent to perform specific tasks.
 
+## Two-Tier Skill System
+
+Josemar Assistente implements a two-tier skill architecture:
+
+### 1. Repo Skills (This Directory)
+- **Location**: `/root/.openclaw/repo-skills/` (inside container)
+- **Source**: `repo-skills/` directory in this repository
+- **Purpose**: Version-controlled, production-ready skills
+- **Deployment**: Copied to container on startup (smart deployment with skip-if-exists)
+- **Persistence**: Can be modified by agent during runtime; modifications preserved on redeploy
+- **Priority**: Base version - can be overridden by runtime skills
+
+### 2. Runtime Skills (Assistant-Created)
+- **Location**: `/root/.openclaw/skills/` (inside container)
+- **Source**: Created by the assistant during conversations
+- **Purpose**: Rapid prototyping, agent experimentation, user customization
+- **Deployment**: Never touched by repo deployment
+- **Persistence**: Always preserved across deployments
+- **Priority**: Higher than repo skills (overrides if same skill name exists)
+
+### Smart Deployment Behavior
+
+When the container starts, the entrypoint script:
+
+1. Checks if `/root/.openclaw/repo-skills/` exists (creates if not)
+2. Iterates through all skills in the mounted repo-skills directory
+3. For each skill:
+   - **First deploy**: Copies skill to `/root/.openclaw/repo-skills/`
+   - **Subsequent deploys**: **SKIPS** if skill already exists (preserves agent modifications)
+   - **Force overwrite**: If skill name is in `FORCE_OVERWRITE_SKILLS` env var, overwrites it
+
+### Force Overwriting Repo Skills
+
+To reset a repo skill to its original version (discarding agent modifications):
+
+**Via GitHub Actions:**
+1. Go to Actions → deploy-to-home-server
+2. Click "Run workflow"
+3. Enter skill names in `force_overwrite_skills` field: `pdf-extractor,web-scraper`
+4. Run workflow
+
+**Via .env file:**
+```bash
+# In .env file:
+FORCE_OVERWRITE_SKILLS=pdf-extractor,web-scraper
+
+# Then restart:
+docker-compose up -d
+```
+
+**Manually:**
+```bash
+# Delete specific skill
+docker-compose exec openclaw rm -rf /root/.openclaw/repo-skills/pdf-extractor
+
+# Or delete all repo skills to reset everything
+docker-compose exec openclaw rm -rf /root/.openclaw/repo-skills/*
+
+# Then restart to redeploy
+docker-compose restart
+```
+
+### Skill Priority
+
+When OpenClaw loads skills, it uses the configuration in `config/openclaw.json`:
+
+```json5
+skills: {
+  load: {
+    extraDirs: [
+      "/root/.openclaw/repo-skills",  // Loaded first (base)
+      "/root/.openclaw/skills",       // Loaded second (overrides)
+    ]
+  }
+}
+```
+
+If both directories contain a skill with the same name, the **runtime skill wins** (loaded last).
+
 ## Current Implementation
 
 The only skill currently implemented is **PDF Extractor** at `skills/pdf-extractor/`.

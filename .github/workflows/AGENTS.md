@@ -71,6 +71,19 @@ Deploys the Josemar Assistente to the self-hosted server.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `fresh_start` | boolean | `false` | When enabled, removes the existing workspace volume and starts fresh. **Warning:** This deletes all conversation history, personality files (SOUL.md, MEMORY.md), and accumulated data. |
+| `force_overwrite_skills` | string | `""` | Comma-separated list of skill names to force overwrite from repo (e.g., `pdf-extractor,web-scraper`). Use to reset specific skills to their original repo version, discarding any agent modifications. |
+
+**Two-Tier Skill System:**
+
+The deployment workflow supports a two-tier skill system:
+
+- **Runtime Skills** (`/root/.openclaw/skills/`): Skills created by the assistant during runtime. These are preserved across deployments and take priority over repo skills.
+- **Repo Skills** (`/root/.openclaw/repo-skills/`): Skills maintained in the `repo-skills/` directory of the repository. These are version-controlled and deployed on container startup.
+
+**Smart Deployment Behavior:**
+- First deployment: Repo skills are copied to the container
+- Subsequent deployments: Repo skills are skipped if they already exist (to preserve agent modifications)
+- Force overwrite: Set `force_overwrite_skills` to specific skill names to reset them to repo version
 
 **Behavior:**
 1. Checks out the repository
@@ -81,6 +94,7 @@ Deploys the Josemar Assistente to the self-hosted server.
 6. Builds the Docker image with no cache
 7. Starts the services
 8. Verifies the container is running
+9. Verifies skill deployment (logs both repo and runtime skills directories)
 
 **Data Safety:**
 - **DO NOT** use `docker system prune` (too broad)
@@ -161,3 +175,23 @@ This ensures that user data, session data, and configuration remain intact durin
    docker-compose run --rm openclaw openclaw --validate-config
    ```
 4. Check if Telegram bot token is valid (only one deployment can use the same token)
+
+### Skills Not Deploying
+
+**Symptoms:** Repo skills not appearing or runtime skills being overwritten
+
+**Solutions:**
+1. Check skill deployment logs in workflow output
+2. Verify repo skills are mounted correctly:
+   ```bash
+   docker-compose exec openclaw ls -la /root/.openclaw/repo-skills/
+   ```
+3. Check runtime skills:
+   ```bash
+   docker-compose exec openclaw ls -la /root/.openclaw/skills/
+   ```
+4. Force overwrite specific skills by re-running deployment with `force_overwrite_skills` parameter
+5. Check OpenClaw skill configuration:
+   ```bash
+   docker-compose exec openclaw openclaw skills list
+   ```

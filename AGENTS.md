@@ -7,8 +7,9 @@
 | Topic | Location |
 |-------|----------|
 | OpenClaw configuration | `config/AGENTS.md` |
-| Skill development | `skills/AGENTS.md` |
+| Skill development | `repo-skills/AGENTS.md` |
 | CI/CD workflows | `.github/workflows/AGENTS.md` |
+| Skills management | See "Skills Management" section below |
 
 ---
 
@@ -408,17 +409,74 @@ docker-compose exec openclaw env | grep -E "ZAI|TELEGRAM|DEEPSEEK"
 docker-compose restart openclaw
 ```
 
-## Skills System
+## Skills Management
 
-Skills extend the assistant's capabilities via external executables. Each skill has:
-- A directory in `skills/`
-- A `SKILL.md` with frontmatter metadata
-- An executable that reads stdin and outputs JSON
+Josemar Assistente implements a **two-tier skill system** that separates version-controlled skills from runtime-created skills.
 
-**Existing Skill:**
-- **PDF Extractor** (`skills/pdf-extractor/`) - Extracts data from Brazilian credit card invoice PDFs
+### Two-Tier Architecture
 
-See `skills/AGENTS.md` for complete skill development documentation.
+**1. Repo Skills (Version-Controlled)**
+- **Repository Location**: `repo-skills/` directory
+- **Container Location**: `/root/.openclaw/repo-skills/`
+- **Purpose**: Production-ready, tested skills maintained in git
+- **Deployment**: Smart deployment with skip-if-exists logic
+  - First deploy: Copied to container
+  - Subsequent deploys: **SKIPPED** if already exists (preserves agent modifications)
+  - Force overwrite: Use `FORCE_OVERWRITE_SKILLS` env var
+
+**2. Runtime Skills (Assistant-Created)**
+- **Container Location**: `/root/.openclaw/skills/`
+- **Purpose**: Skills created by the assistant during conversations
+- **Persistence**: Always preserved, never touched by deployment
+- **Priority**: Higher than repo skills (overrides if same name exists)
+
+### Skill Priority
+
+OpenClaw loads skills in this order (config in `config/openclaw.json`):
+```json5
+skills: {
+  load: {
+    extraDirs: [
+      "/root/.openclaw/repo-skills",  // Loaded first (base version)
+      "/root/.openclaw/skills",       // Loaded second (takes precedence)
+    ]
+  }
+}
+```
+
+If both directories have a skill with the same name, the **runtime skill wins**.
+
+### Managing Repo Skills
+
+**Force Overwrite (GitHub Actions):**
+1. Go to Actions → deploy-to-home-server
+2. Click "Run workflow"
+3. Set `force_overwrite_skills` to: `pdf-extractor,web-scraper`
+4. Run deployment
+
+**Force Overwrite (Local):**
+```bash
+# In .env file:
+FORCE_OVERWRITE_SKILLS=pdf-extractor
+
+# Then deploy:
+docker-compose up -d
+```
+
+**Reset All Repo Skills:**
+```bash
+# Delete all repo skills
+docker-compose exec openclaw rm -rf /root/.openclaw/repo-skills/*
+
+# Restart to redeploy from repo
+docker-compose restart
+```
+
+### Existing Repo Skills
+
+**PDF Extractor** (`repo-skills/pdf-extractor/`) - Extracts data from Brazilian credit card invoice PDFs
+
+See `repo-skills/AGENTS.md` for complete skill development documentation.
 
 ## Configuration Reference
 
@@ -448,8 +506,11 @@ echo "/path/to/test.pdf" | python3 scripts/pdf_extractor.py
 # Test with raw text
 echo "10/12 UBER TRIP 32,75" | python3 scripts/pdf_extractor.py
 
-# Test skill in container
-echo "/workspace/test.pdf" | docker-compose run --rm -T openclaw /root/.openclaw/skills/pdf-extractor/pdf-extractor
+# Test repo skill in container (deployed to repo-skills/)
+echo "/workspace/test.pdf" | docker-compose run --rm -T openclaw /root/.openclaw/repo-skills/pdf-extractor/pdf-extractor
+
+# Test runtime skill in container (created by assistant)
+echo "/workspace/test.pdf" | docker-compose run --rm -T openclaw /root/.openclaw/skills/<skill-name>/<skill-name>
 ```
 
 ### Testing Telegram Integration

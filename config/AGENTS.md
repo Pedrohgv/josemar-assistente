@@ -438,10 +438,18 @@ No Docker image rebuild is required!
 
 ### 5. Skills
 
-Configure custom skills:
+Configure custom skills with support for multiple skill directories:
 
 ```json5
 skills: {
+  // Load skills from multiple directories
+  // Order matters: later directories override earlier ones if same skill name exists
+  load: {
+    extraDirs: [
+      "/root/.openclaw/repo-skills",  // Repo skills (base version)
+      "/root/.openclaw/skills",       // Runtime skills (user/assistant created - takes precedence)
+    ]
+  },
   entries: {
     "pdf-extractor": {
       enabled: true
@@ -451,8 +459,28 @@ skills: {
 ```
 
 **Skill Configuration Fields:**
-- Skill ID (key): Matches skill directory name
-- `enabled`: Boolean, if skill is enabled
+- `load.extraDirs`: Array of directories to scan for skills (in order of priority)
+- `entries`: Skill ID (key) with configuration
+  - `enabled`: Boolean, if skill is enabled
+
+**Two-Tier Skill System:**
+
+The configuration supports a two-tier skill architecture:
+
+1. **Repo Skills** (`/root/.openclaw/repo-skills/`)
+   - Maintained in the `repo-skills/` directory of the repository
+   - Version-controlled and deployed on container startup
+   - Base version of skills that can be overridden
+
+2. **Runtime Skills** (`/root/.openclaw/skills/`)
+   - Skills created by the assistant during conversations
+   - Persisted in the Docker volume across deployments
+   - Takes precedence over repo skills (loaded last)
+
+**Skill Loading Priority:**
+- Skills are loaded from directories in the order specified in `extraDirs`
+- If the same skill name exists in multiple directories, the last one wins
+- Runtime skills override repo skills when both exist
 
 **Adding a New Skill:**
 
@@ -467,7 +495,7 @@ entries: {
 }
 ```
 
-**Note:** Skills are automatically discovered from `/root/.openclaw/skills/` directory. The skill ID must match the directory name.
+**Note:** Skills are automatically discovered from all directories listed in `load.extraDirs`. The skill ID must match the directory name.
 
 ### 6. Agent Prompts and Personality
 
@@ -939,25 +967,45 @@ cat config/openclaw.json | jq '.models.providers'
 
 **Error: "Skill not found"**
 ```bash
-# Check skill directory
-docker-compose exec openclaw ls -la /root/.openclaw/skills/
+# Check both skill directories
+docker-compose exec openclaw ls -la /root/.openclaw/repo-skills/  # Repo skills
+docker-compose exec openclaw ls -la /root/.openclaw/skills/        # Runtime skills
 
 # Check skill configuration
 cat config/openclaw.json | jq '.skills.entries'
 
 # Verify skill directory name matches configuration
+
+# Check skill loading directories
+cat config/openclaw.json | jq '.skills.load.extraDirs'
 ```
 
 **Error: "Skill execution failed"**
 ```bash
-# Test skill manually
+# Test skill manually (check both locations)
+echo '{"test": "data"}' | docker-compose exec -T openclaw /root/.openclaw/repo-skills/skill-name/skill-name
 echo '{"test": "data"}' | docker-compose exec -T openclaw /root/.openclaw/skills/skill-name/skill-name
 
 # Check skill permissions
+docker-compose exec openclaw ls -la /root/.openclaw/repo-skills/skill-name/
 docker-compose exec openclaw ls -la /root/.openclaw/skills/skill-name/
 
 # Check skill dependencies
 docker-compose exec openclaw python3 -c "import required_module"
+```
+
+**Error: "Wrong skill version loaded"**
+```bash
+# Check which directory the skill is loading from
+docker-compose exec openclaw openclaw skills info skill-name
+
+# List all available skills
+docker-compose exec openclaw openclaw skills list
+
+# If runtime skill should override repo skill but isn't:
+# 1. Verify runtime skill exists: ls /root/.openclaw/skills/skill-name/
+# 2. Verify load order in config: cat config/openclaw.json | jq '.skills.load.extraDirs'
+# 3. Restart container after config changes
 ```
 
 ## Additional Resources

@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      force_overwrite_skills:
+        description: 'Comma-separated skill names to force overwrite (e.g., pdf-extractor,web-scraper)'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   deploy:
@@ -34,6 +39,7 @@ jobs:
           PEDRO_TELEGRAM_ID=${{ secrets.PEDRO_TELEGRAM_ID }}
           GATEWAY_AUTH_TOKEN=${{ secrets.GATEWAY_AUTH_TOKEN }}
           GOG_KEYRING_PASSWORD=${{ secrets.GOG_KEYRING_PASSWORD }}
+          FORCE_OVERWRITE_SKILLS=${{ github.event.inputs.force_overwrite_skills }}
           EOF
 
       - name: Optional fresh start - remove workspace volume
@@ -61,3 +67,12 @@ jobs:
 
       - name: Verify deployment
         run: docker ps | grep josemar-assistente
+
+      - name: Verify skill deployment
+        run: |
+          echo "Checking deployed skills..."
+          echo "Repo skills:"
+          docker compose exec -T openclaw ls -la /root/.openclaw/repo-skills/ 2>/dev/null || echo "No repo skills deployed yet"
+          echo ""
+          echo "Runtime skills:"
+          docker compose exec -T openclaw ls -la /root/.openclaw/skills/ 2>/dev/null || echo "No runtime skills yet"

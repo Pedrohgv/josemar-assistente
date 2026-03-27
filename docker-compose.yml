@@ -10,8 +10,8 @@ services:
       - openclaw-workspace:/root/.openclaw
       # Optional: mount scripts directory for development
       # - ./scripts:/app/scripts:ro
-      # Optional: mount skills directory for development
-      # - ./skills:/root/.openclaw-source/skills:ro
+      # Mount repo-maintained skills directory
+      - ./repo-skills:/root/.openclaw-source-skills:ro
     environment:
       # Environment variables for API keys (to be set in .env file)
       - ZAI_API_KEY=${ZAI_API_KEY:-}
@@ -23,6 +23,8 @@ services:
       # Additional users can be added here following the pattern:
       # - ALICE_TELEGRAM_ID=${ALICE_TELEGRAM_ID:-}
       # - BOB_TELEGRAM_ID=${BOB_TELEGRAM_ID:-}
+      # Skills deployment configuration
+      - FORCE_OVERWRITE_SKILLS=${FORCE_OVERWRITE_SKILLS:-}
       # Other environment variables
       - OPENCLAW_LOG_LEVEL=info
     ports:

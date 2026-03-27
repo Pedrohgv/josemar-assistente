@@ -151,7 +151,20 @@ Send a PDF file or ask: "Extraia os dados desta fatura"
 
 ### Custom Skills
 
-Add your own skills in `skills/` directory:
+Josemar uses a two-tier skill system:
+
+**Repo Skills** (version-controlled in `repo-skills/`):
+- Production-ready skills maintained in git
+- Deployed to container with smart "skip-if-exists" logic
+- Can be modified by agent; modifications preserved across deployments
+- Can be force-overwritten via GitHub Actions or .env
+
+**Runtime Skills** (assistant-created in `/root/.openclaw/skills/`):
+- Created by assistant during conversations
+- Never touched by deployment
+- Takes precedence over repo skills (higher priority)
+
+Add production skills in `repo-skills/` directory:
 
 1. Create skill folder with `SKILL.md` (including YAML frontmatter)
 2. Add executable script
@@ -159,12 +172,12 @@ Add your own skills in `skills/` directory:
 
 Example skill structure:
 ```
-skills/my-skill/
+repo-skills/my-skill/
 ├── SKILL.md          # Required: YAML frontmatter + documentation
 └── my-skill          # Executable script (any language)
 ```
 
-See `skills/AGENTS.md` for detailed skill development guide.
+See `repo-skills/AGENTS.md` for detailed skill development guide.
 
 ## Project Structure
 
@@ -179,7 +192,7 @@ josemar-assistente/
 │   └── openclaw.json    # OpenClaw configuration
 ├── scripts/
 │   └── pdf_extractor.py   # PDF extraction script
-├── skills/
+├── repo-skills/            # Version-controlled skills
 │   ├── AGENTS.md          # Skills development guide
 │   └── pdf-extractor/     # PDF extraction skill
 │       ├── SKILL.md       # Skill documentation
@@ -306,16 +319,30 @@ If the service fails to start, check:
 
 ### Skills System
 
-Three load locations (in precedence order):
-1. **Workspace**: `<workspace>/skills/` (highest priority)
-2. **Managed**: `~/.openclaw/skills/` (baked into image)
-3. **Bundled**: Built-in OpenClaw skills (lowest priority)
+Two-tier architecture with multiple load locations:
+
+**Runtime Skills** (assistant-created, highest priority):
+- **Location**: `/root/.openclaw/skills/` inside container
+- Created by assistant during conversations
+- Never touched by deployment, always persisted
+
+**Repo Skills** (version-controlled):
+- **Source**: `repo-skills/` in repository
+- **Location**: `/root/.openclaw/repo-skills/` inside container
+- Deployed with smart "skip-if-exists" logic
+- Can be force-overwritten via `FORCE_OVERWRITE_SKILLS`
+
+**Load Priority** (from `config/openclaw.json`):
+1. Runtime skills (`/root/.openclaw/skills/`) - highest priority
+2. Repo skills (`/root/.openclaw/repo-skills/`) - base version
+3. Bundled OpenClaw skills - lowest priority
 
 ## Documentation
 
 - **AGENTS.md**: Root project documentation for AI assistants
 - **config/AGENTS.md**: Complete configuration reference
-- **skills/AGENTS.md**: Skills development guide
+- **repo-skills/AGENTS.md**: Skills development guide
+- **.github/workflows/AGENTS.md**: CI/CD workflow documentation
 
 ## License
 
