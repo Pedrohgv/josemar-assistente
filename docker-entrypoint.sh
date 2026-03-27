@@ -37,10 +37,11 @@ if [ -d "/root/.openclaw-source-skills" ]; then
     echo "📦 Deploying repo-maintained skills..."
     mkdir -p /root/.openclaw/repo-skills
     
-    # Parse force overwrite list (handle empty value)
+    # Parse force overwrite list (handle empty value) - POSIX sh compatible
     FORCE_LIST=""
     if [ -n "$FORCE_OVERWRITE_SKILLS" ]; then
-        IFS=',' read -r FORCE_LIST <<< "$FORCE_OVERWRITE_SKILLS"
+        # Convert comma-separated to space-separated for POSIX sh
+        FORCE_LIST=$(echo "$FORCE_OVERWRITE_SKILLS" | tr ',' ' ')
     fi
     
     # Check if there are any skills to deploy
