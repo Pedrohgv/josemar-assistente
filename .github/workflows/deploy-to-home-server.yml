@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      force_overwrite_skills:
+        description: 'Comma-separated skill names to force overwrite (e.g., pdf-extractor,web-scraper)'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   deploy:
@@ -32,8 +37,9 @@ jobs:
           TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
           DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}
           PEDRO_TELEGRAM_ID=${{ secrets.PEDRO_TELEGRAM_ID }}
-          GATEWAY_AUTH_TOKEN=${{ secrets.GATEWAY_AUTH_TOKEN }}
+          GATEWAY_AUTH_PASSWORD=${{ secrets.GATEWAY_AUTH_PASSWORD }}
           GOG_KEYRING_PASSWORD=${{ secrets.GOG_KEYRING_PASSWORD }}
+          FORCE_OVERWRITE_SKILLS=${{ github.event.inputs.force_overwrite_skills }}
           EOF
 
       - name: Optional fresh start - remove workspace volume
@@ -59,5 +65,26 @@ jobs:
       - name: Start services
         run: docker compose up -d
 
+      - name: Wait for container to be healthy
+        run: |
+          echo "Waiting for container to be healthy..."
+          for i in {1..30}; do
+            if docker compose ps | grep -q "healthy"; then
+              echo "✅ Container is healthy"
+              break
+            fi
+            echo "   Waiting... ($i/30)"
+            sleep 2
+          done
+
       - name: Verify deployment
         run: docker ps | grep josemar-assistente
+
+      - name: Verify skill deployment
+        run: |
+          echo "Checking deployed skills..."
+          echo "Repo skills:"
+          docker compose exec -T openclaw ls -la /root/.openclaw/repo-skills/ 2>/dev/null || echo "No repo skills deployed yet"
+          echo ""
+          echo "Runtime skills:"
+          docker compose exec -T openclaw ls -la /root/.openclaw/skills/ 2>/dev/null || echo "No runtime skills yet"

@@ -30,7 +30,63 @@ if [ -d "/root/.openclaw-source/avatars" ]; then
     cp -r /root/.openclaw-source/avatars/* /root/.openclaw/workspace/avatars/
 fi
 
-# Validate configuration
+# ============================================
+# REPO SKILLS DEPLOYMENT
+# ============================================
+if [ -d "/root/.openclaw-source-skills" ]; then
+    echo "📦 Deploying repo-maintained skills..."
+    mkdir -p /root/.openclaw/repo-skills
+    
+    # Parse force overwrite list (handle empty value) - POSIX sh compatible
+    FORCE_LIST=""
+    if [ -n "$FORCE_OVERWRITE_SKILLS" ]; then
+        # Convert comma-separated to space-separated for POSIX sh
+        FORCE_LIST=$(echo "$FORCE_OVERWRITE_SKILLS" | tr ',' ' ')
+    fi
+    
+    # Check if there are any skills to deploy
+    if [ -n "$(ls -A /root/.openclaw-source-skills/ 2>/dev/null)" ]; then
+        for skill_source in /root/.openclaw-source-skills/*; do
+            [ -d "$skill_source" ] || continue  # Skip non-directories
+            
+            skill_name=$(basename "$skill_source")
+            skill_dest="/root/.openclaw/repo-skills/$skill_name"
+            
+            # Check if this skill is in the force overwrite list
+            force_overwrite=false
+            if [ -n "$FORCE_LIST" ]; then
+                for forced_skill in $FORCE_LIST; do
+                    if [ "$forced_skill" = "$skill_name" ]; then
+                        force_overwrite=true
+                        break
+                    fi
+                done
+            fi
+            
+            if [ -e "$skill_dest" ]; then
+                if [ "$force_overwrite" = true ]; then
+                    echo "   🔄 Force overwriting $skill_name"
+                    rm -rf "$skill_dest"
+                    cp -r "$skill_source" "$skill_dest"
+                else
+                    echo "   ⏭️  Skipping $skill_name (already exists - preserving agent version)"
+                fi
+            else
+                echo "   📥 Copying $skill_name"
+                cp -r "$skill_source" "$skill_dest"
+            fi
+        done
+        echo "✅ Repo skills deployment complete"
+    else
+        echo "   ℹ️  No skills found in source directory"
+    fi
+else
+    echo "ℹ️  No repo skills to deploy (source directory not mounted)"
+fi
+
+# ============================================
+# VALIDATION
+# ============================================
 if [ -f /root/.openclaw/openclaw.json ]; then
     echo "✅ Configuration file found"
 else
@@ -42,6 +98,18 @@ fi
 # Fix Telegram config if needed (change 'closed' to 'allowlist' if present)
 if [ -f /root/.openclaw/openclaw.json ]; then
     sed -i 's/"dmPolicy": "closed"/"dmPolicy": "allowlist"/g' /root/.openclaw/openclaw.json
+fi
+
+# Handle TELEGRAM_ENABLED environment variable
+# Convert string "true"/"false" to proper boolean in config
+if [ -f /root/.openclaw/openclaw.json ]; then
+    if [ "${TELEGRAM_ENABLED}" = "false" ]; then
+        echo "📵 Disabling Telegram channel (TELEGRAM_ENABLED=false)"
+        sed -i 's/enabled: "${TELEGRAM_ENABLED}"/enabled: false/g' /root/.openclaw/openclaw.json
+    else
+        echo "📱 Enabling Telegram channel (TELEGRAM_ENABLED=true or not set)"
+        sed -i 's/enabled: "${TELEGRAM_ENABLED}"/enabled: true/g' /root/.openclaw/openclaw.json
+    fi
 fi
 
 # Run OpenClaw

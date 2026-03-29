@@ -10,19 +10,22 @@ services:
       - openclaw-workspace:/root/.openclaw
       # Optional: mount scripts directory for development
       # - ./scripts:/app/scripts:ro
-      # Optional: mount skills directory for development
-      # - ./skills:/root/.openclaw-source/skills:ro
+      # Mount repo-maintained skills directory
+      - ./repo-skills:/root/.openclaw-source-skills:ro
     environment:
       # Environment variables for API keys (to be set in .env file)
       - ZAI_API_KEY=${ZAI_API_KEY:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-true}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - PEDRO_TELEGRAM_ID=${PEDRO_TELEGRAM_ID:-}
-      - GATEWAY_AUTH_TOKEN=${GATEWAY_AUTH_TOKEN:-}
+      - GATEWAY_AUTH_PASSWORD=${GATEWAY_AUTH_PASSWORD:-}
       - GOG_KEYRING_PASSWORD=${GOG_KEYRING_PASSWORD:-}
       # Additional users can be added here following the pattern:
       # - ALICE_TELEGRAM_ID=${ALICE_TELEGRAM_ID:-}
       # - BOB_TELEGRAM_ID=${BOB_TELEGRAM_ID:-}
+      # Skills deployment configuration
+      - FORCE_OVERWRITE_SKILLS=${FORCE_OVERWRITE_SKILLS:-}
       # Other environment variables
       - OPENCLAW_LOG_LEVEL=info
     ports:

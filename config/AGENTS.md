@@ -6,6 +6,8 @@ This file provides guidance to AI coding assistants when working with OpenClaw c
 
 OpenClaw uses JSON5 format for configuration, which is a superset of JSON that allows comments, trailing commas, and more readable syntax. The main configuration file is `openclaw.json`.
 
+The system supports the GLM family of models (e.g., GLM-5, GLM-4.7, GLM-5-Turbo) via Z.AI provider, with support for DeepSeek and other OpenAI-compatible providers. Any provider following the OpenAI completions API can be configured using the `{provider-id}/{model-id}` pattern.
+
 **Configuration Characteristics:**
 - **Format**: JSON5 (JSON with extensions)
 - **Location**: `config/openclaw.json`
@@ -19,6 +21,89 @@ OpenClaw uses JSON5 format for configuration, which is a superset of JSON that a
   - ❌ **Backtick strings** (`` ` ``) - Use escaped newlines (`\n`) instead
   - ❌ **ES6 Unicode escapes** (`\u{1F915}`) - Use actual emoji characters (🤕) instead
 - Always use `openclaw doctor --fix` after editing to validate the configuration
+
+## Essential Operations
+
+### Configuration Management
+
+**Edit configuration:**
+```bash
+nano config/openclaw.json
+```
+
+**Validate JSON5 syntax:**
+```bash
+# Using jq
+cat config/openclaw.json | jq .
+
+# Using OpenClaw
+docker-compose run --rm openclaw openclaw --validate-config
+```
+
+**Apply configuration changes:**
+```bash
+# Restart the service (no rebuild needed)
+docker-compose restart openclaw
+
+# Or for major changes
+docker-compose down && docker-compose up -d
+```
+
+**Check configuration in container:**
+```bash
+# View loaded config
+docker-compose exec openclaw cat /root/.openclaw/openclaw.json
+
+# List environment variables
+docker-compose exec openclaw env | sort
+```
+
+### Service Operations
+
+**Start/stop/restart:**
+```bash
+# Start services
+docker-compose up -d
+
+# Stop services
+docker-compose down
+
+# Restart after config changes
+docker-compose restart openclaw
+
+# View logs
+docker-compose logs -f openclaw
+```
+
+**Check service status:**
+```bash
+docker-compose ps
+docker-compose exec openclaw openclaw --version
+```
+
+### Environment Variables
+
+**Create .env file:**
+```bash
+cp .env.example .env
+nano .env
+```
+
+**Required variables:**
+- `ZAI_API_KEY` - Primary LLM provider
+- `TELEGRAM_BOT_TOKEN` - Bot authentication
+- `TELEGRAM_ENABLED` - Enable/disable Telegram channel (`true`/`false`, default: `true`)
+- `DEEPSEEK_API_KEY` - Optional fallback provider
+- `GATEWAY_AUTH_PASSWORD` - Web UI access password (HTTP Basic Auth)
+- `PEDRO_TELEGRAM_ID` - Primary user ID
+
+**Local Testing:**
+Set `TELEGRAM_ENABLED=false` in `.env` to disable Telegram for local testing. This prevents conflicts with the production bot while allowing full testing via the Web UI.
+
+**Reload after .env changes:**
+```bash
+docker-compose restart openclaw
+```
 
 ## JSON5 Format
 
@@ -97,8 +182,8 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
     bind: "lan",
     port: 18789,
     auth: {
-      mode: "token",
-      token: "${GATEWAY_AUTH_TOKEN}",
+      mode: "password",
+      password: "${GATEWAY_AUTH_PASSWORD}",
     },
   },
 
@@ -126,12 +211,18 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
     defaults: {
       workspace: "~/.openclaw/workspace",
       model: {
-        primary: "zai/glm-4.7",
-        fallbacks: ["deepseek/deepseek-reasoner"]
+        // Use any provider/model pattern: {provider-id}/{model-id}
+        // Example: zai/glm-5, deepseek/deepseek-reasoner, custom-provider/model
+        primary: "zai/glm-5",
+        fallbacks: ["zai/glm-4.7", "deepseek/deepseek-reasoner"]
       },
       models: {
+        // Model aliases - use {provider}/{model-id} pattern
+        "zai/glm-5": { alias: "GLM 5" },
         "zai/glm-4.7": { alias: "GLM 4.7" },
-        "deepseek/deepseek-reasoner": { alias: "DeepSeek Reasoner" }
+        "zai/glm-5-turbo": { alias: "GLM 5 Turbo" },
+        "deepseek/deepseek-reasoner": { alias: "DeepSeek Reasoner" },
+        "deepseek/deepseek-chat": { alias: "DeepSeek Chat" }
       }
     },
     list: [
@@ -140,7 +231,7 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
         default: true,
         name: "Josemar",
         workspace: "~/.openclaw/workspace",
-        model: "zai/glm-4.7",
+        model: "zai/glm-5",
         identity: {
           name: "Josemar",
           theme: "helpful assistant",
@@ -217,8 +308,52 @@ env: {
 
 ### 2. Model Providers
 
-Configure external LLM API providers:
+Supports multiple LLM providers through a unified interface. Configure any OpenAI-compatible API.
 
+**Example: Z.AI provider for GLM models:**
+```json5
+models: {
+  mode: "merge",
+  providers: {
+    zai: {
+      baseUrl: "https://api.z.ai/api/paas/v4",
+      apiKey: "${ZAI_API_KEY}",
+      api: "openai-completions",
+      models: [
+        {
+          id: "glm-5",
+          name: "GLM 5",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 200000,
+          maxTokens: 8192,
+        },
+        {
+          id: "glm-4.7",
+          name: "GLM 4.7",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 128000,
+          maxTokens: 8192,
+        },
+        {
+          id: "glm-5-turbo",
+          name: "GLM 5 Turbo",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 128000,
+          maxTokens: 4096,
+        }
+      ]
+    }
+  }
+}
+```
+
+**Example: DeepSeek provider:**
 ```json5
 models: {
   mode: "merge",  // Options: "merge", "replace"
@@ -280,14 +415,18 @@ models: {
 
 **Adding Custom Providers:**
 
+Any provider following the OpenAI completions API can be added. Use the pattern `{provider-id}/{model-id}` when referencing models:
+
 ```json5
 providers: {
+  // Use any provider-id (e.g., custom-provider, anthropic, openai)
   custom-provider: {
     baseUrl: "https://api.custom.com/v1",
     apiKey: "${CUSTOM_API_KEY}",
     api: "openai-completions",
     models: [
       {
+        // Model ID - use this with provider-id: {provider-id}/{model-id}
         id: "custom-model",
         name: "Custom Model",
         reasoning: false,
@@ -301,9 +440,11 @@ providers: {
 }
 ```
 
+**Usage:** Reference models as `{provider-id}/{model-id}`, e.g., `custom-provider/custom-model`
+
 ### 3. Agents
 
-Configure AI agents with their settings:
+Configure AI agents with their settings. The model references use the pattern `{provider-id}/{model-id}`, allowing any OpenAI-compatible provider to be used.
 
 ```json5
 agents: {
@@ -312,15 +453,24 @@ agents: {
     workspace: "~/.openclaw/workspace",
     
     // Default model configuration
+    // Use any provider/model pattern: {provider-id}/{model-id}
+    // Example: zai/glm-5, deepseek/deepseek-reasoner
     model: {
-      primary: "zai/glm-4.7",
-      fallbacks: ["deepseek/deepseek-reasoner"]
+      primary: "zai/glm-5",
+      fallbacks: ["zai/glm-4.7", "deepseek/deepseek-reasoner"]
     },
     
     // Model aliases for easier reference
+    // Format: "{provider-id}/{model-id}": { alias: "Display Name" }
     models: {
+      "zai/glm-5": {
+        alias: "GLM 5"
+      },
       "zai/glm-4.7": {
         alias: "GLM 4.7"
+      },
+      "zai/glm-5-turbo": {
+        alias: "GLM 5 Turbo"
       },
       "deepseek/deepseek-reasoner": {
         alias: "DeepSeek Reasoner"
@@ -337,7 +487,7 @@ agents: {
       default: true,
       name: "Josemar",
       workspace: "~/.openclaw/workspace",
-      model: "zai/glm-4.7",
+      model: "zai/glm-5",
       identity: {
         name: "Josemar",
         theme: "helpful assistant",
@@ -438,10 +588,18 @@ No Docker image rebuild is required!
 
 ### 5. Skills
 
-Configure custom skills:
+Configure custom skills with support for multiple skill directories:
 
 ```json5
 skills: {
+  // Load skills from multiple directories
+  // Order matters: later directories override earlier ones if same skill name exists
+  load: {
+    extraDirs: [
+      "/root/.openclaw/repo-skills",  // Repo skills (base version)
+      "/root/.openclaw/skills",       // Runtime skills (user/assistant created - takes precedence)
+    ]
+  },
   entries: {
     "pdf-extractor": {
       enabled: true
@@ -451,8 +609,28 @@ skills: {
 ```
 
 **Skill Configuration Fields:**
-- Skill ID (key): Matches skill directory name
-- `enabled`: Boolean, if skill is enabled
+- `load.extraDirs`: Array of directories to scan for skills (in order of priority)
+- `entries`: Skill ID (key) with configuration
+  - `enabled`: Boolean, if skill is enabled
+
+**Two-Tier Skill System:**
+
+The configuration supports a two-tier skill architecture:
+
+1. **Repo Skills** (`/root/.openclaw/repo-skills/`)
+   - Maintained in the `repo-skills/` directory of the repository
+   - Version-controlled and deployed on container startup
+   - Base version of skills that can be overridden
+
+2. **Runtime Skills** (`/root/.openclaw/skills/`)
+   - Skills created by the assistant during conversations
+   - Persisted in the Docker volume across deployments
+   - Takes precedence over repo skills (loaded last)
+
+**Skill Loading Priority:**
+- Skills are loaded from directories in the order specified in `extraDirs`
+- If the same skill name exists in multiple directories, the last one wins
+- Runtime skills override repo skills when both exist
 
 **Adding a New Skill:**
 
@@ -467,7 +645,7 @@ entries: {
 }
 ```
 
-**Note:** Skills are automatically discovered from `/root/.openclaw/skills/` directory. The skill ID must match the directory name.
+**Note:** Skills are automatically discovered from all directories listed in `load.extraDirs`. The skill ID must match the directory name.
 
 ### 6. Agent Prompts and Personality
 
@@ -605,11 +783,11 @@ docker-compose restart openclaw
 **1. Use Comments:**
 ```json5
 {
-  // Primary model for the Josemar agent
-  // Fallback to DeepSeek if Z.AI is unavailable
+  // Primary model for the Josemar agent (use {provider}/{model-id} pattern)
+  // Fallback to GLM-4.7 then DeepSeek if Z.AI is unavailable
   model: {
-    primary: "zai/glm-4.7",
-    fallbacks: ["deepseek/deepseek-reasoner"]
+    primary: "zai/glm-5",
+    fallbacks: ["zai/glm-4.7", "deepseek/deepseek-reasoner"]
   }
 }
 ```
@@ -702,11 +880,12 @@ echo "TEST_VAR=value" | docker-compose run --rm -T openclaw sh -c "export \$(cat
 
 **Test model connectivity:**
 ```bash
-# Test Z.AI API
+# Test Z.AI API (use model ID matching the provider's model list)
+# Note: Model ID should match the pattern configured in providers
 curl -X POST "https://api.z.ai/v1/chat/completions" \
   -H "Authorization: Bearer ${ZAI_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"model": "glm-4.7", "messages": [{"role": "user", "content": "Test"}]}'
+  -d '{"model": "glm-5", "messages": [{"role": "user", "content": "Test"}]}'
 
 # Test DeepSeek API
 curl -X POST "https://api.deepseek.com/v1/chat/completions" \
@@ -720,8 +899,8 @@ curl -X POST "https://api.deepseek.com/v1/chat/completions" \
 # List available models
 docker-compose exec openclaw openclaw models list
 
-# Test model
-docker-compose exec openclaw openclaw models test zai/glm-4.7
+# Test model (use {provider}/{model-id} pattern)
+docker-compose exec openclaw openclaw models test zai/glm-5
 ```
 
 ## Configuration Examples
@@ -788,7 +967,7 @@ agents: {
       id: "josemar",
       default: true,
       name: "Josemar",
-      model: "zai/glm-4.7",
+      model: "zai/glm-5",
       workspace: "~/.openclaw/workspace/josemar",
       description: "Assistente pessoal em Português"
     },
@@ -939,26 +1118,134 @@ cat config/openclaw.json | jq '.models.providers'
 
 **Error: "Skill not found"**
 ```bash
-# Check skill directory
-docker-compose exec openclaw ls -la /root/.openclaw/skills/
+# Check both skill directories
+docker-compose exec openclaw ls -la /root/.openclaw/repo-skills/  # Repo skills
+docker-compose exec openclaw ls -la /root/.openclaw/skills/        # Runtime skills
 
 # Check skill configuration
 cat config/openclaw.json | jq '.skills.entries'
 
 # Verify skill directory name matches configuration
+
+# Check skill loading directories
+cat config/openclaw.json | jq '.skills.load.extraDirs'
 ```
 
 **Error: "Skill execution failed"**
 ```bash
-# Test skill manually
+# Test skill manually (check both locations)
+echo '{"test": "data"}' | docker-compose exec -T openclaw /root/.openclaw/repo-skills/skill-name/skill-name
 echo '{"test": "data"}' | docker-compose exec -T openclaw /root/.openclaw/skills/skill-name/skill-name
 
 # Check skill permissions
+docker-compose exec openclaw ls -la /root/.openclaw/repo-skills/skill-name/
 docker-compose exec openclaw ls -la /root/.openclaw/skills/skill-name/
 
 # Check skill dependencies
 docker-compose exec openclaw python3 -c "import required_module"
 ```
+
+**Error: "Wrong skill version loaded"**
+```bash
+# Check which directory the skill is loading from
+docker-compose exec openclaw openclaw skills info skill-name
+
+# List all available skills
+docker-compose exec openclaw openclaw skills list
+
+# If runtime skill should override repo skill but isn't:
+# 1. Verify runtime skill exists: ls /root/.openclaw/skills/skill-name/
+# 2. Verify load order in config: cat config/openclaw.json | jq '.skills.load.extraDirs'
+# 3. Restart container after config changes
+```
+
+## Web UI Access
+
+The OpenClaw Gateway provides a web interface for managing the bot.
+
+### Access URL
+
+**Local:**
+The browser will prompt for HTTP Basic Auth. Enter:
+- Username: `operator` (or any username - OpenClaw ignores it)
+- Password: Your `GATEWAY_AUTH_PASSWORD` from `.env`
+
+Or access via URL:
+```
+http://operator:YOUR_GATEWAY_AUTH_PASSWORD@localhost:18789/
+```
+
+**Remote (via Cloudflare Tunnel or similar):**
+```
+https://operator:YOUR_GATEWAY_AUTH_PASSWORD@your-domain.com/
+```
+
+### Setup
+
+**1. Generate authentication password:**
+```bash
+openssl rand -hex 32
+```
+
+**2. Add to `.env`:**
+```bash
+GATEWAY_AUTH_PASSWORD=your-secure-password-here
+```
+
+**3. Update `config/openclaw.json`:**
+```json5
+gateway: {
+  controlUi: {
+    allowedOrigins: [
+      "http://localhost:18789",
+      "https://your-domain.com",
+    ],
+  },
+}
+```
+
+**4. Restart service:**
+```bash
+docker-compose restart openclaw
+```
+
+### Security
+
+- Token required when `gateway.bind` is set to "lan" (non-loopback)
+- Never share your token publicly
+- UI provides full bot control - protect access accordingly
+
+### Troubleshooting
+
+**Issue: "Pairing Required" Error**
+
+When accessing the Web UI for the first time from a browser, you may see:
+- "disconnected (1008): pairing required"
+- "unauthorized: device token mismatch"
+
+**Solution:**
+OpenClaw requires a one-time device pairing approval for security. Run these commands:
+
+```bash
+# List pending devices
+docker-compose exec openclaw openclaw devices list
+
+# Approve the browser device (use the requestId from the list)
+docker-compose exec openclaw openclaw devices approve <requestId>
+```
+
+Notes:
+- Once approved, the device is remembered in the workspace volume
+- You won't need to re-pair unless you clear browser data or use a different browser profile
+- The CLI uses `127.0.0.1` and is auto-approved
+- Browser connections via `localhost` require explicit approval
+
+**Issue: "Unauthorized" After Pairing**
+
+If you see "unauthorized" even after pairing, the browser may have a stale device token. Try:
+1. Clear browser localStorage for `localhost:18789`
+2. Use Incognito/Private mode
+3. Or approve the new pairing request that appears
 
 ## Additional Resources
 

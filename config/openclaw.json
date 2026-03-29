@@ -16,8 +16,8 @@
     bind: "lan",
     port: 18789,
     auth: {
-      mode: "token",
-      token: "${GATEWAY_AUTH_TOKEN}",
+      mode: "password",
+      password: "${GATEWAY_AUTH_PASSWORD}",
     },
     controlUi: {
       allowedOrigins: [
@@ -152,7 +152,7 @@
   // Channel configurations
   channels: {
     telegram: {
-      enabled: true,
+      enabled: "${TELEGRAM_ENABLED}",
       botToken: "${TELEGRAM_BOT_TOKEN}",
       dmPolicy: "allowlist",
       // To add more users, add their {NAME}_TELEGRAM_ID env var and include it here:
@@ -166,6 +166,14 @@
 
   // Skills configuration
   skills: {
+    // Load skills from multiple directories
+    // Order matters: later directories override earlier ones if same skill name exists
+    load: {
+      extraDirs: [
+        "/root/.openclaw/repo-skills",  // Repo skills (base version)
+        "/root/.openclaw/skills",       // Runtime skills (user/assistant created - takes precedence)
+      ],
+    },
     entries: {
       "pdf-extractor": {
         enabled: true,

@@ -7,15 +7,15 @@ A self-hosted OpenClaw bot running in Docker with Telegram integration and PDF e
 - **OpenClaw Gateway**: Self-hosted AI agent gateway
 - **Telegram Integration**: Native Telegram bot support
 - **PDF Extraction**: Process Brazilian credit card invoice PDFs
-- **GLM 4.7 Support**: Via Z.AI provider (built-in)
-- **DeepSeek Support**: Via custom provider configuration
+- **Multi-Provider LLM Support (GLM, DeepSeek, etc.)**: Via Z.AI provider (built-in)
+- **Extensible provider system (Z.AI, DeepSeek, OpenAI-compatible APIs)**: Via custom provider configuration
 - **Brazilian Portuguese**: Native language interaction
 - **Docker Deployment**: Easy deployment with Docker Compose
 
 ## Prerequisites
 
 - Docker and Docker Compose
-- Z.AI API key (for GLM 4.7 model)
+- Z.AI API key (for GLM models - e.g., GLM-5, GLM-4.7)
 - Telegram Bot Token (from @BotFather)
 - DeepSeek API key (optional, for alternative LLM)
 
@@ -57,7 +57,7 @@ docker compose logs -f
 Create a `.env` file with:
 
 ```bash
-# Z.AI API Key for GLM 4.7 (get from https://z.ai)
+# Z.AI API Key for GLM models (primary provider) (get from https://z.ai)
 ZAI_API_KEY=your_zai_api_key_here
 
 # Telegram Bot Token (get from @BotFather)
@@ -68,6 +68,9 @@ DEEPSEEK_API_KEY=your_deepseek_api_key_here
 
 # OpenClaw log level (debug, info, warn, error)
 OPENCLAW_LOG_LEVEL=info
+
+# GOG Keyring Password (optional, for GOG Galaxy integration)
+GOG_KEYRING_PASSWORD=your_gog_keyring_password_here
 ```
 
 ### OpenClaw Configuration
@@ -101,7 +104,7 @@ The main configuration is in `config/openclaw.json` (JSON5 format):
   agents: {
     defaults: {
       model: {
-        primary: "zai/glm-4.7",
+        primary: "zai/glm-5",
         fallbacks: ["deepseek/deepseek-reasoner"],
       },
     },
@@ -111,7 +114,7 @@ The main configuration is in `config/openclaw.json` (JSON5 format):
         default: true,
         name: "Josemar",
         workspace: "~/.openclaw/workspace",
-        model: "zai/glm-4.7",
+        model: "zai/glm-5",
         // ... agent configuration
       },
     ],
@@ -125,6 +128,12 @@ The main configuration is in `config/openclaw.json` (JSON5 format):
     },
   },
   skills: {
+    load: {
+      extraDirs: [
+        "/root/.openclaw/repo-skills",
+        "/root/.openclaw/skills",
+      ],
+    },
     entries: {
       "pdf-extractor": { enabled: true },
     },
@@ -151,7 +160,20 @@ Send a PDF file or ask: "Extraia os dados desta fatura"
 
 ### Custom Skills
 
-Add your own skills in `skills/` directory:
+Josemar uses a two-tier skill system:
+
+**Repo Skills** (version-controlled in `repo-skills/`):
+- Production-ready skills maintained in git
+- Deployed to container with smart "skip-if-exists" logic
+- Can be modified by agent; modifications preserved across deployments
+- Can be force-overwritten via GitHub Actions or .env
+
+**Runtime Skills** (assistant-created in `/root/.openclaw/skills/`):
+- Created by assistant during conversations
+- Never touched by deployment
+- Takes precedence over repo skills (higher priority)
+
+Add production skills in `repo-skills/` directory:
 
 1. Create skill folder with `SKILL.md` (including YAML frontmatter)
 2. Add executable script
@@ -159,12 +181,12 @@ Add your own skills in `skills/` directory:
 
 Example skill structure:
 ```
-skills/my-skill/
+repo-skills/my-skill/
 ├── SKILL.md          # Required: YAML frontmatter + documentation
 └── my-skill          # Executable script (any language)
 ```
 
-See `skills/AGENTS.md` for detailed skill development guide.
+See `repo-skills/AGENTS.md` for detailed skill development guide.
 
 ## Project Structure
 
@@ -179,7 +201,7 @@ josemar-assistente/
 │   └── openclaw.json    # OpenClaw configuration
 ├── scripts/
 │   └── pdf_extractor.py   # PDF extraction script
-├── skills/
+├── repo-skills/            # Version-controlled skills
 │   ├── AGENTS.md          # Skills development guide
 │   └── pdf-extractor/     # PDF extraction skill
 │       ├── SKILL.md       # Skill documentation
@@ -237,10 +259,10 @@ docker compose down
 
 ## Model Providers
 
-### Z.AI (GLM 4.7)
+### Z.AI (GLM Models)
 
 - **Built-in provider**: No additional configuration needed
-- **Model**: `zai/glm-4.7`
+- **Models**: GLM-5, GLM-4.7, GLM-5-Turbo (configurable)
 - **API Key**: Set `ZAI_API_KEY` environment variable
 - **Features**: Tool calling, reasoning mode
 
@@ -306,16 +328,30 @@ If the service fails to start, check:
 
 ### Skills System
 
-Three load locations (in precedence order):
-1. **Workspace**: `<workspace>/skills/` (highest priority)
-2. **Managed**: `~/.openclaw/skills/` (baked into image)
-3. **Bundled**: Built-in OpenClaw skills (lowest priority)
+Two-tier architecture with multiple load locations:
+
+**Runtime Skills** (assistant-created, highest priority):
+- **Location**: `/root/.openclaw/skills/` inside container
+- Created by assistant during conversations
+- Never touched by deployment, always persisted
+
+**Repo Skills** (version-controlled):
+- **Source**: `repo-skills/` in repository
+- **Location**: `/root/.openclaw/repo-skills/` inside container
+- Deployed with smart "skip-if-exists" logic
+- Can be force-overwritten via `FORCE_OVERWRITE_SKILLS`
+
+**Load Priority** (from `config/openclaw.json`):
+1. Runtime skills (`/root/.openclaw/skills/`) - highest priority
+2. Repo skills (`/root/.openclaw/repo-skills/`) - base version
+3. Bundled OpenClaw skills - lowest priority
 
 ## Documentation
 
 - **AGENTS.md**: Root project documentation for AI assistants
 - **config/AGENTS.md**: Complete configuration reference
-- **skills/AGENTS.md**: Skills development guide
+- **repo-skills/AGENTS.md**: Skills development guide
+- **.github/workflows/AGENTS.md**: CI/CD workflow documentation
 
 ## License
 

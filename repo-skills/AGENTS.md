@@ -6,6 +6,85 @@
 
 The Josemar Assistente uses the OpenClaw skills system to extend functionality. Skills are external tools that can be called by the AI agent to perform specific tasks.
 
+## Two-Tier Skill System
+
+Josemar Assistente implements a two-tier skill architecture:
+
+### 1. Repo Skills (This Directory)
+- **Location**: `/root/.openclaw/repo-skills/` (inside container)
+- **Source**: `repo-skills/` directory in this repository
+- **Purpose**: Version-controlled, production-ready skills
+- **Deployment**: Copied to container on startup (smart deployment with skip-if-exists)
+- **Persistence**: Can be modified by agent during runtime; modifications preserved on redeploy
+- **Priority**: Base version - can be overridden by runtime skills
+
+### 2. Runtime Skills (Assistant-Created)
+- **Location**: `/root/.openclaw/skills/` (inside container)
+- **Source**: Created by the assistant during conversations
+- **Purpose**: Rapid prototyping, agent experimentation, user customization
+- **Deployment**: Never touched by repo deployment
+- **Persistence**: Always preserved across deployments
+- **Priority**: Higher than repo skills (overrides if same skill name exists)
+
+### Smart Deployment Behavior
+
+When the container starts, the entrypoint script:
+
+1. Checks if `/root/.openclaw/repo-skills/` exists (creates if not)
+2. Iterates through all skills in the mounted repo-skills directory
+3. For each skill:
+   - **First deploy**: Copies skill to `/root/.openclaw/repo-skills/`
+   - **Subsequent deploys**: **SKIPS** if skill already exists (preserves agent modifications)
+   - **Force overwrite**: If skill name is in `FORCE_OVERWRITE_SKILLS` env var, overwrites it
+
+### Force Overwriting Repo Skills
+
+To reset a repo skill to its original version (discarding agent modifications):
+
+**Via GitHub Actions:**
+1. Go to Actions → deploy-to-home-server
+2. Click "Run workflow"
+3. Enter skill names in `force_overwrite_skills` field: `pdf-extractor,web-scraper`
+4. Run workflow
+
+**Via .env file:**
+```bash
+# In .env file:
+FORCE_OVERWRITE_SKILLS=pdf-extractor,web-scraper
+
+# Then restart:
+docker-compose up -d
+```
+
+**Manually:**
+```bash
+# Delete specific skill
+docker-compose exec openclaw rm -rf /root/.openclaw/repo-skills/pdf-extractor
+
+# Or delete all repo skills to reset everything
+docker-compose exec openclaw rm -rf /root/.openclaw/repo-skills/*
+
+# Then restart to redeploy
+docker-compose restart
+```
+
+### Skill Priority
+
+When OpenClaw loads skills, it uses the configuration in `config/openclaw.json`:
+
+```json5
+skills: {
+  load: {
+    extraDirs: [
+      "/root/.openclaw/repo-skills",  // Loaded first (base)
+      "/root/.openclaw/skills",       // Loaded second (overrides)
+    ]
+  }
+}
+```
+
+If both directories contain a skill with the same name, the **runtime skill wins** (loaded last).
+
 ## Current Implementation
 
 The only skill currently implemented is **PDF Extractor** at `skills/pdf-extractor/`.
@@ -662,6 +741,108 @@ def main():
 if __name__ == '__main__':
     main()
 ```
+
+## Testing Skills
+
+### Local Testing
+
+Test skills locally before deploying to the container:
+
+**Test with Python script directly:**
+```bash
+# For PDF extractor
+echo "/path/to/test.pdf" | python3 scripts/pdf_extractor.py
+
+# For any skill
+echo '{"input": "test data"}' | python3 scripts/your_skill.py
+```
+
+**Test with raw text input:**
+```bash
+# PDF extractor with text
+echo "10/12 UBER TRIP 32,75" | python3 scripts/pdf_extractor.py
+
+# JSON input
+echo '{"file": "/tmp/test.txt"}' | python3 scripts/your_skill.py
+```
+
+**Check Python dependencies:**
+```bash
+# Verify pymupdf is installed
+python3 -c "import pymupdf; print(pymupdf.__version__)"
+
+# Check all required modules
+python3 -c "import sys; print(sys.path)"
+```
+
+### Container Testing
+
+Test skills in the Docker environment:
+
+**Test repo skill:**
+```bash
+# Test deployed repo skill
+echo "/workspace/test.pdf" | docker-compose run --rm -T openclaw /root/.openclaw/repo-skills/pdf-extractor/pdf-extractor
+```
+
+**Test runtime skill:**
+```bash
+# Test assistant-created skill
+echo '{"input": "test"}' | docker-compose run --rm -T openclaw /root/.openclaw/skills/<skill-name>/<skill-name>
+```
+
+**Debug skill execution:**
+```bash
+# View skill script
+docker-compose exec openclaw cat /root/.openclaw/repo-skills/pdf-extractor/pdf-extractor
+
+# Check skill permissions
+docker-compose exec openclaw ls -la /root/.openclaw/repo-skills/pdf-extractor/
+
+# Test with verbose output
+echo "test" | docker-compose exec -T openclaw sh -x /root/.openclaw/repo-skills/pdf-extractor/pdf-extractor
+```
+
+**Check Python in container:**
+```bash
+# Verify Python and modules
+docker-compose exec openclaw python3 --version
+docker-compose exec openclaw python3 -c "import pymupdf; print('pymupdf OK')"
+
+# Check skill script syntax
+docker-compose exec openclaw python3 -m py_compile /root/.openclaw/repo-skills/pdf-extractor/pdf-extractor
+```
+
+### Debugging Skills
+
+**Enable debug logging in OpenClaw:**
+```bash
+# Edit .env
+OPENCLAW_LOG_LEVEL=debug
+
+# Restart and watch logs
+docker-compose restart openclaw
+docker-compose logs -f openclaw | grep -i skill
+```
+
+**Check skill loading:**
+```bash
+# List all available skills
+docker-compose exec openclaw openclaw skills list
+
+# Get skill info
+docker-compose exec openclaw openclaw skills info pdf-extractor
+
+# Check which directory skill loads from
+docker-compose exec openclaw ls -la /root/.openclaw/repo-skills/
+docker-compose exec openclaw ls -la /root/.openclaw/skills/
+```
+
+**Common skill issues:**
+- **Permission denied**: Check executable bit (`chmod +x`)
+- **Module not found**: Verify Python dependencies in Dockerfile
+- **Invalid JSON output**: Check stdout is clean JSON only
+- **Path not found**: Ensure paths are accessible within container
 
 ## Additional Resources
 
