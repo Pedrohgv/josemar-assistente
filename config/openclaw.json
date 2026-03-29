@@ -178,6 +178,9 @@
       "pdf-extractor": {
         enabled: true,
       },
+      "gogcli-tables": {
+        enabled: true,
+      },
     },
   },
 
