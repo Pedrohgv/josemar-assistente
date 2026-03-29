@@ -1,4 +1,12 @@
-# Use official OpenClaw image as base
+# Stage 1: Build gogcli
+FROM golang:1.25.8 AS gogcli-builder
+
+WORKDIR /build
+RUN git clone --branch feat/sheets-table-manipulation \
+    https://github.com/Pedrohgv/gogcli.git . && \
+    make build
+
+# Stage 2: Final image
 FROM ghcr.io/openclaw/openclaw:latest
 
 # Switch to root user to install packages
@@ -9,24 +17,12 @@ RUN apt-get update && apt-get install -y python3 python3-pip \
     && pip3 install --no-cache-dir --break-system-packages pymupdf \
     && rm -rf /var/lib/apt/lists/*
 
-# Create scripts directory
-RUN mkdir -p /app/scripts
+# Copy gogcli binary from builder
+COPY --from=gogcli-builder /build/bin/gog /usr/local/bin/gog
+RUN chmod +x /usr/local/bin/gog
 
-# Copy PDF extraction script
-COPY scripts/pdf_extractor.py /app/scripts/
-
-# Make script executable
-RUN chmod +x /app/scripts/pdf_extractor.py
-
-# Create skills directories
-RUN mkdir -p /root/.openclaw/skills
-RUN mkdir -p /root/.openclaw/repo-skills
-
-# Copy custom skills
-COPY repo-skills/pdf-extractor /root/.openclaw/repo-skills/pdf-extractor/
-
-# Make skill executable
-RUN chmod +x /root/.openclaw/repo-skills/pdf-extractor/pdf-extractor
+# Create skills directories (skills deployed via volume mount + entrypoint)
+RUN mkdir -p /root/.openclaw/skills /root/.openclaw/repo-skills
 
 # Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/
