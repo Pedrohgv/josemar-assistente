@@ -232,3 +232,17 @@ Safely stops the Josemar Assistente service without deleting data.
    ```bash
    docker-compose exec openclaw openclaw skills list
    ```
+
+## Additional Resources
+
+- **GitHub Actions Documentation**: https://docs.github.com/en/actions
+- **Self-Hosted Runners**: https://docs.github.com/en/actions/hosting-your-own-runners
+- **OpenClaw Documentation**: https://docs.openclaw.dev
+
+## Support
+
+For workflow issues:
+1. Check runner status in GitHub Settings > Actions > Runners
+2. View workflow logs in GitHub Actions tab
+3. Check runner service: `sudo systemctl status actions.runner.*`
+4. Review runner logs: `sudo journalctl -u actions.runner.* -f`

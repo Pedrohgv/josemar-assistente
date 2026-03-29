@@ -22,6 +22,89 @@ The system supports the GLM family of models (e.g., GLM-5, GLM-4.7, GLM-5-Turbo)
   - ❌ **ES6 Unicode escapes** (`\u{1F915}`) - Use actual emoji characters (🤕) instead
 - Always use `openclaw doctor --fix` after editing to validate the configuration
 
+## Essential Operations
+
+### Configuration Management
+
+**Edit configuration:**
+```bash
+nano config/openclaw.json
+```
+
+**Validate JSON5 syntax:**
+```bash
+# Using jq
+cat config/openclaw.json | jq .
+
+# Using OpenClaw
+docker-compose run --rm openclaw openclaw --validate-config
+```
+
+**Apply configuration changes:**
+```bash
+# Restart the service (no rebuild needed)
+docker-compose restart openclaw
+
+# Or for major changes
+docker-compose down && docker-compose up -d
+```
+
+**Check configuration in container:**
+```bash
+# View loaded config
+docker-compose exec openclaw cat /root/.openclaw/openclaw.json
+
+# List environment variables
+docker-compose exec openclaw env | sort
+```
+
+### Service Operations
+
+**Start/stop/restart:**
+```bash
+# Start services
+docker-compose up -d
+
+# Stop services
+docker-compose down
+
+# Restart after config changes
+docker-compose restart openclaw
+
+# View logs
+docker-compose logs -f openclaw
+```
+
+**Check service status:**
+```bash
+docker-compose ps
+docker-compose exec openclaw openclaw --version
+```
+
+### Environment Variables
+
+**Create .env file:**
+```bash
+cp .env.example .env
+nano .env
+```
+
+**Required variables:**
+- `ZAI_API_KEY` - Primary LLM provider
+- `TELEGRAM_BOT_TOKEN` - Bot authentication
+- `TELEGRAM_ENABLED` - Enable/disable Telegram channel (`true`/`false`, default: `true`)
+- `DEEPSEEK_API_KEY` - Optional fallback provider
+- `GATEWAY_AUTH_TOKEN` - Web UI access token
+- `PEDRO_TELEGRAM_ID` - Primary user ID
+
+**Local Testing:**
+Set `TELEGRAM_ENABLED=false` in `.env` to disable Telegram for local testing. This prevents conflicts with the production bot while allowing full testing via the Web UI.
+
+**Reload after .env changes:**
+```bash
+docker-compose restart openclaw
+```
+
 ## JSON5 Format
 
 ### Key Features
@@ -1075,6 +1158,57 @@ docker-compose exec openclaw openclaw skills list
 # 2. Verify load order in config: cat config/openclaw.json | jq '.skills.load.extraDirs'
 # 3. Restart container after config changes
 ```
+
+## Web UI Access
+
+The OpenClaw Gateway provides a web interface for managing the bot.
+
+### Access URL
+
+**Local:**
+```
+http://localhost:18789/__openclaw__/canvas/?token=YOUR_GATEWAY_AUTH_TOKEN
+```
+
+**Remote (via Cloudflare Tunnel or similar):**
+```
+https://your-domain.com/__openclaw__/canvas/?token=YOUR_GATEWAY_AUTH_TOKEN
+```
+
+### Setup
+
+**1. Generate authentication token:**
+```bash
+openssl rand -hex 32
+```
+
+**2. Add to `.env`:**
+```bash
+GATEWAY_AUTH_TOKEN=your-generated-token
+```
+
+**3. Update `config/openclaw.json`:**
+```json5
+gateway: {
+  controlUi: {
+    allowedOrigins: [
+      "http://localhost:18789",
+      "https://your-domain.com",
+    ],
+  },
+}
+```
+
+**4. Restart service:**
+```bash
+docker-compose restart openclaw
+```
+
+### Security
+
+- Token required when `gateway.bind` is set to "lan" (non-loopback)
+- Never share your token publicly
+- UI provides full bot control - protect access accordingly
 
 ## Additional Resources
 

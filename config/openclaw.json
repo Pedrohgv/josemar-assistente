@@ -152,7 +152,7 @@
   // Channel configurations
   channels: {
     telegram: {
-      enabled: true,
+      enabled: "${TELEGRAM_ENABLED}",
       botToken: "${TELEGRAM_BOT_TOKEN}",
       dmPolicy: "allowlist",
       // To add more users, add their {NAME}_TELEGRAM_ID env var and include it here:

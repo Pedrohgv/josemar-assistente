@@ -16,6 +16,7 @@ services:
       # Environment variables for API keys (to be set in .env file)
       - ZAI_API_KEY=${ZAI_API_KEY:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-true}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - PEDRO_TELEGRAM_ID=${PEDRO_TELEGRAM_ID:-}
       - GATEWAY_AUTH_TOKEN=${GATEWAY_AUTH_TOKEN:-}

@@ -742,6 +742,108 @@ if __name__ == '__main__':
     main()
 ```
 
+## Testing Skills
+
+### Local Testing
+
+Test skills locally before deploying to the container:
+
+**Test with Python script directly:**
+```bash
+# For PDF extractor
+echo "/path/to/test.pdf" | python3 scripts/pdf_extractor.py
+
+# For any skill
+echo '{"input": "test data"}' | python3 scripts/your_skill.py
+```
+
+**Test with raw text input:**
+```bash
+# PDF extractor with text
+echo "10/12 UBER TRIP 32,75" | python3 scripts/pdf_extractor.py
+
+# JSON input
+echo '{"file": "/tmp/test.txt"}' | python3 scripts/your_skill.py
+```
+
+**Check Python dependencies:**
+```bash
+# Verify pymupdf is installed
+python3 -c "import pymupdf; print(pymupdf.__version__)"
+
+# Check all required modules
+python3 -c "import sys; print(sys.path)"
+```
+
+### Container Testing
+
+Test skills in the Docker environment:
+
+**Test repo skill:**
+```bash
+# Test deployed repo skill
+echo "/workspace/test.pdf" | docker-compose run --rm -T openclaw /root/.openclaw/repo-skills/pdf-extractor/pdf-extractor
+```
+
+**Test runtime skill:**
+```bash
+# Test assistant-created skill
+echo '{"input": "test"}' | docker-compose run --rm -T openclaw /root/.openclaw/skills/<skill-name>/<skill-name>
+```
+
+**Debug skill execution:**
+```bash
+# View skill script
+docker-compose exec openclaw cat /root/.openclaw/repo-skills/pdf-extractor/pdf-extractor
+
+# Check skill permissions
+docker-compose exec openclaw ls -la /root/.openclaw/repo-skills/pdf-extractor/
+
+# Test with verbose output
+echo "test" | docker-compose exec -T openclaw sh -x /root/.openclaw/repo-skills/pdf-extractor/pdf-extractor
+```
+
+**Check Python in container:**
+```bash
+# Verify Python and modules
+docker-compose exec openclaw python3 --version
+docker-compose exec openclaw python3 -c "import pymupdf; print('pymupdf OK')"
+
+# Check skill script syntax
+docker-compose exec openclaw python3 -m py_compile /root/.openclaw/repo-skills/pdf-extractor/pdf-extractor
+```
+
+### Debugging Skills
+
+**Enable debug logging in OpenClaw:**
+```bash
+# Edit .env
+OPENCLAW_LOG_LEVEL=debug
+
+# Restart and watch logs
+docker-compose restart openclaw
+docker-compose logs -f openclaw | grep -i skill
+```
+
+**Check skill loading:**
+```bash
+# List all available skills
+docker-compose exec openclaw openclaw skills list
+
+# Get skill info
+docker-compose exec openclaw openclaw skills info pdf-extractor
+
+# Check which directory skill loads from
+docker-compose exec openclaw ls -la /root/.openclaw/repo-skills/
+docker-compose exec openclaw ls -la /root/.openclaw/skills/
+```
+
+**Common skill issues:**
+- **Permission denied**: Check executable bit (`chmod +x`)
+- **Module not found**: Verify Python dependencies in Dockerfile
+- **Invalid JSON output**: Check stdout is clean JSON only
+- **Path not found**: Ensure paths are accessible within container
+
 ## Additional Resources
 
 - **OpenClaw Skills Documentation**: https://docs.openclaw.dev/skills
