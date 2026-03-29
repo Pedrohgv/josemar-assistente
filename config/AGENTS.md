@@ -6,6 +6,8 @@ This file provides guidance to AI coding assistants when working with OpenClaw c
 
 OpenClaw uses JSON5 format for configuration, which is a superset of JSON that allows comments, trailing commas, and more readable syntax. The main configuration file is `openclaw.json`.
 
+The system supports the GLM family of models (e.g., GLM-5, GLM-4.7, GLM-5-Turbo) via Z.AI provider, with support for DeepSeek and other OpenAI-compatible providers. Any provider following the OpenAI completions API can be configured using the `{provider-id}/{model-id}` pattern.
+
 **Configuration Characteristics:**
 - **Format**: JSON5 (JSON with extensions)
 - **Location**: `config/openclaw.json`
@@ -126,12 +128,18 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
     defaults: {
       workspace: "~/.openclaw/workspace",
       model: {
-        primary: "zai/glm-4.7",
-        fallbacks: ["deepseek/deepseek-reasoner"]
+        // Use any provider/model pattern: {provider-id}/{model-id}
+        // Example: zai/glm-5, deepseek/deepseek-reasoner, custom-provider/model
+        primary: "zai/glm-5",
+        fallbacks: ["zai/glm-4.7", "deepseek/deepseek-reasoner"]
       },
       models: {
+        // Model aliases - use {provider}/{model-id} pattern
+        "zai/glm-5": { alias: "GLM 5" },
         "zai/glm-4.7": { alias: "GLM 4.7" },
-        "deepseek/deepseek-reasoner": { alias: "DeepSeek Reasoner" }
+        "zai/glm-5-turbo": { alias: "GLM 5 Turbo" },
+        "deepseek/deepseek-reasoner": { alias: "DeepSeek Reasoner" },
+        "deepseek/deepseek-chat": { alias: "DeepSeek Chat" }
       }
     },
     list: [
@@ -140,7 +148,7 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
         default: true,
         name: "Josemar",
         workspace: "~/.openclaw/workspace",
-        model: "zai/glm-4.7",
+        model: "zai/glm-5",
         identity: {
           name: "Josemar",
           theme: "helpful assistant",
@@ -217,8 +225,52 @@ env: {
 
 ### 2. Model Providers
 
-Configure external LLM API providers:
+Supports multiple LLM providers through a unified interface. Configure any OpenAI-compatible API.
 
+**Example: Z.AI provider for GLM models:**
+```json5
+models: {
+  mode: "merge",
+  providers: {
+    zai: {
+      baseUrl: "https://api.z.ai/api/paas/v4",
+      apiKey: "${ZAI_API_KEY}",
+      api: "openai-completions",
+      models: [
+        {
+          id: "glm-5",
+          name: "GLM 5",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 200000,
+          maxTokens: 8192,
+        },
+        {
+          id: "glm-4.7",
+          name: "GLM 4.7",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 128000,
+          maxTokens: 8192,
+        },
+        {
+          id: "glm-5-turbo",
+          name: "GLM 5 Turbo",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 128000,
+          maxTokens: 4096,
+        }
+      ]
+    }
+  }
+}
+```
+
+**Example: DeepSeek provider:**
 ```json5
 models: {
   mode: "merge",  // Options: "merge", "replace"
@@ -280,14 +332,18 @@ models: {
 
 **Adding Custom Providers:**
 
+Any provider following the OpenAI completions API can be added. Use the pattern `{provider-id}/{model-id}` when referencing models:
+
 ```json5
 providers: {
+  // Use any provider-id (e.g., custom-provider, anthropic, openai)
   custom-provider: {
     baseUrl: "https://api.custom.com/v1",
     apiKey: "${CUSTOM_API_KEY}",
     api: "openai-completions",
     models: [
       {
+        // Model ID - use this with provider-id: {provider-id}/{model-id}
         id: "custom-model",
         name: "Custom Model",
         reasoning: false,
@@ -301,9 +357,11 @@ providers: {
 }
 ```
 
+**Usage:** Reference models as `{provider-id}/{model-id}`, e.g., `custom-provider/custom-model`
+
 ### 3. Agents
 
-Configure AI agents with their settings:
+Configure AI agents with their settings. The model references use the pattern `{provider-id}/{model-id}`, allowing any OpenAI-compatible provider to be used.
 
 ```json5
 agents: {
@@ -312,15 +370,24 @@ agents: {
     workspace: "~/.openclaw/workspace",
     
     // Default model configuration
+    // Use any provider/model pattern: {provider-id}/{model-id}
+    // Example: zai/glm-5, deepseek/deepseek-reasoner
     model: {
-      primary: "zai/glm-4.7",
-      fallbacks: ["deepseek/deepseek-reasoner"]
+      primary: "zai/glm-5",
+      fallbacks: ["zai/glm-4.7", "deepseek/deepseek-reasoner"]
     },
     
     // Model aliases for easier reference
+    // Format: "{provider-id}/{model-id}": { alias: "Display Name" }
     models: {
+      "zai/glm-5": {
+        alias: "GLM 5"
+      },
       "zai/glm-4.7": {
         alias: "GLM 4.7"
+      },
+      "zai/glm-5-turbo": {
+        alias: "GLM 5 Turbo"
       },
       "deepseek/deepseek-reasoner": {
         alias: "DeepSeek Reasoner"
@@ -337,7 +404,7 @@ agents: {
       default: true,
       name: "Josemar",
       workspace: "~/.openclaw/workspace",
-      model: "zai/glm-4.7",
+      model: "zai/glm-5",
       identity: {
         name: "Josemar",
         theme: "helpful assistant",
@@ -633,11 +700,11 @@ docker-compose restart openclaw
 **1. Use Comments:**
 ```json5
 {
-  // Primary model for the Josemar agent
-  // Fallback to DeepSeek if Z.AI is unavailable
+  // Primary model for the Josemar agent (use {provider}/{model-id} pattern)
+  // Fallback to GLM-4.7 then DeepSeek if Z.AI is unavailable
   model: {
-    primary: "zai/glm-4.7",
-    fallbacks: ["deepseek/deepseek-reasoner"]
+    primary: "zai/glm-5",
+    fallbacks: ["zai/glm-4.7", "deepseek/deepseek-reasoner"]
   }
 }
 ```
@@ -730,11 +797,12 @@ echo "TEST_VAR=value" | docker-compose run --rm -T openclaw sh -c "export \$(cat
 
 **Test model connectivity:**
 ```bash
-# Test Z.AI API
+# Test Z.AI API (use model ID matching the provider's model list)
+# Note: Model ID should match the pattern configured in providers
 curl -X POST "https://api.z.ai/v1/chat/completions" \
   -H "Authorization: Bearer ${ZAI_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"model": "glm-4.7", "messages": [{"role": "user", "content": "Test"}]}'
+  -d '{"model": "glm-5", "messages": [{"role": "user", "content": "Test"}]}'
 
 # Test DeepSeek API
 curl -X POST "https://api.deepseek.com/v1/chat/completions" \
@@ -748,8 +816,8 @@ curl -X POST "https://api.deepseek.com/v1/chat/completions" \
 # List available models
 docker-compose exec openclaw openclaw models list
 
-# Test model
-docker-compose exec openclaw openclaw models test zai/glm-4.7
+# Test model (use {provider}/{model-id} pattern)
+docker-compose exec openclaw openclaw models test zai/glm-5
 ```
 
 ## Configuration Examples
@@ -816,7 +884,7 @@ agents: {
       id: "josemar",
       default: true,
       name: "Josemar",
-      model: "zai/glm-4.7",
+      model: "zai/glm-5",
       workspace: "~/.openclaw/workspace/josemar",
       description: "Assistente pessoal em Português"
     },

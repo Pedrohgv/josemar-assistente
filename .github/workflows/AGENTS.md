@@ -111,6 +111,43 @@ The deployment workflow supports a two-tier skill system:
 
 This ensures that user data, session data, and configuration remain intact during deployment.
 
+## Stop Service Workflow
+
+### stop-service
+
+Safely stops the Josemar Assistente service without deleting data.
+
+**Trigger:** Manual only (`workflow_dispatch`)
+
+**Parameters:** None
+
+**Behavior:**
+1. Runs on self-hosted runner
+2. Checks out repository (with `clean: false` to preserve any local changes)
+3. Runs `docker compose down` to stop services
+4. Verifies container is stopped by checking `docker ps`
+5. Fails if container is still running
+
+**Use Cases:**
+- Emergency shutdown
+- Before maintenance
+- When you need to free up resources
+- Before running fresh deployment (alternative to deploy workflow's built-in stop)
+
+**Data Safety:**
+- Does **NOT** remove workspace volume (data preserved)
+- Does **NOT** delete images or configuration
+- Only stops running containers
+
+**Comparison with deploy-to-home-server:**
+
+| Aspect | stop-service | deploy-to-home-server |
+|--------|--------------|----------------------|
+| Action | Just stops | Stops, rebuilds, and restarts |
+| Data | Preserved | Preserved (unless fresh_start) |
+| Images | Kept | Rebuilt (with --no-cache) |
+| Configuration | Unchanged | Applied from repo |
+
 ## Troubleshooting
 
 ### Workflow Not Starting
