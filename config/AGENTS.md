@@ -1167,12 +1167,16 @@ The OpenClaw Gateway provides a web interface for managing the bot.
 
 **Local:**
 ```
-http://localhost:18789/__openclaw__/canvas/?token=YOUR_GATEWAY_AUTH_TOKEN
+http://localhost:18789/__openclaw__/?token=YOUR_GATEWAY_AUTH_TOKEN
+```
+Or simply:
+```
+http://localhost:18789/?token=YOUR_GATEWAY_AUTH_TOKEN
 ```
 
 **Remote (via Cloudflare Tunnel or similar):**
 ```
-https://your-domain.com/__openclaw__/canvas/?token=YOUR_GATEWAY_AUTH_TOKEN
+https://your-domain.com/__openclaw__/?token=YOUR_GATEWAY_AUTH_TOKEN
 ```
 
 ### Setup

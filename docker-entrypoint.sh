@@ -100,6 +100,18 @@ if [ -f /root/.openclaw/openclaw.json ]; then
     sed -i 's/"dmPolicy": "closed"/"dmPolicy": "allowlist"/g' /root/.openclaw/openclaw.json
 fi
 
+# Handle TELEGRAM_ENABLED environment variable
+# Convert string "true"/"false" to proper boolean in config
+if [ -f /root/.openclaw/openclaw.json ]; then
+    if [ "${TELEGRAM_ENABLED}" = "false" ]; then
+        echo "📵 Disabling Telegram channel (TELEGRAM_ENABLED=false)"
+        sed -i 's/enabled: "${TELEGRAM_ENABLED}"/enabled: false/g' /root/.openclaw/openclaw.json
+    else
+        echo "📱 Enabling Telegram channel (TELEGRAM_ENABLED=true or not set)"
+        sed -i 's/enabled: "${TELEGRAM_ENABLED}"/enabled: true/g' /root/.openclaw/openclaw.json
+    fi
+fi
+
 # Run OpenClaw
 echo "🚀 Starting OpenClaw gateway..."
 exec "$@"

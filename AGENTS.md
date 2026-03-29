@@ -68,7 +68,11 @@ You can safely test locally without disconnecting the production bot:
 
 3. **Access the Web UI:**
    ```
-   http://localhost:18789/__openclaw__/canvas/?token=YOUR_GATEWAY_AUTH_TOKEN
+   http://localhost:18789/__openclaw__/?token=YOUR_GATEWAY_AUTH_TOKEN
+   ```
+   Or simply:
+   ```
+   http://localhost:18789/?token=YOUR_GATEWAY_AUTH_TOKEN
    ```
 
 4. **Test via browser interface** - All functionality works except Telegram
