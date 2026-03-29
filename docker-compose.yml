@@ -19,7 +19,7 @@ services:
       - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-true}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - PEDRO_TELEGRAM_ID=${PEDRO_TELEGRAM_ID:-}
-      - GATEWAY_AUTH_TOKEN=${GATEWAY_AUTH_TOKEN:-}
+      - GATEWAY_AUTH_PASSWORD=${GATEWAY_AUTH_PASSWORD:-}
       - GOG_KEYRING_PASSWORD=${GOG_KEYRING_PASSWORD:-}
       # Additional users can be added here following the pattern:
       # - ALICE_TELEGRAM_ID=${ALICE_TELEGRAM_ID:-}

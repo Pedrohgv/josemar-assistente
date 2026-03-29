@@ -67,12 +67,13 @@ You can safely test locally without disconnecting the production bot:
    ```
 
 3. **Access the Web UI:**
+   The browser will prompt for HTTP Basic Auth. Enter:
+   - Username: `operator` (or any username - OpenClaw ignores it)
+   - Password: Your `GATEWAY_AUTH_PASSWORD` from `.env`
+   
+   Or access via URL:
    ```
-   http://localhost:18789/__openclaw__/?token=YOUR_GATEWAY_AUTH_TOKEN
-   ```
-   Or simply:
-   ```
-   http://localhost:18789/?token=YOUR_GATEWAY_AUTH_TOKEN
+   http://operator:YOUR_GATEWAY_AUTH_PASSWORD@localhost:18789/
    ```
 
 4. **Approve device pairing** (first time only):
@@ -183,7 +184,7 @@ git push -u origin feature/my-feature-name
 - `TELEGRAM_BOT_TOKEN` - Bot authentication
 - `TELEGRAM_ENABLED` - Enable/disable Telegram (`true`/`false`, default: `true`)
 - `DEEPSEEK_API_KEY` - Optional fallback provider
-- `GATEWAY_AUTH_TOKEN` - Web UI access
+- `GATEWAY_AUTH_PASSWORD` - Web UI access password (HTTP Basic Auth)
 - `PEDRO_TELEGRAM_ID` - Primary user (add more as needed)
 - `GOG_KEYRING_PASSWORD` - Optional game library integration
 

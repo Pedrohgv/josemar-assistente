@@ -27,12 +27,12 @@ The following secrets must be configured in the GitHub repository settings:
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather | Yes |
 | `DEEPSEEK_API_KEY` | DeepSeek API key (optional fallback) | No |
 | `PEDRO_TELEGRAM_ID` | Telegram user ID for the primary user | Yes |
-| `GATEWAY_AUTH_TOKEN` | Authentication token for OpenClaw web UI | Yes |
+| `GATEWAY_AUTH_PASSWORD` | HTTP Basic Auth password for OpenClaw web UI | Yes |
 | `GOG_KEYRING_PASSWORD` | GOG keyring password for Galaxy integration | No |
 
-### Generating GATEWAY_AUTH_TOKEN
+### Generating GATEWAY_AUTH_PASSWORD
 
-Generate a secure random token for accessing the OpenClaw web UI:
+Generate a secure password for accessing the OpenClaw web UI:
 
 ```bash
 openssl rand -hex 32

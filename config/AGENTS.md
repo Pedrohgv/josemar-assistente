@@ -94,7 +94,7 @@ nano .env
 - `TELEGRAM_BOT_TOKEN` - Bot authentication
 - `TELEGRAM_ENABLED` - Enable/disable Telegram channel (`true`/`false`, default: `true`)
 - `DEEPSEEK_API_KEY` - Optional fallback provider
-- `GATEWAY_AUTH_TOKEN` - Web UI access token
+- `GATEWAY_AUTH_PASSWORD` - Web UI access password (HTTP Basic Auth)
 - `PEDRO_TELEGRAM_ID` - Primary user ID
 
 **Local Testing:**
@@ -182,8 +182,8 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
     bind: "lan",
     port: 18789,
     auth: {
-      mode: "token",
-      token: "${GATEWAY_AUTH_TOKEN}",
+      mode: "password",
+      password: "${GATEWAY_AUTH_PASSWORD}",
     },
   },
 
@@ -1166,29 +1166,30 @@ The OpenClaw Gateway provides a web interface for managing the bot.
 ### Access URL
 
 **Local:**
+The browser will prompt for HTTP Basic Auth. Enter:
+- Username: `operator` (or any username - OpenClaw ignores it)
+- Password: Your `GATEWAY_AUTH_PASSWORD` from `.env`
+
+Or access via URL:
 ```
-http://localhost:18789/__openclaw__/?token=YOUR_GATEWAY_AUTH_TOKEN
-```
-Or simply:
-```
-http://localhost:18789/?token=YOUR_GATEWAY_AUTH_TOKEN
+http://operator:YOUR_GATEWAY_AUTH_PASSWORD@localhost:18789/
 ```
 
 **Remote (via Cloudflare Tunnel or similar):**
 ```
-https://your-domain.com/__openclaw__/?token=YOUR_GATEWAY_AUTH_TOKEN
+https://operator:YOUR_GATEWAY_AUTH_PASSWORD@your-domain.com/
 ```
 
 ### Setup
 
-**1. Generate authentication token:**
+**1. Generate authentication password:**
 ```bash
 openssl rand -hex 32
 ```
 
 **2. Add to `.env`:**
 ```bash
-GATEWAY_AUTH_TOKEN=your-generated-token
+GATEWAY_AUTH_PASSWORD=your-secure-password-here
 ```
 
 **3. Update `config/openclaw.json`:**

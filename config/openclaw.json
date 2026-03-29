@@ -16,8 +16,8 @@
     bind: "lan",
     port: 18789,
     auth: {
-      mode: "token",
-      token: "${GATEWAY_AUTH_TOKEN}",
+      mode: "password",
+      password: "${GATEWAY_AUTH_PASSWORD}",
     },
     controlUi: {
       allowedOrigins: [
