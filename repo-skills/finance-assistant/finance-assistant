@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+Finance Assistant Skill for OpenClaw
+
+Handles:
+- PDF credit card invoice extraction and classification
+- Credit card expense registration to Google Sheets
+- General expense registration to Google Sheets
+- Month selection logic
+
+Usage:
+    echo '{"action": "extract", "pdf_path": "/path/to/invoice.pdf"}' | finance-assistant
+    echo '{"action": "extract", "text": "raw invoice text..."}' | finance-assistant
+    echo '{"action": "suggest_month"}' | finance-assistant
+    echo '{"action": "register_credit_card", "expenses": {...}, "month": "Jan", "year": 2025}' | finance-assistant
+    echo '{"action": "register_general", "description": "Aluguel", "amount": 1500.00, "month": "Jan", "year": 2025}' | finance-assistant
+"""
+
+import sys
+import json
+import os
+
+# Add scripts directory to path
+scripts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts')
+if scripts_dir not in sys.path:
+    sys.path.insert(0, scripts_dir)
+
+from database import Database
+from pdf_processor import process_pdf, process_text
+from sheets_manager import append_credit_card_expenses, update_general_expense
+from month_utils import get_month_suggestion_message
+
+
+def main():
+    """Main entry point for the finance-assistant skill."""
+    try:
+        # Read input from stdin
+        input_data = sys.stdin.read().strip()
+        
+        if not input_data:
+            # No input provided
+            result = {
+                "success": False,
+                "error": "No input provided",
+                "usage": {
+                    "description": "Finance Assistant Skill for expense tracking",
+                    "actions": [
+                        {
+                            "action": "extract",
+                            "description": "Extract expenses from PDF or text",
+                            "examples": [
+                                '{"action": "extract", "pdf_path": "/path/to/invoice.pdf"}',
+                                '{"action": "extract", "text": "raw invoice text..."}'
+                            ]
+                        },
+                        {
+                            "action": "suggest_month",
+                            "description": "Get month suggestion based on current date"
+                        },
+                        {
+                            "action": "register_credit_card",
+                            "description": "Register credit card expenses to Google Sheets",
+                            "example": '{"action": "register_credit_card", "expenses": {"Data": [...], "Estabelecimento": [...], "Categoria": [...], "Valor": [...], "Texto Compra": [...]}, "month": "Jan", "year": 2025}'
+                        },
+                        {
+                            "action": "register_general",
+                            "description": "Register/update general expense to Google Sheets",
+                            "example": '{"action": "register_general", "description": "Aluguel", "amount": 1500.00, "month": "Jan", "year": 2025}'
+                        }
+                    ]
+                }
+            }
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            sys.exit(1)
+        
+        # Parse JSON input
+        try:
+            data = json.loads(input_data)
+        except json.JSONDecodeError as e:
+            result = {
+                "success": False,
+                "error": f"Invalid JSON input: {str(e)}"
+            }
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            sys.exit(1)
+        
+        action = data.get("action")
+        
+        if action == "extract":
+            # Initialize database
+            db = Database()
+            
+            # Check if PDF path or text provided
+            pdf_path = data.get("pdf_path")
+            text = data.get("text")
+            
+            if pdf_path:
+                result = process_pdf(pdf_path, db)
+            elif text:
+                result = process_text(text, db)
+            else:
+                result = {
+                    "success": False,
+                    "error": "Either 'pdf_path' or 'text' must be provided for extract action"
+                }
+        
+        elif action == "suggest_month":
+            result = get_month_suggestion_message()
+            result["success"] = True
+        
+        elif action == "register_credit_card":
+            expenses = data.get("expenses")
+            month = data.get("month")
+            year = data.get("year")
+            
+            if not all([expenses, month, year]):
+                result = {
+                    "success": False,
+                    "error": "Missing required fields: expenses, month, year"
+                }
+            else:
+                result = append_credit_card_expenses(year, month, expenses)
+        
+        elif action == "register_general":
+            description = data.get("description")
+            amount = data.get("amount")
+            month = data.get("month")
+            year = data.get("year")
+            
+            if not all([description, amount is not None, month, year]):
+                result = {
+                    "success": False,
+                    "error": "Missing required fields: description, amount, month, year"
+                }
+            else:
+                result = update_general_expense(year, month, description, amount)
+        
+        else:
+            result = {
+                "success": False,
+                "error": f"Unknown action: {action}",
+                "valid_actions": ["extract", "suggest_month", "register_credit_card", "register_general"]
+            }
+        
+        # Output result
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        
+        # Exit with appropriate code
+        sys.exit(0 if result.get("success") else 1)
+        
+    except Exception as e:
+        import traceback
+        result = {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

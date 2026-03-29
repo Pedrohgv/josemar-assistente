@@ -181,6 +181,9 @@
       "gogcli-tables": {
         enabled: true,
       },
+      "finance-assistant": {
+        enabled: true,
+      },
     },
   },
 
