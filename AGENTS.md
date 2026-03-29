@@ -75,9 +75,20 @@ You can safely test locally without disconnecting the production bot:
    http://localhost:18789/?token=YOUR_GATEWAY_AUTH_TOKEN
    ```
 
-4. **Test via browser interface** - All functionality works except Telegram
+4. **Approve device pairing** (first time only):
+   When you first access the Web UI, you'll see "pairing required". Approve your browser:
+   ```bash
+   # List pending devices
+   docker compose exec openclaw openclaw devices list
+   
+   # Approve the pending device
+   docker compose exec openclaw openclaw devices approve <requestId>
+   ```
+   The device will be remembered for future connections.
 
-5. **Stop when done:**
+5. **Test via browser interface** - All functionality works except Telegram
+
+6. **Stop when done:**
    ```bash
    docker-compose down
    ```

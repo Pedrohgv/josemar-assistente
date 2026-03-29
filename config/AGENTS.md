@@ -1214,6 +1214,38 @@ docker-compose restart openclaw
 - Never share your token publicly
 - UI provides full bot control - protect access accordingly
 
+### Troubleshooting
+
+**Issue: "Pairing Required" Error**
+
+When accessing the Web UI for the first time from a browser, you may see:
+- "disconnected (1008): pairing required"
+- "unauthorized: device token mismatch"
+
+**Solution:**
+OpenClaw requires a one-time device pairing approval for security. Run these commands:
+
+```bash
+# List pending devices
+docker-compose exec openclaw openclaw devices list
+
+# Approve the browser device (use the requestId from the list)
+docker-compose exec openclaw openclaw devices approve <requestId>
+```
+
+Notes:
+- Once approved, the device is remembered in the workspace volume
+- You won't need to re-pair unless you clear browser data or use a different browser profile
+- The CLI uses `127.0.0.1` and is auto-approved
+- Browser connections via `localhost` require explicit approval
+
+**Issue: "Unauthorized" After Pairing**
+
+If you see "unauthorized" even after pairing, the browser may have a stale device token. Try:
+1. Clear browser localStorage for `localhost:18789`
+2. Use Incognito/Private mode
+3. Or approve the new pairing request that appears
+
 ## Additional Resources
 
 - **OpenClaw Documentation**: https://docs.openclaw.dev
