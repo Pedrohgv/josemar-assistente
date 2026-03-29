@@ -53,3 +53,8 @@ htmlcov/
 
 # Docker
 .docker/
+
+# Credentials directory
+# Contains sensitive OAuth and API credential files
+# These are mounted into the container at runtime
+credentials/

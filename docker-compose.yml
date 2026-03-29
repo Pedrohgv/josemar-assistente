@@ -12,6 +12,9 @@ services:
       # - ./scripts:/app/scripts:ro
       # Mount repo-maintained skills directory
       - ./repo-skills:/root/.openclaw-source-skills:ro
+      # Mount credentials directory to OpenClaw standard location
+      # Follows convention: ~/.openclaw/credentials/<service>/
+      - ./credentials/gogcli:/root/.openclaw/credentials/gogcli:ro
     environment:
       # Environment variables for API keys (to be set in .env file)
       - ZAI_API_KEY=${ZAI_API_KEY:-}

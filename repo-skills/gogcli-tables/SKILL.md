@@ -49,8 +49,27 @@ Or run the verification script:
 
 ### 2. Authorize Account
 
+**IMPORTANT - OAuth Flow Instructions:**
+
+When authenticating, the process requires manual intervention:
+
+1. The agent will provide you with a Google OAuth URL
+2. **Click the URL and complete the Google authentication** in your browser
+3. **You will be redirected to a localhost URL** (e.g., `http://localhost/?code=...&scope=...`)
+4. **This localhost page will show "cannot be reached" - THIS IS EXPECTED**
+5. **Copy the full URL from your browser's address bar** (the entire localhost URL with all parameters)
+6. **Paste the URL back into the chat**
+7. The agent will complete the authentication process
+
+**Example:**
+> After clicking the authorization link and approving access, you were redirected to:
+> `http://localhost/?code=4/0AVG7fiQp...&scope=https://www.googleapis.com/auth/gmail.readonly`
+>
+> Please paste this callback URL into the chat so I can complete the authentication.
+
+**Commands:**
 ```bash
-gog auth credentials ~/Downloads/client_secret_....json
+gog auth credentials /root/.openclaw/credentials/gogcli/client_secret_*.json
 gog auth add you@gmail.com
 ```
 
