@@ -38,10 +38,10 @@ Generate a secure password for accessing the OpenClaw web UI:
 openssl rand -hex 32
 ```
 
-Copy the output and add it as a GitHub secret named `GATEWAY_AUTH_TOKEN`.
+Copy the output and add it as a GitHub secret named `GATEWAY_AUTH_PASSWORD`.
 
-This token is required to access the web interface at:
-`http://your-server:18789/__openclaw__/canvas/?token=YOUR_TOKEN`
+This password is required to access the web interface via HTTP Basic Auth at:
+`http://your-server:18789/`
 
 ## Test Workflow
 
