@@ -1,5 +1,8 @@
 #!/bin/bash
 # PDF Extractor skill wrapper for OpenClaw
 
-# Call the Python script with stdin input
-python3 /app/scripts/pdf_extractor.py
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Call the Python script from the same directory
+python3 "$SCRIPT_DIR/pdf_extractor.py"
