@@ -47,6 +47,13 @@ Or run the verification script:
 4. Create OAuth 2.0 client (Desktop app)
 5. Download JSON credentials
 
+**Note:** If using Josemar Assistente with OpenClaw, OAuth client credentials are typically already available at:
+```
+/root/.openclaw/credentials/gogcli/client_secret_*.json
+```
+
+If this file exists, you can skip steps 1-5 above and proceed directly to authorization.
+
 ### 2. Authorize Account
 
 **IMPORTANT - OAuth Flow Instructions:**
@@ -72,6 +79,42 @@ When authenticating, the process requires manual intervention:
 gog auth credentials /root/.openclaw/credentials/gogcli/client_secret_*.json
 gog auth add you@gmail.com
 ```
+
+### 2b. Headless/Container Environment (Remote OAuth)
+
+**Use this method when gogcli runs in a container or remote server** (like inside OpenClaw).
+
+The standard OAuth flow doesn't work in containers because the callback goes to `localhost` on your browser, not the server. Use the `--remote` flag instead:
+
+**Step 1 - Generate the authorization URL:**
+```bash
+gog auth add you@gmail.com --remote --step 1
+```
+
+This will output a URL like:
+```
+https://accounts.google.com/o/oauth2/auth?client_id=...&redirect_uri=http://127.0.0.1:8085/oauth2/callback&...
+```
+
+**Step 2 - Open the URL in your browser:**
+1. Click the URL or copy it to your browser
+2. Complete the Google authentication
+3. You will be redirected to `http://127.0.0.1:8085/oauth2/callback?code=...&scope=...`
+4. **This will show "This site can't be reached" or 404 - THIS IS EXPECTED**
+5. **Copy the FULL URL from your browser's address bar** (including the `code=` parameter)
+
+**Step 3 - Complete authentication with the callback URL:**
+```bash
+gog auth add you@gmail.com --remote --step 2 --auth-url "paste_the_full_callback_url_here"
+```
+
+**Why this works:**
+- `--step 1` generates the auth URL without starting a local server
+- The callback goes to your browser's localhost (which doesn't exist)
+- `--step 2` completes the auth by manually providing the callback URL with the authorization code
+- This bypasses the need for the server to receive the callback directly
+
+**Note:** OAuth tokens are now persisted in `/root/.openclaw/workspace/.config/gogcli/` (set via `XDG_CONFIG_HOME`) and survive container restarts.
 
 ### 3. Verify
 

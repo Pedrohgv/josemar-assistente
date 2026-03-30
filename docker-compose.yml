@@ -24,6 +24,8 @@ services:
       - PEDRO_TELEGRAM_ID=${PEDRO_TELEGRAM_ID:-}
       - GATEWAY_AUTH_PASSWORD=${GATEWAY_AUTH_PASSWORD:-}
       - GOG_KEYRING_PASSWORD=${GOG_KEYRING_PASSWORD:-}
+      # Persist gogcli OAuth tokens in workspace volume (survives container restarts)
+      - XDG_CONFIG_HOME=/root/.openclaw/workspace/.config
       # Additional users can be added here following the pattern:
       # - ALICE_TELEGRAM_ID=${ALICE_TELEGRAM_ID:-}
       # - BOB_TELEGRAM_ID=${BOB_TELEGRAM_ID:-}

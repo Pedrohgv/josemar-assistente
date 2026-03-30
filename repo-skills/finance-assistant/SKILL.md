@@ -22,6 +22,25 @@ This skill provides comprehensive expense management:
 - Manage persistent database of establishments and categories
 - Support month-based organization with intelligent suggestions
 
+## Billing Cycle Handling
+
+**Important:** Credit card invoices follow billing cycles, not calendar months. When processing an invoice:
+
+- **ALL extracted expenses go to the table you specify** - regardless of their individual transaction dates
+- This includes:
+  - Purchases from the current billing period
+  - Purchases from previous months (pending charges that appeared on this invoice)
+  - **Refunds and credits** (negative amounts are automatically summed)
+- The "Data" column shows the original transaction date, but all entries belong to the billing month being updated
+
+**Example:**
+If you're updating "Cartão Jan" (January's table) but the invoice contains:
+- 10 purchases from January
+- 3 purchases from December (previous month, now charged)
+- 1 refund/credit for R$ -50,00
+
+**All 14 entries go to "Cartão Jan" table.** The total invoice amount (which includes the refund) is what matters for your tracking. The skill handles everything automatically - you just specify which month's table to update.
+
 ## Usage
 
 ### Extract Expenses from PDF
@@ -62,6 +81,8 @@ echo '{
   "year": 2025
 }' | finance-assistant
 ```
+
+**Note:** Refunds and credits (negative values) are automatically included in the registration. The skill handles all transaction types - purchases, pending charges from previous months, and refunds - all go to the specified month's table.
 
 ### Register General Expense
 
