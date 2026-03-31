@@ -1,6 +1,6 @@
 ---
 name: finance-assistant
-description: Complete financial tracking assistant for credit card expenses and general expenses. Extracts data from Brazilian credit card PDF invoices, classifies expenses using regex patterns, and manages Google Sheets tables for expense tracking. Supports historical queries and month-based organization.
+description: Credit card expense tracking. Extracts expenses from Brazilian credit card PDF invoices, classifies them, and writes to Google Sheets. Single-action workflow: provide a PDF, month, and year.
 categories:
   - finance
   - pdf
@@ -11,186 +11,116 @@ categories:
 
 # Finance Assistant Skill
 
-Complete financial tracking system for managing credit card expenses and general expenses using Google Sheets.
+Extracts expenses from Brazilian credit card PDF invoices, classifies them, and writes to Google Sheets in a single call.
 
-## Overview
+## Agent Workflow
 
-This skill provides comprehensive expense management:
-- Extract and classify expenses from Brazilian credit card PDF invoices
-- Automatically categorize expenses using regex pattern matching
-- Register expenses to Google Sheets tables (Cartão and Despesas)
-- Manage persistent database of establishments and categories
-- Support month-based organization with intelligent suggestions
+1. **Receive PDF** from user
+2. **Determine month/year** before calling the skill:
+   - Days 1-10 of month: likely last month's invoice, ask for confirmation
+   - Days 11+: ask user which month to update
+   - Year: usually current year; December invoices may close in January of next year
+3. **Call the skill** with `register` action
+4. **Report results** to user, highlighting any unclassified expenses
 
-## Billing Cycle Handling
+## Actions
 
-**Important:** Credit card invoices follow billing cycles, not calendar months. When processing an invoice:
+### register (Primary)
 
-- **ALL extracted expenses go to the table you specify** - regardless of their individual transaction dates
-- This includes:
-  - Purchases from the current billing period
-  - Purchases from previous months (pending charges that appeared on this invoice)
-  - **Refunds and credits** (negative amounts are automatically summed)
-- The "Data" column shows the original transaction date, but all entries belong to the billing month being updated
-
-**Example:**
-If you're updating "Cartão Jan" (January's table) but the invoice contains:
-- 10 purchases from January
-- 3 purchases from December (previous month, now charged)
-- 1 refund/credit for R$ -50,00
-
-**All 14 entries go to "Cartão Jan" table.** The total invoice amount (which includes the refund) is what matters for your tracking. The skill handles everything automatically - you just specify which month's table to update.
-
-## Usage
-
-### Extract Expenses from PDF
+Extract, classify, and write expenses to Google Sheets in one step.
 
 ```bash
-# Process PDF file
-echo '{"action": "extract", "pdf_path": "/path/to/invoice.pdf"}' | finance-assistant
-
-# Process raw text
-echo '{"action": "extract", "text": "10/01 UBER TRIP 32,75\n15/01 SUPERMERCDO EXTRA 150,00"}' | finance-assistant
-```
-
-### Get Month Suggestion
-
-```bash
-# Get suggestion based on current date
-echo '{"action": "suggest_month"}' | finance-assistant
-```
-
-**Month Selection Logic:**
-- Days 1-10: Suggests last month (requires user confirmation)
-- Days 11+: No suggestion, asks user to specify
-
-### Register Credit Card Expenses
-
-```bash
-# After extraction, register to Google Sheets
 echo '{
-  "action": "register_credit_card",
-  "expenses": {
-    "Data": ["10/01/2025", "15/01/2025"],
-    "Estabelecimento": ["Uber", "Supermercado"],
-    "Categoria": ["Transporte", "Supermercado"],
-    "Valor": [32.75, 150.00],
-    "Texto Compra": ["UBER TRIP", "SUPERMERCADO EXTRA"]
-  },
+  "action": "register",
+  "pdf_path": "/path/to/invoice.pdf",
   "month": "Jan",
   "year": 2025
 }' | finance-assistant
 ```
 
-**Note:** Refunds and credits (negative values) are automatically included in the registration. The skill handles all transaction types - purchases, pending charges from previous months, and refunds - all go to the specified month's table.
-
-### Register General Expense
-
-```bash
-# Update a general expense (like Aluguel, Internet)
-echo '{
-  "action": "register_general",
-  "description": "Aluguel",
-  "amount": 1800.00,
-  "month": "Jan",
-  "year": 2025
-}' | finance-assistant
-```
-
-## Input/Output Format
-
-### Extract Action Input
-
-```json
-{
-  "action": "extract",
-  "pdf_path": "/path/to/invoice.pdf"
-}
-```
-
-Or with text:
-```json
-{
-  "action": "extract",
-  "text": "raw invoice text content"
-}
-```
-
-### Extract Action Output
-
+**Output (success):**
 ```json
 {
   "success": true,
-  "source": "pdf_file",
-  "file_path": "/path/to/invoice.pdf",
-  "extraction": {
-    "total_expense": "1.234,56",
-    "line_count": 15,
-    "text_preview": "First 500 chars of extracted text..."
-  },
-  "classified_expenses": [
-    {
-      "date": "10/01",
-      "full_date": "10/01/2025",
-      "description": "UBER TRIP",
-      "amount": 32.75,
-      "establishment": "Uber",
-      "category": "Transporte"
-    }
-  ],
-  "sheets_data": {
-    "Data": ["10/01/2025"],
-    "Estabelecimento": ["Uber"],
-    "Categoria": ["Transporte"],
-    "Valor": [32.75],
-    "Texto Compra": ["UBER TRIP"]
-  },
-  "summary": {
-    "total_items": 15,
-    "total_amount": 1234.56
-  }
+  "rows_added": 15,
+  "total_amount": 1234.56,
+  "total_expense": "1.234,56",
+  "table": "Cartao Jan",
+  "spreadsheet": "2025",
+  "unclassified": [
+    {"description": "UNKNOWN MERCHANT", "amount": 50.0}
+  ]
 }
 ```
 
-## Database
+**Output (with unclassified):**
+If any expenses don't match a known pattern, they are registered as "Outros" and listed in `unclassified`. The agent should inform the user so they can add new patterns if needed.
 
-The skill uses SQLite for persistent storage of establishments and categories.
+### add_establishment
 
-**Location:** `/root/.openclaw/workspace/finance_assistant.db`
+Add a new regex pattern for classification.
 
-### Predefined Categories
+```bash
+echo '{
+  "action": "add_establishment",
+  "name": "iFood",
+  "pattern": "ifood",
+  "category": "Ifood"
+}' | finance-assistant
+```
 
-- **Supermercado** - Grocery expenses
-- **Transporte** - Uber, 99 Pop, transportation services
-- **Marmitas** - Day-to-day, healthy and frozen meals
-- **Ifood** - Take-out and delivered food
-- **Assinaturas** - Subscription services
-- **Outros** - Miscellaneous expenses
+Optional `exclude` field: regex to exclude false positives.
 
-### Establishments
+### remove_establishment
 
-Establishments are stored with regex patterns for automatic matching:
-- `name`: Display name (e.g., "Uber")
-- `match_pattern`: Regex pattern to match (e.g., "uber")
-- `exclude_pattern`: Optional regex to exclude false positives
-- `category_id`: Associated category
+Remove an establishment pattern by name.
+
+```bash
+echo '{
+  "action": "remove_establishment",
+  "name": "iFood"
+}' | finance-assistant
+```
+
+### list_establishments
+
+```bash
+echo '{"action": "list_establishments"}' | finance-assistant
+```
+
+### list_categories
+
+```bash
+echo '{"action": "list_categories"}' | finance-assistant
+```
+
+## Classification
+
+Expenses are classified using regex patterns stored in JSON config files. If no pattern matches, the expense gets category "Outros" and the raw description as establishment name.
+
+**Config location:** `/root/.openclaw/workspace/finance-config/`
+- `categories.json` - array of category names
+- `establishments.json` - array of `{name, pattern, category, exclude?}`
+
+Config is created from defaults on first run and persists across container restarts. The agent can modify patterns via `add_establishment`/`remove_establishment`.
+
+## Month Formats
+
+Case-insensitive:
+- **Portuguese:** Janeiro, Fevereiro, Março, ..., Jan, Fev, Mar, ...
+- **English:** January, February, March, ..., Jan, Feb, Mar, ...
 
 ## Google Sheets Structure
 
-### Organization
-
 ```
-Spreadsheet: "{YEAR}" (e.g., "2025", "2026")
+Spreadsheet: "{YEAR}" (e.g., "2025")
 ├── Worksheet: "Jan"
-│   ├── Table: "Cartão Jan" (Credit card expenses)
-│   └── Table: "Despesas Jan" (General expenses)
-├── Worksheet: "Fev"
-│   ├── Table: "Cartão Fev"
-│   └── Table: "Despesas Fev"
-└── ... (all 12 months)
+│   ├── Table: "Cartao Jan" (credit card expenses)
+│   └── Table: "Despesas Jan" (general expenses)
+└── ...
 ```
 
-### Cartão Table Schema
+### Cartao Table Schema
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -200,209 +130,12 @@ Spreadsheet: "{YEAR}" (e.g., "2025", "2026")
 | Valor | Number | Amount in BRL |
 | Texto Compra | Text | Original transaction description |
 
-### Despesas Table Schema
+## Billing Cycle
 
-| Column | Type | Description |
-|--------|------|-------------|
-| Despesa | Text | Expense description |
-| Valor | Number | Amount in BRL |
-
-## Historical Queries (gogcli)
-
-For complex historical queries, use gogcli commands directly.
-
-**Note:** This gogcli build does NOT have `gog sheets list`. Use `gog drive search` instead.
-JSON responses use `result["data"]["files"]` for drive searches and `result["data"]["tables"]` for table lists.
-Table objects use `tableName` and `tableId` (not `name`/`id`).
-
-### List All Spreadsheets
-
-```bash
-gog drive search 'type:spreadsheet'
-```
-
-### List Tables in a Spreadsheet
-
-```bash
-gog sheets table list <spreadsheet-id> --json
-```
-
-### Get Table Data
-
-```bash
-# Get all data from a credit card table
-gog sheets table get <spreadsheet-id> <table-id> --json
-
-# Example: Get Cartão Jan from 2025 spreadsheet
-# 1. Find spreadsheet: gog drive search 'type:spreadsheet 2025' --json
-#    → result["data"]["files"], match by file["name"] == "2025", get file["id"]
-# 2. Find table: gog sheets table list <id> --json
-#    → result["data"]["tables"], match by table["tableName"] == "Cartão Jan", get table["tableId"]
-# 3. Get data: gog sheets table get <spreadsheet-id> <table-id> --json
-```
-
-### Calculate Aggregations
-
-```bash
-# Get all data and calculate sum
-gog sheets table get <spreadsheet-id> <table-id> --json --select=data | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-rows = data.get('data', [])
-total = sum(float(row[3].replace('R$', '').replace('.', '').replace(',', '.')) for row in rows)
-print(f'Total: R\$ {total:.2f}')
-"
-```
-
-## Consultation Examples
-
-### Example 1: Total spent on Transporte in January 2025
-
-```bash
-# 1. Get spreadsheet ID for 2025
-SPREADSHEET_ID=$(gog drive search "type:spreadsheet '2025'" --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([f['id'] for f in d['data']['files'] if f['name']=='2025'][0])")
-
-# 2. Get Cartão Jan table ID
-TABLE_ID=$(gog sheets table list $SPREADSHEET_ID --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([t['tableId'] for t in d['data']['tables'] if t['tableName']=='Cartão Jan'][0])")
-
-# 3. Get data and filter by category
-gog sheets table get $SPREADSHEET_ID $TABLE_ID --json --select=data | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-rows = data.get('data', [])
-transporte_total = 0
-for row in rows:
-    if len(row) >= 4 and row[2] == 'Transporte':
-        valor = float(row[3].replace('R$', '').replace('.', '').replace(',', '.'))
-        transporte_total += valor
-print(f'Total em Transporte (Jan/2025): R\$ {transporte_total:.2f}')
-"
-```
-
-### Example 2: Average monthly spending on Aluguel
-
-```bash
-# Query Despesas tables across multiple months
-YEAR=2025
-SPREADSHEET_ID=$(gog drive search "type:spreadsheet '$YEAR'" --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([f['id'] for f in d['data']['files'] if f['name']=='$YEAR'][0])")
-
-for month in Jan Fev Mar Abr Mai Jun; do
-    TABLE_NAME="Despesas $month"
-    TABLE_ID=$(gog sheets table list $SPREADSHEET_ID --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([t['tableId'] for t in d['data']['tables'] if t['tableName']=='$TABLE_NAME'][0])" 2>/dev/null)
-    if [ ! -z "$TABLE_ID" ]; then
-        gog sheets table get $SPREADSHEET_ID $TABLE_ID --json --select=data | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for row in data.get('data', []):
-    if len(row) >= 2 and row[0] == 'Aluguel':
-        print(f'$month: {row[1]}')
-"
-    fi
-done
-```
-
-### Example 3: Compare Supermercado expenses month-over-month
-
-```bash
-YEAR=2025
-SPREADSHEET_ID=$(gog drive search "type:spreadsheet '$YEAR'" --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([f['id'] for f in d['data']['files'] if f['name']=='$YEAR'][0])")
-
-python3 << EOF
-import subprocess
-import json
-
-months = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
-results = {}
-
-for month in months:
-    try:
-        result = subprocess.run(
-            ["gog", "sheets", "table", "list", "$SPREADSHEET_ID", "--json"],
-            capture_output=True, text=True
-        )
-        tables_data = json.loads(result.stdout)["data"]["tables"]
-        table_id = None
-        for t in tables_data:
-            if t["tableName"] == f"Cartão {month}":
-                table_id = t["tableId"]
-                break
-        
-        if table_id:
-            result = subprocess.run(
-                ["gog", "sheets", "table", "get", "$SPREADSHEET_ID", table_id, "--json"],
-                capture_output=True, text=True
-            )
-            data = json.loads(result.stdout)
-            total = 0
-            for row in data.get('data', []):
-                if len(row) >= 4 and row[2] == 'Supermercado':
-                    valor = float(row[3].replace('R$', '').replace('.', '').replace(',', '.'))
-                    total += valor
-            results[month] = total
-            print(f"{month}: R$ {total:.2f}")
-    except Exception as e:
-        print(f"{month}: Error - {e}")
-
-if results:
-    avg = sum(results.values()) / len(results)
-    print(f"\\nMédia: R$ {avg:.2f}")
-EOF
-```
-
-## Month Formats
-
-The skill accepts months in multiple formats (case-insensitive):
-
-**Portuguese:**
-- Full names: Janeiro, Fevereiro, Março, Abril, Maio, Junho, Julho, Agosto, Setembro, Outubro, Novembro, Dezembro
-- Abbreviations: Jan, Fev, Mar, Abr, Mai, Jun, Jul, Ago, Set, Out, Nov, Dez
-
-**English:**
-- Full names: January, February, March, April, May, June, July, August, September, October, November, December
-- Abbreviations: Jan, Feb, Mar, Apr, May, Jun, Jul, Aug, Sep, Oct, Nov, Dec
-
-## Error Handling
-
-The skill returns structured error responses:
-
-```json
-{
-  "success": false,
-  "error": "Descriptive error message",
-  "details": "Additional context if available"
-}
-```
-
-Common errors:
-- Missing input
-- Invalid JSON
-- PDF extraction failure
-- Spreadsheet not found
-- Table not found
-- Authentication issues (gogcli not authenticated)
+ALL extracted expenses go to the specified month's table, regardless of individual transaction dates. This includes purchases from previous months and refunds/credits.
 
 ## Dependencies
 
 - Python 3
-- pymupdf (PDF text extraction)
+- pymupdf
 - gogcli (Google Sheets operations)
-
-## Files
-
-- `finance-assistant` - Main executable
-- `scripts/database.py` - SQLite database operations
-- `scripts/models.py` - Data models
-- `scripts/data_extractor.py` - PDF text extraction
-- `scripts/data_parser.py` - Expense parsing and validation
-- `scripts/classifier.py` - Expense classification
-- `scripts/establishment_matcher.py` - Regex pattern matching
-- `scripts/pdf_processor.py` - PDF processing orchestration
-- `scripts/sheets_manager.py` - Google Sheets interface
-- `scripts/month_utils.py` - Month utilities and suggestions
-
-## Notes
-
-- Payment entries ("PAGAMENTO DB DIRETO CONTA") are automatically filtered out
-- Brazilian currency format is properly handled (R$ 1.234,56)
-- Year logic: December transactions are assigned to previous year
-- Database persists across container restarts in workspace volume

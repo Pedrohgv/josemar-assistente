@@ -1,0 +1,67 @@
+[
+  {
+    "name": "HBO",
+    "pattern": "hbomax",
+    "category": "Assinaturas"
+  },
+  {
+    "name": "Netflix",
+    "pattern": "netflix",
+    "category": "Assinaturas"
+  },
+  {
+    "name": "Prime",
+    "pattern": "google prime video",
+    "category": "Assinaturas"
+  },
+  {
+    "name": "Spotify",
+    "pattern": "spotify",
+    "category": "Assinaturas"
+  },
+  {
+    "name": "Youtube",
+    "pattern": "google youtube",
+    "category": "Assinaturas"
+  },
+  {
+    "name": "IFood",
+    "pattern": "ifood|ifd",
+    "category": "Ifood"
+  },
+  {
+    "name": "Cozinha da Barbara",
+    "pattern": "cozinhadabárbara|cozinhadabarbara",
+    "category": "Marmitas"
+  },
+  {
+    "name": "Livup",
+    "pattern": "livup|liv up",
+    "category": "Marmitas"
+  },
+  {
+    "name": "Carone",
+    "pattern": "carone",
+    "category": "Supermercado"
+  },
+  {
+    "name": "Carrefour",
+    "pattern": "carrefour",
+    "category": "Supermercado"
+  },
+  {
+    "name": "ExtraPlus",
+    "pattern": "extraplus",
+    "category": "Supermercado"
+  },
+  {
+    "name": "99 Pop",
+    "pattern": "99",
+    "category": "Transporte"
+  },
+  {
+    "name": "Uber",
+    "pattern": "uber",
+    "category": "Transporte"
+  }
+]

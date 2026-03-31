@@ -1,1 +1,0 @@
-# Finance Assistant Scripts Package

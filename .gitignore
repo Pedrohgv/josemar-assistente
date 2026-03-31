@@ -25,6 +25,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!repo-skills/**/lib/
 lib64/
 parts/
 sdist/

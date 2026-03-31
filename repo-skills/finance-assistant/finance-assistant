@@ -1,163 +1,147 @@
 #!/usr/bin/env python3
-"""
-Finance Assistant Skill for OpenClaw
-
-Handles:
-- PDF credit card invoice extraction and classification
-- Credit card expense registration to Google Sheets
-- General expense registration to Google Sheets
-- Month selection logic
-
-Usage:
-    echo '{"action": "extract", "pdf_path": "/path/to/invoice.pdf"}' | finance-assistant
-    echo '{"action": "extract", "text": "raw invoice text..."}' | finance-assistant
-    echo '{"action": "suggest_month"}' | finance-assistant
-    echo '{"action": "register_credit_card", "expenses": {...}, "month": "Jan", "year": 2025}' | finance-assistant
-    echo '{"action": "register_general", "description": "Aluguel", "amount": 1500.00, "month": "Jan", "year": 2025}' | finance-assistant
-"""
 
 import sys
-import json
 import os
+import json
+import traceback
 
-# Add scripts directory to path
-scripts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts')
-if scripts_dir not in sys.path:
-    sys.path.insert(0, scripts_dir)
+lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib')
+if lib_dir not in sys.path:
+    sys.path.insert(0, lib_dir)
 
-from database import Database
-from pdf_processor import process_pdf, process_text
-from sheets_manager import append_credit_card_expenses, update_general_expense
-from month_utils import get_month_suggestion_message
+def action_register(data):
+    pdf_path = data.get('pdf_path')
+    month = data.get('month')
+    year = data.get('year')
+
+    if not all([pdf_path, month, year]):
+        return {"success": False, "error": "Missing required fields: pdf_path, month, year"}
+
+    if not os.path.exists(pdf_path):
+        return {"success": False, "error": f"PDF not found: {pdf_path}"}
+
+    from pdf_extractor import extract_text
+    from expense_parser import extract_total, extract_expenses
+    from classifier import classify_expenses
+    from sheets_writer import append_expenses
+
+    try:
+        raw_text = extract_text(pdf_path)
+    except Exception as e:
+        return {"success": False, "error": f"Failed to extract PDF text: {e}"}
+
+    total_str = extract_total(raw_text)
+    if not total_str:
+        return {"success": False, "error": "Could not extract total from PDF"}
+
+    expenses = extract_expenses(raw_text, total_str)
+    if not expenses:
+        return {"success": False, "error": "No expenses found in PDF"}
+
+    classified, unclassified = classify_expenses(expenses)
+
+    result = append_expenses(year, month, classified)
+    if not result['success']:
+        return result
+
+    result['unclassified'] = unclassified if unclassified else None
+    result['total_expense'] = total_str
+    return result
+
+
+def action_add_establishment(data):
+    from classifier import add_establishment as add_est
+    name = data.get('name')
+    pattern = data.get('pattern')
+    category = data.get('category')
+    exclude = data.get('exclude')
+
+    if not all([name, pattern, category]):
+        return {"success": False, "error": "Missing required fields: name, pattern, category"}
+
+    ok, msg = add_est(name, pattern, category, exclude)
+    return {"success": ok, "message": msg}
+
+
+def action_remove_establishment(data):
+    from classifier import remove_establishment as remove_est
+    name = data.get('name')
+    if not name:
+        return {"success": False, "error": "Missing required field: name"}
+
+    ok, msg = remove_est(name)
+    return {"success": ok, "message": msg}
+
+
+def action_list_establishments(_data):
+    from classifier import list_establishments
+    return {"success": True, "establishments": list_establishments()}
+
+
+def action_list_categories(_data):
+    from classifier import list_categories
+    return {"success": True, "categories": list_categories()}
+
+
+ACTIONS = {
+    'register': action_register,
+    'add_establishment': action_add_establishment,
+    'remove_establishment': action_remove_establishment,
+    'list_establishments': action_list_establishments,
+    'list_categories': action_list_categories,
+}
 
 
 def main():
-    """Main entry point for the finance-assistant skill."""
     try:
-        # Read input from stdin
         input_data = sys.stdin.read().strip()
-        
+
         if not input_data:
-            # No input provided
             result = {
                 "success": False,
                 "error": "No input provided",
                 "usage": {
-                    "description": "Finance Assistant Skill for expense tracking",
+                    "description": "Finance Assistant - credit card expense tracking",
                     "actions": [
-                        {
-                            "action": "extract",
-                            "description": "Extract expenses from PDF or text",
-                            "examples": [
-                                '{"action": "extract", "pdf_path": "/path/to/invoice.pdf"}',
-                                '{"action": "extract", "text": "raw invoice text..."}'
-                            ]
-                        },
-                        {
-                            "action": "suggest_month",
-                            "description": "Get month suggestion based on current date"
-                        },
-                        {
-                            "action": "register_credit_card",
-                            "description": "Register credit card expenses to Google Sheets",
-                            "example": '{"action": "register_credit_card", "expenses": {"Data": [...], "Estabelecimento": [...], "Categoria": [...], "Valor": [...], "Texto Compra": [...]}, "month": "Jan", "year": 2025}'
-                        },
-                        {
-                            "action": "register_general",
-                            "description": "Register/update general expense to Google Sheets",
-                            "example": '{"action": "register_general", "description": "Aluguel", "amount": 1500.00, "month": "Jan", "year": 2025}'
-                        }
-                    ]
-                }
+                        {"action": "register", "description": "Extract, classify and register expenses from PDF", "example": '{"action": "register", "pdf_path": "/path/to/invoice.pdf", "month": "Jan", "year": 2025}'},
+                        {"action": "add_establishment", "description": "Add establishment pattern", "example": '{"action": "add_establishment", "name": "Uber", "pattern": "uber", "category": "Transporte"}'},
+                        {"action": "remove_establishment", "description": "Remove establishment pattern", "example": '{"action": "remove_establishment", "name": "Uber"}'},
+                        {"action": "list_establishments", "description": "List all establishment patterns"},
+                        {"action": "list_categories", "description": "List all categories"},
+                    ],
+                },
             }
             print(json.dumps(result, indent=2, ensure_ascii=False))
             sys.exit(1)
-        
-        # Parse JSON input
+
         try:
             data = json.loads(input_data)
         except json.JSONDecodeError as e:
-            result = {
-                "success": False,
-                "error": f"Invalid JSON input: {str(e)}"
-            }
+            result = {"success": False, "error": f"Invalid JSON: {e}"}
             print(json.dumps(result, indent=2, ensure_ascii=False))
             sys.exit(1)
-        
-        action = data.get("action")
-        
-        if action == "extract":
-            # Initialize database
-            db = Database()
-            
-            # Check if PDF path or text provided
-            pdf_path = data.get("pdf_path")
-            text = data.get("text")
-            
-            if pdf_path:
-                result = process_pdf(pdf_path, db)
-            elif text:
-                result = process_text(text, db)
-            else:
-                result = {
-                    "success": False,
-                    "error": "Either 'pdf_path' or 'text' must be provided for extract action"
-                }
-        
-        elif action == "suggest_month":
-            result = get_month_suggestion_message()
-            result["success"] = True
-        
-        elif action == "register_credit_card":
-            expenses = data.get("expenses")
-            month = data.get("month")
-            year = data.get("year")
-            
-            if not all([expenses, month, year]):
-                result = {
-                    "success": False,
-                    "error": "Missing required fields: expenses, month, year"
-                }
-            else:
-                result = append_credit_card_expenses(year, month, expenses)
-        
-        elif action == "register_general":
-            description = data.get("description")
-            amount = data.get("amount")
-            month = data.get("month")
-            year = data.get("year")
-            
-            if not all([description, amount is not None, month, year]):
-                result = {
-                    "success": False,
-                    "error": "Missing required fields: description, amount, month, year"
-                }
-            else:
-                result = update_general_expense(year, month, description, amount)
-        
-        else:
+
+        action = data.get('action')
+        handler = ACTIONS.get(action)
+
+        if not handler:
             result = {
                 "success": False,
                 "error": f"Unknown action: {action}",
-                "valid_actions": ["extract", "suggest_month", "register_credit_card", "register_general"]
+                "valid_actions": list(ACTIONS.keys()),
             }
-        
-        # Output result
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            sys.exit(1)
+
+        result = handler(data)
         print(json.dumps(result, indent=2, ensure_ascii=False))
-        
-        # Exit with appropriate code
-        sys.exit(0 if result.get("success") else 1)
-        
+        sys.exit(0 if result.get('success') else 1)
+
     except Exception as e:
-        import traceback
-        result = {
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }
+        result = {"success": False, "error": str(e), "traceback": traceback.format_exc()}
         print(json.dumps(result, indent=2, ensure_ascii=False))
         sys.exit(1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
