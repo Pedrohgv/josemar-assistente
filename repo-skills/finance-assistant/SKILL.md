@@ -209,60 +209,48 @@ Spreadsheet: "{YEAR}" (e.g., "2025", "2026")
 
 ## Historical Queries (gogcli)
 
-For complex historical queries, use gogcli commands directly:
+For complex historical queries, use gogcli commands directly.
+
+**Note:** This gogcli build does NOT have `gog sheets list`. Use `gog drive search` instead.
+JSON responses use `result["data"]["files"]` for drive searches and `result["data"]["tables"]` for table lists.
+Table objects use `tableName` and `tableId` (not `name`/`id`).
 
 ### List All Spreadsheets
 
 ```bash
-gog sheets list
+gog drive search 'type:spreadsheet'
 ```
 
 ### List Tables in a Spreadsheet
 
 ```bash
-gog sheets table list <spreadsheet-id>
+gog sheets table list <spreadsheet-id> --json
 ```
 
 ### Get Table Data
 
 ```bash
 # Get all data from a credit card table
-gog sheets table get <spreadsheet-id> <table-id>
+gog sheets table get <spreadsheet-id> <table-id> --json
 
 # Example: Get Cartão Jan from 2025 spreadsheet
-# First get spreadsheet ID for "2025"
-# Then get table ID for "Cartão Jan"
-# Finally: gog sheets table get <spreadsheet-id> <table-id> --json
-```
-
-### Query by Establishment
-
-```bash
-# Export table to CSV and filter
-gog sheets table get <spreadsheet-id> <table-id> --format csv > cartao_jan.csv
-# Then filter by establishment using standard tools
-```
-
-### Query Multiple Months
-
-```bash
-# Script to query multiple months
-for month in Jan Fev Mar; do
-    echo "=== Cartão $month ==="
-    gog sheets table get <spreadsheet-id> "Cartão $month" --json
-done
+# 1. Find spreadsheet: gog drive search 'type:spreadsheet 2025' --json
+#    → result["data"]["files"], match by file["name"] == "2025", get file["id"]
+# 2. Find table: gog sheets table list <id> --json
+#    → result["data"]["tables"], match by table["tableName"] == "Cartão Jan", get table["tableId"]
+# 3. Get data: gog sheets table get <spreadsheet-id> <table-id> --json
 ```
 
 ### Calculate Aggregations
 
 ```bash
 # Get all data and calculate sum
-# This returns JSON that can be processed with jq or Python
-gog sheets table get <spreadsheet-id> <table-id> --json | python3 -c "
+gog sheets table get <spreadsheet-id> <table-id> --json --select=data | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
-total = sum(float(row[3].replace('R$', '').replace('.', '').replace(',', '.')) for row in data['data'])
-print(f'Total: R$ {total:.2f}')
+rows = data.get('data', [])
+total = sum(float(row[3].replace('R$', '').replace('.', '').replace(',', '.')) for row in rows)
+print(f'Total: R\$ {total:.2f}')
 "
 ```
 
@@ -272,22 +260,22 @@ print(f'Total: R$ {total:.2f}')
 
 ```bash
 # 1. Get spreadsheet ID for 2025
-SPREADSHEET_ID=$(gog sheets list --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([s['id'] for s in d if s['name']=='2025'][0])")
+SPREADSHEET_ID=$(gog drive search "type:spreadsheet '2025'" --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([f['id'] for f in d['data']['files'] if f['name']=='2025'][0])")
 
 # 2. Get Cartão Jan table ID
-TABLE_ID=$(gog sheets table list $SPREADSHEET_ID --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([t['id'] for t in d if t['name']=='Cartão Jan'][0])")
+TABLE_ID=$(gog sheets table list $SPREADSHEET_ID --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([t['tableId'] for t in d['data']['tables'] if t['tableName']=='Cartão Jan'][0])")
 
 # 3. Get data and filter by category
-gog sheets table get $SPREADSHEET_ID $TABLE_ID --json | python3 -c "
+gog sheets table get $SPREADSHEET_ID $TABLE_ID --json --select=data | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 rows = data.get('data', [])
 transporte_total = 0
 for row in rows:
-    if len(row) >= 4 and row[2] == 'Transporte':  # Categoria column
+    if len(row) >= 4 and row[2] == 'Transporte':
         valor = float(row[3].replace('R$', '').replace('.', '').replace(',', '.'))
         transporte_total += valor
-print(f'Total em Transporte (Jan/2025): R$ {transporte_total:.2f}')
+print(f'Total em Transporte (Jan/2025): R\$ {transporte_total:.2f}')
 "
 ```
 
@@ -296,13 +284,13 @@ print(f'Total em Transporte (Jan/2025): R$ {transporte_total:.2f}')
 ```bash
 # Query Despesas tables across multiple months
 YEAR=2025
-SPREADSHEET_ID=$(gog sheets list --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([s['id'] for s in d if s['name']=='$YEAR'][0])")
+SPREADSHEET_ID=$(gog drive search "type:spreadsheet '$YEAR'" --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([f['id'] for f in d['data']['files'] if f['name']=='$YEAR'][0])")
 
 for month in Jan Fev Mar Abr Mai Jun; do
     TABLE_NAME="Despesas $month"
-    TABLE_ID=$(gog sheets table list $SPREADSHEET_ID --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([t['id'] for t in d if t['name']=='$TABLE_NAME'][0])" 2>/dev/null)
+    TABLE_ID=$(gog sheets table list $SPREADSHEET_ID --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([t['tableId'] for t in d['data']['tables'] if t['tableName']=='$TABLE_NAME'][0])" 2>/dev/null)
     if [ ! -z "$TABLE_ID" ]; then
-        gog sheets table get $SPREADSHEET_ID $TABLE_ID --json | python3 -c "
+        gog sheets table get $SPREADSHEET_ID $TABLE_ID --json --select=data | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 for row in data.get('data', []):
@@ -317,7 +305,7 @@ done
 
 ```bash
 YEAR=2025
-SPREADSHEET_ID=$(gog sheets list --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([s['id'] for s in d if s['name']=='$YEAR'][0])")
+SPREADSHEET_ID=$(gog drive search "type:spreadsheet '$YEAR'" --json | python3 -c "import json,sys; d=json.load(sys.stdin); print([f['id'] for f in d['data']['files'] if f['name']=='$YEAR'][0])")
 
 python3 << EOF
 import subprocess
@@ -328,20 +316,18 @@ results = {}
 
 for month in months:
     try:
-        # Get table ID
         result = subprocess.run(
             ["gog", "sheets", "table", "list", "$SPREADSHEET_ID", "--json"],
             capture_output=True, text=True
         )
-        tables = json.loads(result.stdout)
+        tables_data = json.loads(result.stdout)["data"]["tables"]
         table_id = None
-        for t in tables:
-            if t['name'] == f"Cartão {month}":
-                table_id = t['id']
+        for t in tables_data:
+            if t["tableName"] == f"Cartão {month}":
+                table_id = t["tableId"]
                 break
         
         if table_id:
-            # Get table data
             result = subprocess.run(
                 ["gog", "sheets", "table", "get", "$SPREADSHEET_ID", table_id, "--json"],
                 capture_output=True, text=True
@@ -357,7 +343,6 @@ for month in months:
     except Exception as e:
         print(f"{month}: Error - {e}")
 
-# Calculate average
 if results:
     avg = sum(results.values()) / len(results)
     print(f"\\nMédia: R$ {avg:.2f}")

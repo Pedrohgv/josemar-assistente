@@ -87,12 +87,20 @@ If both directories contain a skill with the same name, the **runtime skill wins
 
 ## Current Implementation
 
-The only skill currently implemented is **PDF Extractor** at `skills/pdf-extractor/`.
+### finance-assistant
+- **Location**: `finance-assistant/`
+- **Purpose**: Complete financial tracking - PDF extraction, classification, Google Sheets registration
+- **Actions**: extract, suggest_month, register_credit_card, register_general
+- **Categories**: finance, pdf, google-sheets, brazilian, expenses
 
-- **Purpose**: Extracts data from Brazilian credit card invoice PDFs
-- **Input**: PDF file path or raw text (via stdin)
-- **Output**: JSON with extracted expenses
-- **Implementation**: Python script at `scripts/pdf_extractor.py`
+### gogcli-tables
+- **Location**: `gogcli-tables/`
+- **Purpose**: Google Workspace CLI with Sheets Table manipulation support
+- **Categories**: google-workspace, sheets, tables
+
+### pdf-extractor
+- **Location**: `pdf-extractor/`
+- **Purpose**: Basic PDF text extraction from Brazilian credit card invoices
 - **Categories**: pdf, finance, extraction, brazilian
 
 ## Skill Structure

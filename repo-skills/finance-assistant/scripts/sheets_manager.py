@@ -58,18 +58,19 @@ def get_spreadsheet_id_by_year(year: int) -> Optional[str]:
     Returns:
         Spreadsheet ID or None if not found
     """
-    result = run_gog_command(["sheets", "list"])
+    # Use drive search to find spreadsheets (sheets list command doesn't exist)
+    result = run_gog_command(["drive", "search", f"type:spreadsheet '{year}'"])
     
     if not result["success"]:
-        logger.error(f"Failed to list sheets: {result.get('error')}")
+        logger.error(f"Failed to search for spreadsheet: {result.get('error')}")
         return None
     
-    sheets = result["data"]
+    files = result["data"].get("files", [])
     year_str = str(year)
     
-    for sheet in sheets:
-        if sheet.get("name") == year_str:
-            return sheet.get("id")
+    for file in files:
+        if file.get("name") == year_str:
+            return file.get("id")
     
     return None
 
@@ -91,11 +92,11 @@ def get_table_id(spreadsheet_id: str, table_name: str) -> Optional[str]:
         logger.error(f"Failed to list tables: {result.get('error')}")
         return None
     
-    tables = result["data"]
+    tables = result["data"].get("tables", [])
     
     for table in tables:
-        if table.get("name") == table_name:
-            return table.get("id")
+        if table.get("tableName") == table_name:
+            return table.get("tableId")
     
     return None
 
@@ -155,12 +156,12 @@ def append_credit_card_expenses(
         ]
         rows.append(row)
     
-    # Build gogcli command
+    # Build gogcli command using --values-json flag (required for proper parsing)
     rows_json = json.dumps(rows)
     result = run_gog_command([
         "sheets", "table", "append",
         spreadsheet_id, table_id,
-        rows_json
+        f"--values-json={rows_json}"
     ])
     
     if result["success"]:
