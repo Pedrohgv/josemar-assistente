@@ -3,15 +3,15 @@
 
 set -e
 
-echo "🔧 Starting Josemar Assistente..."
+echo "Starting Josemar Assistente..."
 
 # Check for required environment variables
 if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-    echo "⚠️  TELEGRAM_BOT_TOKEN not set. Telegram channel will not work."
+    echo "WARNING: TELEGRAM_BOT_TOKEN not set. Telegram channel will not work."
 fi
 
 if [ -z "$ZAI_API_KEY" ]; then
-    echo "⚠️  ZAI_API_KEY not set. Z.AI provider will not work."
+    echo "WARNING: ZAI_API_KEY not set. Z.AI provider will not work."
 fi
 
 # Create .openclaw directory if it doesn't exist
@@ -19,78 +19,46 @@ mkdir -p /root/.openclaw
 
 # If config directory is mounted, ensure it's copied correctly
 if [ -d "/root/.openclaw-source" ]; then
-    echo "📋 Copying configuration from source..."
+    echo "Copying configuration from source..."
     cp -r /root/.openclaw-source/* /root/.openclaw/ 2>/dev/null || true
+fi
+
+# Copy credentials from read-only mount to writable location
+# Structure: credentials/<service>/<files> -> /root/.openclaw/credentials/<service>/<files>
+if [ -d "/root/.openclaw-credentials" ]; then
+    echo "Mounting credentials..."
+    for service_dir in /root/.openclaw-credentials/*/; do
+        [ -d "$service_dir" ] || continue
+        service_name=$(basename "$service_dir")
+        mkdir -p "/root/.openclaw/credentials/$service_name"
+        cp -r "$service_dir"* "/root/.openclaw/credentials/$service_name/" 2>/dev/null || true
+    done
 fi
 
 # Copy avatars to workspace
 if [ -d "/root/.openclaw-source/avatars" ]; then
-    echo "📸 Copying avatars to workspace..."
+    echo "Copying avatars to workspace..."
     mkdir -p /root/.openclaw/workspace/avatars
     cp -r /root/.openclaw-source/avatars/* /root/.openclaw/workspace/avatars/
 fi
 
 # ============================================
-# REPO SKILLS DEPLOYMENT
+# WORKSPACE GIT SYNC
 # ============================================
-if [ -d "/root/.openclaw-source-skills" ]; then
-    echo "📦 Deploying repo-maintained skills..."
-    mkdir -p /root/.openclaw/repo-skills
-    
-    # Parse force overwrite list (handle empty value) - POSIX sh compatible
-    FORCE_LIST=""
-    if [ -n "$FORCE_OVERWRITE_SKILLS" ]; then
-        # Convert comma-separated to space-separated for POSIX sh
-        FORCE_LIST=$(echo "$FORCE_OVERWRITE_SKILLS" | tr ',' ' ')
-    fi
-    
-    # Check if there are any skills to deploy
-    if [ -n "$(ls -A /root/.openclaw-source-skills/ 2>/dev/null)" ]; then
-        for skill_source in /root/.openclaw-source-skills/*; do
-            [ -d "$skill_source" ] || continue  # Skip non-directories
-            
-            skill_name=$(basename "$skill_source")
-            skill_dest="/root/.openclaw/repo-skills/$skill_name"
-            
-            # Check if this skill is in the force overwrite list
-            force_overwrite=false
-            if [ -n "$FORCE_LIST" ]; then
-                for forced_skill in $FORCE_LIST; do
-                    if [ "$forced_skill" = "$skill_name" ]; then
-                        force_overwrite=true
-                        break
-                    fi
-                done
-            fi
-            
-            if [ -e "$skill_dest" ]; then
-                if [ "$force_overwrite" = true ]; then
-                    echo "   🔄 Force overwriting $skill_name"
-                    rm -rf "$skill_dest"
-                    cp -r "$skill_source" "$skill_dest"
-                else
-                    echo "   ⏭️  Skipping $skill_name (already exists - preserving agent version)"
-                fi
-            else
-                echo "   📥 Copying $skill_name"
-                cp -r "$skill_source" "$skill_dest"
-            fi
-        done
-        echo "✅ Repo skills deployment complete"
-    else
-        echo "   ℹ️  No skills found in source directory"
-    fi
+if [ -n "$WORKSPACE_STATE_REPO" ]; then
+    echo "Running workspace git sync..."
+    /usr/local/bin/workspace-sync.sh
 else
-    echo "ℹ️  No repo skills to deploy (source directory not mounted)"
+    echo "WORKSPACE_STATE_REPO not configured, skipping git sync"
 fi
 
 # ============================================
 # VALIDATION
 # ============================================
 if [ -f /root/.openclaw/openclaw.json ]; then
-    echo "✅ Configuration file found"
+    echo "Configuration file found"
 else
-    echo "❌ Configuration file not found at /root/.openclaw/openclaw.json"
+    echo "ERROR: Configuration file not found at /root/.openclaw/openclaw.json"
     echo "   Make sure config directory is mounted correctly."
     exit 1
 fi
@@ -104,14 +72,14 @@ fi
 # Convert string "true"/"false" to proper boolean in config
 if [ -f /root/.openclaw/openclaw.json ]; then
     if [ "${TELEGRAM_ENABLED}" = "false" ]; then
-        echo "📵 Disabling Telegram channel (TELEGRAM_ENABLED=false)"
+        echo "Disabling Telegram channel (TELEGRAM_ENABLED=false)"
         sed -i 's/enabled: "${TELEGRAM_ENABLED}"/enabled: false/g' /root/.openclaw/openclaw.json
     else
-        echo "📱 Enabling Telegram channel (TELEGRAM_ENABLED=true or not set)"
+        echo "Enabling Telegram channel (TELEGRAM_ENABLED=true or not set)"
         sed -i 's/enabled: "${TELEGRAM_ENABLED}"/enabled: true/g' /root/.openclaw/openclaw.json
     fi
 fi
 
 # Run OpenClaw
-echo "🚀 Starting OpenClaw gateway..."
+echo "Starting OpenClaw gateway..."
 exec "$@"

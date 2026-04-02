@@ -1,0 +1,14 @@
+# AGENTS.md
+
+Operating instructions for the Josemar agent.
+
+## Memory Management
+
+- Read `MEMORY.md` on session start for long-term context
+- Read today's and yesterday's memory log from `memory/`
+- Write daily memory logs to `memory/YYYY-MM-DD.md`
+- Update `MEMORY.md` with important long-term facts
+
+## Workspace Sync
+
+This workspace is a git repo that auto-syncs to a private remote. Only files listed in `.sync-manifest` are versioned.

@@ -8,13 +8,11 @@ services:
       - ./config:/root/.openclaw-source:ro
       # Use named volume for ALL persistent OpenClaw state (devices, workspace, sessions, etc.)
       - openclaw-workspace:/root/.openclaw
-      # Optional: mount scripts directory for development
-      # - ./scripts:/app/scripts:ro
-      # Mount repo-maintained skills directory
-      - ./repo-skills:/root/.openclaw-source-skills:ro
+      # Mount agent-state submodule to workspace for git sync
+      - ./agent-state:/root/.openclaw-source-agent-state:ro
       # Mount credentials directory to OpenClaw standard location
       # Follows convention: ~/.openclaw/credentials/<service>/
-      - ./credentials/gogcli:/root/.openclaw/credentials/gogcli:ro
+      - ./credentials:/root/.openclaw-credentials:ro
     environment:
       # Environment variables for API keys (to be set in .env file)
       - ZAI_API_KEY=${ZAI_API_KEY:-}
@@ -29,8 +27,15 @@ services:
       # Additional users can be added here following the pattern:
       # - ALICE_TELEGRAM_ID=${ALICE_TELEGRAM_ID:-}
       # - BOB_TELEGRAM_ID=${BOB_TELEGRAM_ID:-}
-      # Skills deployment configuration
-      - FORCE_OVERWRITE_SKILLS=${FORCE_OVERWRITE_SKILLS:-}
+      # Agent state repository configuration
+      - WORKSPACE_STATE_REPO=${WORKSPACE_STATE_REPO:-}
+      - WORKSPACE_REPO_TOKEN=${WORKSPACE_REPO_TOKEN:-}
+      - WORKSPACE_SYNC_ON_START=${WORKSPACE_SYNC_ON_START:-true}
+      - WORKSPACE_SYNC_INTERVAL=${WORKSPACE_SYNC_INTERVAL:-60}
+      - WORKSPACE_MEMORY_DAYS=${WORKSPACE_MEMORY_DAYS:-30}
+      - WORKSPACE_GIT_BRANCH=${WORKSPACE_GIT_BRANCH:-main}
+      - WORKSPACE_GIT_USER_EMAIL=${WORKSPACE_GIT_USER_EMAIL:-agent@josemar.local}
+      - WORKSPACE_GIT_USER_NAME=${WORKSPACE_GIT_USER_NAME:-Josemar Agent}
       # Other environment variables
       - OPENCLAW_LOG_LEVEL=info
     ports:

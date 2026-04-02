@@ -12,8 +12,8 @@ FROM ghcr.io/openclaw/openclaw:latest
 # Switch to root user to install packages
 USER root
 
-# Install Python and PDF processing dependencies
-RUN apt-get update && apt-get install -y python3 python3-pip \
+# Install Python, PDF processing dependencies, and git (for workspace sync)
+RUN apt-get update && apt-get install -y python3 python3-pip git gh \
     && pip3 install --no-cache-dir --break-system-packages pymupdf \
     && rm -rf /var/lib/apt/lists/*
 
@@ -21,8 +21,12 @@ RUN apt-get update && apt-get install -y python3 python3-pip \
 COPY --from=gogcli-builder /build/bin/gog /usr/local/bin/gog
 RUN chmod +x /usr/local/bin/gog
 
-# Create skills directories (skills deployed via volume mount + entrypoint)
-RUN mkdir -p /root/.openclaw/skills /root/.openclaw/repo-skills
+# Create skills directory
+RUN mkdir -p /root/.openclaw/skills
+
+# Copy workspace sync script
+COPY scripts/workspace-sync.sh /usr/local/bin/workspace-sync.sh
+RUN chmod +x /usr/local/bin/workspace-sync.sh
 
 # Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/
