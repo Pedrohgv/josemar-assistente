@@ -594,16 +594,10 @@ No Docker image rebuild is required!
 
 ### 5. Skills
 
-Configure custom skills with a unified skill directory:
+Configure custom skills. OpenClaw auto-discovers skills from the workspace directory.
 
 ```json5
 skills: {
-  // Unified skill directory - all skills in one place
-  load: {
-    extraDirs: [
-      "/root/.openclaw/skills",
-    ]
-  },
   entries: {
     "finance-assistant": {
       enabled: true
@@ -619,16 +613,15 @@ skills: {
 ```
 
 **Skill Configuration Fields:**
-- `load.extraDirs`: Array of directories to scan for skills
 - `entries`: Skill ID (key) with configuration
   - `enabled`: Boolean, if skill is enabled
 
 **Unified Skills System:**
 
-All skills live in `agent-state/skills/` and are versioned in the agent state git repo:
+All skills live in `agent-state/skills/` and are versioned in the agent state git repo. OpenClaw auto-discovers them from the workspace directory.
 
-- **Location**: `/root/.openclaw/skills/` (inside container)
-- **Source**: `agent-state/skills/` in the repository (git submodule)
+- **Location**: `/root/.openclaw/workspace/skills/` (inside container)
+- **Source**: `agent-state/skills/` in the repository
 - **Deployment**: Synced via git on container start
 - **Persistence**: Changes are auto-committed and pushed back to the remote repo
 
@@ -647,7 +640,7 @@ entries: {
 }
 ```
 
-**Note:** Skills are automatically discovered from all directories listed in `load.extraDirs`. The skill ID must match the directory name.
+**Note:** Skills are automatically discovered from the workspace directory. The skill directory name must match the entry key.
 
 ### 6. Agent Prompts and Personality
 
@@ -1122,24 +1115,19 @@ cat config/openclaw.json | jq '.models.providers'
 **Error: "Skill not found"**
 ```bash
 # Check skill directory
-docker-compose exec openclaw ls -la /root/.openclaw/skills/
+docker-compose exec openclaw ls -la /root/.openclaw/workspace/skills/
 
 # Check skill configuration
 cat config/openclaw.json | jq '.skills.entries'
-
-# Verify skill directory name matches configuration
-
-# Check skill loading directories
-cat config/openclaw.json | jq '.skills.load.extraDirs'
 ```
 
 **Error: "Skill execution failed"**
 ```bash
 # Test skill manually
-echo '{"test": "data"}' | docker-compose exec -T openclaw /root/.openclaw/skills/skill-name/skill-name
+echo '{"test": "data"}' | docker-compose exec -T openclaw /root/.openclaw/workspace/skills/skill-name/skill-name
 
 # Check skill permissions
-docker-compose exec openclaw ls -la /root/.openclaw/skills/skill-name/
+docker-compose exec openclaw ls -la /root/.openclaw/workspace/skills/skill-name/
 
 # Check skill dependencies
 docker-compose exec openclaw python3 -c "import required_module"

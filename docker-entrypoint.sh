@@ -47,7 +47,7 @@ fi
 # ============================================
 if [ -n "$WORKSPACE_STATE_REPO" ]; then
     echo "Running workspace git sync..."
-    /usr/local/bin/workspace-sync.sh
+    /usr/local/bin/workspace-sync.sh || echo "WARNING: Workspace git sync failed, continuing without sync"
 else
     echo "WORKSPACE_STATE_REPO not configured, skipping git sync"
 fi

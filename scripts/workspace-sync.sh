@@ -107,7 +107,12 @@ do_initial_clone() {
     local tmp_clone
     tmp_clone=$(mktemp -d)
 
-    git clone --branch "$BRANCH" --single-branch "$REPO_URL" "$tmp_clone"
+    local clone_url="$REPO_URL"
+    if [ -n "$REPO_TOKEN" ]; then
+        clone_url=$(echo "$REPO_URL" | sed "s|https://|https://${REPO_TOKEN}@|")
+    fi
+
+    git clone --branch "$BRANCH" --single-branch "$clone_url" "$tmp_clone"
 
     if [ -d "$tmp_clone/.git" ]; then
         cp -r "$tmp_clone/.git" "$WORKSPACE_DIR/.git"
@@ -116,10 +121,12 @@ do_initial_clone() {
 
     rm -rf "$tmp_clone"
 
+    cd "$WORKSPACE_DIR"
     configure_git
     configure_remote
 
-    cd "$WORKSPACE_DIR"
+    git checkout -f "$BRANCH" 2>/dev/null || git checkout -f 2>/dev/null || true
+
     commit_changes "Initial commit from container start" || true
 }
 

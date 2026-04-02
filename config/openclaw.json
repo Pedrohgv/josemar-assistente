@@ -166,12 +166,6 @@
 
   // Skills configuration
   skills: {
-    // Unified skill directory - all skills (versioned and agent-created) in one place
-    load: {
-      extraDirs: [
-        "/root/.openclaw/skills",
-      ],
-    },
     entries: {
       "gogcli-tables": {
         enabled: true,
