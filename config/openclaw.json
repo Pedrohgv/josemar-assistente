@@ -139,12 +139,6 @@
         name: "Josemar",
         workspace: "~/.openclaw/workspace",
         model: "zai/glm-5",
-        identity: {
-          name: "Josemar",
-          theme: "helpful assistant",
-          emoji: "🧓🏿",
-          avatar: "avatars/avatar_josemar.jpeg",
-        },
       },
     ],
   },
@@ -166,22 +160,14 @@
 
   // Skills configuration
   skills: {
-    // Load skills from multiple directories
-    // Order matters: later directories override earlier ones if same skill name exists
-    load: {
-      extraDirs: [
-        "/root/.openclaw/repo-skills",  // Repo skills (base version)
-        "/root/.openclaw/skills",       // Runtime skills (user/assistant created - takes precedence)
-      ],
-    },
     entries: {
-      "pdf-extractor": {
-        enabled: true,
-      },
       "gogcli-tables": {
         enabled: true,
       },
       "finance-assistant": {
+        enabled: true,
+      },
+      "workspace-sync": {
         enabled: true,
       },
     },

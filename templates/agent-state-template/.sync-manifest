@@ -1,0 +1,18 @@
+# Core workspace files
+AGENTS.md
+SOUL.md
+USER.md
+IDENTITY.md
+MEMORY.md
+TOOLS.md
+HEARTBEAT.md
+BOOT.md
+
+# Skills (all files in skill directories)
+skills/*/*
+
+# Memory logs (daily files matching YYYY-MM-DD.md)
+memory/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md
+
+# Avatars
+avatars/*

@@ -4,22 +4,27 @@ on:
   workflow_dispatch:
     inputs:
       fresh_start:
-        description: 'Erase existing workspace and start fresh'
+        description: 'WARNING: This ERASES ALL DATA - workspace volume, all memory (SOUL.md, MEMORY.md), all skills, all sessions, all uploaded files. This action is IRREVERSIBLE. Only use if you want a completely clean slate.'
         required: false
         default: false
         type: boolean
-      force_overwrite_skills:
-        description: 'Comma-separated skill names to force overwrite (e.g., pdf-extractor,web-scraper)'
+      skip_git_sync:
+        description: 'Skip git sync on this deployment (use local workspace state only)'
         required: false
-        default: ''
-        type: string
+        default: false
+        type: boolean
 
 jobs:
   deploy:
     runs-on: self-hosted
     steps:
+      - name: Clean up work directory
+        run: sudo rm -rf ${{ github.workspace }}/credentials || true
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Debug User Info
         run: |
@@ -39,13 +44,29 @@ jobs:
           PEDRO_TELEGRAM_ID=${{ secrets.PEDRO_TELEGRAM_ID }}
           GATEWAY_AUTH_PASSWORD=${{ secrets.GATEWAY_AUTH_PASSWORD }}
           GOG_KEYRING_PASSWORD=${{ secrets.GOG_KEYRING_PASSWORD }}
-          FORCE_OVERWRITE_SKILLS=${{ github.event.inputs.force_overwrite_skills }}
+          WORKSPACE_STATE_REPO=${{ vars.WORKSPACE_STATE_REPO }}
+          WORKSPACE_REPO_TOKEN=${{ secrets.WORKSPACE_REPO_TOKEN }}
+          WORKSPACE_SYNC_ON_START=${{ github.event.inputs.skip_git_sync == 'false' && 'true' || 'false' }}
+          WORKSPACE_SYNC_INTERVAL=60
+          WORKSPACE_MEMORY_DAYS=30
           EOF
 
-      - name: Optional fresh start - remove workspace volume
+      - name: FRESH START - Remove workspace volume
         if: github.event.inputs.fresh_start == 'true'
         run: |
-          echo "Fresh start requested - removing workspace volume..."
+          echo "=========================================="
+          echo "!!! WARNING: FRESH START REQUESTED !!!"
+          echo "=========================================="
+          echo "This will DELETE ALL agent data:"
+          echo "  - All memory files (SOUL.md, MEMORY.md, AGENTS.md, etc.)"
+          echo "  - All skills (including agent modifications)"
+          echo "  - All session history and conversation data"
+          echo "  - All uploaded files (PDFs, etc.)"
+          echo "  - All workspace configuration"
+          echo "=========================================="
+          echo "Waiting 10 seconds before proceeding..."
+          echo "Press Cancel on this workflow to abort."
+          sleep 10
           docker compose down || true
           docker volume rm josemar-assistente_openclaw-workspace 2>/dev/null || true
           echo "Workspace volume removed"
@@ -70,7 +91,7 @@ jobs:
           echo "Waiting for container to be healthy..."
           for i in {1..30}; do
             if docker compose ps | grep -q "healthy"; then
-              echo "✅ Container is healthy"
+              echo "Container is healthy"
               break
             fi
             echo "   Waiting... ($i/30)"
@@ -83,8 +104,4 @@ jobs:
       - name: Verify skill deployment
         run: |
           echo "Checking deployed skills..."
-          echo "Repo skills:"
-          docker compose exec -T openclaw ls -la /root/.openclaw/repo-skills/ 2>/dev/null || echo "No repo skills deployed yet"
-          echo ""
-          echo "Runtime skills:"
-          docker compose exec -T openclaw ls -la /root/.openclaw/skills/ 2>/dev/null || echo "No runtime skills yet"
+          docker compose exec -T openclaw ls -la /root/.openclaw/skills/ 2>/dev/null || echo "No skills deployed yet"
