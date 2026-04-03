@@ -125,7 +125,9 @@ do_initial_clone() {
     configure_git
     configure_remote
 
-    git checkout -f "$BRANCH" 2>/dev/null || git checkout -f 2>/dev/null || true
+    git reset --hard "origin/$BRANCH"
+
+    log_info "Workspace files restored from remote ($(git log --oneline -1))"
 
     commit_changes "Initial commit from container start" || true
 }
