@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       fresh_start:
-        description: '!!! WARNING !!! This ERASES ALL DATA: workspace volume, all memory (SOUL.md, MEMORY.md), all skills, all sessions, all uploaded files. This action is IRREVERSIBLE. Only use if you want a completely clean slate.'
+        description: 'WARNING: This ERASES ALL DATA - workspace volume, all memory (SOUL.md, MEMORY.md), all skills, all sessions, all uploaded files. This action is IRREVERSIBLE. Only use if you want a completely clean slate.'
         required: false
         default: false
         type: boolean
@@ -48,7 +48,7 @@ jobs:
           WORKSPACE_MEMORY_DAYS=30
           EOF
 
-      - name: !!! FRESH START - Remove workspace volume
+      - name: FRESH START - Remove workspace volume
         if: github.event.inputs.fresh_start == 'true'
         run: |
           echo "=========================================="
