@@ -328,3 +328,35 @@ On container start, the workspace sync script (`scripts/workspace-sync.sh`) clon
 5. **Only files in `.sync-manifest` are versioned** - This prevents accidental secret leaks
 6. **Credentials go in `credentials/`** - Never in workspace or agent-state
 7. **Docker volume is the primary storage** - Git repo is backup/sync, not the source of truth
+
+---
+
+## Security: Secret Scanning
+
+This repository uses **gitleaks** to prevent accidental commits of secrets (API keys, tokens, passwords, etc.).
+
+### Automated Scanning
+
+- **CI/CD:** Every push to any branch is scanned via GitHub Actions (`.github/workflows/gitleaks.yml`)
+- **Local:** Pre-commit hooks scan staged changes before each commit (optional but recommended)
+
+### Setup Pre-commit Hooks (One-Time)
+
+```bash
+./scripts/setup-pre-commit.sh
+```
+
+This script creates `venv/` if needed, installs pre-commit, and installs git hooks. After setup, gitleaks runs automatically on every `git commit`.
+
+### Usage
+
+```bash
+# Normal commit - gitleaks runs automatically
+git commit -m "your message"
+
+# Skip gitleaks (emergency only)
+SKIP=gitleaks git commit -m "your message"
+
+# Manual full scan
+source venv/bin/activate && pre-commit run gitleaks --all-files
+```
