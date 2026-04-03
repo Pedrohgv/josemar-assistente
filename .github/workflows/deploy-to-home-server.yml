@@ -18,6 +18,9 @@ jobs:
   deploy:
     runs-on: self-hosted
     steps:
+      - name: Clean up work directory
+        run: sudo rm -rf ${{ github.workspace }}/credentials || true
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
