@@ -22,23 +22,42 @@ This is a **private** git repo that stores the agent's identity, personality, sk
    ```
 4. Set the repo URL in your josemar-assistente deployment:
    - **Environment variable:** `WORKSPACE_STATE_REPO=https://github.com/user/josemar-agent-state.git`
-   - **GitHub secret:** `WORKSPACE_REPO_TOKEN` (GitHub PAT with `repo` scope)
+   - **GitHub secret:** `WORKSPACE_REPO_TOKEN` (GitHub PAT with `repo` scope and **write** permissions)
+
+## First-Time Bootstrap
+
+On the first run, if the workspace has no personality files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`), OpenClaw runs an interactive bootstrap ritual. It asks questions one at a time to define the agent's name, personality, and user preferences, then writes the results to the workspace files.
+
+**For bootstrap to run, the initial commit to the state repo should NOT include personality `.md` files.** Only include:
+- `.gitignore`
+- `.sync-manifest`
+- `skills/`
+- `memory/`
+- `avatars/`
+
+The personality files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`, `MEMORY.md`, `TOOLS.md`, `HEARTBEAT.md`, `BOOT.md`) are created by OpenClaw during bootstrap and automatically versioned by the periodic sync afterwards.
+
+**To trigger bootstrap on an existing deployment:**
+1. Delete all personality `.md` files from the state repo and push
+2. Deploy with `fresh_start: true` (deletes Docker volume, forces fresh clone)
+3. On first message, OpenClaw will start the Q&A ritual
 
 ## File Map
 
-| File | Purpose |
-|------|---------|
-| `AGENTS.md` | Operating instructions for the agent |
-| `SOUL.md` | Persona, tone, boundaries |
-| `USER.md` | User information and preferences |
-| `IDENTITY.md` | Agent name, vibe, emoji |
-| `MEMORY.md` | Long-term curated memory |
-| `TOOLS.md` | Notes about tools and conventions |
-| `HEARTBEAT.md` | Heartbeat checklist (optional) |
-| `BOOT.md` | Startup checklist (optional) |
-| `skills/` | Agent skills (SKILL.md + executables) |
-| `memory/` | Daily memory logs (rotated) |
-| `avatars/` | Agent avatar images |
+| File | Purpose | Created by |
+|------|---------|------------|
+| `AGENTS.md` | Operating instructions for the agent | Bootstrap / manual |
+| `SOUL.md` | Persona, tone, boundaries | Bootstrap / manual |
+| `USER.md` | User information and preferences | Bootstrap / manual |
+| `IDENTITY.md` | Agent name, vibe, emoji | Bootstrap |
+| `MEMORY.md` | Long-term curated memory | Bootstrap / agent |
+| `TOOLS.md` | Notes about tools and conventions | Bootstrap / manual |
+| `HEARTBEAT.md` | Heartbeat checklist (optional) | Manual |
+| `BOOT.md` | Startup checklist (optional) | Manual |
+| `BOOTSTRAP.md` | One-time setup ritual (auto-deleted) | OpenClaw |
+| `skills/` | Agent skills (SKILL.md + executables) | Manual |
+| `memory/` | Daily memory logs (rotated) | Agent |
+| `avatars/` | Agent avatar images | Manual |
 
 ## Security
 
