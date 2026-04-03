@@ -29,6 +29,13 @@ The following secrets must be configured in the GitHub repository settings:
 | `PEDRO_TELEGRAM_ID` | Telegram user ID for the primary user | Yes |
 | `GATEWAY_AUTH_PASSWORD` | HTTP Basic Auth password for OpenClaw web UI | Yes |
 | `GOG_KEYRING_PASSWORD` | GOG keyring password for Galaxy integration | No |
+| `WORKSPACE_REPO_TOKEN` | GitHub PAT for agent state repo (needs `repo` scope) | Yes |
+
+## Required GitHub Variables
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `WORKSPACE_STATE_REPO` | HTTPS URL of the private agent state repo | Yes |
 
 ### Generating GATEWAY_AUTH_PASSWORD
 
@@ -40,8 +47,12 @@ openssl rand -hex 32
 
 Copy the output and add it as a GitHub secret named `GATEWAY_AUTH_PASSWORD`.
 
-This password is required to access the web interface via HTTP Basic Auth at:
-`http://your-server:18789/`
+### Generating WORKSPACE_REPO_TOKEN
+
+1. Go to GitHub Settings > Developer settings > Personal access tokens
+2. Create a new token (classic) with `repo` scope
+3. The token needs read/write access to the **private agent state repo**
+4. Add the token as a GitHub secret named `WORKSPACE_REPO_TOKEN`
 
 ## Test Workflow
 
@@ -70,31 +81,37 @@ Deploys the Josemar Assistente to the self-hosted server.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `fresh_start` | boolean | `false` | When enabled, removes the existing workspace volume and starts fresh. **Warning:** This deletes all conversation history, personality files (SOUL.md, MEMORY.md), and accumulated data. |
-| `force_overwrite_skills` | string | `""` | Comma-separated list of skill names to force overwrite from repo (e.g., `pdf-extractor,web-scraper`). Use to reset specific skills to their original repo version, discarding any agent modifications. |
+| `fresh_start` | boolean | `false` | **WARNING: IRREVERSIBLE.** Erases ALL data: workspace volume (memory, skills, sessions, uploaded files, personality files). Has a 10-second countdown before proceeding. |
+| `skip_git_sync` | boolean | `false` | Skip git sync on this deployment. Use when you want to work with local workspace state only. |
 
-**Two-Tier Skill System:**
+**Agent State Sync:**
 
-The deployment workflow supports a two-tier skill system:
+The deployment handles agent state via git sync:
 
-- **Runtime Skills** (`/root/.openclaw/skills/`): Skills created by the assistant during runtime. These are preserved across deployments and take priority over repo skills.
-- **Repo Skills** (`/root/.openclaw/repo-skills/`): Skills maintained in the `repo-skills/` directory of the repository. These are version-controlled and deployed on container startup.
+- **Normal deploy:** Container starts, syncs workspace with remote agent-state repo
+  - Local agent changes are committed first
+  - Remote changes are merged in (remote wins on conflicts)
+  - Result is pushed back to remote
+- **With `skip_git_sync`:** Git sync is disabled for this deployment
+- **With `fresh_start`:** Docker volume is deleted entirely, workspace is re-cloned from remote
 
-**Smart Deployment Behavior:**
-- First deployment: Repo skills are copied to the container
-- Subsequent deployments: Repo skills are skipped if they already exist (to preserve agent modifications)
-- Force overwrite: Set `force_overwrite_skills` to specific skill names to reset them to repo version
+**Skills Deployment:**
+
+Skills are versioned in the agent-state repo (`agent-state/skills/`). On container start:
+1. The entrypoint runs the git sync script
+2. Skills in the workspace are updated from the git repo
+3. No separate "repo skills" vs "runtime skills" distinction
 
 **Behavior:**
-1. Checks out the repository
-2. Creates `.env` file from GitHub secrets
+1. Checks out the repository (with submodules for `agent-state/`)
+2. Creates `.env` file from GitHub secrets and variables
 3. Stops existing Docker services
-4. Optionally removes workspace volume (if `fresh_start: true`)
+4. Optionally removes workspace volume (if `fresh_start: true`, with safety countdown)
 5. Cleans up old Docker images (preserves volumes)
 6. Builds the Docker image with no cache
 7. Starts the services
-8. Verifies the container is running
-9. Verifies skill deployment (logs both repo and runtime skills directories)
+8. Verifies the container is running and healthy
+9. Verifies skill deployment
 
 **Data Safety:**
 - **DO NOT** use `docker system prune` (too broad)
@@ -102,14 +119,14 @@ The deployment workflow supports a two-tier skill system:
 - **DO NOT** use `--volumes` flag with `docker compose down`
 - Only Docker images are cleaned up, never volumes
 - Workspace data (stored in named Docker volume) and configuration are preserved
+- Agent state is backed up to private git repo on every sync
 
 **Workspace Persistence:**
 - Workspace data is stored in a named Docker volume (`openclaw-workspace`)
 - The volume persists across deployments and container rebuilds
 - Unlike bind mounts, named volumes are stored outside the git repository at `/var/lib/docker/volumes/`
 - This avoids permission conflicts and checkout issues
-
-This ensures that user data, session data, and configuration remain intact during deployment.
+- The volume contains the workspace git repo which syncs with the remote agent-state repo
 
 ## Stop Service Workflow
 
@@ -147,6 +164,7 @@ Safely stops the Josemar Assistente service without deleting data.
 | Data | Preserved | Preserved (unless fresh_start) |
 | Images | Kept | Rebuilt (with --no-cache) |
 | Configuration | Unchanged | Applied from repo |
+| Git sync | No | Yes (unless skip_git_sync) |
 
 ## Troubleshooting
 
@@ -192,7 +210,9 @@ Safely stops the Josemar Assistente service without deleting data.
    - `ZAI_API_KEY` (not `zai_api_key`)
    - `TELEGRAM_BOT_TOKEN`
    - `PEDRO_TELEGRAM_ID`
-3. Re-save secrets if recently added (may take a moment to propagate)
+   - `WORKSPACE_REPO_TOKEN`
+3. Verify `WORKSPACE_STATE_REPO` is set as a **Repository variable** (not a secret)
+4. Re-save secrets if recently added (may take a moment to propagate)
 
 ### Deployment Failures
 
@@ -215,22 +235,40 @@ Safely stops the Josemar Assistente service without deleting data.
 
 ### Skills Not Deploying
 
-**Symptoms:** Repo skills not appearing or runtime skills being overwritten
+**Symptoms:** Skills not appearing after deployment
 
 **Solutions:**
-1. Check skill deployment logs in workflow output
-2. Verify repo skills are mounted correctly:
+1. Check workspace sync logs in container logs:
    ```bash
-   docker-compose exec openclaw ls -la /root/.openclaw/repo-skills/
+   docker compose logs openclaw | grep workspace-sync
    ```
-3. Check runtime skills:
+2. Verify skills exist in workspace:
    ```bash
-   docker-compose exec openclaw ls -la /root/.openclaw/skills/
+   docker compose exec openclaw ls -la /root/.openclaw/skills/
    ```
-4. Force overwrite specific skills by re-running deployment with `force_overwrite_skills` parameter
-5. Check OpenClaw skill configuration:
+3. Check git status in workspace:
    ```bash
-   docker-compose exec openclaw openclaw skills list
+   docker compose exec openclaw sh -c "cd /root/.openclaw/workspace && git status"
+   ```
+4. Verify WORKSPACE_STATE_REPO and WORKSPACE_REPO_TOKEN are set correctly
+
+### Git Sync Issues
+
+**Symptoms:** Agent state not syncing, conflicts not resolving
+
+**Solutions:**
+1. Check sync logs:
+   ```bash
+   docker compose logs openclaw | grep workspace-sync
+   ```
+2. Verify git remote is configured:
+   ```bash
+   docker compose exec openclaw sh -c "cd /root/.openclaw/workspace && git remote -v"
+   ```
+3. Verify token has correct permissions (`repo` scope)
+4. Check if workspace is a valid git repo:
+   ```bash
+   docker compose exec openclaw sh -c "ls -la /root/.openclaw/workspace/.git"
    ```
 
 ## Additional Resources

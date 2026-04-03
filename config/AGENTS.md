@@ -256,7 +256,13 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
   // Skills configuration
   skills: {
     entries: {
-      "pdf-extractor": {
+      "finance-assistant": {
+        enabled: true
+      },
+      "gogcli-tables": {
+        enabled: true
+      },
+      "workspace-sync": {
         enabled: true
       }
     }
@@ -588,20 +594,18 @@ No Docker image rebuild is required!
 
 ### 5. Skills
 
-Configure custom skills with support for multiple skill directories:
+Configure custom skills. OpenClaw auto-discovers skills from the workspace directory.
 
 ```json5
 skills: {
-  // Load skills from multiple directories
-  // Order matters: later directories override earlier ones if same skill name exists
-  load: {
-    extraDirs: [
-      "/root/.openclaw/repo-skills",  // Repo skills (base version)
-      "/root/.openclaw/skills",       // Runtime skills (user/assistant created - takes precedence)
-    ]
-  },
   entries: {
-    "pdf-extractor": {
+    "finance-assistant": {
+      enabled: true
+    },
+    "gogcli-tables": {
+      enabled: true
+    },
+    "workspace-sync": {
       enabled: true
     }
   }
@@ -609,34 +613,25 @@ skills: {
 ```
 
 **Skill Configuration Fields:**
-- `load.extraDirs`: Array of directories to scan for skills (in order of priority)
 - `entries`: Skill ID (key) with configuration
   - `enabled`: Boolean, if skill is enabled
 
-**Two-Tier Skill System:**
+**Unified Skills System:**
 
-The configuration supports a two-tier skill architecture:
+All skills live in `agent-state/skills/` and are versioned in the agent state git repo. OpenClaw auto-discovers them from the workspace directory.
 
-1. **Repo Skills** (`/root/.openclaw/repo-skills/`)
-   - Maintained in the `repo-skills/` directory of the repository
-   - Version-controlled and deployed on container startup
-   - Base version of skills that can be overridden
+- **Location**: `/root/.openclaw/workspace/skills/` (inside container)
+- **Source**: `agent-state/skills/` in the repository
+- **Deployment**: Synced via git on container start
+- **Persistence**: Changes are auto-committed and pushed back to the remote repo
 
-2. **Runtime Skills** (`/root/.openclaw/skills/`)
-   - Skills created by the assistant during conversations
-   - Persisted in the Docker volume across deployments
-   - Takes precedence over repo skills (loaded last)
-
-**Skill Loading Priority:**
-- Skills are loaded from directories in the order specified in `extraDirs`
-- If the same skill name exists in multiple directories, the last one wins
-- Runtime skills override repo skills when both exist
+See `agent-state/skills/AGENTS.md` for detailed skill development guide.
 
 **Adding a New Skill:**
 
 ```json5
 entries: {
-  "pdf-extractor": {
+  "finance-assistant": {
     enabled: true
   },
   "my-custom-skill": {
@@ -645,7 +640,7 @@ entries: {
 }
 ```
 
-**Note:** Skills are automatically discovered from all directories listed in `load.extraDirs`. The skill ID must match the directory name.
+**Note:** Skills are automatically discovered from the workspace directory. The skill directory name must match the entry key.
 
 ### 6. Agent Prompts and Personality
 
@@ -658,8 +653,9 @@ entries: {
 - `workspace/MEMORY.md` - Long-term memory and continuity
 
 **Key Points:**
-- These files live in the `workspace/` directory (mounted to container)
-- They are **NOT versioned** in git (personal to your setup)
+- These files live in the `workspace/` directory (inside Docker volume)
+- They ARE versioned in the agent-state git repo (private repo)
+- Only files listed in `.sync-manifest` are committed (security-first)
 - OpenClaw reads these files on startup to configure the agent
 - Changes to these files require a container restart to take effect
 
@@ -996,7 +992,7 @@ agents: {
 ```json5
 skills: {
   entries: {
-    "pdf-extractor": {
+    "finance-assistant": {
       enabled: true,
       config: {
         maxFileSize: "10MB",
@@ -1118,28 +1114,20 @@ cat config/openclaw.json | jq '.models.providers'
 
 **Error: "Skill not found"**
 ```bash
-# Check both skill directories
-docker-compose exec openclaw ls -la /root/.openclaw/repo-skills/  # Repo skills
-docker-compose exec openclaw ls -la /root/.openclaw/skills/        # Runtime skills
+# Check skill directory
+docker-compose exec openclaw ls -la /root/.openclaw/workspace/skills/
 
 # Check skill configuration
 cat config/openclaw.json | jq '.skills.entries'
-
-# Verify skill directory name matches configuration
-
-# Check skill loading directories
-cat config/openclaw.json | jq '.skills.load.extraDirs'
 ```
 
 **Error: "Skill execution failed"**
 ```bash
-# Test skill manually (check both locations)
-echo '{"test": "data"}' | docker-compose exec -T openclaw /root/.openclaw/repo-skills/skill-name/skill-name
-echo '{"test": "data"}' | docker-compose exec -T openclaw /root/.openclaw/skills/skill-name/skill-name
+# Test skill manually
+echo '{"test": "data"}' | docker-compose exec -T openclaw /root/.openclaw/workspace/skills/skill-name/skill-name
 
 # Check skill permissions
-docker-compose exec openclaw ls -la /root/.openclaw/repo-skills/skill-name/
-docker-compose exec openclaw ls -la /root/.openclaw/skills/skill-name/
+docker-compose exec openclaw ls -la /root/.openclaw/workspace/skills/skill-name/
 
 # Check skill dependencies
 docker-compose exec openclaw python3 -c "import required_module"
@@ -1147,16 +1135,14 @@ docker-compose exec openclaw python3 -c "import required_module"
 
 **Error: "Wrong skill version loaded"**
 ```bash
-# Check which directory the skill is loading from
+# Check skill info
 docker-compose exec openclaw openclaw skills info skill-name
 
 # List all available skills
 docker-compose exec openclaw openclaw skills list
 
-# If runtime skill should override repo skill but isn't:
-# 1. Verify runtime skill exists: ls /root/.openclaw/skills/skill-name/
-# 2. Verify load order in config: cat config/openclaw.json | jq '.skills.load.extraDirs'
-# 3. Restart container after config changes
+# Check git sync status
+docker compose logs openclaw | grep workspace-sync
 ```
 
 ## Web UI Access

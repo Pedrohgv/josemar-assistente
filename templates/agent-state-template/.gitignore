@@ -1,0 +1,30 @@
+# NEVER version these - security critical
+.env
+.env.*
+**/*.key
+**/*.pem
+**/secrets*
+**/credentials*
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+
+# User data files
+**/*.pdf
+**/*.doc
+**/*.docx
+**/*.xls
+**/*.xlsx
+
+# Runtime/generated files
+.DS_Store
+Thumbs.db
+workspace-state.json
+.openclaw/
+*.pyc
+__pycache__/
+.pytest_cache/
+*.log
+
+# Allow specific files even if in ignored patterns
+!.gitkeep

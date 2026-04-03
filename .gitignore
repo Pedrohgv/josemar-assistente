@@ -12,6 +12,9 @@ ENV/
 # Workspace (persistent data)
 workspace/
 
+# Agent state submodule (managed separately)
+agent-state/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -25,7 +28,7 @@ downloads/
 eggs/
 .eggs/
 lib/
-!repo-skills/**/lib/
+!agent-state/**/lib/
 lib64/
 parts/
 sdist/
