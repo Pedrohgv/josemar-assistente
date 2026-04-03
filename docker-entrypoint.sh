@@ -80,6 +80,13 @@ if [ -f /root/.openclaw/openclaw.json ]; then
     fi
 fi
 
+# Symlink workspace skills to OpenClaw skills directory
+if [ -d "${WORKSPACE_DIR:-/root/.openclaw/workspace}/skills" ] && [ ! -d /root/.openclaw/skills/finance-assistant ]; then
+    echo "Linking workspace skills to OpenClaw skills directory..."
+    rm -rf /root/.openclaw/skills
+    ln -s "${WORKSPACE_DIR:-/root/.openclaw/workspace}/skills" /root/.openclaw/skills
+fi
+
 # Run OpenClaw
 echo "Starting OpenClaw gateway..."
 exec "$@"
