@@ -139,12 +139,6 @@
         name: "Josemar",
         workspace: "~/.openclaw/workspace",
         model: "zai/glm-5",
-        identity: {
-          name: "Josemar",
-          theme: "helpful assistant",
-          emoji: "🧓🏿",
-          avatar: "avatars/avatar_josemar.jpeg",
-        },
       },
     ],
   },
