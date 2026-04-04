@@ -13,6 +13,8 @@ Josemar Assistente is a self-hosted AI assistant bot built on OpenClaw, running 
 - **Telegram Channel** - Bot interface for user interaction
 - **Unified Skills System** - Extensible tools for PDF processing and other tasks
 - **Git-Backed Agent State** - Workspace files versioned in a private git repo
+- **Obsidian Vault Infrastructure** - Dedicated vault volume synced with Syncthing
+- **Google Drive Vault Backups** - Daily rotating backup slots managed by rclone
 - **Docker Deployment** - Containerized with persistent workspace storage
 
 **Key Technologies:**
@@ -29,7 +31,7 @@ Josemar Assistente is a self-hosted AI assistant bot built on OpenClaw, running 
 
 ```
 josemar-assistente/
-├── agent-state/            # Git submodule: agent workspace state (private repo)
+├── agent-state/            # Nested git repo: agent workspace state (private repo)
 │   ├── .sync-manifest      # Explicit list of files to version
 │   ├── .gitignore          # Security: prevents secret commits
 │   ├── skills/             # Unified skills (versioned)
@@ -43,7 +45,9 @@ josemar-assistente/
 │   ├── README.md           # Credential setup guide
 │   └── <service>/          # One folder per service
 ├── scripts/                # Helper scripts
-│   └── workspace-sync.sh   # Git sync logic
+│   ├── workspace-sync.sh          # Git sync logic
+│   ├── obsidian-backup.sh         # Vault backup + slot rotation logic
+│   └── obsidian-backup-daemon.sh  # Daily backup scheduler
 ├── templates/              # Templates for new deployments
 │   └── agent-state-template/
 ├── .github/workflows/      # CI/CD automation
@@ -53,10 +57,12 @@ josemar-assistente/
 ```
 
 **Workspace Storage:**
-- Primary storage is the Docker volume `openclaw-workspace`
-- Contains: git repo (workspace state), conversation sessions, credentials (copied from host)
-- Location on host: `/var/lib/docker/volumes/josemar-assistente_openclaw-workspace/_data/`
-- Workspace files are automatically synced to a private git repo (`agent-state/`)
+- `openclaw-workspace` stores OpenClaw runtime state (workspace repo, sessions, paired devices)
+- `obsidian-vault` stores Obsidian markdown files and attachments (not git-versioned)
+- `syncthing-config` stores Syncthing device identity and sync settings
+- `obsidian-backup-state` stores backup slot rotation pointer (`next-slot`)
+- Docker volume paths on host use `/var/lib/docker/volumes/<volume-name>/_data/`
+- Workspace repo files are automatically synced to a private git repo (`agent-state/`)
 
 **Agent State Repo:**
 - A private git repo that version-controls workspace files (personality, skills, memory)
@@ -110,6 +116,11 @@ You can safely test locally without disconnecting the production bot:
    The device will be remembered for future connections.
 
 5. **Test via browser interface** - All functionality works except Telegram
+
+   Optional Obsidian stack testing:
+   - Set `LAN_BIND_IP=127.0.0.1` in `.env`
+   - Access Syncthing UI at `http://127.0.0.1:8384`
+   - Create `credentials/rclone/rclone.conf` before testing backups
 
 6. **Stop when done:**
    ```bash
@@ -196,6 +207,16 @@ git push -u origin feature/my-feature-name
    - Mounted read-only into container at `/root/.openclaw/credentials/<service>/`
    - See `credentials/README.md` for setup guide
 
+7. **Syncthing (Vault Sync)**
+   - Syncs `obsidian-vault` volume to laptop/mobile devices
+   - Uses LAN-only bindings with `LAN_BIND_IP` to avoid internet exposure
+   - Device trust model: explicit device ID pairing
+
+8. **Obsidian Backup (rclone)**
+   - Daily scheduler runs in `obsidian-backup` container
+   - Syncs vault into rotating slots (`slot-1` ... `slot-5`) in Google Drive
+   - Auth loaded from `credentials/rclone/rclone.conf` (or CI secret restore)
+
 ### Data Flow
 
 1. User sends message/PDF via Telegram (or Web UI if testing locally)
@@ -206,6 +227,8 @@ git push -u origin feature/my-feature-name
 6. LLM formats response
 7. Response sent to user via Telegram (or displayed in Web UI)
 8. Periodically, workspace changes are committed and pushed to agent-state repo
+9. Syncthing mirrors the Obsidian vault to paired devices
+10. Daily backup job uploads current vault snapshot to rotating Google Drive slots
 
 ---
 
@@ -226,6 +249,13 @@ git push -u origin feature/my-feature-name
 - `WORKSPACE_SYNC_ON_START` - Enable/disable git sync on start (`true`/`false`)
 - `WORKSPACE_SYNC_INTERVAL` - Minutes between periodic syncs (0 = disabled)
 - `WORKSPACE_MEMORY_DAYS` - Days to keep memory logs
+- `LAN_BIND_IP` - LAN interface IP for Syncthing ports (`127.0.0.1` for local-only testing)
+- `TZ` - Timezone used by Syncthing and backup scheduler
+- `OBSIDIAN_BACKUP_TIME` - Daily backup time (`HH:MM`, default `03:15`)
+- `OBSIDIAN_BACKUP_RUN_ON_START` - Run one backup when backup container starts
+- `OBSIDIAN_BACKUP_SLOTS` - Number of rotating slots kept in Drive (default `5`)
+- `OBSIDIAN_GDRIVE_REMOTE` - rclone remote name (default `gdrive`)
+- `OBSIDIAN_GDRIVE_PATH` - Google Drive destination folder for slot backups
 
 **Agent Personality:** Configured in workspace markdown files (SOUL.md, MEMORY.md) - not in JSON config.
 
@@ -328,6 +358,7 @@ On container start, the workspace sync script (`scripts/workspace-sync.sh`) clon
 5. **Only files in `.sync-manifest` are versioned** - This prevents accidental secret leaks
 6. **Credentials go in `credentials/`** - Never in workspace or agent-state
 7. **Docker volume is the primary storage** - Git repo is backup/sync, not the source of truth
+8. **Keep Syncthing LAN-only** - Bind ports to `LAN_BIND_IP` and disable global discovery/relays for local trust boundary
 
 ---
 

@@ -64,9 +64,13 @@ Copy the output and add it as a GitHub secret named `GATEWAY_AUTH_PASSWORD`.
 
 ### Generating RCLONE_CONFIG_B64
 
-1. Configure rclone locally:
+1. Configure rclone locally (either native install or Docker):
    ```bash
+   # Native binary (if installed)
    rclone config
+
+   # Docker-only alternative (no host install required)
+   docker run --rm -it -v "$PWD/credentials/rclone:/config/rclone" -e RCLONE_CONFIG=/config/rclone/rclone.conf rclone/rclone:latest config
    ```
 2. Encode `rclone.conf` as base64 (single line):
    ```bash
