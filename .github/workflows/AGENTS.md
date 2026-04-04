@@ -30,12 +30,20 @@ The following secrets must be configured in the GitHub repository settings:
 | `GATEWAY_AUTH_PASSWORD` | HTTP Basic Auth password for OpenClaw web UI | Yes |
 | `GOG_KEYRING_PASSWORD` | GOG keyring password for Galaxy integration | No |
 | `WORKSPACE_REPO_TOKEN` | GitHub PAT for agent state repo (needs `repo` scope) | Yes |
+| `RCLONE_CONFIG_B64` | Base64-encoded `rclone.conf` used by Obsidian backup container | Yes (for backups) |
 
 ## Required GitHub Variables
 
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `WORKSPACE_STATE_REPO` | HTTPS URL of the private agent state repo | Yes |
+| `TZ` | Timezone used by Syncthing and backup scheduler | No (default in compose) |
+| `LAN_BIND_IP` | Server LAN IP for Syncthing port binding | Yes (for laptop access) |
+| `OBSIDIAN_BACKUP_TIME` | Daily backup time in HH:MM | No (default `03:15`) |
+| `OBSIDIAN_BACKUP_RUN_ON_START` | Run startup backup (`true`/`false`) | No (default `false`) |
+| `OBSIDIAN_BACKUP_SLOTS` | Rotating backup slots kept in Drive | No (default `5`) |
+| `OBSIDIAN_GDRIVE_REMOTE` | rclone remote name (example: `gdrive`) | No (default `gdrive`) |
+| `OBSIDIAN_GDRIVE_PATH` | Target folder in remote storage | No (default `Josemar/obsidian-backups`) |
 
 ### Generating GATEWAY_AUTH_PASSWORD
 
@@ -53,6 +61,18 @@ Copy the output and add it as a GitHub secret named `GATEWAY_AUTH_PASSWORD`.
 2. Create a new token (classic) with `repo` scope
 3. The token needs read/write access to the **private agent state repo**
 4. Add the token as a GitHub secret named `WORKSPACE_REPO_TOKEN`
+
+### Generating RCLONE_CONFIG_B64
+
+1. Configure rclone locally:
+   ```bash
+   rclone config
+   ```
+2. Encode `rclone.conf` as base64 (single line):
+   ```bash
+   base64 -w 0 ~/.config/rclone/rclone.conf
+   ```
+3. Add the output as GitHub secret `RCLONE_CONFIG_B64`
 
 ## Test Workflow
 
@@ -81,7 +101,7 @@ Deploys the Josemar Assistente to the self-hosted server.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `fresh_start` | boolean | `false` | **WARNING: IRREVERSIBLE.** Erases ALL data: workspace volume (memory, skills, sessions, uploaded files, personality files). Has a 10-second countdown before proceeding. |
+| `fresh_start` | boolean | `false` | **WARNING: IRREVERSIBLE.** Erases OpenClaw workspace data: memory, skills, sessions, uploaded files, personality files. Obsidian vault volume is not removed. Has a 10-second countdown before proceeding. |
 | `skip_git_sync` | boolean | `false` | Skip git sync on this deployment. Use when you want to work with local workspace state only. |
 
 **Agent State Sync:**
@@ -105,13 +125,14 @@ Skills are versioned in the agent-state repo (`agent-state/skills/`). On contain
 **Behavior:**
 1. Checks out the repository (with submodules for `agent-state/`)
 2. Creates `.env` file from GitHub secrets and variables
-3. Stops existing Docker services
-4. Optionally removes workspace volume (if `fresh_start: true`, with safety countdown)
-5. Cleans up old Docker images (preserves volumes)
-6. Builds the Docker image with no cache
-7. Starts the services
-8. Verifies the container is running and healthy
-9. Verifies skill deployment
+3. Restores `credentials/rclone/rclone.conf` from `RCLONE_CONFIG_B64`
+4. Stops existing Docker services
+5. Optionally removes workspace volume (if `fresh_start: true`, with safety countdown)
+6. Cleans up old Docker images (preserves volumes)
+7. Builds the Docker image with no cache
+8. Starts the services
+9. Verifies the container is running and healthy
+10. Verifies skill deployment
 
 **Data Safety:**
 - **DO NOT** use `docker system prune` (too broad)
@@ -123,6 +144,8 @@ Skills are versioned in the agent-state repo (`agent-state/skills/`). On contain
 
 **Workspace Persistence:**
 - Workspace data is stored in a named Docker volume (`openclaw-workspace`)
+- Obsidian vault data is stored in a separate named Docker volume (`obsidian-vault`)
+- Backup slot state is stored in `obsidian-backup-state`
 - The volume persists across deployments and container rebuilds
 - Unlike bind mounts, named volumes are stored outside the git repository at `/var/lib/docker/volumes/`
 - This avoids permission conflicts and checkout issues
@@ -211,6 +234,7 @@ Safely stops the Josemar Assistente service without deleting data.
    - `TELEGRAM_BOT_TOKEN`
    - `PEDRO_TELEGRAM_ID`
    - `WORKSPACE_REPO_TOKEN`
+   - `RCLONE_CONFIG_B64`
 3. Verify `WORKSPACE_STATE_REPO` is set as a **Repository variable** (not a secret)
 4. Re-save secrets if recently added (may take a moment to propagate)
 

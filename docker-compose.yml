@@ -8,6 +8,8 @@ services:
       - ./config:/root/.openclaw-source:ro
       # Use named volume for ALL persistent OpenClaw state (devices, workspace, sessions, etc.)
       - openclaw-workspace:/root/.openclaw
+      # Dedicated Obsidian vault volume (not git-versioned)
+      - obsidian-vault:/root/.openclaw/obsidian
       # Mount agent-state submodule to workspace for git sync
       - ./agent-state:/root/.openclaw-source-agent-state:ro
       # Mount credentials directory to OpenClaw standard location
@@ -53,10 +55,61 @@ services:
       retries: 3
       start_period: 40s
 
+  syncthing:
+    image: syncthing/syncthing:latest
+    container_name: josemar-syncthing
+    restart: unless-stopped
+    user: "0:0"
+    hostname: josemar-server
+    environment:
+      - TZ=${TZ:-America/Sao_Paulo}
+      - PUID=0
+      - PGID=0
+    volumes:
+      - syncthing-config:/var/syncthing/config
+      - obsidian-vault:/var/syncthing/data/obsidian
+    ports:
+      # Bind to LAN IP only (set LAN_BIND_IP in .env)
+      - "${LAN_BIND_IP:-127.0.0.1}:8384:8384"
+      - "${LAN_BIND_IP:-127.0.0.1}:22000:22000/tcp"
+      - "${LAN_BIND_IP:-127.0.0.1}:22000:22000/udp"
+      - "${LAN_BIND_IP:-127.0.0.1}:21027:21027/udp"
+    networks:
+      - openclaw-network
+
+  obsidian-backup:
+    image: rclone/rclone:latest
+    container_name: josemar-obsidian-backup
+    restart: unless-stopped
+    depends_on:
+      - syncthing
+    environment:
+      - TZ=${TZ:-America/Sao_Paulo}
+      - RCLONE_CONFIG=/config/rclone/rclone.conf
+      - OBSIDIAN_BACKUP_TIME=${OBSIDIAN_BACKUP_TIME:-03:15}
+      - OBSIDIAN_BACKUP_RUN_ON_START=${OBSIDIAN_BACKUP_RUN_ON_START:-false}
+      - OBSIDIAN_GDRIVE_REMOTE=${OBSIDIAN_GDRIVE_REMOTE:-gdrive}
+      - OBSIDIAN_GDRIVE_PATH=${OBSIDIAN_GDRIVE_PATH:-Josemar/obsidian-backups}
+      - OBSIDIAN_BACKUP_SLOTS=${OBSIDIAN_BACKUP_SLOTS:-5}
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./credentials/rclone:/config/rclone:ro
+      - obsidian-vault:/data/obsidian:ro
+      - obsidian-backup-state:/state
+    entrypoint: ["/bin/sh", "/scripts/obsidian-backup-daemon.sh"]
+    networks:
+      - openclaw-network
+
 networks:
   openclaw-network:
     driver: bridge
 
 volumes:
   openclaw-workspace:
+    driver: local
+  obsidian-vault:
+    driver: local
+  syncthing-config:
+    driver: local
+  obsidian-backup-state:
     driver: local

@@ -160,17 +160,12 @@
 
   // Skills configuration
   skills: {
-    entries: {
-      "gogcli-tables": {
-        enabled: true,
-      },
-      "finance-assistant": {
-        enabled: true,
-      },
-      "workspace-sync": {
-        enabled: true,
-      },
+    allowBundled: [],
+    load: {
+      watch: true,
+      watchDebounceMs: 250,
     },
+    entries: {},
   },
 
   // Session configuration

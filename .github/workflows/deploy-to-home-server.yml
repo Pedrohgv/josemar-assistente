@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       fresh_start:
-        description: 'WARNING: This ERASES ALL DATA - workspace volume, all memory (SOUL.md, MEMORY.md), all skills, all sessions, all uploaded files. This action is IRREVERSIBLE. Only use if you want a completely clean slate.'
+        description: 'WARNING: This ERASES OPENCLAW WORKSPACE DATA - memory, skills, sessions, uploaded files. This action is IRREVERSIBLE. Obsidian vault volume is NOT removed.'
         required: false
         default: false
         type: boolean
@@ -49,7 +49,25 @@ jobs:
           WORKSPACE_SYNC_ON_START=${{ github.event.inputs.skip_git_sync == 'false' && 'true' || 'false' }}
           WORKSPACE_SYNC_INTERVAL=60
           WORKSPACE_MEMORY_DAYS=30
+          TZ=${{ vars.TZ }}
+          LAN_BIND_IP=${{ vars.LAN_BIND_IP }}
+          OBSIDIAN_BACKUP_TIME=${{ vars.OBSIDIAN_BACKUP_TIME }}
+          OBSIDIAN_BACKUP_RUN_ON_START=${{ vars.OBSIDIAN_BACKUP_RUN_ON_START }}
+          OBSIDIAN_BACKUP_SLOTS=${{ vars.OBSIDIAN_BACKUP_SLOTS }}
+          OBSIDIAN_GDRIVE_REMOTE=${{ vars.OBSIDIAN_GDRIVE_REMOTE }}
+          OBSIDIAN_GDRIVE_PATH=${{ vars.OBSIDIAN_GDRIVE_PATH }}
           EOF
+
+      - name: Create rclone config for backup container
+        run: |
+          mkdir -p credentials/rclone
+          if [ -n "${{ secrets.RCLONE_CONFIG_B64 }}" ]; then
+            echo "${{ secrets.RCLONE_CONFIG_B64 }}" | base64 --decode > credentials/rclone/rclone.conf
+            chmod 600 credentials/rclone/rclone.conf
+            echo "rclone config restored"
+          else
+            echo "WARNING: RCLONE_CONFIG_B64 secret not set. Obsidian backups will fail until configured."
+          fi
 
       - name: FRESH START - Remove workspace volume
         if: github.event.inputs.fresh_start == 'true'
@@ -63,6 +81,7 @@ jobs:
           echo "  - All session history and conversation data"
           echo "  - All uploaded files (PDFs, etc.)"
           echo "  - All workspace configuration"
+          echo "  - Obsidian vault volume is NOT deleted"
           echo "=========================================="
           echo "Waiting 10 seconds before proceeding..."
           echo "Press Cancel on this workflow to abort."
