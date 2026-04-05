@@ -11,6 +11,8 @@ A self-hosted OpenClaw bot running in Docker with Telegram integration and PDF e
 - **Brazilian Portuguese**: Native language interaction
 - **Docker Deployment**: Containerized with persistent workspace storage
 - **Git-Backed Agent State**: Workspace files versioned in a private git repo
+- **Obsidian Vault Sync**: Syncthing-based sync between server and laptop
+- **Google Drive Backups**: Daily rotating Obsidian vault backups via rclone
 
 ## Prerequisites
 
@@ -35,9 +37,16 @@ Create a private GitHub repo for agent state (this stores personality, skills, m
 
 ```bash
 cd repos/josemar-assistente
-git submodule add <your-private-repo-url> agent-state
+git clone <your-private-repo-url> agent-state
 cp .env.example .env
 # Edit .env with your API keys and agent state repo URL
+```
+
+If you do not have a private state repo yet, initialize from template:
+
+```bash
+cp -r templates/agent-state-template/ agent-state
+cd agent-state && git init && git add -A && git commit -m "Initial state"
 ```
 
 ### 3. Build and Run
@@ -111,7 +120,7 @@ All skills live in `agent-state/skills/` and are versioned in the agent state gi
 1. Create skill in `agent-state/skills/<skill-name>/`
 2. Add `SKILL.md` with YAML frontmatter
 3. Add executable script
-4. Enable in `config/openclaw.json`
+4. No config update needed (skills are auto-discovered from `agent-state/skills/`)
 5. Changes sync automatically via git
 
 See `agent-state/skills/AGENTS.md` for detailed skill development guide.
@@ -134,7 +143,7 @@ See `credentials/README.md` for setup instructions.
 
 ```
 josemar-assistente/
-├── agent-state/                    # Git submodule: agent workspace (private repo)
+├── agent-state/                    # Nested git repo: agent workspace (private repo)
 │   ├── .sync-manifest              # Files to version
 │   ├── .gitignore                  # Security ignore list
 │   └── skills/                     # Unified skills
@@ -144,7 +153,11 @@ josemar-assistente/
 ├── credentials/                    # Service credentials (NOT versioned)
 │   └── README.md                   # Setup guide
 ├── scripts/
-│   └── workspace-sync.sh           # Git sync logic
+│   ├── workspace-sync.sh           # Git sync logic
+│   ├── obsidian-backup.sh          # Obsidian backup and slot rotation
+│   └── obsidian-backup-daemon.sh   # Daily backup scheduler
+├── docs/
+│   └── obsidian-operations.md      # Syncthing/backup setup and operations runbook
 ├── templates/
 │   └── agent-state-template/       # Template for new agent state repos
 ├── .github/workflows/              # CI/CD
@@ -160,7 +173,7 @@ josemar-assistente/
 Deployment is handled via GitHub Actions:
 
 1. Set required secrets (see `.github/workflows/AGENTS.md`)
-2. Set `WORKSPACE_STATE_REPO` variable
+2. Set required variables: `WORKSPACE_STATE_REPO` and `LAN_BIND_IP`
 3. Run the `deploy-to-home-server` workflow
 
 **Fresh Start:** The workflow has a `fresh_start` option that erases ALL data (with a safety countdown).
@@ -197,7 +210,11 @@ Access Web UI at `http://operator:YOUR_PASSWORD@localhost:18789/`
 ### Docker Deployment
 
 - **Image**: Based on `ghcr.io/openclaw/openclaw:latest` with Python, pymupdf, git, gogcli
-- **Volume**: `openclaw-workspace` for persistent state (workspace, sessions, credentials)
+- **Volumes**:
+  - `openclaw-workspace` for OpenClaw runtime state
+  - `obsidian-vault` for Obsidian notes and attachments
+  - `syncthing-config` for Syncthing identity and config
+  - `obsidian-backup-state` for backup slot pointer
 - **Entrypoint**: Copies config, mounts credentials, runs git sync, starts OpenClaw
 
 ### Agent State Sync
@@ -221,6 +238,7 @@ Single unified skill directory (`agent-state/skills/`):
 - **agent-state/skills/AGENTS.md**: Skills development guide
 - **credentials/README.md**: Credential management
 - **.github/workflows/AGENTS.md**: CI/CD documentation
+- **docs/obsidian-operations.md**: Obsidian sync/backup operations runbook
 - **templates/agent-state-template/README.md**: Agent state setup
 
 ## License

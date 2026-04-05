@@ -270,6 +270,7 @@ git push -u origin feature/my-feature-name
 - **Credential setup and management** -> `credentials/`
 - **CI/CD workflows, GitHub Actions, runner setup** -> `.github/workflows/`
 - **Docker deployment, environment setup** -> See `docker-compose.yml` and `.env.example`
+- **Obsidian sync/backup operations** -> `docs/obsidian-operations.md`
 - **Agent state template** -> `templates/agent-state-template/`
 - **External docs:** https://docs.openclaw.dev
 
