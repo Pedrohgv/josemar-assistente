@@ -65,3 +65,6 @@ credentials/
 
 # local obsidian vault for development and testing
 obsidian_vault
+
+# local josemar vault scaffold/content
+josemar-vault/
