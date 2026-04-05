@@ -35,6 +35,18 @@ jobs:
           echo "Docker group members: $(getent group docker)"
           echo "Docker socket permissions: $(ls -la /var/run/docker.sock 2>/dev/null || echo 'Docker socket not found')"
 
+      - name: Validate required repository variables
+        run: |
+          if [ -z "${{ vars.WORKSPACE_STATE_REPO }}" ]; then
+            echo "ERROR: Repository variable WORKSPACE_STATE_REPO is required"
+            exit 1
+          fi
+          if [ -z "${{ vars.LAN_BIND_IP }}" ]; then
+            echo "ERROR: Repository variable LAN_BIND_IP is required"
+            echo "Set it to your server LAN IP (example: 192.168.15.200)"
+            exit 1
+          fi
+
       - name: Create .env file
         run: |
           cat > .env << EOF
@@ -51,11 +63,6 @@ jobs:
           WORKSPACE_MEMORY_DAYS=30
           TZ=${{ vars.TZ }}
           LAN_BIND_IP=${{ vars.LAN_BIND_IP }}
-          OBSIDIAN_BACKUP_TIME=${{ vars.OBSIDIAN_BACKUP_TIME }}
-          OBSIDIAN_BACKUP_RUN_ON_START=${{ vars.OBSIDIAN_BACKUP_RUN_ON_START }}
-          OBSIDIAN_BACKUP_SLOTS=${{ vars.OBSIDIAN_BACKUP_SLOTS }}
-          OBSIDIAN_GDRIVE_REMOTE=${{ vars.OBSIDIAN_GDRIVE_REMOTE }}
-          OBSIDIAN_GDRIVE_PATH=${{ vars.OBSIDIAN_GDRIVE_PATH }}
           EOF
 
       - name: Create rclone config for backup container

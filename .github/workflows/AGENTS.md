@@ -37,13 +37,21 @@ The following secrets must be configured in the GitHub repository settings:
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `WORKSPACE_STATE_REPO` | HTTPS URL of the private agent state repo | Yes |
-| `TZ` | Timezone used by Syncthing and backup scheduler | No (default in compose) |
 | `LAN_BIND_IP` | Server LAN IP for Syncthing port binding | Yes (for laptop access) |
-| `OBSIDIAN_BACKUP_TIME` | Daily backup time in HH:MM | No (default `03:15`) |
-| `OBSIDIAN_BACKUP_RUN_ON_START` | Run startup backup (`true`/`false`) | No (default `false`) |
-| `OBSIDIAN_BACKUP_SLOTS` | Rotating backup slots kept in Drive | No (default `5`) |
-| `OBSIDIAN_GDRIVE_REMOTE` | rclone remote name (example: `gdrive`) | No (default `gdrive`) |
-| `OBSIDIAN_GDRIVE_PATH` | Target folder in remote storage | No (default `Josemar/obsidian-backups`) |
+| `TZ` | Timezone used by Syncthing and backup scheduler | No (default `America/Sao_Paulo`) |
+
+### Obsidian Backup Defaults (from Compose)
+
+The deployment workflow does not inject `OBSIDIAN_*` variables into `.env`.
+Backup behavior is controlled by defaults in `docker-compose.yml`:
+
+- `OBSIDIAN_BACKUP_TIME=03:15`
+- `OBSIDIAN_BACKUP_RUN_ON_START=false`
+- `OBSIDIAN_BACKUP_SLOTS=5`
+- `OBSIDIAN_GDRIVE_REMOTE=gdrive`
+- `OBSIDIAN_GDRIVE_PATH=Josemar/obsidian-backups`
+
+To change these values globally, update `docker-compose.yml` defaults.
 
 ### Generating GATEWAY_AUTH_PASSWORD
 
