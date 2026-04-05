@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       fresh_start:
-        description: 'WARNING: This ERASES ALL DATA - workspace volume, all memory (SOUL.md, MEMORY.md), all skills, all sessions, all uploaded files. This action is IRREVERSIBLE. Only use if you want a completely clean slate.'
+        description: 'WARNING: This ERASES OPENCLAW WORKSPACE DATA - memory, skills, sessions, uploaded files. This action is IRREVERSIBLE. Obsidian vault volume is NOT removed.'
         required: false
         default: false
         type: boolean
@@ -35,8 +35,42 @@ jobs:
           echo "Docker group members: $(getent group docker)"
           echo "Docker socket permissions: $(ls -la /var/run/docker.sock 2>/dev/null || echo 'Docker socket not found')"
 
+      - name: Validate required repository variables
+        run: |
+          if [ -z "${{ vars.WORKSPACE_STATE_REPO }}" ]; then
+            echo "ERROR: Repository variable WORKSPACE_STATE_REPO is required"
+            exit 1
+          fi
+          LAN_IP="${{ vars.LAN_BIND_IP }}"
+          if [ -z "$LAN_IP" ]; then
+            echo "ERROR: Repository variable LAN_BIND_IP is required"
+            echo "Set it to your server LAN IP (example: 192.168.15.200)"
+            exit 1
+          fi
+          if [ "$LAN_IP" = "0.0.0.0" ]; then
+            echo "ERROR: LAN_BIND_IP cannot be 0.0.0.0"
+            exit 1
+          fi
+          if ! echo "$LAN_IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: LAN_BIND_IP must be an IPv4 address"
+            exit 1
+          fi
+
+          GUI_BIND_IP="${{ vars.SYNCTHING_GUI_BIND_IP }}"
+          if [ -n "$GUI_BIND_IP" ]; then
+            if [ "$GUI_BIND_IP" = "0.0.0.0" ]; then
+              echo "ERROR: SYNCTHING_GUI_BIND_IP cannot be 0.0.0.0"
+              exit 1
+            fi
+            if ! echo "$GUI_BIND_IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "ERROR: SYNCTHING_GUI_BIND_IP must be an IPv4 address when set"
+              exit 1
+            fi
+          fi
+
       - name: Create .env file
         run: |
+          umask 077
           cat > .env << EOF
           ZAI_API_KEY=${{ secrets.ZAI_API_KEY }}
           TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -49,7 +83,33 @@ jobs:
           WORKSPACE_SYNC_ON_START=${{ github.event.inputs.skip_git_sync == 'false' && 'true' || 'false' }}
           WORKSPACE_SYNC_INTERVAL=60
           WORKSPACE_MEMORY_DAYS=30
+          TZ=${{ vars.TZ }}
+          LAN_BIND_IP=${{ vars.LAN_BIND_IP }}
+          SYNCTHING_GUI_BIND_IP=${{ vars.SYNCTHING_GUI_BIND_IP }}
           EOF
+          chmod 600 .env
+
+      - name: Create rclone config for backup container
+        run: |
+          if [ -n "${{ secrets.RCLONE_CONFIG_B64 }}" ]; then
+            COMPOSE_PROJECT=$(basename "$PWD")
+            RCLONE_VOLUME="${COMPOSE_PROJECT}_obsidian-rclone-config"
+            TMP_RCLONE_CONF=$(mktemp)
+            trap 'rm -f "$TMP_RCLONE_CONF"' EXIT
+            echo "${{ secrets.RCLONE_CONFIG_B64 }}" | base64 --decode > "$TMP_RCLONE_CONF"
+            chmod 600 "$TMP_RCLONE_CONF"
+            docker volume create "$RCLONE_VOLUME" >/dev/null
+            docker run --rm \
+              -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+              -v "$RCLONE_VOLUME:/config/rclone" \
+              alpine:3.20 \
+              sh -c 'cp /tmp/rclone.conf /config/rclone/rclone.conf && chmod 600 /config/rclone/rclone.conf'
+            rm -f "$TMP_RCLONE_CONF"
+            trap - EXIT
+            echo "rclone config loaded into Docker volume"
+          else
+            echo "WARNING: RCLONE_CONFIG_B64 secret not set. Obsidian backups will fail until configured."
+          fi
 
       - name: FRESH START - Remove workspace volume
         if: github.event.inputs.fresh_start == 'true'
@@ -63,6 +123,7 @@ jobs:
           echo "  - All session history and conversation data"
           echo "  - All uploaded files (PDFs, etc.)"
           echo "  - All workspace configuration"
+          echo "  - Obsidian vault volume is NOT deleted"
           echo "=========================================="
           echo "Waiting 10 seconds before proceeding..."
           echo "Press Cancel on this workflow to abort."
@@ -105,3 +166,7 @@ jobs:
         run: |
           echo "Checking deployed skills..."
           docker compose exec -T openclaw ls -la /root/.openclaw/skills/ 2>/dev/null || echo "No skills deployed yet"
+
+      - name: Cleanup sensitive files
+        if: always()
+        run: rm -f .env

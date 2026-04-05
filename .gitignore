@@ -62,3 +62,6 @@ htmlcov/
 # Contains sensitive OAuth and API credential files
 # These are mounted into the container at runtime
 credentials/
+
+# local obsidian vault for development and testing
+obsidian_vault

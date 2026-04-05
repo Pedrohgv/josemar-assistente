@@ -598,23 +598,24 @@ Configure custom skills. OpenClaw auto-discovers skills from the workspace direc
 
 ```json5
 skills: {
-  entries: {
-    "finance-assistant": {
-      enabled: true
-    },
-    "gogcli-tables": {
-      enabled: true
-    },
-    "workspace-sync": {
-      enabled: true
-    }
-  }
+  // Keep bundled defaults disabled; load workspace/state skills only
+  allowBundled: [],
+  // Auto-refresh skills when files change
+  load: {
+    watch: true,
+    watchDebounceMs: 250,
+  },
+  // Per-skill overrides only (optional)
+  entries: {}
 }
 ```
 
 **Skill Configuration Fields:**
-- `entries`: Skill ID (key) with configuration
-  - `enabled`: Boolean, if skill is enabled
+- `allowBundled`: optional allowlist for bundled skills (`[]` disables bundled skills)
+- `load.watch`: auto-refresh discovered skills
+- `load.watchDebounceMs`: debounce for file watcher events
+- `entries`: per-skill override map (optional)
+  - `enabled`: set `false` to disable a discovered skill
 
 **Unified Skills System:**
 
@@ -629,18 +630,9 @@ See `agent-state/skills/AGENTS.md` for detailed skill development guide.
 
 **Adding a New Skill:**
 
-```json5
-entries: {
-  "finance-assistant": {
-    enabled: true
-  },
-  "my-custom-skill": {
-    enabled: true
-  }
-}
-```
+Just add the skill folder to `agent-state/skills/` (or `<workspace>/skills/`). No `openclaw.json` edit is required unless you want per-skill overrides.
 
-**Note:** Skills are automatically discovered from the workspace directory. The skill directory name must match the entry key.
+**Note:** Skills are automatically discovered from the workspace directory. `entries` is only for overrides like `enabled: false`, `env`, or skill-specific config.
 
 ### 6. Agent Prompts and Personality
 
