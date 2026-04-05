@@ -43,7 +43,7 @@ services:
     ports:
       # Metrics port
       - "9090:9090"
-      # OpenClaw Gateway UI (requires GATEWAY_AUTH_TOKEN)
+      # OpenClaw Gateway UI (requires GATEWAY_AUTH_PASSWORD)
       - "18789:18789"
     networks:
       - openclaw-network
@@ -69,8 +69,9 @@ services:
       - syncthing-config:/var/syncthing/config
       - obsidian-vault:/var/syncthing/data/obsidian
     ports:
-      # Bind to LAN IP only (set LAN_BIND_IP in .env)
-      - "${LAN_BIND_IP:-127.0.0.1}:8384:8384"
+      # Syncthing GUI/API should stay localhost-only by default
+      - "${SYNCTHING_GUI_BIND_IP:-127.0.0.1}:8384:8384"
+      # Bind sync/discovery traffic to LAN IP only
       - "${LAN_BIND_IP:-127.0.0.1}:22000:22000/tcp"
       - "${LAN_BIND_IP:-127.0.0.1}:22000:22000/udp"
       - "${LAN_BIND_IP:-127.0.0.1}:21027:21027/udp"
@@ -93,7 +94,7 @@ services:
       - OBSIDIAN_BACKUP_SLOTS=${OBSIDIAN_BACKUP_SLOTS:-5}
     volumes:
       - ./scripts:/scripts:ro
-      - ./credentials/rclone:/config/rclone:ro
+      - obsidian-rclone-config:/config/rclone
       - obsidian-vault:/data/obsidian:ro
       - obsidian-backup-state:/state
     entrypoint: ["/bin/sh", "/scripts/obsidian-backup-daemon.sh"]
@@ -110,6 +111,8 @@ volumes:
   obsidian-vault:
     driver: local
   syncthing-config:
+    driver: local
+  obsidian-rclone-config:
     driver: local
   obsidian-backup-state:
     driver: local

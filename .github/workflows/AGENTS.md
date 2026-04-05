@@ -39,6 +39,9 @@ The following secrets must be configured in the GitHub repository settings:
 | `WORKSPACE_STATE_REPO` | HTTPS URL of the private agent state repo | Yes |
 | `LAN_BIND_IP` | Server LAN IP for Syncthing port binding | Yes (for laptop access) |
 | `TZ` | Timezone used by Syncthing and backup scheduler | No (default `America/Sao_Paulo`) |
+| `SYNCTHING_GUI_BIND_IP` | Syncthing GUI/API bind IP | No (default `127.0.0.1`) |
+
+Security note: avoid setting `SYNCTHING_GUI_BIND_IP=0.0.0.0`.
 
 ### Obsidian Backup Defaults (from Compose)
 
@@ -137,7 +140,7 @@ Skills are versioned in the agent-state repo (`agent-state/skills/`). On contain
 **Behavior:**
 1. Checks out the repository (with submodules for `agent-state/`)
 2. Creates `.env` file from GitHub secrets and variables
-3. Restores `credentials/rclone/rclone.conf` from `RCLONE_CONFIG_B64`
+3. Loads `rclone.conf` from `RCLONE_CONFIG_B64` into Docker volume `obsidian-rclone-config`
 4. Stops existing Docker services
 5. Optionally removes workspace volume (if `fresh_start: true`, with safety countdown)
 6. Cleans up old Docker images (preserves volumes)
@@ -145,6 +148,7 @@ Skills are versioned in the agent-state repo (`agent-state/skills/`). On contain
 8. Starts the services
 9. Verifies the container is running and healthy
 10. Verifies skill deployment
+11. Removes plaintext `.env` from runner workspace
 
 **Data Safety:**
 - **DO NOT** use `docker system prune` (too broad)
@@ -157,6 +161,7 @@ Skills are versioned in the agent-state repo (`agent-state/skills/`). On contain
 **Workspace Persistence:**
 - Workspace data is stored in a named Docker volume (`openclaw-workspace`)
 - Obsidian vault data is stored in a separate named Docker volume (`obsidian-vault`)
+- rclone config is stored in `obsidian-rclone-config`
 - Backup slot state is stored in `obsidian-backup-state`
 - The volume persists across deployments and container rebuilds
 - Unlike bind mounts, named volumes are stored outside the git repository at `/var/lib/docker/volumes/`
@@ -248,7 +253,8 @@ Safely stops the Josemar Assistente service without deleting data.
    - `WORKSPACE_REPO_TOKEN`
    - `RCLONE_CONFIG_B64`
 3. Verify `WORKSPACE_STATE_REPO` is set as a **Repository variable** (not a secret)
-4. Re-save secrets if recently added (may take a moment to propagate)
+4. Verify `LAN_BIND_IP` is set as a **Repository variable**
+5. Re-save secrets if recently added (may take a moment to propagate)
 
 ### Deployment Failures
 
@@ -259,7 +265,7 @@ Safely stops the Josemar Assistente service without deleting data.
    ```bash
    docker-compose logs -f openclaw
    ```
-2. Verify `.env` file was created correctly:
+2. Verify environment variables in the running container:
    ```bash
    docker-compose exec openclaw env | grep -E "ZAI|TELEGRAM"
    ```

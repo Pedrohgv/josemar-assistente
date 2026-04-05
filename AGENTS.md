@@ -60,6 +60,7 @@ josemar-assistente/
 - `openclaw-workspace` stores OpenClaw runtime state (workspace repo, sessions, paired devices)
 - `obsidian-vault` stores Obsidian markdown files and attachments (not git-versioned)
 - `syncthing-config` stores Syncthing device identity and sync settings
+- `obsidian-rclone-config` stores rclone auth for Obsidian backups
 - `obsidian-backup-state` stores backup slot rotation pointer (`next-slot`)
 - Docker volume paths on host use `/var/lib/docker/volumes/<volume-name>/_data/`
 - Workspace repo files are automatically synced to a private git repo (`agent-state/`)
@@ -120,7 +121,7 @@ You can safely test locally without disconnecting the production bot:
    Optional Obsidian stack testing:
    - Set `LAN_BIND_IP=127.0.0.1` in `.env`
    - Access Syncthing UI at `http://127.0.0.1:8384`
-   - Create `credentials/rclone/rclone.conf` before testing backups
+   - Load rclone config into volume `obsidian-rclone-config` before testing backups (see `docs/obsidian-operations.md`)
 
 6. **Stop when done:**
    ```bash
@@ -250,6 +251,7 @@ git push -u origin feature/my-feature-name
 - `WORKSPACE_SYNC_INTERVAL` - Minutes between periodic syncs (0 = disabled)
 - `WORKSPACE_MEMORY_DAYS` - Days to keep memory logs
 - `LAN_BIND_IP` - LAN interface IP for Syncthing ports (`127.0.0.1` for local-only testing)
+- `SYNCTHING_GUI_BIND_IP` - Bind IP for Syncthing GUI/API (`127.0.0.1` recommended)
 - `TZ` - Timezone used by Syncthing and backup scheduler
 - `OBSIDIAN_BACKUP_TIME` - Daily backup time (`HH:MM`, default `03:15`)
 - `OBSIDIAN_BACKUP_RUN_ON_START` - Run one backup when backup container starts

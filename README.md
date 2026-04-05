@@ -97,6 +97,11 @@ WORKSPACE_REPO_TOKEN=your_github_pat_here
 WORKSPACE_SYNC_ON_START=true
 WORKSPACE_SYNC_INTERVAL=60
 WORKSPACE_MEMORY_DAYS=30
+
+# Obsidian Sync/Backup
+LAN_BIND_IP=192.168.1.50
+SYNCTHING_GUI_BIND_IP=127.0.0.1
+TZ=America/Sao_Paulo
 ```
 
 See `.env.example` for the complete list.

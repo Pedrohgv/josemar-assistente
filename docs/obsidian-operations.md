@@ -31,6 +31,7 @@ Key volumes:
 
 - `LAN_BIND_IP`: server LAN IPv4 (example: `192.168.15.200`)
 - `TZ`: optional, defaults to `America/Sao_Paulo`
+- `SYNCTHING_GUI_BIND_IP`: optional, defaults to `127.0.0.1` (recommended)
 
 Backup behavior defaults are defined in `docker-compose.yml`:
 
@@ -39,6 +40,22 @@ Backup behavior defaults are defined in `docker-compose.yml`:
 - `OBSIDIAN_BACKUP_SLOTS=5`
 - `OBSIDIAN_GDRIVE_REMOTE=gdrive`
 - `OBSIDIAN_GDRIVE_PATH=Josemar/obsidian-backups`
+
+## Local/Manual rclone Config Loading
+
+When not deploying through GitHub Actions, load `rclone.conf` into Docker volume `obsidian-rclone-config`:
+
+```bash
+mkdir -p credentials/rclone
+# Place your config at credentials/rclone/rclone.conf
+
+docker volume create josemar-assistente_obsidian-rclone-config
+docker run --rm \
+  -v "$PWD/credentials/rclone:/src:ro" \
+  -v "josemar-assistente_obsidian-rclone-config:/config/rclone" \
+  alpine:3.20 \
+  sh -c 'cp /src/rclone.conf /config/rclone/rclone.conf && chmod 600 /config/rclone/rclone.conf'
+```
 
 ## Network Requirement (Proxmox + Router)
 
@@ -87,6 +104,11 @@ Check Syncthing bind explicitly:
 ss -lntup | grep -E ':8384|:22000|:21027'
 ```
 
+Expected bind model:
+
+- `8384` on `127.0.0.1` (GUI/API)
+- `22000` and `21027` on `LAN_BIND_IP` (sync/discovery)
+
 ## One-Time Pairing: Laptop <-> Server
 
 ### 1) Install Syncthing on laptop
@@ -109,7 +131,19 @@ Open laptop UI: `http://127.0.0.1:8384`
 
 ### 3) Open server Syncthing UI
 
-`http://<LAN_BIND_IP>:8384`
+If `SYNCTHING_GUI_BIND_IP=127.0.0.1` (default), use SSH tunnel:
+
+```bash
+ssh <server-host> -L 8384:127.0.0.1:8384
+```
+
+Then open:
+
+- `http://127.0.0.1:8384`
+
+If GUI was intentionally exposed on LAN, use:
+
+- `http://<LAN_BIND_IP>:8384`
 
 ### 4) Add server on laptop
 
@@ -150,6 +184,12 @@ dc exec -T obsidian-backup sh /scripts/obsidian-backup.sh
 dc logs --tail=100 obsidian-backup
 ```
 
+Verify runtime config path:
+
+```bash
+dc exec -T obsidian-backup ls -l /config/rclone/rclone.conf
+```
+
 ### Verify slots in Google Drive
 
 ```bash
@@ -187,7 +227,7 @@ echo "$VAULT_PATH"
 ```bash
 docker run --rm \
   -v "$VAULT_PATH:/restore" \
-  -v "$PWD/credentials/rclone:/config/rclone:ro" \
+  -v "josemar-assistente_obsidian-rclone-config:/config/rclone:ro" \
   -e RCLONE_CONFIG=/config/rclone/rclone.conf \
   rclone/rclone:latest sync gdrive:Josemar/obsidian-backups/slot-3 /restore
 ```

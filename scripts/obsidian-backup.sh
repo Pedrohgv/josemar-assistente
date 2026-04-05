@@ -9,6 +9,7 @@ REMOTE_NAME="${OBSIDIAN_GDRIVE_REMOTE:-gdrive}"
 REMOTE_PATH="${OBSIDIAN_GDRIVE_PATH:-Josemar/obsidian-backups}"
 SLOTS="${OBSIDIAN_BACKUP_SLOTS:-5}"
 RCLONE_CONFIG_FILE="${RCLONE_CONFIG:-/config/rclone/rclone.conf}"
+LOCK_DIR=""
 
 log_info() {
     echo "[obsidian-backup] $1"
@@ -54,7 +55,24 @@ write_next_slot() {
         next_slot=1
     fi
 
-    printf '%s\n' "$next_slot" > "$STATE_DIR/next-slot"
+    tmp_slot_file="$STATE_DIR/.next-slot.tmp.$$"
+    printf '%s\n' "$next_slot" > "$tmp_slot_file"
+    mv "$tmp_slot_file" "$STATE_DIR/next-slot"
+}
+
+release_lock() {
+    if [ -n "$LOCK_DIR" ] && [ -d "$LOCK_DIR" ]; then
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
+}
+
+acquire_lock() {
+    LOCK_DIR="$STATE_DIR/.backup.lock"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        log_error "Backup already running (lock: $LOCK_DIR)"
+        exit 1
+    fi
+    trap release_lock EXIT INT TERM
 }
 
 main() {
@@ -71,6 +89,7 @@ main() {
     fi
 
     mkdir -p "$STATE_DIR"
+    acquire_lock
 
     slot=$(read_slot)
     timestamp_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
