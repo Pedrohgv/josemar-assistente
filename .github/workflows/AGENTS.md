@@ -46,6 +46,7 @@ The following secrets must be configured in the GitHub repository settings:
 | `AUX_ML_MAX_QUEUE` | Maximum aux-ml queued jobs | No (default `50`) |
 | `AUX_ML_JOB_TIMEOUT_SECONDS` | Aux-ml per-job timeout | No (default `1800`) |
 | `AUX_ML_POLL_INTERVAL_SECONDS` | Queue/model poll interval for aux-ml | No (default `2`) |
+| `AUX_ML_LLAMACPP_TIMEOUT_SECONDS` | llama.cpp server read/write timeout for long OCR requests | No (default `1800`) |
 | `AUX_ML_ALLOWED_INPUT_DIRS` | Comma-separated allowed input roots for OCR | No (default `/root/.openclaw/workspace`) |
 | `AUX_ML_ENFORCE_MEMORY_LIMIT` | Fail fast when memory budget is insufficient | No (default `true`) |
 | `AUX_ML_OCR_MAX_PAGES` | Max pages per OCR PDF job | No (default `50`) |

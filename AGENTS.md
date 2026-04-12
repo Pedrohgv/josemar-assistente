@@ -282,6 +282,7 @@ git push -u origin feature/my-feature-name
 - `AUX_ML_MAX_QUEUE` - Maximum queued auxiliary ML jobs
 - `AUX_ML_JOB_TIMEOUT_SECONDS` - Per-job timeout for long-running tasks
 - `AUX_ML_POLL_INTERVAL_SECONDS` - Poll interval for queue/model status checks
+- `AUX_ML_LLAMACPP_TIMEOUT_SECONDS` - llama.cpp server read/write timeout for long OCR inference requests
 - `AUX_ML_ALLOWED_INPUT_DIRS` - Comma-separated allowed roots for OCR file inputs
 - `AUX_ML_ENFORCE_MEMORY_LIMIT` - Fail fast if configured memory budget is insufficient
 - `AUX_ML_OCR_MAX_PAGES` - Max pages allowed per OCR PDF request

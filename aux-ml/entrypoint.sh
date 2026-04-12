@@ -7,6 +7,7 @@ LLAMA_ROUTER_PORT="${LLAMA_ROUTER_PORT:-8080}"
 LLAMA_MODELS_DIR="${LLAMA_MODELS_DIR:-/models}"
 LLAMA_MODELS_PRESET="${LLAMA_MODELS_PRESET:-/app/config/models-preset.ini}"
 LLAMA_PARALLEL="${LLAMA_PARALLEL:-1}"
+LLAMA_TIMEOUT="${LLAMA_TIMEOUT:-1800}"
 LLAMA_CONT_BATCHING="${LLAMA_CONT_BATCHING:-false}"
 LLAMA_MMPROJ_PATH="${LLAMA_MMPROJ_PATH:-/models/mmproj-glm-ocr.gguf}"
 
@@ -25,6 +26,7 @@ if [ -f "$LLAMA_MODELS_PRESET" ]; then
     /app/llama-server \
         --host "$LLAMA_ROUTER_HOST" \
         --port "$LLAMA_ROUTER_PORT" \
+        --timeout "$LLAMA_TIMEOUT" \
         --models-preset "$LLAMA_MODELS_PRESET" \
         --parallel "$LLAMA_PARALLEL" \
         "$CONT_BATCHING_FLAG" &
@@ -35,6 +37,7 @@ else
     /app/llama-server \
         --host "$LLAMA_ROUTER_HOST" \
         --port "$LLAMA_ROUTER_PORT" \
+        --timeout "$LLAMA_TIMEOUT" \
         --models-dir "$LLAMA_MODELS_DIR" \
         --parallel "$LLAMA_PARALLEL" \
         "$CONT_BATCHING_FLAG" &

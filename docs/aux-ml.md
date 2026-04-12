@@ -26,6 +26,7 @@ AUX_ML_ENABLED=true
 COMPOSE_PROFILES=aux-ml
 AUX_ML_MEMORY_LIMIT=8192m
 AUX_ML_MEMORY_LIMIT_MB=8192
+AUX_ML_LLAMACPP_TIMEOUT_SECONDS=1800
 ```
 
 Then start:
@@ -72,6 +73,10 @@ Model metadata lives in `aux-ml/config/models.yaml`.
    - Different model or empty queue: unload current model.
 
 This behavior intentionally prioritizes predictable memory and correctness over low latency.
+
+For longer OCR runs (for example, page splits or low thread counts), increase
+`AUX_ML_LLAMACPP_TIMEOUT_SECONDS` to avoid `proxy error: Failed to read connection`
+from llama-router child requests.
 
 ## API Endpoints
 
