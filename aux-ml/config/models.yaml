@@ -1,0 +1,7 @@
+models:
+  glm-ocr:
+    task: ocr
+    model_path: /models/glm-ocr.gguf
+    required_memory_mb: 8192
+    default_prompt: "Text Recognition:"
+    max_tokens: 8192

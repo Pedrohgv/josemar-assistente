@@ -40,8 +40,22 @@ The following secrets must be configured in the GitHub repository settings:
 | `LAN_BIND_IP` | Server LAN IP for Syncthing port binding | Yes (for laptop access) |
 | `TZ` | Timezone used by Syncthing and backup scheduler | No (default `America/Sao_Paulo`) |
 | `SYNCTHING_GUI_BIND_IP` | Syncthing GUI/API bind IP | No (default `127.0.0.1`) |
+| `AUX_ML_ENABLED` | Optional aux-ml toggle (`true`/`false`) | No (default enabled) |
+| `AUX_ML_MEMORY_LIMIT` | Docker memory limit for aux-ml service | No (default `8192m`) |
+| `AUX_ML_MEMORY_LIMIT_MB` | Numeric memory budget used by aux-ml runtime validation | No (default `8192`) |
+| `AUX_ML_MAX_QUEUE` | Maximum aux-ml queued jobs | No (default `50`) |
+| `AUX_ML_JOB_TIMEOUT_SECONDS` | Aux-ml per-job timeout | No (default `1800`) |
+| `AUX_ML_POLL_INTERVAL_SECONDS` | Queue/model poll interval for aux-ml | No (default `2`) |
+| `AUX_ML_LLAMACPP_TIMEOUT_SECONDS` | llama.cpp server read/write timeout for long OCR requests | No (default `1800`) |
+| `AUX_ML_ALLOWED_INPUT_DIRS` | Comma-separated allowed input roots for OCR | No (default `/root/.openclaw/workspace`) |
+| `AUX_ML_ENFORCE_MEMORY_LIMIT` | Fail fast when memory budget is insufficient | No (default `true`) |
+| `AUX_ML_OCR_MAX_PAGES` | Max pages per OCR PDF job | No (default `50`) |
 
 Security note: avoid setting `SYNCTHING_GUI_BIND_IP=0.0.0.0`.
+
+When `AUX_ML_ENABLED` is unset, the workflow treats it as `true` and writes `COMPOSE_PROFILES=aux-ml`.
+Set `AUX_ML_ENABLED=false` only when you explicitly want to disable aux-ml for a deployment.
+When aux-ml is enabled, workflow logs whether model files are local or will be downloaded from compose defaults (`glm-ocr` + `mmproj`).
 
 ### Obsidian Backup Defaults (from Compose)
 
@@ -144,7 +158,7 @@ Skills are versioned in the agent-state repo (`agent-state/skills/`). On contain
 4. Stops existing Docker services
 5. Optionally removes workspace volume (if `fresh_start: true`, with safety countdown)
 6. Cleans up old Docker images (preserves volumes)
-7. Builds the Docker image with no cache
+7. Builds Docker images with no cache (includes `aux-ml` image only when aux profile is enabled)
 8. Starts the services
 9. Verifies the container is running and healthy
 10. Verifies skill deployment

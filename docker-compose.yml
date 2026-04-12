@@ -38,6 +38,11 @@ services:
       - WORKSPACE_GIT_BRANCH=${WORKSPACE_GIT_BRANCH:-main}
       - WORKSPACE_GIT_USER_EMAIL=${WORKSPACE_GIT_USER_EMAIL:-agent@josemar.local}
       - WORKSPACE_GIT_USER_NAME=${WORKSPACE_GIT_USER_NAME:-Josemar Agent}
+      # Auxiliary ML service integration (optional)
+      - AUX_ML_ENABLED=${AUX_ML_ENABLED:-false}
+      - AUX_ML_URL=${AUX_ML_URL:-http://aux-ml:8091}
+      - AUX_ML_JOB_TIMEOUT_SECONDS=${AUX_ML_JOB_TIMEOUT_SECONDS:-1800}
+      - AUX_ML_POLL_INTERVAL_SECONDS=${AUX_ML_POLL_INTERVAL_SECONDS:-2}
       # Other environment variables
       - OPENCLAW_LOG_LEVEL=info
     ports:
@@ -54,6 +59,45 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+  aux-ml:
+    profiles:
+      - aux-ml
+    build:
+      context: .
+      dockerfile: aux-ml/Dockerfile
+      args:
+        GLM_OCR_MODEL_URL: ${AUX_ML_GLM_OCR_URL:-https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/main/GLM-OCR-Q8_0.gguf}
+        GLM_OCR_MODEL_SHA256: ${AUX_ML_GLM_OCR_SHA256:-45bc244a6446aff850521dc41f18bc8d7105ad5f0c2c8c28af04e7cc4f4d50b1}
+        GLM_OCR_MMPROJ_URL: ${AUX_ML_GLM_OCR_MMPROJ_URL:-https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/main/mmproj-GLM-OCR-Q8_0.gguf}
+        GLM_OCR_MMPROJ_SHA256: ${AUX_ML_GLM_OCR_MMPROJ_SHA256:-9c4b58e33e316ed142eb5dcb41abec3844d3e6e5dc361ffb782c3fa9d175141f}
+    container_name: josemar-aux-ml
+    restart: unless-stopped
+    expose:
+      - "8091"
+    environment:
+      - AUX_ML_PORT=8091
+      - AUX_ML_BIND_HOST=0.0.0.0
+      - AUX_ML_LLAMACPP_URL=http://127.0.0.1:8080
+      - AUX_ML_MODEL_REGISTRY=/app/config/models.yaml
+      - AUX_ML_MAX_QUEUE=${AUX_ML_MAX_QUEUE:-50}
+      - AUX_ML_JOB_TIMEOUT_SECONDS=${AUX_ML_JOB_TIMEOUT_SECONDS:-1800}
+      - AUX_ML_POLL_INTERVAL_SECONDS=${AUX_ML_POLL_INTERVAL_SECONDS:-1}
+      - AUX_ML_ALLOWED_INPUT_DIRS=${AUX_ML_ALLOWED_INPUT_DIRS:-/root/.openclaw/workspace}
+      - AUX_ML_ENFORCE_MEMORY_LIMIT=${AUX_ML_ENFORCE_MEMORY_LIMIT:-true}
+      - AUX_ML_MEMORY_LIMIT_MB=${AUX_ML_MEMORY_LIMIT_MB:-8192}
+      - AUX_ML_OCR_MAX_PAGES=${AUX_ML_OCR_MAX_PAGES:-50}
+      - LLAMA_ROUTER_HOST=127.0.0.1
+      - LLAMA_ROUTER_PORT=8080
+      - LLAMA_MODELS_DIR=/models
+      - LLAMA_PARALLEL=1
+      - LLAMA_TIMEOUT=${AUX_ML_LLAMACPP_TIMEOUT_SECONDS:-1800}
+      - LLAMA_CONT_BATCHING=false
+    volumes:
+      - openclaw-workspace:/root/.openclaw:ro
+    mem_limit: ${AUX_ML_MEMORY_LIMIT:-8192m}
+    networks:
+      - openclaw-network
 
   syncthing:
     image: syncthing/syncthing:latest

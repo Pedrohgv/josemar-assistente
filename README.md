@@ -13,6 +13,7 @@ A self-hosted OpenClaw bot running in Docker with Telegram integration and PDF e
 - **Git-Backed Agent State**: Workspace files versioned in a private git repo
 - **Obsidian Vault Sync**: Syncthing-based sync between server and laptop
 - **Google Drive Backups**: Daily rotating Obsidian vault backups via rclone
+- **Auxiliary ML Batch Container**: Optional llama.cpp service with FIFO queue for long-running OCR/transcription tasks
 
 ## Prerequisites
 
@@ -98,6 +99,24 @@ WORKSPACE_SYNC_ON_START=true
 WORKSPACE_SYNC_INTERVAL=60
 WORKSPACE_MEMORY_DAYS=30
 
+# Auxiliary ML service (optional)
+AUX_ML_ENABLED=false
+COMPOSE_PROFILES=
+AUX_ML_GLM_OCR_URL=
+AUX_ML_GLM_OCR_SHA256=
+AUX_ML_GLM_OCR_MMPROJ_URL=
+AUX_ML_GLM_OCR_MMPROJ_SHA256=
+AUX_ML_URL=http://aux-ml:8091
+AUX_ML_MEMORY_LIMIT=8192m
+AUX_ML_MEMORY_LIMIT_MB=8192
+AUX_ML_MAX_QUEUE=50
+AUX_ML_JOB_TIMEOUT_SECONDS=1800
+AUX_ML_POLL_INTERVAL_SECONDS=2
+AUX_ML_LLAMACPP_TIMEOUT_SECONDS=1800
+AUX_ML_ALLOWED_INPUT_DIRS=/root/.openclaw/workspace
+AUX_ML_ENFORCE_MEMORY_LIMIT=true
+AUX_ML_OCR_MAX_PAGES=50
+
 # Obsidian Sync/Backup
 LAN_BIND_IP=192.168.1.50
 SYNCTHING_GUI_BIND_IP=127.0.0.1
@@ -110,6 +129,29 @@ See `.env.example` for the complete list.
 
 The main configuration is in `config/openclaw.json` (JSON5 format). See `config/AGENTS.md` for complete reference.
 
+### Auxiliary ML Service (Optional)
+
+The auxiliary ML service runs in a dedicated container and is designed for queue-based, long-running jobs (minutes are acceptable). It currently starts with OCR (`glm-ocr`) and keeps a modular model registry for future additions.
+
+- **Single worker**: exactly one job runs at a time
+- **FIFO queue**: requests are processed in order
+- **Model lifecycle**: load on demand, unload when the next queued job is a different model (or queue is empty)
+- **Internal only**: no host port exposure by default (`http://aux-ml:8091`)
+
+To enable locally:
+
+```bash
+# In .env
+AUX_ML_ENABLED=true
+COMPOSE_PROFILES=aux-ml
+
+docker compose up -d --build
+```
+
+Place model files in `aux-ml/models/` before building (see `aux-ml/models/README.md`).
+If files are not present locally, build auto-downloads default Q8 model + mmproj from Hugging Face.
+You can override URLs/checksums with `AUX_ML_GLM_OCR_URL`, `AUX_ML_GLM_OCR_SHA256`, `AUX_ML_GLM_OCR_MMPROJ_URL`, and `AUX_ML_GLM_OCR_MMPROJ_SHA256`.
+
 ## Skills
 
 All skills live in `agent-state/skills/` and are versioned in the agent state git repo.
@@ -117,6 +159,7 @@ All skills live in `agent-state/skills/` and are versioned in the agent state gi
 ### Current Skills
 
 - **finance-assistant**: Complete financial tracking - extraction, classification, Google Sheets
+- **aux-ml**: Queue-based auxiliary ML jobs (OCR now, additional tasks later)
 - **gogcli-tables**: Google Workspace CLI with Sheets Table manipulation
 - **workspace-sync**: Manage workspace git operations - sync, commit, push, pull, and GitHub CLI
 
@@ -161,8 +204,10 @@ josemar-assistente/
 │   ├── workspace-sync.sh           # Git sync logic
 │   ├── obsidian-backup.sh          # Obsidian backup and slot rotation
 │   └── obsidian-backup-daemon.sh   # Daily backup scheduler
+├── aux-ml/                         # Auxiliary llama.cpp batch processing service
 ├── docs/
-│   └── obsidian-operations.md      # Syncthing/backup setup and operations runbook
+│   ├── obsidian-operations.md      # Syncthing/backup setup and operations runbook
+│   └── aux-ml.md                   # Auxiliary ML operations runbook
 ├── templates/
 │   └── agent-state-template/       # Template for new agent state repos
 ├── .github/workflows/              # CI/CD
@@ -178,7 +223,7 @@ josemar-assistente/
 Deployment is handled via GitHub Actions:
 
 1. Set required secrets (see `.github/workflows/AGENTS.md`)
-2. Set required variables: `WORKSPACE_STATE_REPO` and `LAN_BIND_IP`
+2. Set required variables: `WORKSPACE_STATE_REPO` and `LAN_BIND_IP` (plus optional `AUX_ML_*` variables if enabling aux-ml)
 3. Run the `deploy-to-home-server` workflow
 
 **Fresh Start:** The workflow has a `fresh_start` option that erases ALL data (with a safety countdown).
@@ -208,6 +253,8 @@ TELEGRAM_ENABLED=false
 docker compose up -d
 ```
 
+If testing the auxiliary ML service, also set `COMPOSE_PROFILES=aux-ml` in `.env`.
+
 Access Web UI at `http://operator:YOUR_PASSWORD@localhost:18789/`
 
 ## Architecture
@@ -215,6 +262,7 @@ Access Web UI at `http://operator:YOUR_PASSWORD@localhost:18789/`
 ### Docker Deployment
 
 - **Image**: Based on `ghcr.io/openclaw/openclaw:latest` with Python, pymupdf, git, gogcli
+- **Auxiliary ML**: Optional dedicated `aux-ml` container based on `llama.cpp` server for queued batch inference
 - **Volumes**:
   - `openclaw-workspace` for OpenClaw runtime state
   - `obsidian-vault` for Obsidian notes and attachments
@@ -244,6 +292,7 @@ Single unified skill directory (`agent-state/skills/`):
 - **credentials/README.md**: Credential management
 - **.github/workflows/AGENTS.md**: CI/CD documentation
 - **docs/obsidian-operations.md**: Obsidian sync/backup operations runbook
+- **docs/aux-ml.md**: Auxiliary ML queue/model lifecycle operations
 - **templates/agent-state-template/README.md**: Agent state setup
 
 ## License
