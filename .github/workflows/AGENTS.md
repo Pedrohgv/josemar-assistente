@@ -40,7 +40,7 @@ The following secrets must be configured in the GitHub repository settings:
 | `LAN_BIND_IP` | Server LAN IP for Syncthing port binding | Yes (for laptop access) |
 | `TZ` | Timezone used by Syncthing and backup scheduler | No (default `America/Sao_Paulo`) |
 | `SYNCTHING_GUI_BIND_IP` | Syncthing GUI/API bind IP | No (default `127.0.0.1`) |
-| `AUX_ML_ENABLED` | Enable optional aux-ml profile (`true`/`false`) | No (default disabled) |
+| `AUX_ML_ENABLED` | Optional aux-ml toggle (`true`/`false`) | No (default enabled) |
 | `AUX_ML_MEMORY_LIMIT` | Docker memory limit for aux-ml service | No (default `8192m`) |
 | `AUX_ML_MEMORY_LIMIT_MB` | Numeric memory budget used by aux-ml runtime validation | No (default `8192`) |
 | `AUX_ML_MAX_QUEUE` | Maximum aux-ml queued jobs | No (default `50`) |
@@ -52,7 +52,8 @@ The following secrets must be configured in the GitHub repository settings:
 
 Security note: avoid setting `SYNCTHING_GUI_BIND_IP=0.0.0.0`.
 
-When `AUX_ML_ENABLED=true`, the workflow writes `COMPOSE_PROFILES=aux-ml` into `.env` to activate the optional service.
+When `AUX_ML_ENABLED` is unset, the workflow treats it as `true` and writes `COMPOSE_PROFILES=aux-ml`.
+Set `AUX_ML_ENABLED=false` only when you explicitly want to disable aux-ml for a deployment.
 When aux-ml is enabled, workflow logs whether model files are local or will be downloaded from compose defaults (`glm-ocr` + `mmproj`).
 
 ### Obsidian Backup Defaults (from Compose)

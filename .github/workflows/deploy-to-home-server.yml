@@ -86,8 +86,8 @@ jobs:
           TZ=${{ vars.TZ }}
           LAN_BIND_IP=${{ vars.LAN_BIND_IP }}
           SYNCTHING_GUI_BIND_IP=${{ vars.SYNCTHING_GUI_BIND_IP }}
-          AUX_ML_ENABLED=${{ vars.AUX_ML_ENABLED }}
-          COMPOSE_PROFILES=${{ vars.AUX_ML_ENABLED == 'true' && 'aux-ml' || '' }}
+          AUX_ML_ENABLED=${{ vars.AUX_ML_ENABLED == 'false' && 'false' || 'true' }}
+          COMPOSE_PROFILES=${{ vars.AUX_ML_ENABLED == 'false' && '' || 'aux-ml' }}
           AUX_ML_URL=http://aux-ml:8091
           AUX_ML_MEMORY_LIMIT=${{ vars.AUX_ML_MEMORY_LIMIT }}
           AUX_ML_MEMORY_LIMIT_MB=${{ vars.AUX_ML_MEMORY_LIMIT_MB }}
@@ -102,14 +102,19 @@ jobs:
 
       - name: Set compose profiles
         run: |
-          if [ "${{ vars.AUX_ML_ENABLED }}" = "true" ]; then
+          AUX_ML_ENABLED="${{ vars.AUX_ML_ENABLED }}"
+          if [ -z "$AUX_ML_ENABLED" ]; then
+            AUX_ML_ENABLED="true"
+          fi
+
+          if [ "$AUX_ML_ENABLED" = "true" ]; then
             echo "COMPOSE_PROFILES=aux-ml" >> "$GITHUB_ENV"
           else
             echo "COMPOSE_PROFILES=" >> "$GITHUB_ENV"
           fi
 
       - name: Validate aux-ml model source
-        if: vars.AUX_ML_ENABLED == 'true'
+        if: vars.AUX_ML_ENABLED != 'false'
         run: |
           if [ -f "aux-ml/models/glm-ocr.gguf" ]; then
             echo "Found local glm-ocr model in repository checkout"
