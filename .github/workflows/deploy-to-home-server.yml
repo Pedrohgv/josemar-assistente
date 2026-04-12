@@ -86,8 +86,45 @@ jobs:
           TZ=${{ vars.TZ }}
           LAN_BIND_IP=${{ vars.LAN_BIND_IP }}
           SYNCTHING_GUI_BIND_IP=${{ vars.SYNCTHING_GUI_BIND_IP }}
+          AUX_ML_ENABLED=${{ vars.AUX_ML_ENABLED }}
+          COMPOSE_PROFILES=${{ vars.AUX_ML_ENABLED == 'true' && 'aux-ml' || '' }}
+          AUX_ML_URL=http://aux-ml:8091
+          AUX_ML_MEMORY_LIMIT=${{ vars.AUX_ML_MEMORY_LIMIT }}
+          AUX_ML_MEMORY_LIMIT_MB=${{ vars.AUX_ML_MEMORY_LIMIT_MB }}
+          AUX_ML_MAX_QUEUE=${{ vars.AUX_ML_MAX_QUEUE }}
+          AUX_ML_JOB_TIMEOUT_SECONDS=${{ vars.AUX_ML_JOB_TIMEOUT_SECONDS }}
+          AUX_ML_POLL_INTERVAL_SECONDS=${{ vars.AUX_ML_POLL_INTERVAL_SECONDS }}
+          AUX_ML_ALLOWED_INPUT_DIRS=${{ vars.AUX_ML_ALLOWED_INPUT_DIRS }}
+          AUX_ML_ENFORCE_MEMORY_LIMIT=${{ vars.AUX_ML_ENFORCE_MEMORY_LIMIT }}
+          AUX_ML_OCR_MAX_PAGES=${{ vars.AUX_ML_OCR_MAX_PAGES }}
+          AUX_ML_GLM_OCR_URL=${{ vars.AUX_ML_GLM_OCR_URL }}
+          AUX_ML_GLM_OCR_SHA256=${{ vars.AUX_ML_GLM_OCR_SHA256 }}
           EOF
           chmod 600 .env
+
+      - name: Set compose profiles
+        run: |
+          if [ "${{ vars.AUX_ML_ENABLED }}" = "true" ]; then
+            echo "COMPOSE_PROFILES=aux-ml" >> "$GITHUB_ENV"
+          else
+            echo "COMPOSE_PROFILES=" >> "$GITHUB_ENV"
+          fi
+
+      - name: Validate aux-ml model source
+        if: vars.AUX_ML_ENABLED == 'true'
+        run: |
+          if [ -f "aux-ml/models/glm-ocr.gguf" ]; then
+            echo "Found local glm-ocr model in repository checkout"
+            exit 0
+          fi
+
+          if [ -z "${{ vars.AUX_ML_GLM_OCR_URL }}" ]; then
+            echo "ERROR: AUX_ML_ENABLED=true but no model source configured"
+            echo "Provide aux-ml/models/glm-ocr.gguf in build context or set repo variable AUX_ML_GLM_OCR_URL"
+            exit 1
+          fi
+
+          echo "Using AUX_ML_GLM_OCR_URL as build-time model source"
 
       - name: Create rclone config for backup container
         run: |

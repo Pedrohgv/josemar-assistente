@@ -68,3 +68,10 @@ obsidian_vault
 
 # local josemar vault scaffold/content
 josemar-vault/
+
+# Auxiliary ML model artifacts (local only, can be very large)
+aux-ml/models/*.gguf
+aux-ml/models/*.bin
+aux-ml/models/*.safetensors
+!aux-ml/models/.gitkeep
+!aux-ml/models/README.md

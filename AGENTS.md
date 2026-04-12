@@ -12,6 +12,7 @@ Josemar Assistente is a self-hosted AI assistant bot built on OpenClaw, running 
 - **OpenClaw Gateway** - AI agent orchestration (multi-provider LLM support)
 - **Telegram Channel** - Bot interface for user interaction
 - **Unified Skills System** - Extensible tools for PDF processing and other tasks
+- **Auxiliary ML Container** - Optional queue-based `llama.cpp` service for long-running OCR/transcription jobs
 - **Git-Backed Agent State** - Workspace files versioned in a private git repo
 - **Obsidian Vault Infrastructure** - Dedicated vault volume synced with Syncthing
 - **Google Drive Vault Backups** - Daily rotating backup slots managed by rclone
@@ -21,6 +22,7 @@ Josemar Assistente is a self-hosted AI assistant bot built on OpenClaw, running 
 - **OpenClaw** - Self-hosted AI agent gateway (supports multiple LLM providers: GLM, DeepSeek, OpenAI-compatible APIs)
 - **Docker & Docker Compose** - Containerized deployment
 - **Python 3** - Custom skills and PDF processing (pymupdf)
+- **llama.cpp** - Self-hosted local inference server for auxiliary models
 - **Telegram** - Bot interface
 - **Git** - Workspace state versioning
 - **JSON5** - Configuration format
@@ -36,6 +38,7 @@ josemar-assistente/
 │   ├── .gitignore          # Security: prevents secret commits
 │   ├── skills/             # Unified skills (versioned)
 │   │   ├── finance-assistant/  # Expense tracking (PDF + Google Sheets)
+│   │   ├── aux-ml/             # Auxiliary ML queue skill (OCR/transcription jobs)
 │   │   ├── gogcli-tables/      # Google Sheets CLI
 │   │   └── workspace-sync/     # Git operations skill
 │   ├── memory/             # Daily memory logs (rotated)
@@ -48,6 +51,7 @@ josemar-assistente/
 │   ├── workspace-sync.sh          # Git sync logic
 │   ├── obsidian-backup.sh         # Vault backup + slot rotation logic
 │   └── obsidian-backup-daemon.sh  # Daily backup scheduler
+├── aux-ml/                 # Auxiliary ML service (queue + model lifecycle)
 ├── templates/              # Templates for new deployments
 │   └── agent-state-template/
 ├── .github/workflows/      # CI/CD automation
@@ -94,6 +98,8 @@ You can safely test locally without disconnecting the production bot:
    ```bash
    docker-compose up -d
    ```
+
+   To include auxiliary ML batch processing locally, set `COMPOSE_PROFILES=aux-ml` in `.env` before starting.
 
 3. **Access the Web UI:**
    The browser will prompt for HTTP Basic Auth. Enter:
@@ -218,6 +224,11 @@ git push -u origin feature/my-feature-name
    - Syncs vault into rotating slots (`slot-1` ... `slot-5`) in Google Drive
    - Auth loaded from `credentials/rclone/rclone.conf` (or CI secret restore)
 
+9. **Auxiliary ML Service (`aux-ml`)**
+   - Optional container running `llama.cpp` server in router mode
+   - Provides FIFO queue and one-at-a-time batch processing for long tasks
+   - Loads model on demand; unloads when queue is empty or next job uses another model
+
 ### Data Flow
 
 1. User sends message/PDF via Telegram (or Web UI if testing locally)
@@ -230,6 +241,7 @@ git push -u origin feature/my-feature-name
 8. Periodically, workspace changes are committed and pushed to agent-state repo
 9. Syncthing mirrors the Obsidian vault to paired devices
 10. Daily backup job uploads current vault snapshot to rotating Google Drive slots
+11. For heavy jobs, Josemar skill submits task to `aux-ml`, polls completion, and returns result
 
 ---
 
@@ -258,6 +270,19 @@ git push -u origin feature/my-feature-name
 - `OBSIDIAN_BACKUP_SLOTS` - Number of rotating slots kept in Drive (default `5`)
 - `OBSIDIAN_GDRIVE_REMOTE` - rclone remote name (default `gdrive`)
 - `OBSIDIAN_GDRIVE_PATH` - Google Drive destination folder for slot backups
+- `AUX_ML_ENABLED` - Feature flag for aux-ml skill integration (`true`/`false`)
+- `COMPOSE_PROFILES` - Set to `aux-ml` to start/build auxiliary ML service
+- `AUX_ML_GLM_OCR_URL` - Optional build-time download URL for `glm-ocr.gguf` model
+- `AUX_ML_GLM_OCR_SHA256` - Optional SHA256 checksum for downloaded `glm-ocr.gguf`
+- `AUX_ML_URL` - Internal URL for auxiliary ML API (default `http://aux-ml:8091`)
+- `AUX_ML_MEMORY_LIMIT` - Docker memory limit for `aux-ml` container (should match largest model requirement)
+- `AUX_ML_MEMORY_LIMIT_MB` - Numeric memory budget used for runtime validation
+- `AUX_ML_MAX_QUEUE` - Maximum queued auxiliary ML jobs
+- `AUX_ML_JOB_TIMEOUT_SECONDS` - Per-job timeout for long-running tasks
+- `AUX_ML_POLL_INTERVAL_SECONDS` - Poll interval for queue/model status checks
+- `AUX_ML_ALLOWED_INPUT_DIRS` - Comma-separated allowed roots for OCR file inputs
+- `AUX_ML_ENFORCE_MEMORY_LIMIT` - Fail fast if configured memory budget is insufficient
+- `AUX_ML_OCR_MAX_PAGES` - Max pages allowed per OCR PDF request
 
 **Agent Personality:** Configured in workspace markdown files (SOUL.md, MEMORY.md) - not in JSON config.
 
@@ -272,6 +297,7 @@ git push -u origin feature/my-feature-name
 - **Credential setup and management** -> `credentials/`
 - **CI/CD workflows, GitHub Actions, runner setup** -> `.github/workflows/`
 - **Docker deployment, environment setup** -> See `docker-compose.yml` and `.env.example`
+- **Auxiliary ML service API and operations** -> `docs/aux-ml.md` and `aux-ml/`
 - **Obsidian sync/backup operations** -> `docs/obsidian-operations.md`
 - **Agent state template** -> `templates/agent-state-template/`
 - **External docs:** https://docs.openclaw.dev
@@ -306,6 +332,7 @@ agent-state/
 ├── skills/             # Unified skills (all skills live here)
 │   ├── AGENTS.md       # Skill development guide
 │   ├── finance-assistant/
+│   ├── aux-ml/
 │   ├── gogcli-tables/
 │   └── workspace-sync/
 ├── memory/             # Daily memory logs (YYYY-MM-DD.md)
