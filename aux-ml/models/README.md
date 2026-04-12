@@ -2,14 +2,21 @@
 
 Place auxiliary model artifacts in this directory before building the `aux-ml` image.
 
-## Current expected model
+## Current expected models
 
 - `glm-ocr.gguf` -> mapped to model key `glm-ocr`
+- `mmproj-glm-ocr.gguf` -> multimodal projector for GLM-OCR
 
 The image build copies this directory into `/models` inside the container.
 
-If `glm-ocr.gguf` is not present here, Docker build can download it when
-`AUX_ML_GLM_OCR_URL` is set (optional integrity check with `AUX_ML_GLM_OCR_SHA256`).
+If local files are not present here, compose defaults download and bundle both files.
+
+You can override URLs/checksums with:
+
+- `AUX_ML_GLM_OCR_URL`
+- `AUX_ML_GLM_OCR_SHA256`
+- `AUX_ML_GLM_OCR_MMPROJ_URL`
+- `AUX_ML_GLM_OCR_MMPROJ_SHA256`
 
 ## Notes
 

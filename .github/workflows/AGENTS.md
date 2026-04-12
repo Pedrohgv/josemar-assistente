@@ -49,13 +49,11 @@ The following secrets must be configured in the GitHub repository settings:
 | `AUX_ML_ALLOWED_INPUT_DIRS` | Comma-separated allowed input roots for OCR | No (default `/root/.openclaw/workspace`) |
 | `AUX_ML_ENFORCE_MEMORY_LIMIT` | Fail fast when memory budget is insufficient | No (default `true`) |
 | `AUX_ML_OCR_MAX_PAGES` | Max pages per OCR PDF job | No (default `50`) |
-| `AUX_ML_GLM_OCR_URL` | Build-time download URL for `glm-ocr.gguf` when local file is absent | No (required when aux-ml enabled and no local model file) |
-| `AUX_ML_GLM_OCR_SHA256` | Optional SHA256 checksum for downloaded `glm-ocr.gguf` | No |
 
 Security note: avoid setting `SYNCTHING_GUI_BIND_IP=0.0.0.0`.
 
 When `AUX_ML_ENABLED=true`, the workflow writes `COMPOSE_PROFILES=aux-ml` into `.env` to activate the optional service.
-When aux-ml is enabled, workflow validates model source presence (`aux-ml/models/glm-ocr.gguf` or `AUX_ML_GLM_OCR_URL`).
+When aux-ml is enabled, workflow logs whether model files are local or will be downloaded from compose defaults (`glm-ocr` + `mmproj`).
 
 ### Obsidian Backup Defaults (from Compose)
 

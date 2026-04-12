@@ -43,10 +43,20 @@ If `COMPOSE_PROFILES` does not include `aux-ml`, the service is not started.
 Current expected files:
 
 - `aux-ml/models/glm-ocr.gguf`
+- `aux-ml/models/mmproj-glm-ocr.gguf`
 
 If required model files are missing, `aux-ml` fails fast on startup.
 
-Build fallback: if the local file is absent, set `AUX_ML_GLM_OCR_URL` (and optional `AUX_ML_GLM_OCR_SHA256`) so Docker build downloads the model and still ships it in the image.
+Build fallback behavior:
+
+- If local files are absent, compose defaults download and bundle:
+  - `GLM-OCR-Q8_0.gguf`
+  - `mmproj-GLM-OCR-Q8_0.gguf`
+- To override download sources/checksums, set:
+  - `AUX_ML_GLM_OCR_URL`
+  - `AUX_ML_GLM_OCR_SHA256`
+  - `AUX_ML_GLM_OCR_MMPROJ_URL`
+  - `AUX_ML_GLM_OCR_MMPROJ_SHA256`
 
 Model metadata lives in `aux-ml/config/models.yaml`.
 

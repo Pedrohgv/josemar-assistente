@@ -97,8 +97,6 @@ jobs:
           AUX_ML_ALLOWED_INPUT_DIRS=${{ vars.AUX_ML_ALLOWED_INPUT_DIRS }}
           AUX_ML_ENFORCE_MEMORY_LIMIT=${{ vars.AUX_ML_ENFORCE_MEMORY_LIMIT }}
           AUX_ML_OCR_MAX_PAGES=${{ vars.AUX_ML_OCR_MAX_PAGES }}
-          AUX_ML_GLM_OCR_URL=${{ vars.AUX_ML_GLM_OCR_URL }}
-          AUX_ML_GLM_OCR_SHA256=${{ vars.AUX_ML_GLM_OCR_SHA256 }}
           EOF
           chmod 600 .env
 
@@ -115,16 +113,15 @@ jobs:
         run: |
           if [ -f "aux-ml/models/glm-ocr.gguf" ]; then
             echo "Found local glm-ocr model in repository checkout"
-            exit 0
+          else
+            echo "No local glm-ocr model found; compose default URL will be used"
           fi
 
-          if [ -z "${{ vars.AUX_ML_GLM_OCR_URL }}" ]; then
-            echo "ERROR: AUX_ML_ENABLED=true but no model source configured"
-            echo "Provide aux-ml/models/glm-ocr.gguf in build context or set repo variable AUX_ML_GLM_OCR_URL"
-            exit 1
+          if [ -f "aux-ml/models/mmproj-glm-ocr.gguf" ]; then
+            echo "Found local mmproj model in repository checkout"
+          else
+            echo "No local mmproj model found; compose default URL will be used"
           fi
-
-          echo "Using AUX_ML_GLM_OCR_URL as build-time model source"
 
       - name: Create rclone config for backup container
         run: |

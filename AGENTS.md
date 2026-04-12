@@ -272,8 +272,10 @@ git push -u origin feature/my-feature-name
 - `OBSIDIAN_GDRIVE_PATH` - Google Drive destination folder for slot backups
 - `AUX_ML_ENABLED` - Feature flag for aux-ml skill integration (`true`/`false`)
 - `COMPOSE_PROFILES` - Set to `aux-ml` to start/build auxiliary ML service
-- `AUX_ML_GLM_OCR_URL` - Optional build-time download URL for `glm-ocr.gguf` model
-- `AUX_ML_GLM_OCR_SHA256` - Optional SHA256 checksum for downloaded `glm-ocr.gguf`
+- `AUX_ML_GLM_OCR_URL` - Optional build-time download URL override for `glm-ocr.gguf` model
+- `AUX_ML_GLM_OCR_SHA256` - Optional SHA256 checksum override for downloaded `glm-ocr.gguf`
+- `AUX_ML_GLM_OCR_MMPROJ_URL` - Optional build-time download URL override for `mmproj-glm-ocr.gguf`
+- `AUX_ML_GLM_OCR_MMPROJ_SHA256` - Optional SHA256 checksum override for downloaded `mmproj-glm-ocr.gguf`
 - `AUX_ML_URL` - Internal URL for auxiliary ML API (default `http://aux-ml:8091`)
 - `AUX_ML_MEMORY_LIMIT` - Docker memory limit for `aux-ml` container (should match largest model requirement)
 - `AUX_ML_MEMORY_LIMIT_MB` - Numeric memory budget used for runtime validation

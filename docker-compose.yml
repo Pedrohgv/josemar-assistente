@@ -67,8 +67,10 @@ services:
       context: .
       dockerfile: aux-ml/Dockerfile
       args:
-        GLM_OCR_MODEL_URL: ${AUX_ML_GLM_OCR_URL:-}
-        GLM_OCR_MODEL_SHA256: ${AUX_ML_GLM_OCR_SHA256:-}
+        GLM_OCR_MODEL_URL: ${AUX_ML_GLM_OCR_URL:-https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/main/GLM-OCR-Q8_0.gguf}
+        GLM_OCR_MODEL_SHA256: ${AUX_ML_GLM_OCR_SHA256:-45bc244a6446aff850521dc41f18bc8d7105ad5f0c2c8c28af04e7cc4f4d50b1}
+        GLM_OCR_MMPROJ_URL: ${AUX_ML_GLM_OCR_MMPROJ_URL:-https://huggingface.co/ggml-org/GLM-OCR-GGUF/resolve/main/mmproj-GLM-OCR-Q8_0.gguf}
+        GLM_OCR_MMPROJ_SHA256: ${AUX_ML_GLM_OCR_MMPROJ_SHA256:-9c4b58e33e316ed142eb5dcb41abec3844d3e6e5dc361ffb782c3fa9d175141f}
     container_name: josemar-aux-ml
     restart: unless-stopped
     expose:

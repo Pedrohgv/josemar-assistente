@@ -104,6 +104,8 @@ AUX_ML_ENABLED=false
 COMPOSE_PROFILES=
 AUX_ML_GLM_OCR_URL=
 AUX_ML_GLM_OCR_SHA256=
+AUX_ML_GLM_OCR_MMPROJ_URL=
+AUX_ML_GLM_OCR_MMPROJ_SHA256=
 AUX_ML_URL=http://aux-ml:8091
 AUX_ML_MEMORY_LIMIT=8192m
 AUX_ML_MEMORY_LIMIT_MB=8192
@@ -146,7 +148,8 @@ docker compose up -d --build
 ```
 
 Place model files in `aux-ml/models/` before building (see `aux-ml/models/README.md`).
-If files are not present locally, set `AUX_ML_GLM_OCR_URL` (optional `AUX_ML_GLM_OCR_SHA256`) so build downloads and bundles the model.
+If files are not present locally, build auto-downloads default Q8 model + mmproj from Hugging Face.
+You can override URLs/checksums with `AUX_ML_GLM_OCR_URL`, `AUX_ML_GLM_OCR_SHA256`, `AUX_ML_GLM_OCR_MMPROJ_URL`, and `AUX_ML_GLM_OCR_MMPROJ_SHA256`.
 
 ## Skills
 

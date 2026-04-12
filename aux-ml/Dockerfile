@@ -4,6 +4,8 @@ USER root
 
 ARG GLM_OCR_MODEL_URL=
 ARG GLM_OCR_MODEL_SHA256=
+ARG GLM_OCR_MMPROJ_URL=
+ARG GLM_OCR_MMPROJ_SHA256=
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
@@ -29,6 +31,18 @@ RUN if [ ! -f /models/glm-ocr.gguf ]; then \
     fi \
     && if [ -n "$GLM_OCR_MODEL_SHA256" ]; then \
         echo "$GLM_OCR_MODEL_SHA256  /models/glm-ocr.gguf" | sha256sum -c -; \
+    fi \
+    && if [ ! -f /models/mmproj-glm-ocr.gguf ]; then \
+        if [ -z "$GLM_OCR_MMPROJ_URL" ]; then \
+            echo "ERROR: Missing /models/mmproj-glm-ocr.gguf and GLM_OCR_MMPROJ_URL build arg is empty."; \
+            echo "Provide local file aux-ml/models/mmproj-glm-ocr.gguf or set AUX_ML_GLM_OCR_MMPROJ_URL in .env."; \
+            exit 1; \
+        fi; \
+        echo "Downloading GLM-OCR mmproj from build arg URL..."; \
+        curl -fL "$GLM_OCR_MMPROJ_URL" -o /models/mmproj-glm-ocr.gguf; \
+    fi \
+    && if [ -n "$GLM_OCR_MMPROJ_SHA256" ]; then \
+        echo "$GLM_OCR_MMPROJ_SHA256  /models/mmproj-glm-ocr.gguf" | sha256sum -c -; \
     fi
 
 RUN chmod +x /usr/local/bin/aux-ml-entrypoint.sh
