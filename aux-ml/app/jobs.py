@@ -61,6 +61,8 @@ class JobRecord:
     model: str
     file_path: str
     prompt: str | None
+    column_split: int
+    column_split_pages: tuple[int, ...] | None
     status: str
     created_at: str
     started_at: str | None = None
@@ -74,6 +76,8 @@ class JobRecord:
             "task": self.task,
             "model": self.model,
             "file_path": self.file_path,
+            "column_split": self.column_split,
+            "column_split_pages": list(self.column_split_pages) if self.column_split_pages else None,
             "status": self.status,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -89,7 +93,15 @@ class JobStore:
         self._jobs: dict[str, JobRecord] = {}
         self._completion_events: dict[str, asyncio.Event] = {}
 
-    async def create(self, task: str, model: str, file_path: str, prompt: str | None) -> JobRecord:
+    async def create(
+        self,
+        task: str,
+        model: str,
+        file_path: str,
+        prompt: str | None,
+        column_split: int,
+        column_split_pages: tuple[int, ...] | None,
+    ) -> JobRecord:
         job_id = str(uuid.uuid4())
         record = JobRecord(
             id=job_id,
@@ -97,6 +109,8 @@ class JobStore:
             model=model,
             file_path=file_path,
             prompt=prompt,
+            column_split=column_split,
+            column_split_pages=column_split_pages,
             status="queued",
             created_at=_utc_now_iso(),
         )

@@ -20,6 +20,8 @@ SUPPORTED_IMAGE_EXTENSIONS = {
     ".tiff",
 }
 
+COLUMN_SPLIT_OVERLAP_RATIO = 0.08
+
 
 def _extract_text_from_completion(response: dict) -> str:
     choices = response.get("choices")
@@ -78,6 +80,54 @@ def _guess_mime_type(path: Path) -> str:
     return "application/octet-stream"
 
 
+def _should_split_pdf_page(
+    *,
+    page_index: int,
+    column_split: int,
+    column_split_pages: tuple[int, ...] | None,
+) -> bool:
+    if column_split <= 1:
+        return False
+    if not column_split_pages:
+        return True
+    return page_index in column_split_pages
+
+
+def _build_column_clips(
+    *,
+    page_rect: pymupdf.Rect,
+    column_split: int,
+    overlap_ratio: float,
+) -> list[pymupdf.Rect]:
+    column_width = page_rect.width / column_split
+    overlap = column_width * overlap_ratio
+
+    clips: list[pymupdf.Rect] = []
+    for index in range(column_split):
+        left = page_rect.x0 + (index * column_width)
+        right = page_rect.x0 + ((index + 1) * column_width)
+
+        if index > 0:
+            left -= overlap
+        if index < (column_split - 1):
+            right += overlap
+
+        clip = pymupdf.Rect(
+            max(page_rect.x0, left),
+            page_rect.y0,
+            min(page_rect.x1, right),
+            page_rect.y1,
+        )
+        clips.append(clip)
+
+    return clips
+
+
+def _merge_column_parts(column_parts: list[str]) -> str:
+    cleaned = [part.strip() for part in column_parts if part.strip()]
+    return "\n\n".join(cleaned)
+
+
 async def _ocr_image_bytes(
     image_bytes: bytes,
     mime_type: str,
@@ -120,6 +170,8 @@ async def run_ocr_task(
     prompt: str | None,
     timeout_seconds: int,
     max_pages: int,
+    column_split: int,
+    column_split_pages: tuple[int, ...] | None,
     allowed_roots: tuple[Path, ...],
     router: LlamaRouterClient,
 ) -> dict:
@@ -140,18 +192,49 @@ async def run_ocr_task(
                         f"PDF has more than {max_pages} pages. Increase AUX_ML_OCR_MAX_PAGES if needed."
                     )
 
-                pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))
-                image_bytes = pixmap.tobytes("png")
-                page_text = await _ocr_image_bytes(
-                    image_bytes=image_bytes,
-                    mime_type="image/png",
-                    prompt=effective_prompt,
-                    model_id=model_id,
-                    max_tokens=model_spec.max_tokens,
-                    timeout_seconds=timeout_seconds,
-                    router=router,
+                split_mode = _should_split_pdf_page(
+                    page_index=page_index,
+                    column_split=column_split,
+                    column_split_pages=column_split_pages,
                 )
-                pages.append({"page": page_index, "text": page_text})
+
+                if split_mode:
+                    clips = _build_column_clips(
+                        page_rect=page.rect,
+                        column_split=column_split,
+                        overlap_ratio=COLUMN_SPLIT_OVERLAP_RATIO,
+                    )
+                    parts: list[str] = []
+                    for clip in clips:
+                        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), clip=clip)
+                        image_bytes = pixmap.tobytes("png")
+                        part_text = await _ocr_image_bytes(
+                            image_bytes=image_bytes,
+                            mime_type="image/png",
+                            prompt=effective_prompt,
+                            model_id=model_id,
+                            max_tokens=model_spec.max_tokens,
+                            timeout_seconds=timeout_seconds,
+                            router=router,
+                        )
+                        parts.append(part_text)
+                    page_text = _merge_column_parts(parts)
+                    page_mode = f"columns-{column_split}"
+                else:
+                    pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))
+                    image_bytes = pixmap.tobytes("png")
+                    page_text = await _ocr_image_bytes(
+                        image_bytes=image_bytes,
+                        mime_type="image/png",
+                        prompt=effective_prompt,
+                        model_id=model_id,
+                        max_tokens=model_spec.max_tokens,
+                        timeout_seconds=timeout_seconds,
+                        router=router,
+                    )
+                    page_mode = "full-page"
+
+                pages.append({"page": page_index, "mode": page_mode, "text": page_text})
                 merged_parts.append(page_text)
         finally:
             document.close()
@@ -161,6 +244,10 @@ async def run_ocr_task(
             "source_file": str(resolved_file),
             "source_type": "pdf",
             "page_count": len(pages),
+            "layout": {
+                "column_split": column_split,
+                "column_split_pages": list(column_split_pages) if column_split_pages else None,
+            },
             "text": merged_text,
             "pages": pages,
         }

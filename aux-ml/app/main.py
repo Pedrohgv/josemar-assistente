@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 import asyncio
+from typing import Annotated
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -80,6 +81,8 @@ class SubmitJobRequest(BaseModel):
     model: str | None = None
     file_path: str
     prompt: str | None = None
+    column_split: Annotated[int, Field(ge=1, le=4, strict=True)] = 1
+    column_split_pages: list[Annotated[int, Field(ge=1, strict=True)]] | None = None
 
 
 class RunJobRequest(SubmitJobRequest):
@@ -153,6 +156,8 @@ async def submit_job(payload: SubmitJobRequest) -> dict:
             model=payload.model,
             file_path=payload.file_path,
             prompt=payload.prompt,
+            column_split=payload.column_split,
+            column_split_pages=payload.column_split_pages,
         )
     except QueueFullError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -182,6 +187,8 @@ async def run_and_wait(payload: RunJobRequest) -> dict:
             model=payload.model,
             file_path=payload.file_path,
             prompt=payload.prompt,
+            column_split=payload.column_split,
+            column_split_pages=payload.column_split_pages,
         )
     except QueueFullError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc

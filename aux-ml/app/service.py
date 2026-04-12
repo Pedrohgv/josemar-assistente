@@ -62,10 +62,19 @@ class AuxMLService:
         model: str | None,
         file_path: str,
         prompt: str | None,
+        column_split: int,
+        column_split_pages: list[int] | None,
     ) -> dict:
         normalized_task = task.strip().lower()
         if not normalized_task:
             raise ValueError("Task is required")
+
+        if column_split < 1:
+            raise ValueError("column_split must be >= 1")
+
+        normalized_split_pages: tuple[int, ...] | None = None
+        if column_split_pages:
+            normalized_split_pages = tuple(sorted(set(column_split_pages)))
 
         if model:
             spec = self._registry.get(model)
@@ -82,6 +91,8 @@ class AuxMLService:
             model=spec.key,
             file_path=file_path,
             prompt=prompt,
+            column_split=column_split,
+            column_split_pages=normalized_split_pages,
         )
         try:
             queue_position = await self._queue.enqueue(job.id)
@@ -94,6 +105,8 @@ class AuxMLService:
             "queue_position": queue_position,
             "model": spec.key,
             "task": normalized_task,
+            "column_split": column_split,
+            "column_split_pages": list(normalized_split_pages) if normalized_split_pages else None,
         }
 
     async def get_job(self, job_id: str) -> dict | None:
@@ -154,6 +167,8 @@ class AuxMLService:
                         prompt=job.prompt,
                         timeout_seconds=self._settings.job_timeout_seconds,
                         max_pages=self._settings.ocr_max_pages,
+                        column_split=job.column_split,
+                        column_split_pages=job.column_split_pages,
                         allowed_roots=self._settings.allowed_input_dirs,
                         router=self._router,
                     )

@@ -90,15 +90,28 @@ This behavior intentionally prioritizes predictable memory and correctness over 
   "task": "ocr",
   "model": "glm-ocr",
   "file_path": "/root/.openclaw/workspace/uploads/invoice.pdf",
-  "prompt": "Extract all text preserving reading order"
+  "prompt": "Text Recognition:",
+  "column_split": 1,
+  "column_split_pages": [2]
 }
 ```
+
+Prompt behavior:
+
+- If omitted, OCR uses default prompt `Text Recognition:`
+- For table-heavy layouts, you can pass `Table Recognition:` explicitly
+
+Column split controls (optional):
+
+- `column_split`: number of vertical segments per selected page (`1` = disabled, `2` = left/right)
+- `column_split_pages`: list of 1-based page numbers to split; when omitted and `column_split > 1`, split applies to all PDF pages
 
 Successful OCR job result includes:
 
 - `text` - merged extracted text
 - `page_count` - number of processed pages/images
 - `pages` - per-page text chunks
+- `layout` - PDF-only layout metadata (column split settings); image OCR keeps the simpler response shape
 
 ## Memory Policy
 

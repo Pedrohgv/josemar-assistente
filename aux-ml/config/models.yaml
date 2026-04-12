@@ -3,8 +3,5 @@ models:
     task: ocr
     model_path: /models/glm-ocr.gguf
     required_memory_mb: 8192
-    default_prompt: |
-      Extract all visible text from this image.
-      Preserve reading order and line breaks.
-      Do not add commentary.
+    default_prompt: "Text Recognition:"
     max_tokens: 8192
