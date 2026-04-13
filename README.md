@@ -156,10 +156,16 @@ You can override URLs/checksums with `AUX_ML_GLM_OCR_URL`, `AUX_ML_GLM_OCR_SHA25
 
 ## Skills
 
-All skills live in `agent-state/skills/` and are versioned in the agent state git repo.
+Skills are loaded from two sources:
+
+- **Repo-shipped core bundle**: `skills-factory/vault-gateway/` (copied into image at `/opt/josemar/skills`)
+- **Agent-state skills**: `agent-state/skills/` (versioned in the private state repo)
+
+The vault gateway is the single public vault interface and ships with this repository.
 
 ### Current Skills
 
+- **vault-gateway** (repo-shipped): Single entrypoint for vault routing and operations
 - **finance-assistant**: Complete financial tracking - extraction, classification, Google Sheets
 - **aux-ml**: Queue-based auxiliary ML jobs (OCR now, additional tasks later)
 - **gogcli-tables**: Google Workspace CLI with Sheets Table manipulation
@@ -167,11 +173,15 @@ All skills live in `agent-state/skills/` and are versioned in the agent state gi
 
 ### Adding Skills
 
+For user-level/custom skills:
+
 1. Create skill in `agent-state/skills/<skill-name>/`
 2. Add `SKILL.md` with YAML frontmatter
 3. Add executable script
 4. No config update needed (skills are auto-discovered from `agent-state/skills/`)
 5. Changes sync automatically via git
+
+For core repo-shipped skills (like `vault-gateway`), update files under `skills-factory/` and redeploy.
 
 See `agent-state/skills/AGENTS.md` for detailed skill development guide.
 
@@ -236,6 +246,15 @@ Deployment is handled via GitHub Actions:
 
 ```bash
 docker compose build
+```
+
+### Running Vault Gateway Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+
+# Scoped run for vault-gateway contract tests
+python3 -m unittest tests.vault_gateway.test_gateway_contract -v
 ```
 
 ### Viewing Logs
