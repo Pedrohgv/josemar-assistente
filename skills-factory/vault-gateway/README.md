@@ -24,6 +24,16 @@ This directory contains the repo-shipped MBIFC vault bundle for Josemar.
 - `inbox.triage`, `vault.defrag`, `vault.audit`, `vault.deep-clean`, and `tags.garden` return structured maintenance summaries.
 - `transcribe` remains dormant.
 
+## Playbooks
+
+- `playbooks/onboarding/PLAYBOOK.md` — Full onboarding flow: choose path, collect preferences, area scaffolding, vault baseline structure, core & area-specific templates, user profile, safety gates for destructive port
+- `playbooks/inbox-triage/PLAYBOOK.md` — 6-step triage workflow: scan, classify, pre-move checklist, MOC update, digest, archive candidates
+- `playbooks/defrag/PLAYBOOK.md` — 5-phase structural maintenance: audit, tag hygiene, MOC refresh, structure evolution, report
+- `playbooks/vault-audit/PLAYBOOK.md` — 7-phase health check: structural scan, duplicate detection, link integrity, frontmatter audit, MOC review, cross-reference, health report with trend analysis
+- `playbooks/deep-clean/PLAYBOOK.md` — 7-phase audit + 6 extended passes: stale content, outdated references, content quality, redundant tags, broken external links, template compliance
+- `playbooks/tag-garden/PLAYBOOK.md` — Focused tag analysis: collect, identify issues, suggest actions, visualize distribution
+- `dormant/transcribe/PLAYBOOK.md` — Dormant until transcription backend configured; preserves MBIFC workflow spec
+
 ## Next Implementation Phases
 
 - Expand summary routes into deterministic write-mode operations.
