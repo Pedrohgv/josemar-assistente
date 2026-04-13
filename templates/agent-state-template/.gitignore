@@ -21,6 +21,7 @@
 Thumbs.db
 workspace-state.json
 .openclaw/
+.config/gogcli/
 *.pyc
 __pycache__/
 .pytest_cache/

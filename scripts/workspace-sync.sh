@@ -175,7 +175,7 @@ do_sync_start() {
             log_warn "  Conflict resolved (remote won): $f"
         done
 
-        git add -A
+        stage_manifest_files
         git commit -m "Merge remote: conflict resolution (remote wins)" 2>/dev/null || true
     fi
 
