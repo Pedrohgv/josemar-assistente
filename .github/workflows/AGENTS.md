@@ -28,7 +28,7 @@ The following secrets must be configured in the GitHub repository settings:
 | `DEEPSEEK_API_KEY` | DeepSeek API key (optional fallback) | No |
 | `PEDRO_TELEGRAM_ID` | Telegram user ID for the primary user | Yes |
 | `GATEWAY_AUTH_PASSWORD` | HTTP Basic Auth password for OpenClaw web UI | Yes |
-| `GOG_KEYRING_PASSWORD` | GOG keyring password for Galaxy integration | No |
+| `GOG_KEYRING_PASSWORD` | Optional passphrase for gogcli keyring (decrypts Google OAuth token store) | No |
 | `WORKSPACE_REPO_TOKEN` | GitHub PAT for agent state repo (needs `repo` scope) | Yes |
 | `RCLONE_CONFIG_B64` | Base64-encoded `rclone.conf` used by Obsidian backup container | Yes (for backups) |
 

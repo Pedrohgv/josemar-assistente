@@ -256,7 +256,7 @@ git push -u origin feature/my-feature-name
 - `DEEPSEEK_API_KEY` - Optional fallback provider
 - `GATEWAY_AUTH_PASSWORD` - Web UI access password (HTTP Basic Auth)
 - `PEDRO_TELEGRAM_ID` - Primary user (add more as needed)
-- `GOG_KEYRING_PASSWORD` - Optional game library integration
+- `GOG_KEYRING_PASSWORD` - Optional passphrase used by gogcli keyring to decrypt Google OAuth token storage
 - `WORKSPACE_STATE_REPO` - Private git repo URL for agent state
 - `WORKSPACE_REPO_TOKEN` - GitHub PAT for agent state repo (use GitHub secret in deployment)
 - `WORKSPACE_SYNC_ON_START` - Enable/disable git sync on start (`true`/`false`)
