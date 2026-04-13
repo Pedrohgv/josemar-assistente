@@ -14,6 +14,7 @@ SYNC_ON_START="${WORKSPACE_SYNC_ON_START:-true}"
 SYNC_INTERVAL="${WORKSPACE_SYNC_INTERVAL:-60}"
 MEMORY_DAYS="${WORKSPACE_MEMORY_DAYS:-30}"
 MANIFEST_PATH="${WORKSPACE_DIR}/.sync-manifest"
+PROTECTED_SKILL_DIR="skills/vault-gateway"
 
 log_info() {
     echo "[workspace-sync] $1"
@@ -75,6 +76,34 @@ commit_changes() {
     return 0
 }
 
+enforce_vault_gateway_guardrail() {
+    local absolute_path
+    absolute_path="${WORKSPACE_DIR}/${PROTECTED_SKILL_DIR}"
+
+    if [ ! -e "$absolute_path" ]; then
+        return 1
+    fi
+
+    log_warn "Guardrail: removing workspace override at ${PROTECTED_SKILL_DIR}"
+
+    tracked_files=$(git ls-files -- "$PROTECTED_SKILL_DIR" 2>/dev/null || true)
+    if [ -n "$tracked_files" ]; then
+        git rm -r -f "$PROTECTED_SKILL_DIR" >/dev/null 2>&1 || true
+    fi
+
+    rm -rf "$absolute_path"
+    return 0
+}
+
+commit_guardrail_cleanup() {
+    if git diff --cached --quiet; then
+        return 1
+    fi
+
+    git commit -m "Guardrail: remove workspace vault-gateway override"
+    return 0
+}
+
 rotate_memory_logs() {
     if [ "$MEMORY_DAYS" -le 0 ] 2>/dev/null; then
         return
@@ -129,6 +158,13 @@ do_initial_clone() {
 
     log_info "Workspace files restored from remote ($(git log --oneline -1))"
 
+    if enforce_vault_gateway_guardrail; then
+        if commit_guardrail_cleanup; then
+            log_info "Pushing guardrail cleanup after initial clone..."
+            git push -u origin "$BRANCH" || log_warn "Failed to push guardrail cleanup"
+        fi
+    fi
+
     commit_changes "Initial commit from container start" || true
 }
 
@@ -137,6 +173,10 @@ do_sync_start() {
 
     configure_git
     configure_remote
+
+    if enforce_vault_gateway_guardrail; then
+        commit_guardrail_cleanup || true
+    fi
 
     log_info "Committing local changes before sync..."
     commit_changes "Auto-commit before sync: $(date -Iseconds 2>/dev/null || date)" || true
@@ -151,8 +191,12 @@ do_sync_start() {
     has_remote=$(git ls-remote --heads origin "$BRANCH" 2>/dev/null | wc -l)
 
     if [ "$has_remote" -eq 0 ]; then
+        if enforce_vault_gateway_guardrail; then
+            commit_guardrail_cleanup || true
+        fi
+
         log_info "Remote branch has no commits yet, pushing local state"
-        git push -u origin "$BRANCH" || log_warn "Failed to push to remote"
+        git push -u origin "HEAD:$BRANCH" || log_warn "Failed to push to remote"
         return
     fi
 
@@ -162,6 +206,14 @@ do_sync_start() {
     remote_commit=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "none")
 
     if [ "$local_commit" = "$remote_commit" ]; then
+        if enforce_vault_gateway_guardrail; then
+            if commit_guardrail_cleanup; then
+                log_info "Pushing guardrail cleanup..."
+                git push origin "HEAD:$BRANCH" || log_warn "Failed to push guardrail cleanup"
+            fi
+            return
+        fi
+
         log_info "Local and remote are in sync"
         return
     fi
@@ -179,6 +231,10 @@ do_sync_start() {
         git commit -m "Merge remote: conflict resolution (remote wins)" 2>/dev/null || true
     fi
 
+    if enforce_vault_gateway_guardrail; then
+        commit_guardrail_cleanup || true
+    fi
+
     log_info "Pushing merged result..."
     git push origin "HEAD:$BRANCH" || log_warn "Failed to push to remote"
 }
@@ -189,8 +245,20 @@ do_periodic_sync() {
     configure_git
     configure_remote
 
+    committed=0
+
+    if enforce_vault_gateway_guardrail; then
+        if commit_guardrail_cleanup; then
+            committed=1
+        fi
+    fi
+
     log_info "Periodic sync: committing changes..."
     if commit_changes "Auto-sync: $(date -Iseconds 2>/dev/null || date)"; then
+        committed=1
+    fi
+
+    if [ "$committed" -eq 1 ]; then
         rotate_memory_logs
         log_info "Pushing to remote..."
         git push origin "HEAD:$BRANCH" || log_warn "Failed to push to remote"

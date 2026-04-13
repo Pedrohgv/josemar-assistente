@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
+from lib.flags import is_bundle_enabled, is_transcribe_enabled  # noqa: E402
+from lib.handlers import handle_route  # noqa: E402
+from lib.router import (  # noqa: E402
+    extract_route_payload,
+    get_route_metadata,
+    is_known_route,
+    load_routes,
+    parse_route,
+    validate_route_payload,
+)
+
+
+def _load_payload() -> dict:
+    raw = sys.stdin.read()
+    if not raw.strip():
+        return {}
+
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+
+    return {"prompt": raw.strip()}
+
+
+def main() -> int:
+    payload = _load_payload()
+
+    if not is_bundle_enabled():
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error": "vault-gateway is disabled",
+                },
+                ensure_ascii=True,
+            )
+        )
+        return 1
+
+    try:
+        routes = load_routes()
+    except RuntimeError as exc:
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error": "route_contract_error",
+                    "message": str(exc),
+                },
+                ensure_ascii=True,
+            )
+        )
+        return 1
+
+    if "action" in payload or "operation" in payload:
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error": "invalid_contract",
+                    "message": "Use 'route' as the only operation selector. 'action' and 'operation' are not supported.",
+                },
+                ensure_ascii=True,
+            )
+        )
+        return 1
+
+    route = parse_route(payload)
+
+    if "payload" in payload and not isinstance(payload.get("payload"), dict):
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error": "invalid_contract",
+                    "message": "Field 'payload' must be an object.",
+                },
+                ensure_ascii=True,
+            )
+        )
+        return 1
+
+    route_payload = extract_route_payload(payload)
+
+    invalid_top_level_keys = [
+        key for key in payload.keys() if key not in {"route", "payload"}
+    ]
+    if invalid_top_level_keys:
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error": "invalid_contract",
+                    "message": "Only 'route' and 'payload' are allowed at top level.",
+                    "invalid_keys": sorted(invalid_top_level_keys),
+                },
+                ensure_ascii=True,
+            )
+        )
+        return 1
+
+    if not route:
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error": "route_required",
+                    "message": "Explicit route is required. Provide route in input JSON.",
+                    "available_routes": sorted(list(routes.keys())),
+                },
+                ensure_ascii=True,
+            )
+        )
+        return 1
+
+    if not is_known_route(route, routes):
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error": "invalid_route",
+                    "message": f"Unknown route '{route}'.",
+                    "available_routes": sorted(list(routes.keys())),
+                },
+                ensure_ascii=True,
+            )
+        )
+        return 1
+
+    metadata = get_route_metadata(route, routes)
+    payload_errors = validate_route_payload(route, route_payload, routes)
+    if payload_errors:
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error": "invalid_payload",
+                    "message": "Payload does not satisfy route contract.",
+                    "details": payload_errors,
+                },
+                ensure_ascii=True,
+            )
+        )
+        return 1
+
+    route_status = metadata.get("status", "active")
+    if route_status != "active":
+        message = f"Route '{route}' is currently {route_status}."
+        if route == "transcribe" and not is_transcribe_enabled():
+            message = "Transcription capability exists but is dormant until a transcription backend is configured."
+
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "route": route,
+                    "status": route_status,
+                    "executed": False,
+                    "error": "route_dormant",
+                    "message": message,
+                    "playbook": metadata.get("playbook"),
+                },
+                ensure_ascii=True,
+            )
+        )
+        return 1
+
+    route_result = handle_route(route, route_payload, metadata)
+    ok = "error" not in route_result
+
+    print(
+        json.dumps(
+            {
+                "success": ok,
+                "route": route,
+                "status": metadata.get("status", "active"),
+                "playbook": metadata.get("playbook"),
+                "input": route_payload,
+                **route_result,
+            },
+            ensure_ascii=True,
+        )
+    )
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
