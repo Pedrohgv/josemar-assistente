@@ -7,6 +7,7 @@
     ZAI_API_KEY: "${ZAI_API_KEY}",
     TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
     DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
+    OLLAMA_API_KEY: "${OLLAMA_API_KEY}",
     GOG_KEYRING_PASSWORD: "${GOG_KEYRING_PASSWORD}",
   },
 
@@ -68,6 +69,28 @@
           },
         ],
       },
+      // Ollama Cloud provider (OpenAI-compatible)
+      ollama: {
+        baseUrl: "https://ollama.com/v1",
+        apiKey: "${OLLAMA_API_KEY}",
+        api: "openai-completions",
+        models: [
+          {
+            id: "glm-5.1:cloud",
+            name: "GLM 5.1 Cloud",
+            reasoning: false,
+            input: ["text"],
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+            },
+            contextWindow: 128000,
+            maxTokens: 32768,
+          },
+        ],
+      },
       // Z.AI provider for GLM models
       zai: {
         baseUrl: "https://api.z.ai/api/coding/paas/v4",
@@ -121,7 +144,7 @@
       workspace: "~/.openclaw/workspace",
       model: {
         primary: "zai/glm-5.1",
-        fallbacks: ["zai/glm-5", "zai/glm-4.7", "deepseek/deepseek-chat"],
+        fallbacks: ["zai/glm-5", "zai/glm-4.7", "deepseek/deepseek-chat", "ollama/glm-5.1:cloud"],
       },
       models: {
         "zai/glm-5.1": {
@@ -141,7 +164,10 @@
         },
         "zai/glm-5-turbo": {
           alias: "GLM 5 Turbo",
-        }
+        },
+        "ollama/glm-5.1:cloud": {
+          alias: "GLM 5.1 Cloud (Ollama)",
+        },
       },
     },
     list: [

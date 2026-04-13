@@ -19,7 +19,7 @@ Josemar Assistente is a self-hosted AI assistant bot built on OpenClaw, running 
 - **Docker Deployment** - Containerized with persistent workspace storage
 
 **Key Technologies:**
-- **OpenClaw** - Self-hosted AI agent gateway (supports multiple LLM providers: GLM, DeepSeek, OpenAI-compatible APIs)
+- **OpenClaw** - Self-hosted AI agent gateway (supports multiple LLM providers: GLM, DeepSeek, Ollama Cloud, OpenAI-compatible APIs)
 - **Docker & Docker Compose** - Containerized deployment
 - **Python 3** - Custom skills and PDF processing (pymupdf)
 - **llama.cpp** - Self-hosted local inference server for auxiliary models
@@ -254,6 +254,7 @@ git push -u origin feature/my-feature-name
 - `TELEGRAM_BOT_TOKEN` - Bot authentication
 - `TELEGRAM_ENABLED` - Enable/disable Telegram (`true`/`false`, default: `true`)
 - `DEEPSEEK_API_KEY` - Optional fallback provider
+- `OLLAMA_API_KEY` - Optional Ollama Cloud provider key
 - `GATEWAY_AUTH_PASSWORD` - Web UI access password (HTTP Basic Auth)
 - `PEDRO_TELEGRAM_ID` - Primary user (add more as needed)
 - `GOG_KEYRING_PASSWORD` - Optional passphrase used by gogcli keyring to decrypt Google OAuth token storage
