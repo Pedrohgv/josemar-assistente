@@ -26,6 +26,7 @@ The following secrets must be configured in the GitHub repository settings:
 | `ZAI_API_KEY` | API key for Z.AI provider (GLM models) | Yes |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather | Yes |
 | `DEEPSEEK_API_KEY` | DeepSeek API key (optional fallback) | No |
+| `OLLAMA_API_KEY` | Ollama Cloud API key (optional fallback/provider) | No |
 | `PEDRO_TELEGRAM_ID` | Telegram user ID for the primary user | Yes |
 | `GATEWAY_AUTH_PASSWORD` | HTTP Basic Auth password for OpenClaw web UI | Yes |
 | `GOG_KEYRING_PASSWORD` | Optional passphrase for gogcli keyring (decrypts Google OAuth token store) | No |
@@ -262,6 +263,7 @@ Safely stops the Josemar Assistente service without deleting data.
 1. Verify secrets are set in **Repository** settings (not Environment secrets)
 2. Check secret names match exactly (case-sensitive):
    - `ZAI_API_KEY` (not `zai_api_key`)
+   - `OLLAMA_API_KEY`
    - `TELEGRAM_BOT_TOKEN`
    - `PEDRO_TELEGRAM_ID`
    - `WORKSPACE_REPO_TOKEN`
@@ -281,7 +283,7 @@ Safely stops the Josemar Assistente service without deleting data.
    ```
 2. Verify environment variables in the running container:
    ```bash
-   docker-compose exec openclaw env | grep -E "ZAI|TELEGRAM"
+   docker-compose exec openclaw env | grep -E "ZAI|OLLAMA|TELEGRAM"
    ```
 3. Validate configuration:
    ```bash

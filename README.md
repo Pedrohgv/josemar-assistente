@@ -7,7 +7,7 @@ A self-hosted OpenClaw bot running in Docker with Telegram integration and PDF e
 - **OpenClaw Gateway**: Self-hosted AI agent gateway
 - **Telegram Integration**: Native Telegram bot support
 - **PDF Extraction**: Process Brazilian credit card invoice PDFs
-- **Multi-Provider LLM Support**: GLM, DeepSeek, and OpenAI-compatible APIs
+- **Multi-Provider LLM Support**: GLM, DeepSeek, Ollama Cloud, and OpenAI-compatible APIs
 - **Brazilian Portuguese**: Native language interaction
 - **Docker Deployment**: Containerized with persistent workspace storage
 - **Git-Backed Agent State**: Workspace files versioned in a private git repo
@@ -21,6 +21,7 @@ A self-hosted OpenClaw bot running in Docker with Telegram integration and PDF e
 - Z.AI API key (for GLM models - e.g., GLM-5, GLM-4.7)
 - Telegram Bot Token (from @BotFather)
 - DeepSeek API key (optional, for alternative LLM)
+- Ollama Cloud API key (optional, for Ollama Cloud models)
 - A **private** GitHub repo for agent state versioning
 
 ## Quick Start
@@ -81,6 +82,7 @@ Create a `.env` file with:
 # LLM Provider
 ZAI_API_KEY=your_zai_api_key_here
 DEEPSEEK_API_KEY=your_deepseek_api_key_here
+OLLAMA_API_KEY=your_ollama_api_key_here
 
 # Telegram
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
