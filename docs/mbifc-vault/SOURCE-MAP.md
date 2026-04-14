@@ -14,6 +14,16 @@ This file maps MBIFC source artifacts to the new vault-gateway bundle layout.
 | `skills/tag-garden/SKILL.md` | `skills-factory/vault-gateway/playbooks/tag-garden/PLAYBOOK.md` | mapped |
 | `skills/transcribe/SKILL.md` | `skills-factory/vault-gateway/dormant/transcribe/PLAYBOOK.md` | mapped (dormant) |
 
+## Note Route Mapping (Agent-Derived)
+
+| MBIFC Source | New Location | Status |
+| --- | --- | --- |
+| `agents/scribe.md` | `skills-factory/vault-gateway/playbooks/note-capture/PLAYBOOK.md` | mapped |
+| `agents/seeker.md` (search modes) | `skills-factory/vault-gateway/playbooks/note-search/PLAYBOOK.md` | mapped |
+| `agents/seeker.md` (modification capabilities) | `skills-factory/vault-gateway/playbooks/note-update/PLAYBOOK.md` | mapped |
+| `agents/connector.md` | `skills-factory/vault-gateway/playbooks/note-link/PLAYBOOK.md` | mapped |
+| `agents/sorter.md` | `skills-factory/vault-gateway/playbooks/note-file/PLAYBOOK.md` | mapped |
+
 ## Registry and Dispatch References
 
 | MBIFC Source | New Location | Status |

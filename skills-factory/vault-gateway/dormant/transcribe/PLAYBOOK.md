@@ -3,7 +3,7 @@
 ## Status
 
 - State: dormant
-- Source: `dump_folder/My-Brain-Is-Full-Crew/skills/transcribe/SKILL.md`
+- Source: `My-Brain-Is-Full-Crew/skills/transcribe/SKILL.md`
 - Phase: scaffold (backend unavailable)
 
 ## Purpose

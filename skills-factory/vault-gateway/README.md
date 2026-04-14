@@ -2,6 +2,12 @@
 
 This directory contains the repo-shipped MBIFC vault bundle for Josemar.
 
+## MBIFC Reference
+
+- MBIFC stands for **My Brain Is Full Crew**.
+- Upstream repository: https://github.com/gnekt/My-Brain-Is-Full-Crew
+- Reference date: 2026-04-13
+
 ## Design
 
 - One public skill: `vault-gateway`.
@@ -26,6 +32,11 @@ This directory contains the repo-shipped MBIFC vault bundle for Josemar.
 
 ## Playbooks
 
+- `playbooks/note-capture/PLAYBOOK.md` — MBIFC Scribe-derived capture/refinement guidance for `note.capture`
+- `playbooks/note-update/PLAYBOOK.md` — MBIFC Seeker-derived read-before-edit/update guidance for `note.update`
+- `playbooks/note-search/PLAYBOOK.md` — MBIFC Seeker-derived retrieval guidance for `note.search`
+- `playbooks/note-link/PLAYBOOK.md` — MBIFC Connector-derived link discipline for `note.link`
+- `playbooks/note-file/PLAYBOOK.md` — MBIFC Sorter-derived filing workflow for `note.file`
 - `playbooks/onboarding/PLAYBOOK.md` — Full onboarding flow: choose path, collect preferences, area scaffolding, vault baseline structure, core & area-specific templates, user profile, safety gates for destructive port
 - `playbooks/inbox-triage/PLAYBOOK.md` — 6-step triage workflow: scan, classify, pre-move checklist, MOC update, digest, archive candidates
 - `playbooks/defrag/PLAYBOOK.md` — 5-phase structural maintenance: audit, tag hygiene, MOC refresh, structure evolution, report

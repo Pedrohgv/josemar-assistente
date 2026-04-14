@@ -3,7 +3,7 @@
 ## Status
 
 - State: active
-- Source: `dump_folder/My-Brain-Is-Full-Crew/skills/defrag/SKILL.md`
+- Source: `My-Brain-Is-Full-Crew/skills/defrag/SKILL.md`
 - Mode: OpenClaw-native gateway flow
 
 ## Purpose

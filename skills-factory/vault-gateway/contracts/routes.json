@@ -20,7 +20,7 @@
     },
     "note.capture": {
       "status": "active",
-      "playbook": "playbooks/inbox-triage/PLAYBOOK.md",
+      "playbook": "playbooks/note-capture/PLAYBOOK.md",
       "source": "agents/scribe.md",
       "summary": "Create a new markdown note in the vault",
       "payload": {
@@ -33,8 +33,8 @@
     },
     "note.update": {
       "status": "active",
-      "playbook": "playbooks/inbox-triage/PLAYBOOK.md",
-      "source": "agents/scribe.md",
+      "playbook": "playbooks/note-update/PLAYBOOK.md",
+      "source": "agents/seeker.md",
       "summary": "Update an existing markdown note",
       "payload": {
         "path": "required relative path",
@@ -44,7 +44,7 @@
     },
     "note.search": {
       "status": "active",
-      "playbook": "playbooks/vault-audit/PLAYBOOK.md",
+      "playbook": "playbooks/note-search/PLAYBOOK.md",
       "source": "agents/seeker.md",
       "summary": "Search markdown notes by text",
       "payload": {
@@ -55,7 +55,7 @@
     },
     "note.link": {
       "status": "active",
-      "playbook": "playbooks/tag-garden/PLAYBOOK.md",
+      "playbook": "playbooks/note-link/PLAYBOOK.md",
       "source": "agents/connector.md",
       "summary": "Create wiki-link relation between notes",
       "payload": {
@@ -66,7 +66,7 @@
     },
     "note.file": {
       "status": "active",
-      "playbook": "playbooks/inbox-triage/PLAYBOOK.md",
+      "playbook": "playbooks/note-file/PLAYBOOK.md",
       "source": "agents/sorter.md",
       "summary": "Move note to destination folder",
       "payload": {
