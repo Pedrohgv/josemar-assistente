@@ -57,6 +57,12 @@ class VaultGatewayContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self._tmp_dir, ignore_errors=True)
 
+    def _write_template(self, relative_path: str, content: str) -> Path:
+        template_path = self.vault_dir / relative_path
+        template_path.parent.mkdir(parents=True, exist_ok=True)
+        template_path.write_text(content, encoding="utf-8")
+        return template_path
+
     def test_rejects_top_level_keys_outside_contract(self) -> None:
         code, output = run_gateway(
             {
@@ -138,6 +144,181 @@ class VaultGatewayContractTests(unittest.TestCase):
         note_path = self.vault_dir / relative_path
         self.assertTrue(note_path.exists())
         self.assertIn("conversation with client Claudio", note_path.read_text(encoding="utf-8"))
+
+    def test_template_list_discovers_templates(self) -> None:
+        self._write_template(
+            "Templates/Client.md",
+            """---
+vg_template: true
+vg_template_id: client-v1
+vg_title: Client
+vg_description: Client profile template
+vg_default_target_folder: 05-People
+vg_aliases: [client, customer]
+vg_fields:
+  - name: client_name
+    type: string
+    required: true
+  - name: contact_email
+    type: string
+    required: true
+---
+
+# {{client_name}}
+Contact: {{contact_email}}
+""",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "template.list",
+                "payload": {"query": "client"},
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        templates = output.get("result", {}).get("templates", [])
+        self.assertTrue(any(item.get("template_id") == "client-v1" for item in templates))
+
+    def test_template_inspect_returns_field_schema(self) -> None:
+        self._write_template(
+            "Templates/Client.md",
+            """---
+vg_template: true
+vg_template_id: client-v1
+vg_fields:
+  - name: client_name
+    type: string
+    required: true
+    prompt: Nome do cliente?
+  - name: contact_email
+    type: string
+    required: true
+---
+
+# {{client_name}}
+Email: {{contact_email}}
+""",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "template.inspect",
+                "payload": {
+                    "template_path": "Templates/Client.md",
+                    "include_placeholders": True,
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        result = output.get("result", {})
+        fields = result.get("fields", [])
+        self.assertTrue(any(field.get("name") == "client_name" for field in fields))
+        self.assertIn("client_name", result.get("placeholders", []))
+
+    def test_note_capture_template_missing_required_fields_requests_input(self) -> None:
+        self._write_template(
+            "Templates/Client.md",
+            """---
+vg_template: true
+vg_template_id: client-v1
+vg_fields:
+  - name: client_name
+    type: string
+    required: true
+  - name: contact_email
+    type: string
+    required: true
+    prompt: Qual o email de contato?
+---
+
+# {{client_name}}
+Email: {{contact_email}}
+""",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {
+                    "template_id": "client-v1",
+                    "field_values": {
+                        "client_name": "Acme Ltd",
+                    },
+                    "template_mode": "strict",
+                    "missing_fields_policy": "ask",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        self.assertTrue(output.get("needs_user_input"))
+        self.assertEqual(output.get("phase"), "awaiting_template_fields")
+        missing = output.get("result", {}).get("missing_fields", [])
+        self.assertTrue(any(item.get("name") == "contact_email" for item in missing))
+        inbox = self.vault_dir / "00-Inbox"
+        inbox_notes = [path for path in inbox.rglob("*.md")] if inbox.exists() else []
+        self.assertEqual(inbox_notes, [])
+
+    def test_note_capture_template_renders_fields(self) -> None:
+        self._write_template(
+            "Templates/Client.md",
+            """---
+vg_template: true
+vg_template_id: client-v1
+vg_default_target_folder: 05-People
+vg_fields:
+  - name: client_name
+    type: string
+    required: true
+  - name: contact_email
+    type: string
+    required: true
+---
+
+# {{client_name}}
+Email: {{contact_email}}
+
+## Notes
+{{captured_context}}
+""",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {
+                    "template_id": "client-v1",
+                    "field_values": {
+                        "client_name": "Acme Ltd",
+                        "contact_email": "ops@acme.example",
+                    },
+                    "text": "Primeira reuniao comercial",
+                    "template_mode": "strict",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        self.assertFalse(output.get("needs_user_input"))
+
+        relative_path = output.get("result", {}).get("path", "")
+        self.assertTrue(relative_path.startswith("05-People/"))
+        created = self.vault_dir / relative_path
+        self.assertTrue(created.exists())
+        created_text = created.read_text(encoding="utf-8")
+        self.assertIn("Acme Ltd", created_text)
+        self.assertIn("ops@acme.example", created_text)
+        self.assertIn("Primeira reuniao comercial", created_text)
+        self.assertNotIn("{{client_name}}", created_text)
 
     def test_rejects_unknown_payload_keys(self) -> None:
         code, output = run_gateway(
@@ -262,6 +443,88 @@ class VaultGatewayContractTests(unittest.TestCase):
         self.assertEqual(code2, 0)
         self.assertEqual(output2.get("phase"), "warn_backup")
         self.assertIn("RECOMENDACAO FORTE", output2.get("message", ""))
+
+    def test_note_read_returns_content_and_frontmatter(self) -> None:
+        note_path = self.vault_dir / "00-Inbox" / "test-note.md"
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(
+            "---\ntype: meeting\nstatus: active\n---\n\n# Test Note\n\nSome content here.\n",
+            encoding="utf-8",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.read",
+                "payload": {"path": "00-Inbox/test-note.md"},
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output.get("result", {})
+        self.assertEqual(result.get("frontmatter", {}).get("type"), "meeting")
+        self.assertIn("Some content here.", result.get("body", ""))
+
+    def test_note_read_selective_body_only(self) -> None:
+        note_path = self.vault_dir / "00-Inbox" / "body-only.md"
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(
+            "---\ntags: [test]\n---\n\nBody content.\n",
+            encoding="utf-8",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.read",
+                "payload": {
+                    "path": "00-Inbox/body-only.md",
+                    "include_frontmatter": False,
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        result = output.get("result", {})
+        self.assertNotIn("frontmatter", result)
+        self.assertIn("Body content.", result.get("body", ""))
+
+    def test_note_read_selective_frontmatter_only(self) -> None:
+        note_path = self.vault_dir / "00-Inbox" / "fm-only.md"
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(
+            "---\nstatus: inbox\n---\n\nBig body text.\n",
+            encoding="utf-8",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.read",
+                "payload": {
+                    "path": "00-Inbox/fm-only.md",
+                    "include_body": False,
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        result = output.get("result", {})
+        self.assertIn("frontmatter", result)
+        self.assertNotIn("body", result)
+
+    def test_note_read_requires_path(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.read",
+                "payload": {},
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "invalid_payload")
 
     def test_transcribe_is_dormant(self) -> None:
         code, output = run_gateway(

@@ -11,7 +11,10 @@ from lib.vault_ops import (
     build_port_plan,
     capture_note,
     file_note,
+    inspect_template,
+    list_templates,
     link_notes,
+    read_note,
     scan_vault,
     search_notes,
     summarize_audit,
@@ -362,17 +365,76 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
             result["vault_root"] = str(vault_root)
             return result
 
+        if route == "template.list":
+            result = list_templates(
+                vault_root=vault_root,
+                query=str(payload.get("query") or ""),
+                path_prefix=payload.get("path_prefix"),
+                include_legacy=_as_bool(payload.get("include_legacy", True)),
+                limit=int(payload.get("limit") or 50),
+                mode=str(payload.get("mode") or "capture"),
+            )
+            return {
+                "message": "Catalogo de templates carregado.",
+                "needs_user_input": False,
+                "result": result,
+            }
+
+        if route == "template.inspect":
+            result = inspect_template(
+                vault_root=vault_root,
+                template_path=str(payload.get("template_path") or ""),
+                include_body_preview=_as_bool(payload.get("include_body_preview", False)),
+                include_placeholders=_as_bool(payload.get("include_placeholders", True)),
+            )
+            return {
+                "message": "Template inspecionado com sucesso.",
+                "needs_user_input": False,
+                "result": result,
+            }
+
         if route == "note.capture":
+            append_captured_context = payload.get("append_captured_context")
             result = capture_note(
                 vault_root=vault_root,
                 text=str(payload.get("text") or ""),
                 title=payload.get("title"),
-                target_folder=str(payload.get("target_folder") or "00-Inbox"),
+                target_folder=payload.get("target_folder"),
                 template_hint=payload.get("template_hint"),
                 tags=payload.get("tags"),
+                template_path=payload.get("template_path"),
+                template_id=payload.get("template_id"),
+                field_values=payload.get("field_values"),
+                template_mode=str(payload.get("template_mode") or "legacy"),
+                missing_fields_policy=str(payload.get("missing_fields_policy") or "ask"),
+                append_captured_context=(
+                    True if append_captured_context is None else _as_bool(append_captured_context)
+                ),
             )
+            if result.get("pending"):
+                pending_result = dict(result)
+                pending_result.pop("pending", None)
+                return {
+                    "message": "Campos obrigatorios do template ainda faltam.",
+                    "needs_user_input": True,
+                    "phase": result.get("phase"),
+                    "result": pending_result,
+                }
             return {
                 "message": "Nota capturada com sucesso.",
+                "needs_user_input": False,
+                "result": result,
+            }
+
+        if route == "note.read":
+            result = read_note(
+                vault_root=vault_root,
+                path=payload.get("path"),
+                include_frontmatter=_as_bool(payload.get("include_frontmatter", True)),
+                include_body=_as_bool(payload.get("include_body", True)),
+            )
+            return {
+                "message": "Nota lida com sucesso.",
                 "needs_user_input": False,
                 "result": result,
             }

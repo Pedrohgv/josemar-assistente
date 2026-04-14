@@ -9,7 +9,7 @@
 ## Route Mapping
 
 - Route: `note.capture`
-- Payload: `text` (required), `title` (optional), `target_folder` (optional), `template_hint` (optional), `tags` (optional)
+- Payload: `text` (optional), `title` (optional), `target_folder` (optional), `template_hint` (optional), `template_path` (optional), `template_id` (optional), `field_values` (optional object), `template_mode` (optional), `missing_fields_policy` (optional), `append_captured_context` (optional), `tags` (optional)
 
 ## Purpose
 
@@ -102,12 +102,15 @@ If category is uncertain, keep generic note format and leave in inbox.
 ## Runtime Reality (Current Implementation)
 
 Current deterministic handler behavior:
-- Requires `text`.
+- Requires `text` when no template is selected.
 - Creates target folder if missing.
-- Uses `title` if provided, else derives one from first words of `text`.
-- Uses `template_hint` only if matching template file is found.
-- Adds simple default frontmatter when template is not found.
-- Supports optional `tags` normalization.
+- Uses `title` if provided, else infers from template fields/metadata, then from `text`.
+- Supports template selection by `template_path`, `template_id`, or `template_hint`.
+- Supports structured template fill when template metadata defines `vg_fields`.
+- If required template fields are missing and policy is `ask`, returns `needs_user_input` with `missing_fields` and does not write the note yet.
+- Falls back to legacy template behavior (copy template + captured context) when metadata is absent.
+- Adds simple default frontmatter when no template is selected.
+- Supports optional `tags` normalization for non-template fallback notes.
 
 Current handler does not:
 - Auto-split one message into multiple notes.

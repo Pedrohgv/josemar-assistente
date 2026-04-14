@@ -17,6 +17,9 @@ Use this skill as the only public interface for vault operations.
 ## Active Routes
 
 - onboarding
+- template.list
+- template.inspect
+- note.read
 - note.capture
 - note.update
 - note.search
@@ -43,6 +46,23 @@ Always provide structured input with explicit route:
     "text": "anote que hj tive uma conversa com o cliente Claudio",
     "target_folder": "00-Inbox",
     "template_hint": "meeting"
+  }
+}
+```
+
+Structured template capture example:
+
+```json
+{
+  "route": "note.capture",
+  "payload": {
+    "template_id": "client-v1",
+    "field_values": {
+      "client_name": "Acme Ltd",
+      "contact_email": "ops@acme.example"
+    },
+    "template_mode": "strict",
+    "missing_fields_policy": "ask"
   }
 }
 ```

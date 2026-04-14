@@ -19,12 +19,17 @@
 
 ## MBIFC Method Port (Seeker Modification Capabilities)
 
+The Seeker uses a whole-note read-rewrite pattern. There is no structured patch API — the LLM reads, decides what to change, and rewrites the full file.
+
 Core sequence:
 
-1. Read full note before modifying.
-2. Decide edit type: append, prepend, or replace.
-3. Apply smallest change that satisfies the request.
-4. Confirm what changed and where.
+1. **Read** — Call `note.read` to get the full note content and frontmatter.
+2. **Decide** — Determine edit type and scope (append, targeted section, frontmatter field, etc.).
+3. **Reconstruct** — Build the full modified note content, preserving structure and unchanged sections.
+4. **Replace** — Call `note.update` with `mode: replace` and the complete modified text.
+5. **Confirm** — Summarize what changed for the user.
+
+This is how MBIFC's Seeker works in practice: the LLM does the intelligent editing, the file system just reads and writes safely.
 
 ## Update Modes
 
@@ -32,16 +37,19 @@ Core sequence:
 
 - Add new content at the end of the existing note.
 - Preserve prior content exactly.
+- Lightweight: no need to read the note first.
 
 ### Prepend
 
 - Add new content at the beginning.
 - Useful for summaries or urgent updates.
+- Lightweight: no need to read the note first.
 
 ### Replace
 
 - Replace full note body with provided text.
-- Use only when user intent is explicit.
+- **Use with `note.read` for targeted edits**: read the full note, modify the relevant parts in your response, then write the whole thing back.
+- This is the primary mode for MBIFC-style intelligent editing (section changes, frontmatter updates, tag changes, status changes, link fixes).
 
 ## Recommended Post-Edit Hygiene (MBIFC Guidance)
 

@@ -20,9 +20,12 @@ This file maps MBIFC source artifacts to the new vault-gateway bundle layout.
 | --- | --- | --- |
 | `agents/scribe.md` | `skills-factory/vault-gateway/playbooks/note-capture/PLAYBOOK.md` | mapped |
 | `agents/seeker.md` (search modes) | `skills-factory/vault-gateway/playbooks/note-search/PLAYBOOK.md` | mapped |
+| `agents/seeker.md` (read-before-edit) | `skills-factory/vault-gateway/playbooks/note-read/PLAYBOOK.md` | mapped |
 | `agents/seeker.md` (modification capabilities) | `skills-factory/vault-gateway/playbooks/note-update/PLAYBOOK.md` | mapped |
 | `agents/connector.md` | `skills-factory/vault-gateway/playbooks/note-link/PLAYBOOK.md` | mapped |
 | `agents/sorter.md` | `skills-factory/vault-gateway/playbooks/note-file/PLAYBOOK.md` | mapped |
+| `agents/architect.md` + `agents/scribe.md` | `skills-factory/vault-gateway/playbooks/template-list/PLAYBOOK.md` | mapped |
+| `agents/architect.md` + `agents/scribe.md` | `skills-factory/vault-gateway/playbooks/template-inspect/PLAYBOOK.md` | mapped |
 
 ## Registry and Dispatch References
 

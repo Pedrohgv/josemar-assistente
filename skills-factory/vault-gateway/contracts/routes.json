@@ -18,17 +18,58 @@
         "state_key": "required string to isolate multi-turn onboarding sessions"
       }
     },
+    "template.list": {
+      "status": "active",
+      "playbook": "playbooks/template-list/PLAYBOOK.md",
+      "source": "agents/scribe.md",
+      "summary": "List available templates and metadata",
+      "payload": {
+        "query": "optional string",
+        "path_prefix": "optional relative path",
+        "include_legacy": "optional boolean",
+        "limit": "optional number (default 50)",
+        "mode": "optional: capture|all (default capture)"
+      }
+    },
+    "template.inspect": {
+      "status": "active",
+      "playbook": "playbooks/template-inspect/PLAYBOOK.md",
+      "source": "agents/scribe.md",
+      "summary": "Inspect one template metadata and fields",
+      "payload": {
+        "template_path": "required relative path",
+        "include_body_preview": "optional boolean",
+        "include_placeholders": "optional boolean"
+      }
+    },
     "note.capture": {
       "status": "active",
       "playbook": "playbooks/note-capture/PLAYBOOK.md",
       "source": "agents/scribe.md",
       "summary": "Create a new markdown note in the vault",
       "payload": {
-        "text": "required string",
+        "text": "optional string",
         "title": "optional string",
         "target_folder": "optional string, defaults to 00-Inbox",
         "template_hint": "optional string",
-        "tags": "optional list[string]"
+        "tags": "optional list[string]",
+        "template_path": "optional relative path",
+        "template_id": "optional string",
+        "field_values": "optional object",
+        "template_mode": "optional: legacy|auto|strict|off (default legacy)",
+        "missing_fields_policy": "optional: ask|fail|defaults (default ask)",
+        "append_captured_context": "optional boolean"
+      }
+    },
+    "note.read": {
+      "status": "active",
+      "playbook": "playbooks/note-read/PLAYBOOK.md",
+      "source": "agents/seeker.md",
+      "summary": "Read full note content and frontmatter",
+      "payload": {
+        "path": "required relative path",
+        "include_frontmatter": "optional boolean (default true)",
+        "include_body": "optional boolean (default true)"
       }
     },
     "note.update": {

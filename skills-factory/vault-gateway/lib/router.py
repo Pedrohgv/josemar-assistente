@@ -90,6 +90,11 @@ def _validate_value_type(key: str, value: object, descriptor: str) -> str | None
             return _type_error(key, "number")
         return None
 
+    if "object" in descriptor_text:
+        if not isinstance(value, dict):
+            return _type_error(key, "object")
+        return None
+
     if "relative path" in descriptor_text:
         if not isinstance(value, str):
             return _type_error(key, "relative path string")

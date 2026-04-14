@@ -8,10 +8,11 @@ Provide MBIFC vault capabilities to Josemar through one public skill entrypoint,
 
 - Public entrypoint: `vault-gateway`
 - Route contract is explicit (`route` + `payload`) and enforced strictly at runtime.
-- Active operation routes: `note.capture`, `note.update`, `note.search`, `note.link`, `note.file`, `inbox.triage`, `vault.defrag`, `vault.audit`, `vault.deep-clean`, `tags.garden`, `onboarding`
+- Active operation routes: `template.list`, `template.inspect`, `note.read`, `note.capture`, `note.update`, `note.search`, `note.link`, `note.file`, `inbox.triage`, `vault.defrag`, `vault.audit`, `vault.deep-clean`, `tags.garden`, `onboarding`
 - Internal active playbooks:
   - workflow playbooks: onboarding, inbox-triage, defrag, vault-audit, deep-clean, tag-garden
-  - note route playbooks: note-capture, note-update, note-search, note-link, note-file
+  - note route playbooks: note-read, note-capture, note-update, note-search, note-link, note-file
+  - template route playbooks: template-list, template-inspect
 - Internal dormant playbook: transcribe
 
 ## Source of Truth

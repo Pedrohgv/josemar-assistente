@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, date
 import json
 from pathlib import Path
 import re
 import shutil
 
 from lib.common import TAG_PATTERN
+
+try:
+    import yaml  # type: ignore
+except Exception:  # pragma: no cover
+    yaml = None
 
 
 STANDARD_DIRS = [
@@ -23,6 +28,9 @@ STANDARD_DIRS = [
     "Templates",
     "Meta",
 ]
+
+
+PLACEHOLDER_PATTERN = re.compile(r"\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}")
 
 
 def _slugify(value: str) -> str:
@@ -104,6 +112,563 @@ def _normalize_tags(raw_tags: object) -> list[str]:
     return []
 
 
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "sim", "s", "on"}
+    return False
+
+
+def _parse_inline_list(raw: str) -> list[str]:
+    text = (raw or "").strip()
+    if not (text.startswith("[") and text.endswith("]")):
+        return []
+
+    inner = text[1:-1].strip()
+    if not inner:
+        return []
+
+    items = [item.strip() for item in inner.split(",")]
+    normalized = []
+    for item in items:
+        if not item:
+            continue
+        if (item.startswith("\"") and item.endswith("\"")) or (
+            item.startswith("'") and item.endswith("'")
+        ):
+            item = item[1:-1]
+        normalized.append(item)
+    return normalized
+
+
+def _parse_scalar_token(raw: str) -> object:
+    value = (raw or "").strip()
+    if not value:
+        return ""
+
+    if value.lower() in {"true", "false"}:
+        return value.lower() == "true"
+
+    inline_list = _parse_inline_list(value)
+    if inline_list:
+        return inline_list
+
+    if (value.startswith("\"") and value.endswith("\"")) or (
+        value.startswith("'") and value.endswith("'")
+    ):
+        return value[1:-1]
+
+    if re.fullmatch(r"-?\d+", value):
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    if re.fullmatch(r"-?\d+\.\d+", value):
+        try:
+            return float(value)
+        except ValueError:
+            return value
+
+    return value
+
+
+def _leading_spaces(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _parse_yaml_block(lines: list[str]) -> object:
+    meaningful = [line for line in lines if line.strip()]
+    if not meaningful:
+        return None
+
+    first = meaningful[0]
+    first_indent = _leading_spaces(first)
+    first_stripped = first.strip()
+
+    if first_stripped.startswith("- "):
+        items: list[object] = []
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            if not line.strip():
+                index += 1
+                continue
+
+            indent = _leading_spaces(line)
+            stripped = line.strip()
+            if indent != first_indent or not stripped.startswith("- "):
+                index += 1
+                continue
+
+            head = stripped[2:].strip()
+            if ":" in head:
+                key, value = head.split(":", 1)
+                item: dict[str, object] = {key.strip(): _parse_scalar_token(value)}
+                index += 1
+
+                while index < len(lines):
+                    continuation = lines[index]
+                    if not continuation.strip():
+                        index += 1
+                        continue
+
+                    continuation_indent = _leading_spaces(continuation)
+                    continuation_stripped = continuation.strip()
+                    if continuation_indent <= first_indent:
+                        break
+                    if continuation_stripped.startswith("- ") and continuation_indent == first_indent:
+                        break
+
+                    if ":" in continuation_stripped:
+                        ckey, cvalue = continuation_stripped.split(":", 1)
+                        item[ckey.strip()] = _parse_scalar_token(cvalue)
+                    index += 1
+
+                items.append(item)
+                continue
+
+            items.append(_parse_scalar_token(head))
+            index += 1
+
+        return items
+
+    mapping: dict[str, object] = {}
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        mapping[key.strip()] = _parse_scalar_token(value)
+    return mapping
+
+
+def _parse_frontmatter_fallback(frontmatter_text: str) -> dict:
+    data: dict[str, object] = {}
+    lines = frontmatter_text.splitlines()
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            index += 1
+            continue
+        if line.startswith(" "):
+            index += 1
+            continue
+        if ":" not in line:
+            index += 1
+            continue
+
+        key, raw_value = line.split(":", 1)
+        key = key.strip()
+        value = raw_value.strip()
+        if not key:
+            index += 1
+            continue
+
+        if value:
+            data[key] = _parse_scalar_token(value)
+            index += 1
+            continue
+
+        block_lines: list[str] = []
+        next_index = index + 1
+        while next_index < len(lines):
+            candidate = lines[next_index]
+            if candidate.strip() and not candidate.startswith(" "):
+                break
+            block_lines.append(candidate)
+            next_index += 1
+
+        data[key] = _parse_yaml_block(block_lines)
+        index = next_index
+
+    return data
+
+
+def _extract_frontmatter(text: str) -> tuple[dict, str]:
+    if not text.startswith("---\n"):
+        return {}, text
+
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, text
+
+    end_index = None
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            end_index = index
+            break
+
+    if end_index is None:
+        return {}, text
+
+    frontmatter_text = "\n".join(lines[1:end_index])
+    body = "\n".join(lines[end_index + 1 :])
+
+    if yaml is not None:
+        try:
+            parsed = yaml.safe_load(frontmatter_text)
+            if isinstance(parsed, dict):
+                return parsed, body
+        except Exception:
+            pass
+
+    return _parse_frontmatter_fallback(frontmatter_text), body
+
+
+def _extract_placeholders(template_text: str) -> list[str]:
+    seen = set()
+    ordered: list[str] = []
+    for match in PLACEHOLDER_PATTERN.finditer(template_text or ""):
+        name = (match.group(1) or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name)
+    return ordered
+
+
+def _normalize_template_fields(raw_fields: object) -> list[dict]:
+    if not isinstance(raw_fields, list):
+        return []
+
+    normalized: list[dict] = []
+    for item in raw_fields:
+        if not isinstance(item, dict):
+            continue
+
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+
+        field_type = str(item.get("type") or "string").strip().lower() or "string"
+        field: dict[str, object] = {
+            "name": name,
+            "type": field_type,
+            "required": _as_bool(item.get("required", False)),
+        }
+
+        if "default" in item:
+            field["default"] = item.get("default")
+
+        prompt = item.get("prompt")
+        if isinstance(prompt, str) and prompt.strip():
+            field["prompt"] = prompt.strip()
+
+        enum = item.get("enum")
+        if isinstance(enum, list):
+            enum_values = [str(entry).strip() for entry in enum if str(entry).strip()]
+            if enum_values:
+                field["enum"] = enum_values
+
+        normalized.append(field)
+
+    return normalized
+
+
+def _template_record(
+    vault_root: Path,
+    template_path: Path,
+    include_fields: bool = False,
+    include_placeholders: bool = False,
+    include_body_preview: bool = False,
+) -> dict:
+    text = _safe_read_text(template_path)
+    frontmatter, body = _extract_frontmatter(text)
+
+    aliases = _normalize_tags(frontmatter.get("vg_aliases"))
+    fields = _normalize_template_fields(frontmatter.get("vg_fields"))
+    template_id = str(frontmatter.get("vg_template_id") or "").strip() or None
+    description = str(frontmatter.get("vg_description") or "").strip() or None
+    default_target_folder = str(frontmatter.get("vg_default_target_folder") or "").strip() or None
+
+    title = str(frontmatter.get("vg_title") or "").strip() or template_path.stem
+    legacy = not bool(_as_bool(frontmatter.get("vg_template")) or template_id or fields)
+
+    record: dict[str, object] = {
+        "template_id": template_id,
+        "path": _relative(vault_root, template_path),
+        "title": title,
+        "description": description,
+        "legacy": legacy,
+        "field_count": len(fields),
+        "required_field_count": len([field for field in fields if field.get("required")]),
+        "default_target_folder": default_target_folder,
+        "aliases": aliases,
+    }
+
+    if include_fields:
+        record["fields"] = fields
+    if include_placeholders:
+        record["placeholders"] = _extract_placeholders(text)
+    if include_body_preview:
+        record["body_preview"] = body.strip()[:2000]
+
+    return record
+
+
+def _iter_template_paths(vault_root: Path, path_prefix: str | None = None) -> list[Path]:
+    base_dir = vault_root / "Templates"
+    if path_prefix:
+        base_dir = _resolve_relative_path(vault_root, path_prefix)
+
+    if not base_dir.exists() or not base_dir.is_dir():
+        return []
+
+    templates = []
+    for path in sorted(base_dir.rglob("*.md"), key=lambda item: str(item).lower()):
+        if path.is_file():
+            templates.append(path)
+    return templates
+
+
+def _query_matches_template(record: dict, query: str) -> bool:
+    needle = (query or "").strip().lower()
+    if not needle:
+        return True
+
+    haystack = [
+        str(record.get("template_id") or "").lower(),
+        str(record.get("title") or "").lower(),
+        str(record.get("description") or "").lower(),
+        str(record.get("path") or "").lower(),
+    ]
+    aliases = record.get("aliases")
+    if isinstance(aliases, list):
+        for alias in aliases:
+            haystack.append(str(alias).lower())
+
+    return any(needle in item for item in haystack)
+
+
+def list_templates(
+    vault_root: Path,
+    query: str = "",
+    path_prefix: str | None = None,
+    include_legacy: bool = True,
+    limit: int = 50,
+    mode: str = "capture",
+) -> dict:
+    safe_limit = max(1, min(int(limit or 50), 200))
+    normalized_mode = (mode or "capture").strip().lower()
+
+    templates = []
+    for template_path in _iter_template_paths(vault_root, path_prefix=path_prefix):
+        record = _template_record(vault_root, template_path)
+        if not include_legacy and record.get("legacy"):
+            continue
+        if normalized_mode == "capture" and _is_hidden(template_path):
+            continue
+        if not _query_matches_template(record, query):
+            continue
+        templates.append(record)
+
+    templates.sort(key=lambda item: (bool(item.get("legacy")), str(item.get("title") or "").lower()))
+
+    return {
+        "query": query,
+        "path_prefix": path_prefix or "Templates",
+        "mode": normalized_mode,
+        "templates": templates[:safe_limit],
+        "total": len(templates),
+    }
+
+
+def inspect_template(
+    vault_root: Path,
+    template_path: str,
+    include_body_preview: bool = False,
+    include_placeholders: bool = True,
+) -> dict:
+    path = _resolve_relative_path(vault_root, template_path)
+    if path.suffix.lower() != ".md":
+        raise ValueError("Template must be a markdown file (.md)")
+    if not path.exists() or not path.is_file():
+        raise ValueError(f"Template not found at path: {template_path}")
+
+    return _template_record(
+        vault_root,
+        path,
+        include_fields=True,
+        include_placeholders=include_placeholders,
+        include_body_preview=include_body_preview,
+    )
+
+
+def _find_template_by_id(vault_root: Path, template_id: str) -> tuple[Path | None, dict | None]:
+    normalized = (template_id or "").strip().lower()
+    if not normalized:
+        return None, None
+
+    matches: list[tuple[Path, dict]] = []
+    for template_path in _iter_template_paths(vault_root, path_prefix="Templates"):
+        record = _template_record(vault_root, template_path, include_fields=True)
+        current_id = str(record.get("template_id") or "").strip().lower()
+        if current_id == normalized:
+            matches.append((template_path, record))
+
+    if not matches:
+        return None, None
+    if len(matches) > 1:
+        raise ValueError(
+            "template_id is ambiguous; multiple templates share the same vg_template_id"
+        )
+    return matches[0]
+
+
+def _resolve_dynamic_default(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+
+    token = value.strip().lower()
+    now = datetime.utcnow()
+    if token == "@today":
+        return now.strftime("%Y-%m-%d")
+    if token == "@now_iso":
+        return now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if token == "@year":
+        return now.strftime("%Y")
+    if token == "@month":
+        return now.strftime("%m")
+    return value
+
+
+def _coerce_field_value(value: object, field_type: str, enum: list[str] | None = None) -> object:
+    normalized_type = (field_type or "string").strip().lower()
+
+    if normalized_type == "string":
+        output = str(value)
+    elif normalized_type == "number":
+        if isinstance(value, bool):
+            raise ValueError("expected number")
+        if isinstance(value, (int, float)):
+            output = value
+        elif isinstance(value, str) and value.strip():
+            try:
+                output = float(value.strip())
+            except ValueError as exc:
+                raise ValueError("expected number") from exc
+        else:
+            raise ValueError("expected number")
+    elif normalized_type == "boolean":
+        if isinstance(value, bool):
+            output = value
+        elif isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "y", "sim", "s", "on"}:
+                output = True
+            elif lowered in {"false", "0", "no", "n", "nao", "off"}:
+                output = False
+            else:
+                raise ValueError("expected boolean")
+        else:
+            raise ValueError("expected boolean")
+    elif normalized_type == "date":
+        if isinstance(value, date):
+            output = value.strftime("%Y-%m-%d")
+        elif isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value.strip()):
+            output = value.strip()
+        else:
+            raise ValueError("expected date format YYYY-MM-DD")
+    elif normalized_type == "list[string]":
+        if isinstance(value, str):
+            items = [item.strip() for item in value.split(",") if item.strip()]
+            output = items
+        elif isinstance(value, list):
+            output = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            raise ValueError("expected list[string]")
+    elif normalized_type == "list[number]":
+        if isinstance(value, str):
+            raw_items = [item.strip() for item in value.split(",") if item.strip()]
+            parsed = []
+            for item in raw_items:
+                try:
+                    parsed.append(float(item))
+                except ValueError as exc:
+                    raise ValueError("expected list[number]") from exc
+            output = parsed
+        elif isinstance(value, list):
+            parsed = []
+            for item in value:
+                if isinstance(item, bool):
+                    raise ValueError("expected list[number]")
+                if isinstance(item, (int, float)):
+                    parsed.append(item)
+                elif isinstance(item, str) and item.strip():
+                    try:
+                        parsed.append(float(item.strip()))
+                    except ValueError as exc:
+                        raise ValueError("expected list[number]") from exc
+                else:
+                    raise ValueError("expected list[number]")
+            output = parsed
+        else:
+            raise ValueError("expected list[number]")
+    elif normalized_type == "list[boolean]":
+        if isinstance(value, str):
+            raw_items = [item.strip() for item in value.split(",") if item.strip()]
+            parsed = []
+            for item in raw_items:
+                lowered = item.lower()
+                if lowered in {"true", "1", "yes", "y", "sim", "s", "on"}:
+                    parsed.append(True)
+                elif lowered in {"false", "0", "no", "n", "nao", "off"}:
+                    parsed.append(False)
+                else:
+                    raise ValueError("expected list[boolean]")
+            output = parsed
+        elif isinstance(value, list):
+            parsed = []
+            for item in value:
+                if isinstance(item, bool):
+                    parsed.append(item)
+                else:
+                    raise ValueError("expected list[boolean]")
+            output = parsed
+        else:
+            raise ValueError("expected list[boolean]")
+    else:
+        output = value
+
+    if enum and isinstance(output, str):
+        normalized_enum = [str(item).strip().lower() for item in enum if str(item).strip()]
+        if output.strip().lower() not in normalized_enum:
+            raise ValueError(f"expected one of: {', '.join(normalized_enum)}")
+
+    return output
+
+
+def _stringify_render_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        return ", ".join(_stringify_render_value(item) for item in value)
+    return str(value)
+
+
+def _render_template(template_text: str, render_values: dict[str, object]) -> tuple[str, list[str]]:
+    unresolved: list[str] = []
+
+    def _replace(match: re.Match[str]) -> str:
+        key = (match.group(1) or "").strip()
+        if key in render_values:
+            return _stringify_render_value(render_values.get(key))
+        unresolved.append(key)
+        return match.group(0)
+
+    rendered = PLACEHOLDER_PATTERN.sub(_replace, template_text)
+    unresolved_unique = sorted({key for key in unresolved if key})
+    return rendered, unresolved_unique
+
+
 def _find_template(vault_root: Path, hint: str) -> Path | None:
     if not hint:
         return None
@@ -150,37 +715,300 @@ def _resolve_note_path(vault_root: Path, path: str | None = None) -> Path:
     return note_path
 
 
+def _resolve_capture_template(
+    vault_root: Path,
+    template_hint: str | None = None,
+    template_path: str | None = None,
+    template_id: str | None = None,
+) -> tuple[Path | None, dict | None]:
+    if template_path:
+        resolved = _resolve_relative_path(vault_root, template_path)
+        if resolved.suffix.lower() != ".md":
+            raise ValueError("template_path must point to a markdown file")
+        if not resolved.exists() or not resolved.is_file():
+            raise ValueError(f"Template not found at path: {template_path}")
+        return resolved, _template_record(vault_root, resolved, include_fields=True, include_placeholders=True)
+
+    if template_id:
+        by_id = _find_template_by_id(vault_root, template_id)
+        if by_id[0] is None:
+            raise ValueError(f"Template id not found: {template_id}")
+        return by_id
+
+    by_hint = _find_template(vault_root, template_hint or "")
+    if by_hint is None:
+        return None, None
+    return by_hint, _template_record(vault_root, by_hint, include_fields=True, include_placeholders=True)
+
+
+def _normalize_field_values_map(raw: object) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        return {}
+
+    normalized: dict[str, object] = {}
+    for key, value in raw.items():
+        name = str(key).strip()
+        if not name:
+            continue
+        normalized[name] = value
+    return normalized
+
+
+def _prepare_template_field_values(
+    field_defs: list[dict],
+    provided_values: dict[str, object],
+    missing_fields_policy: str,
+) -> tuple[dict[str, object], list[dict], list[str]]:
+    field_map = {str(field.get("name")): field for field in field_defs if field.get("name")}
+    warnings: list[str] = []
+
+    unknown_fields = sorted([key for key in provided_values.keys() if key not in field_map])
+    if unknown_fields:
+        warnings.append(f"Unknown template fields ignored: {', '.join(unknown_fields)}")
+
+    resolved_values: dict[str, object] = {}
+    missing_fields: list[dict] = []
+
+    for name, field in field_map.items():
+        has_value = name in provided_values
+        raw_value = provided_values.get(name)
+
+        if not has_value and "default" in field:
+            raw_value = _resolve_dynamic_default(field.get("default"))
+            has_value = raw_value is not None
+
+        if not has_value or raw_value is None or (isinstance(raw_value, str) and not raw_value.strip()):
+            if field.get("required"):
+                missing_fields.append(
+                    {
+                        "name": name,
+                        "type": str(field.get("type") or "string"),
+                        "prompt": str(field.get("prompt") or ""),
+                    }
+                )
+            continue
+
+        try:
+            resolved_values[name] = _coerce_field_value(
+                raw_value,
+                str(field.get("type") or "string"),
+                field.get("enum") if isinstance(field.get("enum"), list) else None,
+            )
+        except ValueError as exc:
+            raise ValueError(f"Invalid value for template field '{name}': {exc}") from exc
+
+    policy = (missing_fields_policy or "ask").strip().lower()
+    if missing_fields and policy in {"fail", "defaults"}:
+        names = ", ".join(field["name"] for field in missing_fields)
+        raise ValueError(f"Missing required template fields: {names}")
+
+    return resolved_values, missing_fields, warnings
+
+
+def _resolve_capture_target_dir(
+    vault_root: Path,
+    target_folder: str | None,
+    template_record: dict | None,
+) -> Path:
+    requested = (target_folder or "").strip()
+    if requested:
+        resolved_folder = requested
+    else:
+        resolved_folder = str((template_record or {}).get("default_target_folder") or "00-Inbox")
+
+    target_dir = _resolve_relative_path(vault_root, resolved_folder)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir
+
+
+def _pick_capture_title(
+    body: str,
+    title: str | None,
+    template_record: dict | None,
+    resolved_fields: dict[str, object],
+    template_path: Path | None,
+) -> str:
+    explicit = (title or "").strip()
+    if explicit:
+        return explicit
+
+    for key in ("title", "name", "client_name", "meeting_title"):
+        value = resolved_fields.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    inferred = str((template_record or {}).get("title") or "").strip()
+    if inferred:
+        return inferred
+
+    if body.strip():
+        return _default_capture_title(body)
+
+    if template_path is not None:
+        return template_path.stem
+
+    return datetime.utcnow().strftime("capture-%Y%m%d-%H%M%S")
+
+
+def _builtin_render_values() -> dict[str, object]:
+    now = datetime.utcnow()
+    return {
+        "today": now.strftime("%Y-%m-%d"),
+        "now_iso": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "year": now.strftime("%Y"),
+        "month": now.strftime("%m"),
+    }
+
+
+def read_note(
+    vault_root: Path,
+    path: str | None = None,
+    include_frontmatter: bool = True,
+    include_body: bool = True,
+) -> dict:
+    note_path = _resolve_note_path(vault_root, path=path)
+    text = _safe_read_text(note_path)
+    frontmatter, body = _extract_frontmatter(text)
+
+    result: dict[str, object] = {
+        "path": _relative(vault_root, note_path),
+        "title": note_path.stem,
+    }
+
+    if include_frontmatter:
+        result["frontmatter"] = frontmatter if frontmatter else {}
+        result["has_frontmatter"] = bool(frontmatter)
+    if include_body:
+        result["body"] = body.strip()
+        result["size_bytes"] = note_path.stat().st_size if note_path.exists() else 0
+
+    return result
+
+
 def capture_note(
     vault_root: Path,
     text: str,
     title: str | None = None,
-    target_folder: str = "00-Inbox",
+    target_folder: str | None = None,
     template_hint: str | None = None,
     tags: object = None,
+    template_path: str | None = None,
+    template_id: str | None = None,
+    field_values: object = None,
+    template_mode: str = "legacy",
+    missing_fields_policy: str = "ask",
+    append_captured_context: bool = True,
 ) -> dict:
     body = (text or "").strip()
-    if not body:
-        raise ValueError("Field 'text' is required")
+    normalized_tags = _normalize_tags(tags)
+    provided_fields = _normalize_field_values_map(field_values)
+    mode = (template_mode or "legacy").strip().lower()
+    missing_policy = (missing_fields_policy or "ask").strip().lower()
+
+    if mode not in {"legacy", "auto", "strict", "off"}:
+        raise ValueError("Invalid template_mode")
+    if missing_policy not in {"ask", "fail", "defaults"}:
+        raise ValueError("Invalid missing_fields_policy")
+
+    if (template_id or template_path) and mode == "off":
+        raise ValueError("template_mode=off cannot be used with template_id or template_path")
+
+    selected_template_path = None
+    selected_template_record = None
+    if mode != "off":
+        selected_template_path, selected_template_record = _resolve_capture_template(
+            vault_root,
+            template_hint=template_hint,
+            template_path=template_path,
+            template_id=template_id,
+        )
+
+    if selected_template_path is None and not body:
+        raise ValueError("Field 'text' is required when no template is selected")
+
+    if selected_template_path is None and provided_fields:
+        raise ValueError("field_values requires a selected template")
 
     vault_root.mkdir(parents=True, exist_ok=True)
-    target_dir = _resolve_relative_path(vault_root, target_folder)
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = _resolve_capture_target_dir(vault_root, target_folder, selected_template_record)
 
-    selected_title = (title or "").strip() or _default_capture_title(body)
+    field_defs = []
+    if isinstance(selected_template_record, dict):
+        raw_defs = selected_template_record.get("fields")
+        if isinstance(raw_defs, list):
+            field_defs = raw_defs
+
+    structured_mode = False
+    if selected_template_path is not None and field_defs:
+        if mode in {"auto", "strict"}:
+            structured_mode = True
+        elif provided_fields:
+            structured_mode = True
+
+    if mode == "strict" and selected_template_path is not None and not field_defs:
+        raise ValueError("Strict template mode requires vg_fields metadata in template frontmatter")
+
+    resolved_fields: dict[str, object] = {}
+    missing_fields: list[dict] = []
+    warnings: list[str] = []
+    unresolved_placeholders: list[str] = []
+
+    if structured_mode:
+        resolved_fields, missing_fields, warnings = _prepare_template_field_values(
+            field_defs,
+            provided_fields,
+            missing_policy,
+        )
+
+        if missing_fields and missing_policy == "ask":
+            pending_result = {
+                "pending": True,
+                "phase": "awaiting_template_fields",
+                "template_used": _relative(vault_root, selected_template_path),
+                "missing_fields": missing_fields,
+                "provided_fields": sorted([key for key in provided_fields.keys() if key]),
+                "warnings": warnings,
+                "will_write_note": False,
+                "target_folder": _relative(vault_root, target_dir),
+            }
+            _append_log(vault_root, "note.capture.pending", pending_result)
+            return pending_result
+
+    selected_title = _pick_capture_title(
+        body,
+        title,
+        selected_template_record,
+        resolved_fields,
+        selected_template_path,
+    )
     slug = _slugify(selected_title) or datetime.utcnow().strftime("capture-%Y%m%d-%H%M%S")
     note_path = _unique_path(target_dir / f"{slug}.md")
 
-    normalized_tags = _normalize_tags(tags)
-    template_path = _find_template(vault_root, template_hint or "")
     timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    if template_path:
-        template_text = _safe_read_text(template_path).rstrip()
-        content = (
-            f"{template_text}\n\n"
-            "## Captured Context\n\n"
-            f"{body}\n"
-        )
+    if selected_template_path:
+        template_text = _safe_read_text(selected_template_path).rstrip()
+        if structured_mode:
+            render_values = _builtin_render_values()
+            render_values.update(resolved_fields)
+            if body:
+                render_values.setdefault("captured_context", body)
+
+            rendered, unresolved_placeholders = _render_template(template_text, render_values)
+            content = rendered.rstrip() + "\n"
+
+            if body and append_captured_context and "captured_context" not in _extract_placeholders(template_text):
+                content = f"{content.rstrip()}\n\n## Captured Context\n\n{body}\n"
+            if unresolved_placeholders:
+                warnings.append(
+                    "Unresolved placeholders kept as-is: " + ", ".join(unresolved_placeholders)
+                )
+        else:
+            content = (
+                f"{template_text}\n\n"
+                "## Captured Context\n\n"
+                f"{body}\n"
+            )
     else:
         frontmatter = ["---", "type: note", f"created: {timestamp}"]
         if normalized_tags:
@@ -196,8 +1024,11 @@ def capture_note(
     result = {
         "path": _relative(vault_root, note_path),
         "title": selected_title,
-        "template_used": _relative(vault_root, template_path) if template_path else None,
+        "template_used": _relative(vault_root, selected_template_path) if selected_template_path else None,
         "target_folder": _relative(vault_root, target_dir),
+        "template_mode_used": "structured" if structured_mode else ("legacy" if selected_template_path else "none"),
+        "warnings": warnings,
+        "unresolved_placeholders": unresolved_placeholders,
     }
     _append_log(vault_root, "note.capture", result)
     return result

@@ -26,12 +26,15 @@ This directory contains the repo-shipped MBIFC vault bundle for Josemar.
 - `onboarding` supports deterministic new-vault and port-existing flows.
 - `onboarding` requires a `state_key` in payload for multi-turn isolation.
 - Port flow includes destructive confirmation gates with backup warning.
-- `note.capture`, `note.update`, `note.search`, `note.link`, and `note.file` provide flexible day-to-day vault manipulation.
+- `note.capture`, `note.read`, `note.update`, `note.search`, `note.link`, and `note.file` provide flexible day-to-day vault manipulation.
 - `inbox.triage`, `vault.defrag`, `vault.audit`, `vault.deep-clean`, and `tags.garden` return structured maintenance summaries.
 - `transcribe` remains dormant.
 
 ## Playbooks
 
+- `playbooks/template-list/PLAYBOOK.md` — Deterministic template discovery for capture flows (`template.list`)
+- `playbooks/template-inspect/PLAYBOOK.md` — Deterministic template schema/placeholder inspection (`template.inspect`)
+- `playbooks/note-read/PLAYBOOK.md` — MBIFC Seeker-derived read-before-edit guidance for `note.read`
 - `playbooks/note-capture/PLAYBOOK.md` — MBIFC Scribe-derived capture/refinement guidance for `note.capture`
 - `playbooks/note-update/PLAYBOOK.md` — MBIFC Seeker-derived read-before-edit/update guidance for `note.update`
 - `playbooks/note-search/PLAYBOOK.md` — MBIFC Seeker-derived retrieval guidance for `note.search`
