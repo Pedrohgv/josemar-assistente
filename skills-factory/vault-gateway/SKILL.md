@@ -20,6 +20,7 @@ Use this skill as the only public interface for vault operations.
 - template.list
 - template.inspect
 - note.read
+- note.create (alias for note.capture)
 - note.capture
 - note.update
 - note.search

@@ -160,6 +160,16 @@ def validate_route_payload(route_name: str, route_payload: dict, routes: dict | 
     return errors
 
 
+def resolve_alias(route_name: str, routes: dict | None = None) -> str:
+    if routes is None:
+        routes = load_routes()
+    metadata = routes.get(route_name, {})
+    alias_of = metadata.get("alias_of")
+    if isinstance(alias_of, str) and alias_of in routes:
+        return alias_of
+    return route_name
+
+
 def get_route_metadata(route_name: str, routes: dict | None = None) -> dict:
     if routes is None:
         routes = load_routes()

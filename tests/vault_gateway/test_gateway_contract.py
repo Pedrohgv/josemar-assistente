@@ -636,6 +636,36 @@ Email: {{contact_email}}
         self.assertEqual(code, 1)
         self.assertEqual(output.get("error"), "validation_error")
 
+    def test_note_create_alias_works_same_as_capture(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.create",
+                "payload": {"text": "alias test content"},
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        self.assertEqual(output.get("resolved_route"), "note.capture")
+        result = output.get("result", {})
+        relative_path = result.get("path", "")
+        note_path = self.vault_dir / relative_path
+        self.assertTrue(note_path.exists())
+        self.assertIn("alias test content", note_path.read_text(encoding="utf-8"))
+
+    def test_note_capture_no_alias_field_when_not_used(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {"text": "direct capture"},
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("resolved_route", output)
+
     def test_transcribe_is_dormant(self) -> None:
         code, output = run_gateway(
             {

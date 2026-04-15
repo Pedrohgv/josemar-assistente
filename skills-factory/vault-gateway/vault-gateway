@@ -17,6 +17,7 @@ from lib.router import (  # noqa: E402
     is_known_route,
     load_routes,
     parse_route,
+    resolve_alias,
     validate_route_payload,
 )
 
@@ -179,22 +180,24 @@ def main() -> int:
         )
         return 1
 
-    route_result = handle_route(route, route_payload, metadata)
+    resolved_route = resolve_alias(route, routes)
+    resolved_metadata = get_route_metadata(resolved_route, routes) if resolved_route != route else metadata
+
+    route_result = handle_route(resolved_route, route_payload, resolved_metadata)
     ok = "error" not in route_result
 
-    print(
-        json.dumps(
-            {
-                "success": ok,
-                "route": route,
-                "status": metadata.get("status", "active"),
-                "playbook": metadata.get("playbook"),
-                "input": route_payload,
-                **route_result,
-            },
-            ensure_ascii=True,
-        )
-    )
+    output = {
+        "success": ok,
+        "route": route,
+        "status": metadata.get("status", "active"),
+        "playbook": resolved_metadata.get("playbook"),
+        "input": route_payload,
+        **route_result,
+    }
+    if resolved_route != route:
+        output["resolved_route"] = resolved_route
+
+    print(json.dumps(output, ensure_ascii=True))
     return 0 if ok else 1
 
 

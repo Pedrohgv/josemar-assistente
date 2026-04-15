@@ -42,6 +42,25 @@
         "include_placeholders": "optional boolean"
       }
     },
+    "note.create": {
+      "status": "active",
+      "playbook": "playbooks/note-capture/PLAYBOOK.md",
+      "alias_of": "note.capture",
+      "summary": "Create a new markdown note in the vault (alias for note.capture)",
+      "payload": {
+        "text": "optional string",
+        "title": "optional string",
+        "target_folder": "optional string, defaults to 00-Inbox",
+        "template_hint": "optional string",
+        "tags": "optional list[string]",
+        "template_path": "optional relative path",
+        "template_id": "optional string",
+        "field_values": "optional object",
+        "template_mode": "optional: legacy|auto|strict|off (default legacy)",
+        "missing_fields_policy": "optional: ask|fail|defaults (default ask)",
+        "append_captured_context": "optional boolean"
+      }
+    },
     "note.capture": {
       "status": "active",
       "playbook": "playbooks/note-capture/PLAYBOOK.md",
