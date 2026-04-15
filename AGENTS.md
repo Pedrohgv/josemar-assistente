@@ -287,6 +287,7 @@ git push -u origin feature/my-feature-name
 - `AUX_ML_ALLOWED_INPUT_DIRS` - Comma-separated allowed roots for OCR file inputs
 - `AUX_ML_ENFORCE_MEMORY_LIMIT` - Fail fast if configured memory budget is insufficient
 - `AUX_ML_OCR_MAX_PAGES` - Max pages allowed per OCR PDF request
+- `JOSEMAR_TIMEZONE` - IANA timezone for agent system prompts and message envelope timestamps (default `America/Sao_Paulo`)
 
 **Agent Personality:** Configured in workspace markdown files (SOUL.md, MEMORY.md) - not in JSON config.
 
