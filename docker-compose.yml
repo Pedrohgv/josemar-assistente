@@ -44,6 +44,9 @@ services:
       - AUX_ML_URL=${AUX_ML_URL:-http://aux-ml:8091}
       - AUX_ML_JOB_TIMEOUT_SECONDS=${AUX_ML_JOB_TIMEOUT_SECONDS:-1800}
       - AUX_ML_POLL_INTERVAL_SECONDS=${AUX_ML_POLL_INTERVAL_SECONDS:-2}
+      # Timezone (defaults to Brazil UTC-3)
+      - TZ=${TZ:-America/Sao_Paulo}
+      - JOSEMAR_TIMEZONE=${JOSEMAR_TIMEZONE:-America/Sao_Paulo}
       # Other environment variables
       - OPENCLAW_LOG_LEVEL=info
     ports:

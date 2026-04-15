@@ -170,6 +170,8 @@
   agents: {
     defaults: {
       workspace: "~/.openclaw/workspace",
+      userTimezone: "${JOSEMAR_TIMEZONE}",
+      envelopeTimezone: "${JOSEMAR_TIMEZONE}",
       model: {
         primary: "zai/glm-5.1",
         fallbacks: ["zai/glm-5", "zai/glm-4.7", "deepseek/deepseek-chat", "ollama/glm-5.1:cloud"],
