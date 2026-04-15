@@ -79,8 +79,9 @@
       "summary": "Update an existing markdown note",
       "payload": {
         "path": "required relative path",
-        "text": "required string",
-        "mode": "optional: append|prepend|replace (default append)"
+        "text": "optional string (required unless mode is frontmatter)",
+        "mode": "optional: append|prepend|replace|frontmatter (default append)",
+        "frontmatter_fields": "optional object (required when mode is frontmatter)"
       }
     },
     "note.search": {

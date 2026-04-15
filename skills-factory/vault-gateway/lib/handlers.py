@@ -440,11 +440,13 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
             }
 
         if route == "note.update":
+            fm_fields = payload.get("frontmatter_fields")
             result = update_note(
                 vault_root=vault_root,
                 text=str(payload.get("text") or ""),
                 path=payload.get("path"),
                 mode=str(payload.get("mode") or "append"),
+                frontmatter_fields=fm_fields if isinstance(fm_fields, dict) else None,
             )
             return {
                 "message": "Nota atualizada com sucesso.",

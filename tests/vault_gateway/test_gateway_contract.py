@@ -526,6 +526,116 @@ Email: {{contact_email}}
         self.assertEqual(code, 1)
         self.assertEqual(output.get("error"), "invalid_payload")
 
+    def test_note_update_replace_preserves_frontmatter(self) -> None:
+        note_path = self.vault_dir / "00-Inbox" / "fm-safe.md"
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(
+            "---\ntype: meeting\nstatus: active\n---\n\n# Meeting\n\nOld content.\n",
+            encoding="utf-8",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.update",
+                "payload": {
+                    "path": "00-Inbox/fm-safe.md",
+                    "text": "# Updated Title\n\nNew content only.",
+                    "mode": "replace",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output.get("result", {})
+        self.assertIn("warnings", result)
+
+        updated_text = note_path.read_text(encoding="utf-8")
+        self.assertTrue(updated_text.startswith("---"))
+        self.assertIn("type: meeting", updated_text)
+        self.assertIn("New content only.", updated_text)
+
+    def test_note_update_replace_with_yaml_keeps_provided(self) -> None:
+        note_path = self.vault_dir / "00-Inbox" / "fm-explicit.md"
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(
+            "---\ntype: old\n---\n\n# Old\n",
+            encoding="utf-8",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.update",
+                "payload": {
+                    "path": "00-Inbox/fm-explicit.md",
+                    "text": "---\ntype: new\npriority: high\n---\n\n# New Body\n",
+                    "mode": "replace",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        result = output.get("result", {})
+        self.assertNotIn("warnings", result)
+
+        updated_text = note_path.read_text(encoding="utf-8")
+        self.assertIn("type: new", updated_text)
+        self.assertIn("priority: high", updated_text)
+        self.assertNotIn("type: old", updated_text)
+
+    def test_note_update_frontmatter_mode_surgical(self) -> None:
+        note_path = self.vault_dir / "00-Inbox" / "fm-surgical.md"
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(
+            "---\ntype: task\nstatus: inbox\n---\n\n# My Task\n\nBody stays intact.\n",
+            encoding="utf-8",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.update",
+                "payload": {
+                    "path": "00-Inbox/fm-surgical.md",
+                    "mode": "frontmatter",
+                    "frontmatter_fields": {
+                        "status": "active",
+                        "updated": "2026-04-15",
+                    },
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+
+        updated_text = note_path.read_text(encoding="utf-8")
+        self.assertIn("status: active", updated_text)
+        self.assertIn("updated: 2026-04-15", updated_text)
+        self.assertIn("type: task", updated_text)
+        self.assertIn("Body stays intact.", updated_text)
+
+    def test_note_update_frontmatter_mode_requires_fields(self) -> None:
+        note_path = self.vault_dir / "00-Inbox" / "fm-nofields.md"
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text("---\ntype: note\n---\n\nSome body.\n", encoding="utf-8")
+
+        code, output = run_gateway(
+            {
+                "route": "note.update",
+                "payload": {
+                    "path": "00-Inbox/fm-nofields.md",
+                    "mode": "frontmatter",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "validation_error")
+
     def test_transcribe_is_dormant(self) -> None:
         code, output = run_gateway(
             {

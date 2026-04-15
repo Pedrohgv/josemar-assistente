@@ -1034,34 +1034,87 @@ def capture_note(
     return result
 
 
+def _serialize_frontmatter(fields: dict) -> str:
+    lines = ["---"]
+    for key, value in fields.items():
+        if isinstance(value, list):
+            items = ", ".join(str(item) for item in value)
+            lines.append(f"{key}: [{items}]")
+        elif isinstance(value, bool):
+            lines.append(f"{key}: {'true' if value else 'false'}")
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            lines.append(f"{key}: {value}")
+        else:
+            lines.append(f"{key}: {value}")
+    lines.append("---")
+    return "\n".join(lines)
+
+
 def update_note(
     vault_root: Path,
-    text: str,
+    text: str | None = None,
     path: str | None = None,
     mode: str = "append",
+    frontmatter_fields: dict | None = None,
 ) -> dict:
+    normalized_mode = (mode or "append").strip().lower()
+    valid_modes = {"append", "prepend", "replace", "frontmatter"}
+    if normalized_mode not in valid_modes:
+        raise ValueError(f"Invalid mode. Expected one of: {', '.join(sorted(valid_modes))}")
+
+    if normalized_mode == "frontmatter":
+        if not frontmatter_fields or not isinstance(frontmatter_fields, dict):
+            raise ValueError("frontmatter_fields is required when mode is frontmatter")
+        if not text:
+            text = ""
+
     payload_text = (text or "").strip()
-    if not payload_text:
+    if normalized_mode != "frontmatter" and not payload_text:
         raise ValueError("Field 'text' is required")
 
     note_path = _resolve_note_path(vault_root, path=path)
     existing = _safe_read_text(note_path)
+    existing_frontmatter, existing_body = _extract_frontmatter(existing)
 
-    normalized_mode = (mode or "append").strip().lower()
+    warnings: list[str] = []
+
     if normalized_mode == "replace":
-        updated = payload_text + "\n"
+        if payload_text.startswith("---"):
+            updated = payload_text + "\n"
+        elif existing_frontmatter:
+            updated = _serialize_frontmatter(existing_frontmatter) + "\n\n" + payload_text + "\n"
+            warnings.append("Existing frontmatter auto-preserved (replace text had no YAML block)")
+        else:
+            updated = payload_text + "\n"
+
+    elif normalized_mode == "frontmatter":
+        merged = dict(existing_frontmatter) if existing_frontmatter else {}
+        merged.update(frontmatter_fields)
+        fm_block = _serialize_frontmatter(merged)
+        body_text = existing_body.strip()
+        if body_text:
+            updated = fm_block + "\n\n" + body_text + "\n"
+        else:
+            updated = fm_block + "\n"
+
     elif normalized_mode == "prepend":
-        updated = payload_text + "\n\n" + existing
+        if payload_text.startswith("---"):
+            updated = payload_text + "\n\n" + existing
+        else:
+            updated = payload_text + "\n\n" + existing
+
     else:
         separator = "\n\n" if existing.strip() else ""
         updated = existing.rstrip() + separator + payload_text + "\n"
 
     note_path.write_text(updated, encoding="utf-8")
 
-    result = {
+    result: dict[str, object] = {
         "path": _relative(vault_root, note_path),
         "mode": normalized_mode,
     }
+    if warnings:
+        result["warnings"] = warnings
     _append_log(vault_root, "note.update", result)
     return result
 

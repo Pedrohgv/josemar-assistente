@@ -46,3 +46,4 @@ If destructive mode is selected, workflow shows strong warning and strongly reco
 - Relative-path constraints at contract and filesystem layers.
 - Vault root allowlist guard before route execution.
 - Session-isolated onboarding state via required `state_key`.
+- Frontmatter auto-preserve on `note.update` replace mode when replacement text lacks YAML block.

@@ -80,6 +80,22 @@ For onboarding, include a session-scoped `state_key` in payload to isolate multi
 }
 ```
 
+Frontmatter surgical update example:
+
+```json
+{
+  "route": "note.update",
+  "payload": {
+    "path": "01-Projects/my-task.md",
+    "mode": "frontmatter",
+    "frontmatter_fields": {
+      "status": "active",
+      "updated": "2026-04-15"
+    }
+  }
+}
+```
+
 Contract rules:
 - Top-level keys: only `route` and `payload`
 - Route params must be inside `payload`
@@ -90,6 +106,7 @@ Contract rules:
 
 - For "port existing vault", always propose a safe plan before execution.
 - If user requests destructive mode, display a strong warning and strongly recommend a vault backup before continuing.
+- When using `note.update` with `mode: replace`, existing frontmatter is auto-preserved if the replacement text has no YAML block. This prevents accidental frontmatter loss during read-then-replace edits.
 
 ## Internal Contract
 
