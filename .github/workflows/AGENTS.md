@@ -32,15 +32,17 @@ The following secrets must be configured in the GitHub repository settings:
 | `GOG_KEYRING_PASSWORD` | Optional passphrase for gogcli keyring (decrypts Google OAuth token store) | No |
 | `WORKSPACE_REPO_TOKEN` | GitHub PAT for agent state repo (needs `repo` scope) | Yes |
 | `RCLONE_CONFIG_B64` | Base64-encoded `rclone.conf` used by Obsidian backup container | Yes (for backups) |
+| `TS_AUTHKEY` | Tailscale auth key used by sidecar for unattended tailnet login | No (recommended for remote sync automation) |
 
 ## Required GitHub Variables
 
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `WORKSPACE_STATE_REPO` | HTTPS URL of the private agent state repo | Yes |
-| `LAN_BIND_IP` | Server LAN IP for Syncthing port binding | Yes (for laptop access) |
 | `TZ` | Timezone used by Syncthing and backup scheduler | No (default `America/Sao_Paulo`) |
 | `SYNCTHING_GUI_BIND_IP` | Syncthing GUI/API bind IP | No (default `127.0.0.1`) |
+| `TAILSCALE_HOSTNAME` | Optional hostname for Tailscale sidecar node | No (default `josemar-server`) |
+| `TS_EXTRA_ARGS` | Optional extra flags passed to `tailscale up` in sidecar | No |
 | `AUX_ML_ENABLED` | Optional aux-ml toggle (`true`/`false`) | No (default enabled) |
 | `AUX_ML_MEMORY_LIMIT` | Docker memory limit for aux-ml service | No (default `8192m`) |
 | `AUX_ML_MEMORY_LIMIT_MB` | Numeric memory budget used by aux-ml runtime validation | No (default `8192`) |
@@ -53,6 +55,10 @@ The following secrets must be configured in the GitHub repository settings:
 | `AUX_ML_OCR_MAX_PAGES` | Max pages per OCR PDF job | No (default `50`) |
 
 Security note: avoid setting `SYNCTHING_GUI_BIND_IP=0.0.0.0`.
+
+`TS_AUTHKEY` is written to `.env` and used by the `tailscale` sidecar container for unattended tailnet login.
+No host-level Tailscale installation is required by deploy workflow.
+Deploy now fails fast if `tailscale` sidecar is running but not connected/logged in.
 
 When `AUX_ML_ENABLED` is unset, the workflow treats it as `true` and writes `COMPOSE_PROFILES=aux-ml`.
 Set `AUX_ML_ENABLED=false` only when you explicitly want to disable aux-ml for a deployment.
@@ -268,8 +274,9 @@ Safely stops the Josemar Assistente service without deleting data.
    - `PEDRO_TELEGRAM_ID`
    - `WORKSPACE_REPO_TOKEN`
    - `RCLONE_CONFIG_B64`
+   - `TS_AUTHKEY` (if using unattended tailscale sidecar login)
 3. Verify `WORKSPACE_STATE_REPO` is set as a **Repository variable** (not a secret)
-4. Verify `LAN_BIND_IP` is set as a **Repository variable**
+4. (Optional) Set `TAILSCALE_HOSTNAME` and `TS_EXTRA_ARGS` as repository variables for sidecar tuning.
 5. Re-save secrets if recently added (may take a moment to propagate)
 
 ### Deployment Failures

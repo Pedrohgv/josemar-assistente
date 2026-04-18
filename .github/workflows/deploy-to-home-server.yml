@@ -41,20 +41,6 @@ jobs:
             echo "ERROR: Repository variable WORKSPACE_STATE_REPO is required"
             exit 1
           fi
-          LAN_IP="${{ vars.LAN_BIND_IP }}"
-          if [ -z "$LAN_IP" ]; then
-            echo "ERROR: Repository variable LAN_BIND_IP is required"
-            echo "Set it to your server LAN IP (example: 192.168.15.200)"
-            exit 1
-          fi
-          if [ "$LAN_IP" = "0.0.0.0" ]; then
-            echo "ERROR: LAN_BIND_IP cannot be 0.0.0.0"
-            exit 1
-          fi
-          if ! echo "$LAN_IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "ERROR: LAN_BIND_IP must be an IPv4 address"
-            exit 1
-          fi
 
           GUI_BIND_IP="${{ vars.SYNCTHING_GUI_BIND_IP }}"
           if [ -n "$GUI_BIND_IP" ]; then
@@ -79,13 +65,15 @@ jobs:
           PEDRO_TELEGRAM_ID=${{ secrets.PEDRO_TELEGRAM_ID }}
           GATEWAY_AUTH_PASSWORD=${{ secrets.GATEWAY_AUTH_PASSWORD }}
           GOG_KEYRING_PASSWORD=${{ secrets.GOG_KEYRING_PASSWORD }}
+          TS_AUTHKEY=${{ secrets.TS_AUTHKEY }}
           WORKSPACE_STATE_REPO=${{ vars.WORKSPACE_STATE_REPO }}
           WORKSPACE_REPO_TOKEN=${{ secrets.WORKSPACE_REPO_TOKEN }}
           WORKSPACE_SYNC_ON_START=${{ github.event.inputs.skip_git_sync == 'false' && 'true' || 'false' }}
           WORKSPACE_SYNC_INTERVAL=60
           WORKSPACE_MEMORY_DAYS=30
           TZ=${{ vars.TZ }}
-          LAN_BIND_IP=${{ vars.LAN_BIND_IP }}
+          TAILSCALE_HOSTNAME=${{ vars.TAILSCALE_HOSTNAME }}
+          TS_EXTRA_ARGS=${{ vars.TS_EXTRA_ARGS }}
           SYNCTHING_GUI_BIND_IP=${{ vars.SYNCTHING_GUI_BIND_IP }}
           AUX_ML_ENABLED=${{ vars.AUX_ML_ENABLED == 'false' && 'false' || 'true' }}
           COMPOSE_PROFILES=${{ vars.AUX_ML_ENABLED == 'false' && '' || 'aux-ml' }}
@@ -187,6 +175,33 @@ jobs:
 
       - name: Start services
         run: docker compose up -d
+
+      - name: Verify tailscale sidecar login
+        run: |
+          echo "Checking tailscale sidecar status..."
+          if ! docker compose ps tailscale | grep -q "Up"; then
+            echo "ERROR: tailscale service is not running"
+            docker compose ps
+            exit 1
+          fi
+
+          TS_IP=""
+          for i in {1..30}; do
+            TS_IP="$(docker compose exec -T tailscale tailscale ip -4 2>/dev/null | sed -n '1p')"
+            if echo "$TS_IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Tailscale sidecar connected with IPv4: $TS_IP"
+              break
+            fi
+            echo "Waiting for tailscale login/connection... ($i/30)"
+            sleep 2
+          done
+
+          if ! echo "$TS_IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: tailscale sidecar is running but not logged in/connected"
+            echo "Set TS_AUTHKEY secret or log in manually with: docker compose exec -T tailscale tailscale up"
+            docker compose logs --tail=120 tailscale
+            exit 1
+          fi
 
       - name: Wait for container to be healthy
         run: |

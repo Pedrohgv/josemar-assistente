@@ -11,7 +11,7 @@ A self-hosted OpenClaw bot running in Docker with Telegram integration and PDF e
 - **Brazilian Portuguese**: Native language interaction
 - **Docker Deployment**: Containerized with persistent workspace storage
 - **Git-Backed Agent State**: Workspace files versioned in a private git repo
-- **Obsidian Vault Sync**: Syncthing-based sync between server and laptop
+- **Obsidian Vault Sync**: Syncthing sync over private network (Tailscale-ready)
 - **Google Drive Backups**: Daily rotating Obsidian vault backups via rclone
 - **Auxiliary ML Batch Container**: Optional llama.cpp service with FIFO queue for long-running OCR/transcription tasks
 
@@ -120,12 +120,37 @@ AUX_ML_ENFORCE_MEMORY_LIMIT=true
 AUX_ML_OCR_MAX_PAGES=50
 
 # Obsidian Sync/Backup
-LAN_BIND_IP=192.168.1.50
+TS_AUTHKEY=tskey-xxxxx
+TAILSCALE_HOSTNAME=josemar-server
+TS_EXTRA_ARGS=
 SYNCTHING_GUI_BIND_IP=127.0.0.1
 TZ=America/Sao_Paulo
 ```
 
 See `.env.example` for the complete list.
+
+### Remote Vault Sync (Tailscale)
+
+To sync Obsidian outside your home network, use Tailscale on server and laptop:
+
+1. Install Tailscale on both devices.
+2. Join the same tailnet (`tailscale up`).
+3. Configure `TS_AUTHKEY` so the server `tailscale` sidecar joins your tailnet automatically.
+4. In Syncthing, set each device address to `tcp://<peer-tailscale-ip>:22000`.
+
+Laptop persistence check (after reboot):
+
+```bash
+systemctl is-enabled tailscaled
+```
+
+If needed:
+
+```bash
+sudo systemctl enable --now tailscaled
+```
+
+Detailed runbook: `docs/obsidian-operations.md`.
 
 ### OpenClaw Configuration
 
@@ -235,8 +260,9 @@ josemar-assistente/
 Deployment is handled via GitHub Actions:
 
 1. Set required secrets (see `.github/workflows/AGENTS.md`)
-2. Set required variables: `WORKSPACE_STATE_REPO` and `LAN_BIND_IP` (plus optional `AUX_ML_*` variables if enabling aux-ml)
-3. Run the `deploy-to-home-server` workflow
+2. For unattended remote sync setup, add optional secret `TS_AUTHKEY` (Tailscale auth key)
+3. Set required variables: `WORKSPACE_STATE_REPO` (plus optional `TAILSCALE_HOSTNAME`, `TS_EXTRA_ARGS`, and optional `AUX_ML_*` variables if enabling aux-ml)
+4. Run the `deploy-to-home-server` workflow
 
 **Fresh Start:** The workflow has a `fresh_start` option that erases ALL data (with a safety countdown).
 
@@ -288,6 +314,7 @@ Access Web UI at `http://operator:YOUR_PASSWORD@localhost:18789/`
   - `openclaw-workspace` for OpenClaw runtime state
   - `obsidian-vault` for Obsidian notes and attachments
   - `syncthing-config` for Syncthing identity and config
+  - `tailscale-state` for Tailscale sidecar identity and login state
   - `obsidian-backup-state` for backup slot pointer
 - **Entrypoint**: Copies config, mounts credentials, runs git sync, starts OpenClaw
 
