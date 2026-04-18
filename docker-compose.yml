@@ -111,7 +111,6 @@ services:
       - tailscale
     network_mode: service:tailscale
     user: "0:0"
-    hostname: josemar-server
     environment:
       - TZ=${TZ:-America/Sao_Paulo}
       - PUID=0
