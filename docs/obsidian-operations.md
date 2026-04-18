@@ -11,7 +11,8 @@ Use this file as the source of truth for future operators.
 ## Architecture Summary
 
 - `obsidian-vault` Docker volume stores notes and attachments (not git-versioned).
-- `syncthing` container syncs the vault to client devices.
+- `tailscale` sidecar provides private network connectivity for sync.
+- `syncthing` container syncs the vault to client devices through the sidecar namespace.
 - `obsidian-backup` container uploads one rotating snapshot per day to Google Drive.
 - `openclaw` mounts the same vault volume at `/root/.openclaw/obsidian`.
 
@@ -19,6 +20,7 @@ Key volumes:
 
 - `josemar-assistente_obsidian-vault`
 - `josemar-assistente_syncthing-config`
+- `josemar-assistente_tailscale-state`
 - `josemar-assistente_obsidian-backup-state`
 
 ## Required GitHub Configuration
@@ -26,12 +28,19 @@ Key volumes:
 ### Secrets
 
 - `RCLONE_CONFIG_B64`: base64-encoded `rclone.conf` containing remote `gdrive`
+- `TS_AUTHKEY` (optional, recommended): Tailscale auth key for unattended server bootstrap/login during deploy
 
 ### Variables
 
-- `LAN_BIND_IP`: server LAN IPv4 (example: `192.168.15.200`)
 - `TZ`: optional, defaults to `America/Sao_Paulo`
 - `SYNCTHING_GUI_BIND_IP`: optional, defaults to `127.0.0.1` (recommended)
+- `TAILSCALE_HOSTNAME`: optional node name for sidecar (default `josemar-server`)
+- `TS_EXTRA_ARGS`: optional extra flags passed to `tailscale up`
+
+Notes:
+
+- Server-side Tailscale runs as a Docker sidecar (`tailscale` service), not as a host package.
+- If `TS_AUTHKEY` is set in GitHub secrets, sidecar login is unattended during deploy.
 
 Backup behavior defaults are defined in `docker-compose.yml`:
 
@@ -57,17 +66,35 @@ docker run --rm \
   sh -c 'cp /src/rclone.conf /config/rclone/rclone.conf && chmod 600 /config/rclone/rclone.conf'
 ```
 
-## Network Requirement (Proxmox + Router)
+## Tailscale Auth Key (for unattended setup)
 
-The VM should keep a stable LAN IP.
+If you want non-interactive `tailscale up` in the server sidecar, create a pre-auth key:
 
-Recommended approach:
+1. Open Tailscale admin: `https://login.tailscale.com/admin/settings/keys`
+2. Click **Generate auth key**.
+3. Recommended settings for this server use case:
+   - Reusable: enabled
+   - Ephemeral: disabled
+   - Expiry: choose a controlled window (or no expiry only if your policy allows it)
+   - Tags: optional (for ACL-driven server identity)
+4. Save the key securely (you will only see the full value once).
 
-1. In Proxmox, copy the VM NIC MAC address.
-2. In the router DHCP settings, create a reservation for that MAC.
-3. Reserve the IP used in `LAN_BIND_IP`.
+Usage:
 
-If `LAN_BIND_IP` changes, laptop sync settings must be updated.
+```bash
+sudo tailscale up --auth-key=<TS_AUTHKEY>
+```
+
+## Network Requirement (Tailscale Sidecar)
+
+Recommended topology:
+
+1. Server runs `tailscale` as a Docker sidecar service.
+2. `syncthing` runs in the same network namespace (`network_mode: service:tailscale`).
+3. Laptop runs native Tailscale client.
+4. In Syncthing, configure each device address as `tcp://<tailscale-ip>:22000`.
+
+This keeps sync traffic on your private tailnet without opening router/firewall ports and avoids host-level Tailscale installation.
 
 ## How To Find The Active Compose Path On Server
 
@@ -89,36 +116,92 @@ Run on server:
 
 ```bash
 dc ps
+dc logs --tail=80 tailscale
 dc logs --tail=80 syncthing
 dc logs --tail=80 obsidian-backup
 ```
 
 Expected:
 
-- `openclaw`, `syncthing`, `obsidian-backup` are `Up`
-- Syncthing ports bound to `LAN_BIND_IP`
+- `openclaw`, `tailscale`, `syncthing`, `obsidian-backup` are `Up`
+- Tailscale reports a `100.x.y.z` address
 
-Check Syncthing bind explicitly:
+Check runtime state explicitly:
 
 ```bash
-ss -lntup | grep -E ':8384|:22000|:21027'
+dc exec -T tailscale tailscale ip -4
+dc exec -T tailscale tailscale status
+ss -lntup | grep -E ':8384'
 ```
 
-Expected bind model:
+Expected model:
 
 - `8384` on `127.0.0.1` (GUI/API)
-- `22000` and `21027` on `LAN_BIND_IP` (sync/discovery)
+- Syncthing sync port `22000` reachable via server Tailscale IP
 
 ## One-Time Pairing: Laptop <-> Server
 
-### 1) Install Syncthing on laptop
+### 1) Install Tailscale on laptop
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo systemctl enable --now tailscaled
+sudo tailscale up
+tailscale ip -4
+```
+
+Save both Tailscale IPv4 addresses.
+
+### 1.1) Ensure server sidecar is connected
+
+On server:
+
+```bash
+dc ps
+dc logs --tail=80 tailscale
+dc exec -T tailscale tailscale ip -4
+```
+
+If no IP is returned, verify `TS_AUTHKEY` in deploy secrets and redeploy.
+
+Manual fallback (without `TS_AUTHKEY`):
+
+```bash
+dc exec -T tailscale tailscale up
+```
+
+Open the login URL printed by the command, approve the node, then re-run `dc exec -T tailscale tailscale ip -4`.
+
+### 1.2) Ensure Tailscale survives laptop reboots
+
+On the laptop, verify the daemon is enabled as a system service:
+
+```bash
+systemctl is-enabled tailscaled
+systemctl status tailscaled --no-pager
+```
+
+If it is not enabled, run:
+
+```bash
+sudo systemctl enable --now tailscaled
+```
+
+After reboot, validate connection state:
+
+```bash
+tailscale status
+tailscale ip -4
+```
+
+### 2) Install Syncthing on laptop
 
 ```bash
 sudo apt update
 sudo apt install -y syncthing
 ```
 
-### 2) Start Syncthing on laptop
+### 3) Start Syncthing on laptop
 
 Preferred (persistent):
 
@@ -129,7 +212,7 @@ systemctl --user status syncthing --no-pager
 
 Open laptop UI: `http://127.0.0.1:8384`
 
-### 3) Open server Syncthing UI
+### 4) Open server Syncthing UI
 
 If `SYNCTHING_GUI_BIND_IP=127.0.0.1` (default), use SSH tunnel:
 
@@ -141,22 +224,22 @@ Then open:
 
 - `http://127.0.0.1:8384`
 
-If GUI was intentionally exposed on LAN, use:
+If GUI was intentionally exposed, use:
 
-- `http://<LAN_BIND_IP>:8384`
+- `http://<SERVER_PRIVATE_IP>:8384`
 
-### 4) Add server on laptop
+### 5) Add server on laptop
 
 - Device ID: server Syncthing device ID
-- Address: `tcp://<LAN_BIND_IP>:22000`
+- Address: `tcp://<SERVER_TAILSCALE_IP>:22000` (server IP from `dc exec -T tailscale tailscale ip -4`)
 
 Important: do not use `http://...:8384` as device address.
 
-### 5) Accept device on server
+### 6) Accept device on server
 
 Approve the laptop in server UI.
 
-### 6) Share folder
+### 7) Share folder
 
 On server UI, share `obsidian-vault` with laptop.
 
@@ -166,14 +249,18 @@ On laptop UI, accept folder and choose local path, for example:
 
 Open that folder in Obsidian desktop.
 
-## LAN-Only Syncthing Policy
+## Tailscale-Only Syncthing Policy
 
 Server and laptop should both use:
 
 - `Global Discovery`: disabled
 - `Relaying`: disabled
 - `NAT Traversal`: disabled
-- `Local Discovery`: enabled
+- `Local Discovery`: disabled
+
+For each device, set explicit peer address to the other Tailscale endpoint:
+
+- `tcp://<peer-tailscale-ip>:22000`
 
 ## Backup Operations
 
@@ -249,6 +336,7 @@ dc logs --tail=80 syncthing
 Normal redeploy preserves:
 
 - Syncthing identity, pairing, folder settings (`syncthing-config`)
+- Tailscale node state (`tailscale-state`)
 - Vault files (`obsidian-vault`)
 - Backup ring pointer (`obsidian-backup-state`)
 
@@ -265,8 +353,7 @@ It does not remove Obsidian volumes.
 Check connectivity from laptop:
 
 ```bash
-nc -vz <LAN_BIND_IP> 22000
-curl -sS http://<LAN_BIND_IP>:8384/rest/noauth/health
+nc -vz <SERVER_TAILSCALE_IP> 22000
 ```
 
 If reachable, verify device address is TCP, not HTTP:
@@ -278,7 +365,7 @@ syncthing cli --gui-address=127.0.0.1:8384 --gui-apikey=<LAPTOP_API_KEY> \
 
 Expected value:
 
-- `tcp://<LAN_BIND_IP>:22000`
+- `tcp://<SERVER_TAILSCALE_IP>:22000`
 
 ### Symptom: Server log says `unknown device`
 

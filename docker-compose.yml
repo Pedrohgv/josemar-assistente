@@ -107,6 +107,9 @@ services:
     image: syncthing/syncthing:latest
     container_name: josemar-syncthing
     restart: unless-stopped
+    depends_on:
+      - tailscale
+    network_mode: service:tailscale
     user: "0:0"
     hostname: josemar-server
     environment:
@@ -116,13 +119,27 @@ services:
     volumes:
       - syncthing-config:/var/syncthing/config
       - obsidian-vault:/var/syncthing/data/obsidian
+
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: josemar-tailscale
+    restart: unless-stopped
+    hostname: ${TAILSCALE_HOSTNAME:-josemar-server}
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+      - TS_EXTRA_ARGS=${TS_EXTRA_ARGS:-}
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+      - net_raw
     ports:
       # Syncthing GUI/API should stay localhost-only by default
       - "${SYNCTHING_GUI_BIND_IP:-127.0.0.1}:8384:8384"
-      # Bind sync/discovery traffic to LAN IP only
-      - "${LAN_BIND_IP:-127.0.0.1}:22000:22000/tcp"
-      - "${LAN_BIND_IP:-127.0.0.1}:22000:22000/udp"
-      - "${LAN_BIND_IP:-127.0.0.1}:21027:21027/udp"
     networks:
       - openclaw-network
 
@@ -163,4 +180,6 @@ volumes:
   obsidian-rclone-config:
     driver: local
   obsidian-backup-state:
+    driver: local
+  tailscale-state:
     driver: local

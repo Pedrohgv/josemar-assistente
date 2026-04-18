@@ -64,6 +64,7 @@ josemar-assistente/
 - `openclaw-workspace` stores OpenClaw runtime state (workspace repo, sessions, paired devices)
 - `obsidian-vault` stores Obsidian markdown files and attachments (not git-versioned)
 - `syncthing-config` stores Syncthing device identity and sync settings
+- `tailscale-state` stores Tailscale sidecar identity/login state
 - `obsidian-rclone-config` stores rclone auth for Obsidian backups
 - `obsidian-backup-state` stores backup slot rotation pointer (`next-slot`)
 - Docker volume paths on host use `/var/lib/docker/volumes/<volume-name>/_data/`
@@ -125,7 +126,7 @@ You can safely test locally without disconnecting the production bot:
 5. **Test via browser interface** - All functionality works except Telegram
 
    Optional Obsidian stack testing:
-   - Set `LAN_BIND_IP=127.0.0.1` in `.env`
+   - Configure `TS_AUTHKEY` in `.env` so the `tailscale` sidecar joins your tailnet
    - Access Syncthing UI at `http://127.0.0.1:8384`
    - Load rclone config into volume `obsidian-rclone-config` before testing backups (see `docs/obsidian-operations.md`)
 
@@ -216,7 +217,7 @@ git push -u origin feature/my-feature-name
 
 7. **Syncthing (Vault Sync)**
    - Syncs `obsidian-vault` volume to laptop/mobile devices
-   - Uses LAN-only bindings with `LAN_BIND_IP` to avoid internet exposure
+   - Uses a `tailscale` sidecar for private-network connectivity (Syncthing shares sidecar network namespace)
    - Device trust model: explicit device ID pairing
 
 8. **Obsidian Backup (rclone)**
@@ -263,8 +264,10 @@ git push -u origin feature/my-feature-name
 - `WORKSPACE_SYNC_ON_START` - Enable/disable git sync on start (`true`/`false`)
 - `WORKSPACE_SYNC_INTERVAL` - Minutes between periodic syncs (0 = disabled)
 - `WORKSPACE_MEMORY_DAYS` - Days to keep memory logs
-- `LAN_BIND_IP` - LAN interface IP for Syncthing ports (`127.0.0.1` for local-only testing)
+- `TS_AUTHKEY` - Tailscale auth key used by sidecar for unattended tailnet login
 - `SYNCTHING_GUI_BIND_IP` - Bind IP for Syncthing GUI/API (`127.0.0.1` recommended)
+- `TAILSCALE_HOSTNAME` - Optional hostname for tailscale sidecar node (default `josemar-server`)
+- `TS_EXTRA_ARGS` - Optional extra flags passed to `tailscale up` in sidecar
 - `TZ` - Timezone used by Syncthing and backup scheduler
 - `OBSIDIAN_BACKUP_TIME` - Daily backup time (`HH:MM`, default `03:15`)
 - `OBSIDIAN_BACKUP_RUN_ON_START` - Run one backup when backup container starts
@@ -393,7 +396,7 @@ On container start, the workspace sync script (`scripts/workspace-sync.sh`) clon
 5. **Only files in `.sync-manifest` are versioned** - This prevents accidental secret leaks
 6. **Credentials go in `credentials/`** - Never in workspace or agent-state
 7. **Docker volume is the primary storage** - Git repo is backup/sync, not the source of truth
-8. **Keep Syncthing LAN-only** - Bind ports to `LAN_BIND_IP` and disable global discovery/relays for local trust boundary
+8. **Keep Syncthing private-network-only** - Use Tailscale sidecar networking and disable global discovery/relays
 
 ---
 
