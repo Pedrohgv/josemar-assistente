@@ -29,6 +29,7 @@ eggs/
 .eggs/
 lib/
 !agent-state/**/lib/
+!skills-factory/**/lib/
 lib64/
 parts/
 sdist/

@@ -1,0 +1,183 @@
+{
+  "version": 1,
+  "public_entrypoint": "vault-gateway",
+  "notes": {
+    "intent": "Expose exactly one vault interface to Josemar",
+    "routing": "Route must be provided explicitly by the caller",
+    "transcribe": "Kept dormant until backend setup"
+  },
+  "routes": {
+    "onboarding": {
+      "status": "active",
+      "playbook": "playbooks/onboarding/PLAYBOOK.md",
+      "source": "skills/onboarding/SKILL.md",
+      "summary": "Initialize vault or port existing vault with safety gates",
+      "payload": {
+        "input": "optional string",
+        "mode": "optional: new|port",
+        "state_key": "required string to isolate multi-turn onboarding sessions"
+      }
+    },
+    "template.list": {
+      "status": "active",
+      "playbook": "playbooks/template-list/PLAYBOOK.md",
+      "source": "agents/scribe.md",
+      "summary": "List available templates and metadata",
+      "payload": {
+        "query": "optional string",
+        "path_prefix": "optional relative path",
+        "include_legacy": "optional boolean",
+        "limit": "optional number (default 50)",
+        "mode": "optional: capture|all (default capture)"
+      }
+    },
+    "template.inspect": {
+      "status": "active",
+      "playbook": "playbooks/template-inspect/PLAYBOOK.md",
+      "source": "agents/scribe.md",
+      "summary": "Inspect one template metadata and fields",
+      "payload": {
+        "template_path": "required relative path",
+        "include_body_preview": "optional boolean",
+        "include_placeholders": "optional boolean"
+      }
+    },
+    "note.create": {
+      "status": "active",
+      "playbook": "playbooks/note-capture/PLAYBOOK.md",
+      "alias_of": "note.capture",
+      "summary": "Create a new markdown note in the vault (alias for note.capture)",
+      "payload": {
+        "text": "optional string",
+        "title": "optional string",
+        "target_folder": "optional string, defaults to 00-Inbox",
+        "template_hint": "optional string",
+        "tags": "optional list[string]",
+        "template_path": "optional relative path",
+        "template_id": "optional string",
+        "field_values": "optional object",
+        "template_mode": "optional: legacy|auto|strict|off (default legacy)",
+        "missing_fields_policy": "optional: ask|fail|defaults (default ask)",
+        "append_captured_context": "optional boolean"
+      }
+    },
+    "note.capture": {
+      "status": "active",
+      "playbook": "playbooks/note-capture/PLAYBOOK.md",
+      "source": "agents/scribe.md",
+      "summary": "Create a new markdown note in the vault",
+      "payload": {
+        "text": "optional string",
+        "title": "optional string",
+        "target_folder": "optional string, defaults to 00-Inbox",
+        "template_hint": "optional string",
+        "tags": "optional list[string]",
+        "template_path": "optional relative path",
+        "template_id": "optional string",
+        "field_values": "optional object",
+        "template_mode": "optional: legacy|auto|strict|off (default legacy)",
+        "missing_fields_policy": "optional: ask|fail|defaults (default ask)",
+        "append_captured_context": "optional boolean"
+      }
+    },
+    "note.read": {
+      "status": "active",
+      "playbook": "playbooks/note-read/PLAYBOOK.md",
+      "source": "agents/seeker.md",
+      "summary": "Read full note content and frontmatter",
+      "payload": {
+        "path": "required relative path",
+        "include_frontmatter": "optional boolean (default true)",
+        "include_body": "optional boolean (default true)"
+      }
+    },
+    "note.update": {
+      "status": "active",
+      "playbook": "playbooks/note-update/PLAYBOOK.md",
+      "source": "agents/seeker.md",
+      "summary": "Update an existing markdown note",
+      "payload": {
+        "path": "required relative path",
+        "text": "optional string (required unless mode is frontmatter)",
+        "mode": "optional: append|prepend|replace|frontmatter (default append)",
+        "frontmatter_fields": "optional object (required when mode is frontmatter)"
+      }
+    },
+    "note.search": {
+      "status": "active",
+      "playbook": "playbooks/note-search/PLAYBOOK.md",
+      "source": "agents/seeker.md",
+      "summary": "Search markdown notes by text",
+      "payload": {
+        "query": "required string",
+        "limit": "optional number (default 20)",
+        "path_prefix": "optional folder prefix"
+      }
+    },
+    "note.link": {
+      "status": "active",
+      "playbook": "playbooks/note-link/PLAYBOOK.md",
+      "source": "agents/connector.md",
+      "summary": "Create wiki-link relation between notes",
+      "payload": {
+        "source_path": "required relative path",
+        "target_path": "required relative path",
+        "bidirectional": "optional boolean"
+      }
+    },
+    "note.file": {
+      "status": "active",
+      "playbook": "playbooks/note-file/PLAYBOOK.md",
+      "source": "agents/sorter.md",
+      "summary": "Move note to destination folder",
+      "payload": {
+        "source_path": "required relative path",
+        "target_folder": "required relative path"
+      }
+    },
+    "inbox.triage": {
+      "status": "active",
+      "playbook": "playbooks/inbox-triage/PLAYBOOK.md",
+      "source": "skills/inbox-triage/SKILL.md",
+      "summary": "Generate inbox status summary",
+      "payload": {}
+    },
+    "vault.defrag": {
+      "status": "active",
+      "playbook": "playbooks/defrag/PLAYBOOK.md",
+      "source": "skills/defrag/SKILL.md",
+      "summary": "Generate structural maintenance summary",
+      "payload": {}
+    },
+    "vault.audit": {
+      "status": "active",
+      "playbook": "playbooks/vault-audit/PLAYBOOK.md",
+      "source": "skills/vault-audit/SKILL.md",
+      "summary": "Generate vault audit summary",
+      "payload": {}
+    },
+    "vault.deep-clean": {
+      "status": "active",
+      "playbook": "playbooks/deep-clean/PLAYBOOK.md",
+      "source": "skills/deep-clean/SKILL.md",
+      "summary": "Generate deep-clean summary",
+      "payload": {}
+    },
+    "tags.garden": {
+      "status": "active",
+      "playbook": "playbooks/tag-garden/PLAYBOOK.md",
+      "source": "skills/tag-garden/SKILL.md",
+      "summary": "Generate tag taxonomy summary",
+      "payload": {}
+    },
+    "transcribe": {
+      "status": "dormant",
+      "playbook": "dormant/transcribe/PLAYBOOK.md",
+      "source": "skills/transcribe/SKILL.md",
+      "summary": "Transcription flow kept dormant until backend setup",
+      "payload": {
+        "input": "optional"
+      }
+    }
+  }
+}

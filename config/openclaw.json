@@ -237,10 +237,20 @@
   skills: {
     allowBundled: [],
     load: {
+      extraDirs: [
+        "/opt/josemar/skills",
+      ],
       watch: true,
       watchDebounceMs: 250,
     },
-    entries: {},
+    entries: {
+      "obsidian-power-user": {
+        enabled: false,
+      },
+      "obsidian-shared-vault": {
+        enabled: false,
+      },
+    },
   },
 
   // Session configuration
