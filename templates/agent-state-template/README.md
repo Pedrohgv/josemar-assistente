@@ -35,7 +35,18 @@ On the first run, if the workspace has no personality files (`SOUL.md`, `IDENTIT
 - `memory/`
 - `avatars/`
 
-The personality files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`, `MEMORY.md`, `TOOLS.md`, `HEARTBEAT.md`, `BOOT.md`) are created by OpenClaw during bootstrap and automatically versioned by the periodic sync afterwards.
+Personality files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`) are created by OpenClaw during bootstrap and automatically versioned by periodic sync.
+
+Operational files (`TOOLS.md`, `BOOT.md`, `HEARTBEAT.md`) are pre-seeded in this template to document core capabilities available out of the box.
+
+## Skill Ownership Model
+
+This project separates skills by ownership:
+
+- **Core repo-owned skills** ship from the main repository (`skills-factory/`) and are bundled into the Docker image.
+- **User-owned skills** live in this private state repo (`skills/`) and are specific to each user/deployment.
+
+Do not copy user-specific skills into the main repository. Keep them in the state repo.
 
 **To trigger bootstrap on an existing deployment:**
 1. Delete all personality `.md` files from the state repo and push
@@ -51,9 +62,9 @@ The personality files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`, `MEMORY
 | `USER.md` | User information and preferences | Bootstrap / manual |
 | `IDENTITY.md` | Agent name, vibe, emoji | Bootstrap |
 | `MEMORY.md` | Long-term curated memory | Bootstrap / agent |
-| `TOOLS.md` | Notes about tools and conventions | Bootstrap / manual |
-| `HEARTBEAT.md` | Heartbeat checklist (optional) | Manual |
-| `BOOT.md` | Startup checklist (optional) | Manual |
+| `TOOLS.md` | Core capability notes and conventions | Template / manual |
+| `HEARTBEAT.md` | Heartbeat checklist (optional) | Template / manual |
+| `BOOT.md` | Startup checklist (optional) | Template / manual |
 | `BOOTSTRAP.md` | One-time setup ritual (auto-deleted) | OpenClaw |
 | `skills/` | Agent skills (SKILL.md + executables) | Manual |
 | `memory/` | Daily memory logs (rotated) | Agent |

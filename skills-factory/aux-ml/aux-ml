@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+
+import json
+import os
+import sys
+import time
+import traceback
+import urllib.error
+import urllib.request
+
+
+AUX_ML_URL = os.getenv("AUX_ML_URL", "http://aux-ml:8091").rstrip("/")
+AUX_ML_ENABLED = os.getenv("AUX_ML_ENABLED", "false").strip().lower() == "true"
+AUX_ML_TIMEOUT_SECONDS = int(os.getenv("AUX_ML_JOB_TIMEOUT_SECONDS", "1800"))
+AUX_ML_POLL_INTERVAL_SECONDS = float(os.getenv("AUX_ML_POLL_INTERVAL_SECONDS", "2"))
+
+
+def _http_json(method, path, payload=None, timeout=30):
+    data = None
+    headers = {"Accept": "application/json"}
+
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request = urllib.request.Request(
+        url=f"{AUX_ML_URL}{path}",
+        data=data,
+        headers=headers,
+        method=method,
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+            if not body:
+                return {}
+            return json.loads(body)
+    except urllib.error.HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Aux ML HTTP {exc.code}: {details}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Failed to connect to aux-ml at {AUX_ML_URL}: {exc}") from exc
+
+
+def _ensure_enabled():
+    if AUX_ML_ENABLED:
+        return
+    raise RuntimeError(
+        "AUX_ML_ENABLED=false. Enable auxiliary container by setting AUX_ML_ENABLED=true and COMPOSE_PROFILES=aux-ml"
+    )
+
+
+def _submit_job(data):
+    payload = {
+        "task": data.get("task", "ocr"),
+        "model": data.get("model"),
+        "file_path": data.get("file_path"),
+        "prompt": data.get("prompt"),
+        "column_split": data.get("column_split", 1),
+        "column_split_pages": data.get("column_split_pages"),
+    }
+    if not payload["file_path"]:
+        return {"success": False, "error": "Missing required field: file_path"}
+    return _http_json("POST", "/jobs", payload=payload, timeout=30)
+
+
+def _job_status(job_id):
+    return _http_json("GET", f"/jobs/{job_id}", timeout=30)
+
+
+def _wait_for_job(job_id, timeout_seconds):
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        job = _job_status(job_id)
+        status = job.get("status")
+        if status == "succeeded":
+            return {
+                "success": True,
+                "job_id": job_id,
+                "status": status,
+                "result": job.get("result"),
+                "job": job,
+            }
+        if status == "failed":
+            return {
+                "success": False,
+                "job_id": job_id,
+                "status": status,
+                "error": job.get("error", "Job failed"),
+                "job": job,
+            }
+        time.sleep(AUX_ML_POLL_INTERVAL_SECONDS)
+
+    return {
+        "success": False,
+        "job_id": job_id,
+        "status": "timeout",
+        "error": f"Timed out waiting for job after {timeout_seconds}s",
+    }
+
+
+def action_ocr_file(data):
+    payload = {
+        "task": "ocr",
+        "model": data.get("model", "glm-ocr"),
+        "file_path": data.get("file_path"),
+        "prompt": data.get("prompt"),
+        "column_split": data.get("column_split", 1),
+        "column_split_pages": data.get("column_split_pages"),
+    }
+    if not payload["file_path"]:
+        return {"success": False, "error": "Missing required field: file_path"}
+
+    submitted = _http_json("POST", "/jobs", payload=payload, timeout=30)
+
+    should_wait = data.get("wait", True)
+    if not should_wait:
+        return {
+            "success": True,
+            "job_id": submitted.get("job_id"),
+            "status": submitted.get("status"),
+            "submitted": submitted,
+        }
+
+    timeout_seconds = int(data.get("timeout_seconds", AUX_ML_TIMEOUT_SECONDS))
+    return _wait_for_job(submitted.get("job_id"), timeout_seconds)
+
+
+def action_submit_job(data):
+    submitted = _submit_job(data)
+    if submitted.get("success") is False:
+        return submitted
+    return {
+        "success": True,
+        "job_id": submitted.get("job_id"),
+        "status": submitted.get("status"),
+        "submitted": submitted,
+    }
+
+
+def action_job_status(data):
+    job_id = data.get("job_id")
+    if not job_id:
+        return {"success": False, "error": "Missing required field: job_id"}
+    job = _job_status(job_id)
+    return {"success": True, "job": job}
+
+
+def action_wait_for_job(data):
+    job_id = data.get("job_id")
+    if not job_id:
+        return {"success": False, "error": "Missing required field: job_id"}
+
+    timeout_seconds = int(data.get("timeout_seconds", AUX_ML_TIMEOUT_SECONDS))
+    return _wait_for_job(job_id, timeout_seconds)
+
+
+def action_queue_status(_data):
+    queue = _http_json("GET", "/queue", timeout=30)
+    return {"success": True, "queue": queue}
+
+
+def action_health(_data):
+    health = _http_json("GET", "/health", timeout=30)
+    return {"success": True, "health": health}
+
+
+ACTIONS = {
+    "ocr_file": action_ocr_file,
+    "submit_job": action_submit_job,
+    "job_status": action_job_status,
+    "wait_for_job": action_wait_for_job,
+    "queue_status": action_queue_status,
+    "health": action_health,
+}
+
+
+def main():
+    try:
+        input_data = sys.stdin.read().strip()
+        if not input_data:
+            result = {
+                "success": False,
+                "error": "No input provided",
+                "usage": {
+                    "actions": list(ACTIONS.keys()),
+                    "example": {
+                        "action": "ocr_file",
+                        "file_path": "/root/.openclaw/workspace/uploads/document.pdf",
+                        "wait": True,
+                    },
+                },
+            }
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            sys.exit(1)
+
+        try:
+            data = json.loads(input_data)
+        except json.JSONDecodeError as exc:
+            print(json.dumps({"success": False, "error": f"Invalid JSON: {exc}"}, indent=2, ensure_ascii=False))
+            sys.exit(1)
+
+        action = data.get("action")
+        handler = ACTIONS.get(action)
+        if handler is None:
+            print(
+                json.dumps(
+                    {
+                        "success": False,
+                        "error": f"Unknown action: {action}",
+                        "valid_actions": list(ACTIONS.keys()),
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            sys.exit(1)
+
+        _ensure_enabled()
+        result = handler(data)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        sys.exit(0 if result.get("success") else 1)
+
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

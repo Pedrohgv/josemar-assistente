@@ -181,34 +181,38 @@ You can override URLs/checksums with `AUX_ML_GLM_OCR_URL`, `AUX_ML_GLM_OCR_SHA25
 
 ## Skills
 
-Skills are loaded from two sources:
+Skills are split by ownership:
 
-- **Repo-shipped core bundle**: `skills-factory/vault-gateway/` (copied into image at `/opt/josemar/skills`)
-- **Agent-state skills**: `agent-state/skills/` (versioned in the private state repo)
+- **Repo-shipped core skills**: `skills-factory/` (copied into image at `/opt/josemar/skills`)
+- **User-owned state skills**: `agent-state/skills/` (private state repo, different per user)
 
-The vault gateway is the single public vault interface and ships with this repository.
+Current core repo-shipped skills:
 
-### Current Skills
+- **vault-gateway**: Single entrypoint for vault routing and operations
+- **aux-ml**: Skill interface for queue-based auxiliary ML jobs
+- **workspace-sync**: Skill interface for workspace git sync/status/commit/push flows
 
-- **vault-gateway** (repo-shipped): Single entrypoint for vault routing and operations
-- **finance-assistant**: Complete financial tracking - extraction, classification, Google Sheets
-- **aux-ml**: Queue-based auxiliary ML jobs (OCR now, additional tasks later)
-- **gogcli-tables**: Google Workspace CLI with Sheets Table manipulation
-- **workspace-sync**: Manage workspace git operations - sync, commit, push, pull, and GitHub CLI
+### Skill Ownership Policy
+
+- Keep platform functionality in `skills-factory/`
+- Keep user-specific workflows only in each user's private state repo
+- Do not commit user-specific skills to this main repository
 
 ### Adding Skills
 
-For user-level/custom skills:
+For core repo-shipped skills:
+
+1. Create or update files under `skills-factory/<skill-name>/`
+2. Rebuild/redeploy so the image ships the new version
+
+For user-owned skills:
 
 1. Create skill in `agent-state/skills/<skill-name>/`
-2. Add `SKILL.md` with YAML frontmatter
-3. Add executable script
-4. No config update needed (skills are auto-discovered from `agent-state/skills/`)
-5. Changes sync automatically via git
+2. Add `SKILL.md` with YAML frontmatter and executable script
+3. No main-repo config change is needed
+4. Changes sync via the state repo workflow
 
-For core repo-shipped skills (like `vault-gateway`), update files under `skills-factory/` and redeploy.
-
-See `agent-state/skills/AGENTS.md` for detailed skill development guide.
+See `agent-state/skills/AGENTS.md` for skill authoring details.
 
 ## Credential Management
 
@@ -231,7 +235,7 @@ josemar-assistente/
 ├── agent-state/                    # Nested git repo: agent workspace (private repo)
 │   ├── .sync-manifest              # Files to version
 │   ├── .gitignore                  # Security ignore list
-│   └── skills/                     # Unified skills
+│   └── skills/                     # User-owned state skills
 ├── config/                         # OpenClaw configuration
 │   ├── AGENTS.md                   # Config reference
 │   └── openclaw.json               # Main config
@@ -242,6 +246,10 @@ josemar-assistente/
 │   ├── obsidian-backup.sh          # Obsidian backup and slot rotation
 │   └── obsidian-backup-daemon.sh   # Daily backup scheduler
 ├── aux-ml/                         # Auxiliary llama.cpp batch processing service
+├── skills-factory/                 # Repo-owned core skills shipped in image
+│   ├── vault-gateway/
+│   ├── aux-ml/
+│   └── workspace-sync/
 ├── docs/
 │   ├── obsidian-operations.md      # Syncthing/backup setup and operations runbook
 │   └── aux-ml.md                   # Auxiliary ML operations runbook
@@ -327,10 +335,10 @@ Access Web UI at `http://operator:YOUR_PASSWORD@localhost:18789/`
 
 ### Skills System
 
-Single unified skill directory (`agent-state/skills/`):
-- All skills versioned in the agent state git repo
-- Modified by agent at runtime, changes sync back automatically
-- No "repo" vs "runtime" distinction
+Two-scope skill system:
+- **Core scope** (`skills-factory/`): repo-owned, image-shipped platform capabilities
+- **State scope** (`agent-state/skills/`): user-owned capabilities kept in private state repos
+- If a skill name exists in both scopes, treat the core repo-shipped version as the canonical platform source
 
 ## Documentation
 

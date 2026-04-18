@@ -24,9 +24,13 @@ RUN chmod +x /usr/local/bin/gog
 # Create skills directories
 RUN mkdir -p /root/.openclaw/skills /opt/josemar/skills
 
-# Copy repo-shipped vault bundle skills
+# Copy repo-shipped core skills
 COPY skills-factory/vault-gateway /opt/josemar/skills/vault-gateway
+COPY skills-factory/aux-ml /opt/josemar/skills/aux-ml
+COPY skills-factory/workspace-sync /opt/josemar/skills/workspace-sync
 RUN chmod +x /opt/josemar/skills/vault-gateway/vault-gateway
+RUN chmod +x /opt/josemar/skills/aux-ml/aux-ml
+RUN chmod +x /opt/josemar/skills/workspace-sync/workspace-sync
 
 # Copy workspace sync script
 COPY scripts/workspace-sync.sh /usr/local/bin/workspace-sync.sh

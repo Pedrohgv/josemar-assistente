@@ -256,10 +256,10 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
   // Skills configuration
   skills: {
     entries: {
-      "finance-assistant": {
+      "vault-gateway": {
         enabled: true
       },
-      "gogcli-tables": {
+      "aux-ml": {
         enabled: true
       },
       "workspace-sync": {
@@ -984,7 +984,7 @@ agents: {
 ```json5
 skills: {
   entries: {
-    "finance-assistant": {
+    "document-processor": {
       enabled: true,
       config: {
         maxFileSize: "10MB",

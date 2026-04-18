@@ -19,7 +19,7 @@ Provide MBIFC vault capabilities to Josemar through one public skill entrypoint,
 
 - Bundle source of truth: repository files under `skills-factory/vault-gateway/`
 - Runtime loading: image-managed directory via OpenClaw `skills.load.extraDirs` (`/opt/josemar/skills`)
-- Legacy workspace vault skills `obsidian-power-user` and `obsidian-shared-vault` are disabled in OpenClaw config to avoid context bloat.
+- Legacy workspace vault skills are not part of the core bundle to avoid context bloat.
 - This keeps Obsidian capability shipped with Josemar, not tied to state-repo drift
 
 ## Guardrail (Single Rule)
