@@ -145,6 +145,82 @@ class VaultGatewayContractTests(unittest.TestCase):
         self.assertTrue(note_path.exists())
         self.assertIn("conversation with client Claudio", note_path.read_text(encoding="utf-8"))
 
+    def test_note_capture_maintains_structure_context_files(self) -> None:
+        area_dir = self.vault_dir / "02-Areas" / "Health"
+        area_dir.mkdir(parents=True, exist_ok=True)
+        (area_dir / "existing-1.md").write_text("# Existing 1\n", encoding="utf-8")
+        (area_dir / "existing-2.md").write_text("# Existing 2\n", encoding="utf-8")
+
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {
+                    "text": "new health note",
+                    "target_folder": "02-Areas/Health",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        self.assertIn("Tambem atualizei arquivos de contexto", output.get("message", ""))
+
+        maintenance = output.get("result", {}).get("maintenance_updates", [])
+        self.assertTrue(any("_index.md" in item for item in maintenance))
+        self.assertTrue(any("Meta/vault-structure.md" in item for item in maintenance))
+
+        index_text = (area_dir / "_index.md").read_text(encoding="utf-8")
+        self.assertIn("## Working Rules", index_text)
+        self.assertIn("<!-- VG:BEGIN managed-summary -->", index_text)
+        self.assertIn("<!-- VG:END managed-summary -->", index_text)
+
+        structure_text = (self.vault_dir / "Meta" / "vault-structure.md").read_text(encoding="utf-8")
+        self.assertIn("<!-- VG:BEGIN managed-structure -->", structure_text)
+        self.assertIn("<!-- VG:END managed-structure -->", structure_text)
+
+    def test_note_update_preserves_manual_index_sections(self) -> None:
+        area_dir = self.vault_dir / "02-Areas" / "Finance"
+        area_dir.mkdir(parents=True, exist_ok=True)
+
+        index_content = """# Finance
+
+## Purpose
+Human-written purpose text.
+
+## Working Rules
+Always include monthly reconciliation details.
+
+<!-- VG:BEGIN managed-summary -->
+old managed content
+<!-- VG:END managed-summary -->
+"""
+        (area_dir / "_index.md").write_text(index_content, encoding="utf-8")
+
+        note_path = area_dir / "monthly.md"
+        note_path.write_text("# Monthly\n\nbase content\n", encoding="utf-8")
+
+        code, output = run_gateway(
+            {
+                "route": "note.update",
+                "payload": {
+                    "path": "02-Areas/Finance/monthly.md",
+                    "text": "new update section",
+                    "mode": "append",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        self.assertIn("Tambem atualizei arquivos de contexto", output.get("message", ""))
+
+        refreshed_index = (area_dir / "_index.md").read_text(encoding="utf-8")
+        self.assertIn("Always include monthly reconciliation details.", refreshed_index)
+        self.assertIn("## Managed Summary", refreshed_index)
+        self.assertIn("Last structural refresh", refreshed_index)
+
     def test_template_list_discovers_templates(self) -> None:
         self._write_template(
             "Templates/Client.md",

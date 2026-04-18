@@ -29,6 +29,14 @@ STANDARD_DIRS = [
     "Meta",
 ]
 
+INDEX_AUTO_CREATE_MIN_NOTES = 3
+
+INDEX_MANAGED_BEGIN = "<!-- VG:BEGIN managed-summary -->"
+INDEX_MANAGED_END = "<!-- VG:END managed-summary -->"
+
+STRUCTURE_MANAGED_BEGIN = "<!-- VG:BEGIN managed-structure -->"
+STRUCTURE_MANAGED_END = "<!-- VG:END managed-structure -->"
+
 
 PLACEHOLDER_PATTERN = re.compile(r"\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}")
 
@@ -95,6 +103,218 @@ def _append_log(vault_root: Path, action: str, details: dict) -> None:
     line = f"- {timestamp} | {action} | {payload}\n"
     with log_file.open("a", encoding="utf-8") as handle:
         handle.write(line)
+
+
+def _replace_managed_block(content: str, begin: str, end: str, block_body: str) -> tuple[str, bool]:
+    begin_index = content.find(begin)
+    end_index = content.find(end)
+    replacement = f"{begin}\n{block_body.rstrip()}\n{end}"
+
+    if begin_index != -1 and end_index != -1 and end_index > begin_index:
+        end_index += len(end)
+        updated = content[:begin_index] + replacement + content[end_index:]
+    else:
+        base = content.rstrip()
+        if base:
+            updated = f"{base}\n\n{replacement}\n"
+        else:
+            updated = replacement + "\n"
+
+    return updated, updated != content
+
+
+def _count_markdown_notes(base_dir: Path, recursive: bool = True) -> int:
+    if not base_dir.exists() or not base_dir.is_dir():
+        return 0
+    iterator = base_dir.rglob("*.md") if recursive else base_dir.glob("*.md")
+    count = 0
+    for item in iterator:
+        if not item.is_file():
+            continue
+        if item.name == "_index.md":
+            continue
+        count += 1
+    return count
+
+
+def _list_recent_notes(folder: Path, max_items: int = 5) -> list[Path]:
+    notes = []
+    for path in folder.glob("*.md"):
+        if not path.is_file() or path.name == "_index.md":
+            continue
+        notes.append(path)
+    notes.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    return notes[:max_items]
+
+
+def _build_index_managed_summary(vault_root: Path, folder: Path) -> str:
+    rel_folder = _relative(vault_root, folder)
+    direct_notes = _count_markdown_notes(folder, recursive=False)
+    total_notes = _count_markdown_notes(folder, recursive=True)
+    subfolders = [item for item in folder.iterdir() if item.is_dir() and not _is_hidden(item)] if folder.exists() else []
+    subfolders.sort(key=lambda item: item.name.lower())
+    recent_notes = _list_recent_notes(folder)
+
+    lines = [
+        "## Managed Summary",
+        f"- Folder: `{rel_folder}`",
+        f"- Direct notes: {direct_notes}",
+        f"- Total notes (recursive): {total_notes}",
+        f"- Subfolders: {len(subfolders)}",
+    ]
+
+    if subfolders:
+        lines.append("- Subfolder list: " + ", ".join(item.name for item in subfolders[:12]))
+
+    if recent_notes:
+        lines.append("- Recent notes:")
+        for note in recent_notes:
+            lines.append(f"  - [[{note.stem}]]")
+
+    lines.append(f"- Last structural refresh: {datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}")
+    return "\n".join(lines)
+
+
+def _build_new_index_file(vault_root: Path, folder: Path) -> str:
+    folder_name = folder.name
+    folder_tag = _slugify(folder_name) or "area"
+    managed_summary = _build_index_managed_summary(vault_root, folder)
+    return "\n".join(
+        [
+            "---",
+            "type: area-index",
+            f"title: {folder_name}",
+            f"updated: {datetime.utcnow().strftime('%Y-%m-%d')}",
+            f"tags: [index, {folder_tag}]",
+            "---",
+            "",
+            f"# {folder_name}",
+            "",
+            "## Purpose",
+            "Describe what this folder is for.",
+            "",
+            "## Working Rules",
+            "Add operating instructions for humans and AI agents in this folder.",
+            "",
+            INDEX_MANAGED_BEGIN,
+            managed_summary,
+            INDEX_MANAGED_END,
+            "",
+        ]
+    )
+
+
+def _refresh_folder_index(vault_root: Path, folder: Path) -> tuple[list[str], bool]:
+    updates: list[str] = []
+    folder = folder.resolve(strict=False)
+    vault_real = vault_root.resolve(strict=False)
+    if folder == vault_real or vault_real not in folder.parents:
+        return updates, False
+    if not folder.exists() or not folder.is_dir() or _is_hidden(folder):
+        return updates, False
+
+    index_path = folder / "_index.md"
+    note_count = _count_markdown_notes(folder, recursive=True)
+
+    created = False
+    if not index_path.exists() and note_count >= INDEX_AUTO_CREATE_MIN_NOTES:
+        index_path.write_text(_build_new_index_file(vault_root, folder), encoding="utf-8")
+        updates.append(f"created {_relative(vault_root, index_path)}")
+        created = True
+
+    if not index_path.exists():
+        return updates, created
+
+    existing = _safe_read_text(index_path)
+    managed_summary = _build_index_managed_summary(vault_root, folder)
+    updated, changed = _replace_managed_block(existing, INDEX_MANAGED_BEGIN, INDEX_MANAGED_END, managed_summary)
+    if changed:
+        index_path.write_text(updated, encoding="utf-8")
+        if created:
+            updates.append(f"updated managed summary in {_relative(vault_root, index_path)}")
+        else:
+            updates.append(f"updated {_relative(vault_root, index_path)}")
+
+    return updates, created
+
+
+def _build_vault_structure_managed_summary(vault_root: Path) -> str:
+    top_dirs = []
+    extras = []
+    for item in sorted(vault_root.iterdir(), key=lambda entry: entry.name.lower()):
+        if item.is_dir() and not _is_hidden(item):
+            top_dirs.append(item.name)
+            if item.name not in STANDARD_DIRS:
+                extras.append(item.name)
+
+    lines = [
+        "## Managed Structure Snapshot",
+        f"- Last refresh: {datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}",
+        "",
+        "### Root Directories",
+    ]
+    for name in STANDARD_DIRS:
+        marker = "present" if name in top_dirs else "missing"
+        lines.append(f"- {name}: {marker}")
+
+    if extras:
+        lines.extend(["", "### Non-Standard Root Directories"])
+        for name in extras:
+            lines.append(f"- {name}")
+
+    areas_root = vault_root / "02-Areas"
+    if areas_root.exists() and areas_root.is_dir():
+        lines.extend(["", "### Area Folders"])
+        for area in sorted((p for p in areas_root.iterdir() if p.is_dir() and not _is_hidden(p)), key=lambda p: p.name.lower()):
+            area_notes = _count_markdown_notes(area, recursive=True)
+            has_index = (area / "_index.md").exists()
+            lines.append(f"- {area.name}: notes={area_notes}, _index.md={'yes' if has_index else 'no'}")
+
+    return "\n".join(lines)
+
+
+def _refresh_vault_structure_file(vault_root: Path) -> list[str]:
+    updates: list[str] = []
+    meta_dir = vault_root / "Meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    structure_path = meta_dir / "vault-structure.md"
+
+    if structure_path.exists():
+        existing = _safe_read_text(structure_path)
+    else:
+        existing = "# Vault Structure\n\nThis file tracks the current vault organization.\n"
+        updates.append(f"created {_relative(vault_root, structure_path)}")
+
+    managed_summary = _build_vault_structure_managed_summary(vault_root)
+    updated, changed = _replace_managed_block(
+        existing,
+        STRUCTURE_MANAGED_BEGIN,
+        STRUCTURE_MANAGED_END,
+        managed_summary,
+    )
+    if changed:
+        structure_path.write_text(updated, encoding="utf-8")
+        if f"created {_relative(vault_root, structure_path)}" not in updates:
+            updates.append(f"updated {_relative(vault_root, structure_path)}")
+    return updates
+
+
+def _refresh_structure_context(vault_root: Path, touched_dirs: list[Path]) -> list[str]:
+    updates: list[str] = []
+    seen: set[str] = set()
+
+    for directory in touched_dirs:
+        for message in _refresh_folder_index(vault_root, directory)[0]:
+            if message not in seen:
+                seen.add(message)
+                updates.append(message)
+
+    for message in _refresh_vault_structure_file(vault_root):
+        if message not in seen:
+            seen.add(message)
+            updates.append(message)
+
+    return updates
 
 
 def _normalize_tags(raw_tags: object) -> list[str]:
@@ -1020,6 +1240,7 @@ def capture_note(
         content = f"{frontmatter_text}\n\n# {selected_title}\n\n{body}\n"
 
     note_path.write_text(content, encoding="utf-8")
+    maintenance_updates = _refresh_structure_context(vault_root, [target_dir])
 
     result = {
         "path": _relative(vault_root, note_path),
@@ -1029,6 +1250,7 @@ def capture_note(
         "template_mode_used": "structured" if structured_mode else ("legacy" if selected_template_path else "none"),
         "warnings": warnings,
         "unresolved_placeholders": unresolved_placeholders,
+        "maintenance_updates": maintenance_updates,
     }
     _append_log(vault_root, "note.capture", result)
     return result
@@ -1108,10 +1330,12 @@ def update_note(
         updated = existing.rstrip() + separator + payload_text + "\n"
 
     note_path.write_text(updated, encoding="utf-8")
+    maintenance_updates = _refresh_structure_context(vault_root, [note_path.parent])
 
     result: dict[str, object] = {
         "path": _relative(vault_root, note_path),
         "mode": normalized_mode,
+        "maintenance_updates": maintenance_updates,
     }
     if warnings:
         result["warnings"] = warnings
@@ -1230,11 +1454,14 @@ def file_note(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     destination = _unique_path(target_dir / source.name)
+    source_parent = source.parent
     shutil.move(str(source), str(destination))
+    maintenance_updates = _refresh_structure_context(vault_root, [source_parent, target_dir])
 
     result = {
         "from": _relative(vault_root, source),
         "to": _relative(vault_root, destination),
+        "maintenance_updates": maintenance_updates,
     }
     _append_log(vault_root, "note.file", result)
     return result

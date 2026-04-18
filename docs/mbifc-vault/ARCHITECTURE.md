@@ -47,3 +47,4 @@ If destructive mode is selected, workflow shows strong warning and strongly reco
 - Vault root allowlist guard before route execution.
 - Session-isolated onboarding state via required `state_key`.
 - Frontmatter auto-preserve on `note.update` replace mode when replacement text lacks YAML block.
+- Deterministic managed-block maintenance for context files (`Meta/vault-structure.md`, folder `_index.md`) on write routes; non-managed sections are preserved verbatim.

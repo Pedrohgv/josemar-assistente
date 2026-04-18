@@ -83,6 +83,9 @@ Current deterministic handler behavior:
 - Resolves note by relative path.
 - Enforces `.md` target and existence.
 - Applies `append`, `prepend`, or `replace` text operation.
+- Supports `frontmatter` mode for surgical YAML field updates.
+- Auto-preserves existing frontmatter on `replace` when replacement text has no YAML block.
+- Refreshes structural context files after write: updates `Meta/vault-structure.md` managed block and updates folder `_index.md` managed summary.
 - Logs operation in `Meta/vault-gateway-log.md`.
 
 Current handler does not:

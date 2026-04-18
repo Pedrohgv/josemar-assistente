@@ -111,6 +111,7 @@ Current deterministic handler behavior:
 - Falls back to legacy template behavior (copy template + captured context) when metadata is absent.
 - Adds simple default frontmatter when no template is selected.
 - Supports optional `tags` normalization for non-template fallback notes.
+- Refreshes structural context files after write: updates `Meta/vault-structure.md` managed block and updates or auto-creates folder `_index.md` (when folder has enough notes).
 
 Current handler does not:
 - Auto-split one message into multiple notes.

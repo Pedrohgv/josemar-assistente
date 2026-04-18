@@ -55,6 +55,19 @@ def _as_bool(value: object) -> bool:
     return False
 
 
+def _maintenance_suffix(result: dict) -> str:
+    updates = result.get("maintenance_updates")
+    if not isinstance(updates, list):
+        return ""
+    cleaned = [str(item).strip() for item in updates if str(item).strip()]
+    if not cleaned:
+        return ""
+    first = cleaned[0]
+    if len(cleaned) == 1:
+        return f" Tambem atualizei arquivos de contexto ({first})."
+    return f" Tambem atualizei arquivos de contexto ({first} e mais {len(cleaned) - 1})."
+
+
 def _is_strict_yes(text: str) -> bool:
     return normalize_text(text) in {"sim", "s", "yes", "y", "ok"}
 
@@ -421,7 +434,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                     "result": pending_result,
                 }
             return {
-                "message": "Nota capturada com sucesso.",
+                "message": "Nota capturada com sucesso." + _maintenance_suffix(result),
                 "needs_user_input": False,
                 "result": result,
             }
@@ -449,7 +462,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 frontmatter_fields=fm_fields if isinstance(fm_fields, dict) else None,
             )
             return {
-                "message": "Nota atualizada com sucesso.",
+                "message": "Nota atualizada com sucesso." + _maintenance_suffix(result),
                 "needs_user_input": False,
                 "result": result,
             }
@@ -487,7 +500,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 target_folder=str(payload.get("target_folder") or "01-Projects"),
             )
             return {
-                "message": "Nota movida com sucesso.",
+                "message": "Nota movida com sucesso." + _maintenance_suffix(result),
                 "needs_user_input": False,
                 "result": result,
             }
