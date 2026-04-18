@@ -108,6 +108,7 @@ Contract rules:
 - For "port existing vault", always propose a safe plan before execution.
 - If user requests destructive mode, display a strong warning and strongly recommend a vault backup before continuing.
 - When using `note.update` with `mode: replace`, existing frontmatter is auto-preserved if the replacement text has no YAML block. This prevents accidental frontmatter loss during read-then-replace edits.
+- Read/write note routes ingest contextual guidance from nearest folder `_index.md` (including `## Working Rules`) and from managed snapshot in `Meta/vault-structure.md` when present.
 - After vault write routes (`note.capture`, `note.update`, `note.file`), gateway refreshes managed context blocks in `Meta/vault-structure.md` and folder `_index.md` files while preserving human-authored sections.
 
 ## Internal Contract

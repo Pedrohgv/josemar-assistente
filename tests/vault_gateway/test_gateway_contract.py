@@ -590,6 +590,92 @@ Email: {{contact_email}}
         self.assertIn("frontmatter", result)
         self.assertNotIn("body", result)
 
+    def test_note_read_ingests_nearest_index_context(self) -> None:
+        folder = self.vault_dir / "02-Areas" / "Health"
+        folder.mkdir(parents=True, exist_ok=True)
+        (self.vault_dir / "Meta").mkdir(parents=True, exist_ok=True)
+
+        (folder / "_index.md").write_text(
+            """# Health
+
+## Working Rules
+Use concise updates and include action items.
+
+<!-- VG:BEGIN managed-summary -->
+## Managed Summary
+- Folder: `02-Areas/Health`
+- Direct notes: 2
+<!-- VG:END managed-summary -->
+""",
+            encoding="utf-8",
+        )
+        (self.vault_dir / "Meta" / "vault-structure.md").write_text(
+            """# Vault Structure
+
+<!-- VG:BEGIN managed-structure -->
+## Managed Structure Snapshot
+- Last refresh: 2026-04-18T00:00:00Z
+<!-- VG:END managed-structure -->
+""",
+            encoding="utf-8",
+        )
+        (folder / "note.md").write_text("# Note\n\nBody\n", encoding="utf-8")
+
+        code, output = run_gateway(
+            {
+                "route": "note.read",
+                "payload": {"path": "02-Areas/Health/note.md"},
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        result = output.get("result", {})
+        context = result.get("context", {})
+        folder_context = context.get("folder_context", {})
+
+        self.assertEqual(folder_context.get("index_path"), "02-Areas/Health/_index.md")
+        self.assertIn("include action items", folder_context.get("working_rules", ""))
+        self.assertIn("Managed Summary", folder_context.get("managed_summary", ""))
+
+        vault_context = context.get("vault_structure_context", {})
+        self.assertEqual(vault_context.get("path"), "Meta/vault-structure.md")
+        self.assertTrue(vault_context.get("managed_snapshot_present"))
+
+    def test_note_update_ingests_parent_index_when_direct_missing(self) -> None:
+        parent = self.vault_dir / "02-Areas" / "Finance"
+        child = parent / "Reports"
+        child.mkdir(parents=True, exist_ok=True)
+
+        (parent / "_index.md").write_text(
+            """# Finance
+
+## Working Rules
+Prefer monthly grouping and explicit totals.
+""",
+            encoding="utf-8",
+        )
+        (child / "report.md").write_text("# Report\n\nInitial\n", encoding="utf-8")
+
+        code, output = run_gateway(
+            {
+                "route": "note.update",
+                "payload": {
+                    "path": "02-Areas/Finance/Reports/report.md",
+                    "text": "delta",
+                    "mode": "append",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        context = output.get("result", {}).get("context", {})
+        folder_context = context.get("folder_context", {})
+        self.assertEqual(folder_context.get("folder"), "02-Areas/Finance/Reports")
+        self.assertEqual(folder_context.get("index_path"), "02-Areas/Finance/_index.md")
+        self.assertIn("monthly grouping", folder_context.get("working_rules", ""))
+
     def test_note_read_requires_path(self) -> None:
         code, output = run_gateway(
             {

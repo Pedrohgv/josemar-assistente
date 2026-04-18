@@ -123,6 +123,129 @@ def _replace_managed_block(content: str, begin: str, end: str, block_body: str) 
     return updated, updated != content
 
 
+def _extract_managed_block(content: str, begin: str, end: str) -> str:
+    begin_index = content.find(begin)
+    end_index = content.find(end)
+    if begin_index == -1 or end_index == -1 or end_index <= begin_index:
+        return ""
+    start = begin_index + len(begin)
+    return content[start:end_index].strip()
+
+
+def _extract_markdown_section(content: str, heading: str) -> str:
+    pattern = re.compile(
+        rf"(?ms)^##\s+{re.escape(heading)}\s*$\n?(.*?)(?=^##\s+|^#\s+|\Z)"
+    )
+    match = pattern.search(content)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def _truncate_text(text: str, limit: int = 1200) -> str:
+    normalized = (text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit].rstrip() + "..."
+
+
+def _find_nearest_index(vault_root: Path, start_dir: Path) -> Path | None:
+    vault_real = vault_root.resolve(strict=False)
+    current = start_dir.resolve(strict=False)
+    if current == vault_real:
+        return None
+    if vault_real not in current.parents:
+        return None
+
+    while True:
+        candidate = current / "_index.md"
+        if candidate.exists() and candidate.is_file():
+            return candidate
+        if current == vault_real:
+            break
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def _build_folder_context(vault_root: Path, folder: Path | None) -> dict | None:
+    if folder is None:
+        return None
+    folder_real = folder.resolve(strict=False)
+    vault_real = vault_root.resolve(strict=False)
+    if folder_real == vault_real or vault_real not in folder_real.parents:
+        return None
+
+    context: dict[str, object] = {
+        "folder": _relative(vault_root, folder_real),
+    }
+
+    index_path = _find_nearest_index(vault_root, folder_real)
+    if index_path is None:
+        context["index_found"] = False
+        return context
+
+    content = _safe_read_text(index_path)
+    context["index_found"] = True
+    context["index_path"] = _relative(vault_root, index_path)
+
+    working_rules = _extract_markdown_section(content, "Working Rules")
+    if working_rules:
+        context["working_rules"] = _truncate_text(working_rules, 1600)
+
+    managed_summary = _extract_managed_block(content, INDEX_MANAGED_BEGIN, INDEX_MANAGED_END)
+    if managed_summary:
+        context["managed_summary"] = _truncate_text(managed_summary, 1600)
+
+    return context
+
+
+def _build_vault_structure_context(vault_root: Path) -> dict | None:
+    structure_path = vault_root / "Meta" / "vault-structure.md"
+    if not structure_path.exists() or not structure_path.is_file():
+        return None
+
+    content = _safe_read_text(structure_path)
+    managed = _extract_managed_block(content, STRUCTURE_MANAGED_BEGIN, STRUCTURE_MANAGED_END)
+    if not managed:
+        return {
+            "path": _relative(vault_root, structure_path),
+            "managed_snapshot_present": False,
+        }
+
+    return {
+        "path": _relative(vault_root, structure_path),
+        "managed_snapshot_present": True,
+        "managed_snapshot": _truncate_text(managed, 2200),
+    }
+
+
+def _build_operation_context(
+    vault_root: Path,
+    primary_folder: Path | None = None,
+    secondary_folder: Path | None = None,
+) -> dict:
+    context: dict[str, object] = {}
+
+    primary = _build_folder_context(vault_root, primary_folder)
+    if primary is not None:
+        context["folder_context"] = primary
+
+    if secondary_folder is not None:
+        secondary = _build_folder_context(vault_root, secondary_folder)
+        if secondary is not None:
+            if primary is None or secondary.get("folder") != primary.get("folder"):
+                context["secondary_folder_context"] = secondary
+
+    vault_structure = _build_vault_structure_context(vault_root)
+    if vault_structure is not None:
+        context["vault_structure_context"] = vault_structure
+
+    return context
+
+
 def _count_markdown_notes(base_dir: Path, recursive: bool = True) -> int:
     if not base_dir.exists() or not base_dir.is_dir():
         return 0
@@ -1102,6 +1225,8 @@ def read_note(
         result["body"] = body.strip()
         result["size_bytes"] = note_path.stat().st_size if note_path.exists() else 0
 
+    result["context"] = _build_operation_context(vault_root, note_path.parent)
+
     return result
 
 
@@ -1241,6 +1366,7 @@ def capture_note(
 
     note_path.write_text(content, encoding="utf-8")
     maintenance_updates = _refresh_structure_context(vault_root, [target_dir])
+    operation_context = _build_operation_context(vault_root, target_dir)
 
     result = {
         "path": _relative(vault_root, note_path),
@@ -1251,6 +1377,7 @@ def capture_note(
         "warnings": warnings,
         "unresolved_placeholders": unresolved_placeholders,
         "maintenance_updates": maintenance_updates,
+        "context": operation_context,
     }
     _append_log(vault_root, "note.capture", result)
     return result
@@ -1331,11 +1458,13 @@ def update_note(
 
     note_path.write_text(updated, encoding="utf-8")
     maintenance_updates = _refresh_structure_context(vault_root, [note_path.parent])
+    operation_context = _build_operation_context(vault_root, note_path.parent)
 
     result: dict[str, object] = {
         "path": _relative(vault_root, note_path),
         "mode": normalized_mode,
         "maintenance_updates": maintenance_updates,
+        "context": operation_context,
     }
     if warnings:
         result["warnings"] = warnings
@@ -1394,10 +1523,12 @@ def search_notes(vault_root: Path, query: str, limit: int = 20, path_prefix: str
         )
 
     matches.sort(key=lambda item: (-item["score"], item["path"]))
+    operation_context = _build_operation_context(vault_root, base_dir)
     return {
         "query": query,
         "results": matches[:safe_limit],
         "total_matches": len(matches),
+        "context": operation_context,
     }
 
 
@@ -1457,11 +1588,13 @@ def file_note(
     source_parent = source.parent
     shutil.move(str(source), str(destination))
     maintenance_updates = _refresh_structure_context(vault_root, [source_parent, target_dir])
+    operation_context = _build_operation_context(vault_root, target_dir, source_parent)
 
     result = {
         "from": _relative(vault_root, source),
         "to": _relative(vault_root, destination),
         "maintenance_updates": maintenance_updates,
+        "context": operation_context,
     }
     _append_log(vault_root, "note.file", result)
     return result

@@ -27,6 +27,7 @@ This directory contains the repo-shipped MBIFC vault bundle for Josemar.
 - `onboarding` requires a `state_key` in payload for multi-turn isolation.
 - Port flow includes destructive confirmation gates with backup warning.
 - `note.capture`, `note.read`, `note.update` (supports append, prepend, replace with frontmatter auto-preserve, and surgical frontmatter mode), `note.search`, `note.link`, and `note.file` provide flexible day-to-day vault manipulation.
+- Read/write note routes ingest folder context from nearest `_index.md` (including `## Working Rules`) plus `Meta/vault-structure.md` managed snapshot when available.
 - After write routes (`note.capture`, `note.update`, `note.file`), managed context blocks are refreshed in `Meta/vault-structure.md` and folder `_index.md`; human-authored sections remain untouched.
 - `inbox.triage`, `vault.defrag`, `vault.audit`, `vault.deep-clean`, and `tags.garden` return structured maintenance summaries.
 - `transcribe` remains dormant.

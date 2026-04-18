@@ -46,6 +46,16 @@ Return:
 - frontmatter dict (when `include_frontmatter` is true)
 - body text (when `include_body` is true)
 - file size in bytes (when body is included)
+- context ingestion block with nearest folder `_index.md` (if found) and `Meta/vault-structure.md` managed snapshot (if available)
+
+## Context Ingestion
+
+- The gateway automatically loads nearest `_index.md` context when operating in a folder (current folder, then parent folders up to vault root).
+- From `_index.md`, the gateway extracts:
+  - `## Working Rules` section (human/AI instructions)
+  - managed summary block (`VG:BEGIN/END managed-summary`)
+- The gateway also loads the managed structure snapshot from `Meta/vault-structure.md` when present.
+- This gives Josemar deterministic local context without requiring separate human vs AI files.
 
 ## Safety
 

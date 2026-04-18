@@ -48,3 +48,4 @@ If destructive mode is selected, workflow shows strong warning and strongly reco
 - Session-isolated onboarding state via required `state_key`.
 - Frontmatter auto-preserve on `note.update` replace mode when replacement text lacks YAML block.
 - Deterministic managed-block maintenance for context files (`Meta/vault-structure.md`, folder `_index.md`) on write routes; non-managed sections are preserved verbatim.
+- Deterministic context ingestion on note routes: nearest `_index.md` (including `## Working Rules`) plus `Meta/vault-structure.md` managed snapshot are attached to operation results.
