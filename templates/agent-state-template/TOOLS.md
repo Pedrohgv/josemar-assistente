@@ -1,54 +1,52 @@
 # TOOLS.md
 
-Core capability notes for a fresh state repo.
+Notas de capacidades core para um state repo novo.
 
-## Skill Ownership
+## Escopo de Skills
 
-- Core platform skills are shipped by the main repository image.
-- User-specific skills belong only in this private state repo under `skills/`.
+- Skills core embarcadas devem ser tratadas apenas pelo que existe em runtime.
+- Skills especificas do usuario devem ficar somente neste state repo, em `skills/`.
 
-## Repo-Shipped Core Skills
+## Skills Core Embarcadas (Bundled)
 
 ### vault-gateway
 
-- Source of truth: `skills-factory/vault-gateway/` in the main repo
-- Runtime path: `/opt/josemar/skills/vault-gateway/`
-- Purpose: single public entrypoint for Obsidian vault operations
-- Usage style: strict `route` + `payload` contract
+- Caminho em runtime: `/opt/josemar/skills/vault-gateway/`
+- Finalidade: ponto unico de entrada para operacoes no Obsidian vault
+- Uso: seguir contrato estrito `route` + `payload`
 
 ### aux-ml
 
-- Source of truth: `skills-factory/aux-ml/` in the main repo
-- Runtime path: `/opt/josemar/skills/aux-ml/`
-- Purpose: submit/poll queue-based OCR and long-running auxiliary ML jobs
+- Caminho em runtime: `/opt/josemar/skills/aux-ml/`
+- Finalidade: envio e acompanhamento de jobs longos (OCR/transcricao) via fila
+- Regra: qualquer tarefa relacionada a OCR deve ser roteada para `aux-ml`
 
 ### workspace-sync
 
-- Source of truth: `skills-factory/workspace-sync/` in the main repo
-- Runtime path: `/opt/josemar/skills/workspace-sync/`
-- Purpose: workspace git status/diff/log/commit/push/pull/sync operations
+- Caminho em runtime: `/opt/josemar/skills/workspace-sync/`
+- Finalidade: operacoes git do workspace (`status`, `diff`, `log`, `commit`, `push`, `pull`, `sync`)
 
-## Auxiliary ML Integration
+## Integracao Auxiliar de ML
 
-The auxiliary ML service is optional and profile-gated.
+O servico auxiliar de ML e opcional e depende de profile.
 
-Enable in `.env`:
+Habilite no `.env`:
 
 ```bash
 AUX_ML_ENABLED=true
 COMPOSE_PROFILES=aux-ml
 ```
 
-Then start/restart services:
+Depois inicie ou reinicie os servicos:
 
 ```bash
 docker compose up -d --build
 ```
 
-## Runtime Checks
+## Checagens de Runtime
 
-Before using a capability, verify it exists in the active runtime environment:
+Antes de usar uma capacidade, valide no ambiente ativo:
 
-- Confirm repo-shipped skill is present in `/opt/josemar/skills/`
-- Confirm optional services (like `aux-ml`) are running when required
-- If a capability is missing, report it clearly and continue with available paths
+- Confirmar que a skill embarcada esta presente em `/opt/josemar/skills/`
+- Confirmar servicos opcionais (como `aux-ml`) quando necessario
+- Se uma capacidade estiver ausente, informar claramente e seguir com os caminhos disponiveis

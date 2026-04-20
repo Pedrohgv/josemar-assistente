@@ -395,6 +395,7 @@ On container start, the workspace sync script (`scripts/workspace-sync.sh`) clon
 6. **Credentials go in `credentials/`** - Never in workspace or agent-state
 7. **Docker volume is the primary storage** - Git repo is backup/sync, not the source of truth
 8. **Keep Syncthing private-network-only** - Use Tailscale sidecar networking and disable global discovery/relays
+9. **Keep template TOOLS aligned with bundled skills** - `templates/agent-state-template/TOOLS.md` must always document every bundled skill available in runtime under `/opt/josemar/skills/`; update it whenever bundled skills are added, removed, or materially changed
 
 ---
 
