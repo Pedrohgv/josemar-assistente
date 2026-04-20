@@ -1,0 +1,410 @@
+#!/bin/sh
+
+set -e
+
+WORKSPACE_DIR="${WORKSPACE_DIR:-/root/.openclaw/workspace}"
+MANIFEST_PATH="${WORKSPACE_DIR}/.sync-manifest"
+REPO_TOKEN="${WORKSPACE_REPO_TOKEN:-}"
+
+input_data=$(cat)
+
+action=$(echo "$input_data" | python3 -c "import sys,json; print(json.load(sys.stdin).get('action',''))" 2>/dev/null || echo "")
+command_text=$(echo "$input_data" | python3 -c "import sys,json; print(json.load(sys.stdin).get('command',''))" 2>/dev/null || echo "")
+command_name=$(echo "$input_data" | python3 -c "import sys,json; print(json.load(sys.stdin).get('commandName',''))" 2>/dev/null || echo "")
+command_text_normalized=$(python3 - "$command_text" "$command_name" <<'PY'
+import sys
+
+raw = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
+name = (sys.argv[2] if len(sys.argv) > 2 else "").strip().lower()
+
+if raw.startswith("/") and name:
+    raw_lower = raw.lower()
+    prefix = f"/{name}"
+    if raw_lower.startswith(prefix):
+        remainder = raw[len(prefix):]
+        if not remainder:
+            raw = ""
+        elif remainder.startswith(":"):
+            raw = remainder[1:].strip()
+        elif remainder[0].isspace():
+            raw = remainder.strip()
+
+print(raw)
+PY
+)
+command_action=$(printf '%s' "$command_text_normalized" | python3 -c "import sys; raw=sys.stdin.read().strip(); print(raw.split(None, 1)[0].lower() if raw else '')" 2>/dev/null || echo "")
+command_payload=$(printf '%s' "$command_text_normalized" | python3 -c "import sys; raw=sys.stdin.read().strip(); parts=raw.split(None, 1); print(parts[1] if len(parts) > 1 else '')" 2>/dev/null || echo "")
+
+action_source="json"
+
+if [ -z "$action" ] && [ -n "$command_action" ]; then
+    action="$command_action"
+    action_source="command"
+fi
+
+if [ -z "$action" ] && [ -n "$command_name" ]; then
+    action="sync"
+    action_source="slash-default"
+fi
+
+if [ -z "$action" ]; then
+    echo '{"success": false, "error": "No action specified", "hint": "Use an action field or slash command args (status|diff|log|commit|push|pull|sync|gh)"}'
+    exit 1
+fi
+
+cd "$WORKSPACE_DIR"
+
+# Extract clean repo URL (without any embedded token)
+get_clean_repo_url() {
+    repo_url=$(git remote get-url origin 2>/dev/null || echo "")
+    if [ -z "$repo_url" ]; then
+        echo ""
+        return
+    fi
+    # Remove any embedded credentials (token@domain pattern)
+    echo "$repo_url" | sed -E 's|https://[^@]*@|https://|'
+}
+
+# Configure git credentials using credential helper (more reliable than URL embedding)
+ensure_auth() {
+    if [ -z "$REPO_TOKEN" ]; then
+        return 0
+    fi
+
+    # Get clean URL without any existing token
+    clean_url=$(get_clean_repo_url)
+    if [ -n "$clean_url" ]; then
+        # Set clean URL first
+        git remote set-url origin "$clean_url" 2>/dev/null || true
+    fi
+
+    # Configure credential helper
+    git config credential.helper store 2>/dev/null || true
+
+    # Extract repo owner from URL for credentials
+    repo_path=$(echo "$clean_url" | sed -E 's|https://github.com/||' | sed 's|\.git$||')
+    repo_owner=$(echo "$repo_path" | cut -d'/' -f1)
+
+    # Write credentials file (format: https://user:token@github.com)
+    echo "https://${repo_owner}:${REPO_TOKEN}@github.com" > ~/.git-credentials 2>/dev/null || true
+    chmod 600 ~/.git-credentials 2>/dev/null || true
+
+    # Also configure gh CLI if available
+    if command -v gh >/dev/null 2>&1; then
+        echo "$REPO_TOKEN" | gh auth login --with-token 2>/dev/null || true
+    fi
+
+    # Configure git user if env vars exist
+    if [ -n "$WORKSPACE_GIT_USER_NAME" ]; then
+        git config user.name "$WORKSPACE_GIT_USER_NAME" 2>/dev/null || true
+    fi
+    if [ -n "$WORKSPACE_GIT_USER_EMAIL" ]; then
+        git config user.email "$WORKSPACE_GIT_USER_EMAIL" 2>/dev/null || true
+    fi
+}
+
+# Check if credentials are properly configured
+check_auth() {
+    if [ ! -f ~/.git-credentials ]; then
+        return 1
+    fi
+    return 0
+}
+
+stage_manifest_files() {
+    if [ ! -f "$MANIFEST_PATH" ]; then
+        echo "WARNING: .sync-manifest not found, refusing to stage all files" >&2
+        return
+    fi
+    while IFS= read -r pattern; do
+        case "$pattern" in
+            \#*|"") continue ;;
+            *) ;;
+        esac
+        expanded=$(echo "$pattern" | sed "s|skills|${WORKSPACE_DIR}/skills|; s|memory|${WORKSPACE_DIR}/memory|; s|avatars|${WORKSPACE_DIR}/avatars|")
+        for f in $expanded; do
+            if [ -e "$f" ]; then
+                git add "$f" 2>/dev/null || true
+            fi
+        done
+    done < "$MANIFEST_PATH"
+}
+
+has_changes() {
+    ! git diff --cached --quiet 2>/dev/null
+}
+
+do_status() {
+    tracked=""
+    if [ -f "$MANIFEST_PATH" ]; then
+        tracked=$(grep -v '^\s*#' "$MANIFEST_PATH" | grep -v '^\s*$' || true)
+    fi
+    status_output=$(git status --short 2>/dev/null || echo "Not a git repo")
+    branch=$(git branch --show-current 2>/dev/null || echo "unknown")
+    remote_url=$(get_clean_repo_url)
+
+    auth_configured="False"
+    if check_auth; then
+        auth_configured="True"
+    fi
+
+    WS_BRANCH="$branch" \
+    WS_REMOTE="$remote_url" \
+    WS_AUTH="$auth_configured" \
+    WS_TRACKED="$tracked" \
+    WS_STATUS="$status_output" \
+    python3 - <<'PY'
+import json
+import os
+
+tracked = os.environ.get("WS_TRACKED", "")
+status_output = os.environ.get("WS_STATUS", "")
+
+print(
+    json.dumps(
+        {
+            "success": True,
+            "action": "status",
+            "branch": os.environ.get("WS_BRANCH", "unknown"),
+            "remote": os.environ.get("WS_REMOTE", ""),
+            "auth_configured": os.environ.get("WS_AUTH", "false").lower() == "true",
+            "tracked_patterns": tracked.strip().split("\n") if tracked.strip() else [],
+            "status": status_output.strip().split("\n"),
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+)
+PY
+}
+
+do_diff() {
+    diff_output=$(git diff 2>/dev/null; git diff --cached 2>/dev/null)
+
+    WS_DIFF_OUTPUT="$diff_output" python3 - <<'PY'
+import json
+import os
+
+diff = os.environ.get("WS_DIFF_OUTPUT", "")
+print(
+    json.dumps(
+        {
+            "success": True,
+            "action": "diff",
+            "diff": diff if diff.strip() else "(no changes)",
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+)
+PY
+}
+
+do_log() {
+    count=$(echo "$input_data" | python3 -c "import sys,json; print(json.load(sys.stdin).get('count', ''))" 2>/dev/null || echo "")
+    if [ -z "$count" ] && [ "$action_source" = "command" ] && [ -n "$command_payload" ]; then
+        case "$command_payload" in
+            *[!0-9]* ) ;;
+            * ) count="$command_payload" ;;
+        esac
+    fi
+    if [ -z "$count" ]; then
+        count="10"
+    fi
+    log_output=$(git log --oneline -n "$count" 2>/dev/null || echo "No commits")
+
+    WS_LOG_OUTPUT="$log_output" python3 - <<'PY'
+import json
+import os
+
+log_output = os.environ.get("WS_LOG_OUTPUT", "")
+print(
+    json.dumps(
+        {
+            "success": True,
+            "action": "log",
+            "commits": log_output.strip().split("\n"),
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+)
+PY
+}
+
+do_commit() {
+    message=$(echo "$input_data" | python3 -c "import sys,json; print(json.load(sys.stdin).get('message', ''))" 2>/dev/null || echo "")
+    if [ -z "$message" ] && [ "$action_source" = "command" ] && [ -n "$command_payload" ]; then
+        message="$command_payload"
+    fi
+    if [ -z "$message" ]; then
+        message="Manual commit"
+    fi
+
+    stage_manifest_files
+
+    if ! has_changes; then
+        echo '{"success": true, "action": "commit", "message": "No changes to commit"}'
+        return
+    fi
+
+    if git commit -m "$message" 2>/dev/null; then
+        commit_sha=$(git rev-parse --short HEAD 2>/dev/null)
+        echo "{\"success\": true, \"action\": \"commit\", \"commit\": \"$commit_sha\", \"message\": \"$message\"}"
+    else
+        echo '{"success": false, "error": "Commit failed"}'
+        exit 1
+    fi
+}
+
+do_push() {
+    ensure_auth
+    branch=$(git branch --show-current 2>/dev/null || echo "main")
+
+    push_output=$(git push origin "HEAD:$branch" 2>&1)
+    push_status=$?
+
+    if [ $push_status -eq 0 ]; then
+        echo "{\"success\": true, \"action\": \"push\", \"branch\": \"$branch\"}"
+    else
+        echo "{\"success\": false, \"action\": \"push\", \"error\": \"Push failed\", \"details\": \"$push_output\"}"
+        exit 1
+    fi
+}
+
+do_pull() {
+    ensure_auth
+    branch=$(git branch --show-current 2>/dev/null || echo "main")
+
+    stage_manifest_files
+    git commit -m "Pre-merge commit" 2>/dev/null || true
+
+    if git fetch origin "$branch" 2>&1; then
+        if git merge "origin/$branch" -X theirs -m "Merge remote (remote wins)" 2>&1; then
+            echo "{\"success\": true, \"action\": \"pull\", \"branch\": \"$branch\"}"
+        else
+            stage_manifest_files
+            git commit -m "Merge remote: conflict resolution (remote wins)" 2>/dev/null || true
+            echo "{\"success\": true, \"action\": \"pull\", \"branch\": \"$branch\", \"conflicts_resolved\": true}"
+        fi
+    else
+        echo '{"success": false, "error": "Fetch failed"}'
+        exit 1
+    fi
+}
+
+do_sync() {
+    message=$(echo "$input_data" | python3 -c "import sys,json; print(json.load(sys.stdin).get('message', ''))" 2>/dev/null || echo "")
+    if [ -z "$message" ] && [ "$action_source" = "command" ] && [ -n "$command_payload" ]; then
+        message="$command_payload"
+    fi
+    if [ -z "$message" ]; then
+        message="Auto-sync"
+    fi
+
+    stage_manifest_files
+
+    if ! has_changes; then
+        echo '{"success": true, "action": "sync", "message": "No changes to sync"}'
+        return
+    fi
+
+    ensure_auth
+    branch=$(git branch --show-current 2>/dev/null || echo "main")
+
+    if git commit -m "$message" 2>/dev/null; then
+        commit_sha=$(git rev-parse --short HEAD 2>/dev/null)
+
+        push_output=$(git push origin "HEAD:$branch" 2>&1)
+        push_status=$?
+
+        if [ $push_status -eq 0 ]; then
+            echo "{\"success\": true, \"action\": \"sync\", \"commit\": \"$commit_sha\", \"push\": true, \"branch\": \"$branch\"}"
+        else
+            echo "{\"success\": false, \"action\": \"sync\", \"commit\": \"$commit_sha\", \"push\": false, \"error\": \"Push failed after commit\", \"details\": \"$push_output\"}"
+            exit 1
+        fi
+    else
+        echo '{"success": false, "error": "Commit failed"}'
+        exit 1
+    fi
+}
+
+do_gh() {
+    command_str=$(echo "$input_data" | python3 -c "import sys,json; print(json.load(sys.stdin).get('command', ''))" 2>/dev/null || echo "")
+
+    if [ "$action_source" = "command" ]; then
+        command_str="$command_payload"
+    fi
+
+    if [ -z "$command_str" ]; then
+        echo '{"success": false, "error": "No gh command specified"}'
+        exit 1
+    fi
+
+    ensure_auth
+
+    if output=$(python3 - "$command_str" <<'PY'
+import json
+import shlex
+import subprocess
+import sys
+
+command = sys.argv[1] if len(sys.argv) > 1 else ""
+result = {
+    "action": "gh",
+    "command": command,
+}
+
+if not command.strip():
+    result.update({"success": False, "error": "No gh command specified"})
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    raise SystemExit(1)
+
+try:
+    args = shlex.split(command)
+except ValueError as exc:
+    result.update({"success": False, "error": f"Invalid gh command syntax: {exc}"})
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    raise SystemExit(1)
+
+try:
+    completed = subprocess.run(["gh", *args], capture_output=True, text=True)
+except FileNotFoundError:
+    result.update({"success": False, "error": "gh CLI not found"})
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    raise SystemExit(1)
+
+output = f"{completed.stdout or ''}{completed.stderr or ''}"
+result.update(
+    {
+        "success": completed.returncode == 0,
+        "exit_code": completed.returncode,
+        "output": output,
+    }
+)
+print(json.dumps(result, indent=2, ensure_ascii=False))
+raise SystemExit(0 if completed.returncode == 0 else 1)
+PY
+); then
+        printf '%s\n' "$output"
+    else
+        printf '%s\n' "$output"
+        exit 1
+    fi
+}
+
+case "$action" in
+    status)  do_status ;;
+    diff)    do_diff ;;
+    log)     do_log ;;
+    commit)  do_commit ;;
+    push)    do_push ;;
+    pull)    do_pull ;;
+    sync)    do_sync ;;
+    gh)      do_gh ;;
+    *)
+        echo "{\"success\": false, \"error\": \"Unknown action: $action\", \"valid_actions\": [\"status\", \"diff\", \"log\", \"commit\", \"push\", \"pull\", \"sync\", \"gh\"]}"
+        exit 1
+        ;;
+esac

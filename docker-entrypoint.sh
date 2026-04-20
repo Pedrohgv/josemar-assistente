@@ -80,12 +80,14 @@ if [ -f /root/.openclaw/openclaw.json ]; then
     fi
 fi
 
-# Symlink workspace skills to OpenClaw skills directory
-if [ -d "${WORKSPACE_DIR:-/root/.openclaw/workspace}/skills" ] && [ ! -d /root/.openclaw/skills/finance-assistant ]; then
-    echo "Linking workspace skills to OpenClaw skills directory..."
-    rm -rf /root/.openclaw/skills
-    ln -s "${WORKSPACE_DIR:-/root/.openclaw/workspace}/skills" /root/.openclaw/skills
+# Keep /root/.openclaw/skills as a real directory.
+# Legacy deployments may have it symlinked to workspace/skills; remove that to
+# avoid source confusion now that repo-shipped skills are loaded from /opt/josemar/skills.
+if [ -L /root/.openclaw/skills ]; then
+    echo "Removing legacy /root/.openclaw/skills symlink..."
+    rm -f /root/.openclaw/skills
 fi
+mkdir -p /root/.openclaw/skills
 
 # Run OpenClaw
 echo "Starting OpenClaw gateway..."

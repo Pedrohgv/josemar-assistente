@@ -11,7 +11,7 @@ Josemar Assistente is a self-hosted AI assistant bot built on OpenClaw, running 
 **Core Architecture:**
 - **OpenClaw Gateway** - AI agent orchestration (multi-provider LLM support)
 - **Telegram Channel** - Bot interface for user interaction
-- **Unified Skills System** - Extensible tools for PDF processing and other tasks
+- **Two-Scope Skills System** - Repo-owned core skills plus user-owned state skills
 - **Auxiliary ML Container** - Optional queue-based `llama.cpp` service for long-running OCR/transcription jobs
 - **Git-Backed Agent State** - Workspace files versioned in a private git repo
 - **Obsidian Vault Infrastructure** - Dedicated vault volume synced with Syncthing
@@ -36,11 +36,7 @@ josemar-assistente/
 ├── agent-state/            # Nested git repo: agent workspace state (private repo)
 │   ├── .sync-manifest      # Explicit list of files to version
 │   ├── .gitignore          # Security: prevents secret commits
-│   ├── skills/             # Unified skills (versioned)
-│   │   ├── finance-assistant/  # Expense tracking (PDF + Google Sheets)
-│   │   ├── aux-ml/             # Auxiliary ML queue skill (OCR/transcription jobs)
-│   │   ├── gogcli-tables/      # Google Sheets CLI
-│   │   └── workspace-sync/     # Git operations skill
+│   ├── skills/             # User-owned skills (private state repo)
 │   ├── memory/             # Daily memory logs (rotated)
 │   └── avatars/            # Agent avatars
 ├── config/                 # OpenClaw configuration
@@ -52,6 +48,10 @@ josemar-assistente/
 │   ├── obsidian-backup.sh         # Vault backup + slot rotation logic
 │   └── obsidian-backup-daemon.sh  # Daily backup scheduler
 ├── aux-ml/                 # Auxiliary ML service (queue + model lifecycle)
+├── skills-factory/         # Repo-owned core skills shipped in image
+│   ├── vault-gateway/
+│   ├── aux-ml/
+│   └── workspace-sync/
 ├── templates/              # Templates for new deployments
 │   └── agent-state-template/
 ├── .github/workflows/      # CI/CD automation
@@ -199,10 +199,11 @@ git push -u origin feature/my-feature-name
    - Telegram bot integration (can be disabled via `TELEGRAM_ENABLED`)
    - User access controlled via allowlist
 
-4. **Skills (Unified System)**
-   - All skills live in `agent-state/skills/` (versioned in private git repo)
-   - Skills can be modified at runtime; changes are synced back to git
-   - Loaded from `/root/.openclaw/skills/` inside container
+4. **Skills (Two Ownership Scopes)**
+   - **Core repo-owned skills** ship from `skills-factory/` into `/opt/josemar/skills/` in the image
+   - Current core skills: `vault-gateway`, `aux-ml`, `workspace-sync`
+   - **User-owned skills** live in `agent-state/skills/` (private state repo)
+   - User-owned skills can be modified at runtime and synced via state-repo git workflow
 
 5. **Workspace State (Git-Backed)**
    - Personality files (SOUL.md, IDENTITY.md, etc.) versioned
@@ -301,7 +302,8 @@ git push -u origin feature/my-feature-name
 **For specific tasks, navigate to the relevant directory:**
 
 - **Configuration details, Web UI setup, troubleshooting** -> `config/`
-- **Skill development, testing, deployment** -> `agent-state/skills/`
+- **Core skill development (repo-owned)** -> `skills-factory/`
+- **User skill development (state-owned)** -> `agent-state/skills/`
 - **Credential setup and management** -> `credentials/`
 - **CI/CD workflows, GitHub Actions, runner setup** -> `.github/workflows/`
 - **Docker deployment, environment setup** -> See `docker-compose.yml` and `.env.example`
@@ -337,12 +339,8 @@ cd agent-state && git init && git add -A && git commit -m "Initial state"
 agent-state/
 ├── .sync-manifest      # ONLY files listed here are versioned (security-first)
 ├── .gitignore          # Blocks secrets, PDFs, runtime files
-├── skills/             # Unified skills (all skills live here)
-│   ├── AGENTS.md       # Skill development guide
-│   ├── finance-assistant/
-│   ├── aux-ml/
-│   ├── gogcli-tables/
-│   └── workspace-sync/
+├── skills/             # User-owned skills (private, per user)
+│   └── AGENTS.md       # Skill development guide
 ├── memory/             # Daily memory logs (YYYY-MM-DD.md)
 └── avatars/            # Agent avatars
 ```
