@@ -104,6 +104,20 @@
             maxTokens: 32768,
           },
           {
+            id: "kimi-k2.6:cloud",
+            name: "Kimi K2.6 Cloud",
+            reasoning: true,
+            input: ["text", "image"],
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+            },
+            contextWindow: 128000,
+            maxTokens: 32768,
+          },
+          {
             id: "minimax-m2.7:cloud",
             name: "MiniMax M2.7 Cloud",
             reasoning: true,
@@ -173,7 +187,7 @@
       userTimezone: "${JOSEMAR_TIMEZONE}",
       envelopeTimezone: "${JOSEMAR_TIMEZONE}",
       model: {
-        primary: "zai/glm-5.1",
+        primary: "ollama/kimi-k2.6:cloud",
         fallbacks: ["zai/glm-5", "zai/glm-4.7", "deepseek/deepseek-chat", "ollama/glm-5.1:cloud"],
       },
       imageModel: "ollama/kimi-k2.5:cloud",
@@ -202,6 +216,9 @@
         "ollama/kimi-k2.5:cloud": {
           alias: "Kimi K2.5 Cloud (Ollama)",
         },
+        "ollama/kimi-k2.6:cloud": {
+          alias: "Kimi K2.6 Cloud (Ollama)",
+        },
         "ollama/minimax-m2.7:cloud": {
           alias: "MiniMax M2.7 Cloud (Ollama)",
         },
@@ -213,7 +230,7 @@
         default: true,
         name: "Josemar",
         workspace: "~/.openclaw/workspace",
-        model: "zai/glm-5.1",
+        model: "ollama/kimi-k2.6:cloud",
       },
     ],
   },
