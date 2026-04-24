@@ -341,6 +341,7 @@ agent-state/
 ├── .gitignore          # Blocks secrets, PDFs, runtime files
 ├── skills/             # User-owned skills (private, per user)
 │   └── AGENTS.md       # Skill development guide
+├── cron/               # OpenClaw scheduled jobs (jobs.json)
 ├── memory/             # Daily memory logs (YYYY-MM-DD.md)
 └── avatars/            # Agent avatars
 ```
@@ -372,6 +373,7 @@ Only files matching patterns in `.sync-manifest` are committed by the auto-sync 
 Current tracked patterns:
 - Core personality files (SOUL.md, MEMORY.md, IDENTITY.md, USER.md, TOOLS.md, HEARTBEAT.md, BOOT.md, AGENTS.md)
 - Skills: `skills/*/*`
+- Cron jobs: `cron/jobs.json`
 - Memory logs: `memory/YYYY-MM-DD.md`
 - Avatars: `avatars/*`
 

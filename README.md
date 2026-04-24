@@ -235,7 +235,8 @@ josemar-assistente/
 ├── agent-state/                    # Nested git repo: agent workspace (private repo)
 │   ├── .sync-manifest              # Files to version
 │   ├── .gitignore                  # Security ignore list
-│   └── skills/                     # User-owned state skills
+│   ├── skills/                     # User-owned state skills
+│   └── cron/jobs.json              # Cron definitions synced from state repo
 ├── config/                         # OpenClaw configuration
 │   ├── AGENTS.md                   # Config reference
 │   └── openclaw.json               # Main config
@@ -331,6 +332,7 @@ Access Web UI at `http://operator:YOUR_PASSWORD@localhost:18789/`
 - **On start**: Commits local changes, fetches remote, merges (remote wins conflicts), pushes
 - **Periodic**: Auto-commits and pushes at configurable interval
 - **Security**: Only files in `.sync-manifest` are versioned
+- **Cron source of truth**: OpenClaw cron jobs are loaded from `agent-state/cron/jobs.json`
 - **Memory rotation**: Logs older than N days are automatically removed
 
 ### Skills System

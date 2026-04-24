@@ -268,6 +268,12 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
     }
   },
 
+  // Cron configuration (state-repo-backed jobs file)
+  cron: {
+    enabled: true,
+    store: "~/.openclaw/workspace/cron/jobs.json"
+  },
+
   // Session configuration
   session: {
     scope: "per-sender",
@@ -685,7 +691,26 @@ session: {
 - `manual`: Only reset manually
 - `never`: Never reset sessions
 
-### 8. Logging
+### 8. Cron Automation
+
+Configure scheduled automation jobs:
+
+```json5
+cron: {
+  enabled: true,
+  store: "~/.openclaw/workspace/cron/jobs.json"
+}
+```
+
+**Cron Fields:**
+- `enabled`: Turns cron execution on/off
+- `store`: Path to the cron jobs JSON file
+
+**State repo integration:**
+- Use `~/.openclaw/workspace/cron/jobs.json` so cron definitions come from the synced state repo
+- Track `cron/jobs.json` in `.sync-manifest` to keep schedules versioned and recoverable
+
+### 9. Logging
 
 Configure logging behavior:
 

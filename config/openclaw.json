@@ -263,6 +263,12 @@
     entries: {},
   },
 
+  // Cron jobs (tracked in state repo workspace)
+  cron: {
+    enabled: true,
+    store: "~/.openclaw/workspace/cron/jobs.json",
+  },
+
   // Session configuration
   session: {
     scope: "per-sender",
