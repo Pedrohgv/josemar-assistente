@@ -22,9 +22,9 @@
     },
     controlUi: {
       allowedOrigins: [
-        "http://192.168.15.200:18789",
         "http://localhost:18789",
-        "https://josemar.casabanana.casa",
+        "${CONTROL_UI_ALLOWED_ORIGIN_1}",
+        "${CONTROL_UI_ALLOWED_ORIGIN_2}",
       ],
     },
   },
@@ -243,7 +243,7 @@
       dmPolicy: "allowlist",
       // To add more users, add their {NAME}_TELEGRAM_ID env var and include it here:
       allowFrom: [
-        "${PEDRO_TELEGRAM_ID}",
+        "${PRIMARY_TELEGRAM_ID}",
         // "${ALICE_TELEGRAM_ID}",
         // "${BOB_TELEGRAM_ID}",
       ],

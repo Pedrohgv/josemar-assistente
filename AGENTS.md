@@ -258,7 +258,9 @@ git push -u origin feature/my-feature-name
 - `DEEPSEEK_API_KEY` - Optional fallback provider
 - `OLLAMA_API_KEY` - Optional Ollama Cloud provider key
 - `GATEWAY_AUTH_PASSWORD` - Web UI access password (HTTP Basic Auth)
-- `PEDRO_TELEGRAM_ID` - Primary user (add more as needed)
+- `PRIMARY_TELEGRAM_ID` - Primary user (add more as needed)
+- `CONTROL_UI_ALLOWED_ORIGIN_1` - Optional production Web UI origin allowlist entry
+- `CONTROL_UI_ALLOWED_ORIGIN_2` - Optional production Web UI origin allowlist entry
 - `GOG_KEYRING_PASSWORD` - Optional passphrase used by gogcli keyring to decrypt Google OAuth token storage
 - `WORKSPACE_STATE_REPO` - Private git repo URL for agent state
 - `WORKSPACE_REPO_TOKEN` - GitHub PAT for agent state repo (use GitHub secret in deployment)
