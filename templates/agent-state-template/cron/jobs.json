@@ -1,0 +1,4 @@
+{
+  "$schema": "https://openclaw.ai/schemas/cron-jobs.json",
+  "jobs": []
+}

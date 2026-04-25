@@ -32,6 +32,7 @@ On the first run, if the workspace has no personality files (`SOUL.md`, `IDENTIT
 - `.gitignore`
 - `.sync-manifest`
 - `skills/`
+- `cron/jobs.json`
 - `memory/`
 - `avatars/`
 
@@ -67,6 +68,7 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 | `BOOT.md` | Startup checklist (optional) | Template / manual |
 | `BOOTSTRAP.md` | One-time setup ritual (auto-deleted) | OpenClaw |
 | `skills/` | Agent skills (SKILL.md + executables) | Manual |
+| `cron/jobs.json` | Cron job definitions loaded by OpenClaw | Manual / agent |
 | `memory/` | Daily memory logs (rotated) | Agent |
 | `avatars/` | Agent avatar images | Manual |
 
