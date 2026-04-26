@@ -1,4 +1,4 @@
-name: privacy-scan
+name: Privacy Scan
 
 on:
   push:
