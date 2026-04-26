@@ -96,13 +96,14 @@
       "playbook": "playbooks/note-update/PLAYBOOK.md",
       "source": "agents/seeker.md",
       "summary": "Update an existing markdown note",
-      "payload": {
-        "path": "required relative path",
-        "text": "optional string (required unless mode is frontmatter)",
-        "mode": "optional: append|prepend|replace|frontmatter (default append)",
-        "frontmatter_fields": "optional object (required when mode is frontmatter)"
-      }
-    },
+        "payload": {
+          "path": "required relative path",
+          "text": "optional string (required unless mode is frontmatter)",
+          "mode": "optional: append|prepend|replace|frontmatter|section_append|section_prepend (default append)",
+          "frontmatter_fields": "optional object (required when mode is frontmatter)",
+          "section_heading": "optional string (required when mode is section_append or section_prepend)"
+        }
+      },
     "note.search": {
       "status": "active",
       "playbook": "playbooks/note-search/PLAYBOOK.md",
