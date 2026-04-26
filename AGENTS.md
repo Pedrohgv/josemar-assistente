@@ -412,6 +412,8 @@ This repository uses **gitleaks** and a **PII guard** to reduce accidental expos
 - **CI/CD:** Every push to any branch is scanned via GitHub Actions (`.github/workflows/privacy-scan.yml`)
 - **Local:** Pre-commit hooks scan staged changes before each commit (optional but recommended)
 - **Privacy guard:** Added-line PII checks run in pre-commit and in CI via `.github/workflows/privacy-scan.yml`
+- **OpenCode runtime guard:** `opencode.json` loads `.opencode/plugins/pii-commit-guard.mjs`, which intercepts `git commit` bash calls and runs staged PII checks before allowing commit execution
+- **OpenCode commit behavior (mandatory):** whenever a commit is requested in this repo, OpenCode must run the `pii-commit-check` skill before creating the commit
 
 ### Setup Pre-commit Hooks (One-Time)
 
