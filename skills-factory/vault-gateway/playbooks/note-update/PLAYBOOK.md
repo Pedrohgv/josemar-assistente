@@ -9,7 +9,7 @@
 ## Route Mapping
 
 - Route: `note.update`
-- Payload: `path` (required), `text` (required unless mode is frontmatter), `mode` (optional: append|prepend|replace|frontmatter), `frontmatter_fields` (required when mode is frontmatter)
+- Payload: `path` (required), `text` (required unless mode is frontmatter), `mode` (optional: append|prepend|replace|frontmatter|section_append|section_prepend), `frontmatter_fields` (required when mode is frontmatter), `section_heading` (required when mode is section_append/section_prepend)
 
 ## Purpose
 
@@ -62,6 +62,43 @@ This is how MBIFC's Seeker works in practice: the LLM does the intelligent editi
 - The note body remains unchanged.
 - Example: set `status: active` and add `updated: 2026-04-15` without re-reading or re-writing the body.
 
+### Section Append / Section Prepend
+
+- Use `mode: section_append` to insert content at the end of an existing markdown section.
+- Use `mode: section_prepend` to insert content at the start of an existing markdown section.
+- Provide `section_heading` with the target heading text (example: `Tasks`).
+- The section must already exist; the handler does not create a new heading.
+- If the heading does not exist (or appears more than once), the operation fails with validation guidance.
+
+## Section-Intent Policy (Mandatory)
+
+For any user request that implies "add content inside an existing section" (tasks, decisions, action items, notes, wins, blockers, etc.), follow this decision flow:
+
+1. **Read first (mandatory)**
+   - Call `note.read` for the target note before writing.
+   - Identify whether the target heading exists and whether it is unique.
+
+2. **If heading exists exactly once**
+   - Use `note.update` with `mode: section_append` (default) or `section_prepend`.
+   - Pass explicit `section_heading`.
+
+3. **If heading does not exist**
+   - Do **not** silently fallback to `append`/`prepend`.
+   - Ask one focused question to confirm creating a new section heading.
+   - After explicit confirmation, use read-then-replace to add the new heading in the right location.
+
+4. **If heading exists more than once**
+   - Do **not** guess.
+   - Ask which heading instance should receive the content.
+
+5. **Never create duplicate headings by default**
+   - For section-intent requests, raw `append`/`prepend` is disallowed unless the user explicitly asks for free-form insertion.
+
+Default interpretation examples:
+- "crie X tarefas" in a daily note -> section intent targeting `Tasks`
+- "adicione em decisões" -> section intent targeting `Decisões`
+- "anota isso no final da nota" -> free-form append (not section intent)
+
 ## Frontmatter Safety (Auto-Preserve)
 
 When using `mode: replace` with content that lacks a YAML frontmatter block, the gateway automatically preserves the existing frontmatter. This prevents the most common read-then-replace mistake: the LLM reads a note with `note.read`, edits the body only, and forgets to include the frontmatter in the replacement text.
@@ -83,14 +120,14 @@ Current deterministic handler behavior:
 - Resolves note by relative path.
 - Enforces `.md` target and existence.
 - Applies `append`, `prepend`, or `replace` text operation.
+- Supports `section_append` and `section_prepend` to edit a single existing section without creating duplicate headings.
 - Supports `frontmatter` mode for surgical YAML field updates.
 - Auto-preserves existing frontmatter on `replace` when replacement text has no YAML block.
 - Refreshes structural context files after write: updates `Meta/vault-structure.md` managed block and updates folder `_index.md` managed summary.
 - Logs operation in `Meta/vault-gateway-log.md`.
 
 Current handler does not:
-- Parse or merge frontmatter fields.
-- Rebuild sections semantically.
+- Rebuild sections semantically beyond deterministic section insertion.
 - Auto-fix links, tags, or MOC references.
 
 Those richer MBIFC refinements should happen in additional turns when needed.

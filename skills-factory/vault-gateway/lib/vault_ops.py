@@ -142,6 +142,59 @@ def _extract_markdown_section(content: str, heading: str) -> str:
     return match.group(1).strip()
 
 
+def _normalize_heading_label(value: str) -> str:
+    label = (value or "").strip()
+    label = re.sub(r"\s+#*$", "", label).strip()
+    label = re.sub(r"\s+", " ", label)
+    return label.casefold()
+
+
+def _update_markdown_section(body_text: str, heading: str, payload_text: str, prepend: bool = False) -> str:
+    normalized_target = _normalize_heading_label(heading)
+    if not normalized_target:
+        raise ValueError("section_heading is required when using section mode")
+
+    heading_matches = list(re.finditer(r"(?m)^(#{1,6})[ \t]+(.+?)\s*$", body_text))
+    matching_indices = [
+        index
+        for index, match in enumerate(heading_matches)
+        if _normalize_heading_label(match.group(2)) == normalized_target
+    ]
+
+    if not matching_indices:
+        raise ValueError(f"Section '{heading}' was not found in note body")
+    if len(matching_indices) > 1:
+        raise ValueError(
+            f"Multiple sections named '{heading}' were found; use note.read + replace for an explicit edit"
+        )
+
+    target_index = matching_indices[0]
+    target_match = heading_matches[target_index]
+    target_level = len(target_match.group(1))
+
+    section_start = target_match.end()
+    section_end = len(body_text)
+    for candidate in heading_matches[target_index + 1 :]:
+        if len(candidate.group(1)) <= target_level:
+            section_end = candidate.start()
+            break
+
+    current_section = body_text[section_start:section_end].lstrip("\n")
+    insertion = payload_text.strip()
+    if prepend:
+        if current_section.strip():
+            rebuilt_section = "\n" + insertion + "\n\n" + current_section.rstrip() + "\n"
+        else:
+            rebuilt_section = "\n" + insertion + "\n"
+    else:
+        if current_section.strip():
+            rebuilt_section = "\n" + current_section.rstrip() + "\n" + insertion + "\n"
+        else:
+            rebuilt_section = "\n" + insertion + "\n"
+
+    return body_text[:section_start] + rebuilt_section + body_text[section_end:]
+
+
 def _truncate_text(text: str, limit: int = 1200) -> str:
     normalized = (text or "").strip()
     if len(normalized) <= limit:
@@ -1405,9 +1458,10 @@ def update_note(
     path: str | None = None,
     mode: str = "append",
     frontmatter_fields: dict | None = None,
+    section_heading: str | None = None,
 ) -> dict:
     normalized_mode = (mode or "append").strip().lower()
-    valid_modes = {"append", "prepend", "replace", "frontmatter"}
+    valid_modes = {"append", "prepend", "replace", "frontmatter", "section_append", "section_prepend"}
     if normalized_mode not in valid_modes:
         raise ValueError(f"Invalid mode. Expected one of: {', '.join(sorted(valid_modes))}")
 
@@ -1420,6 +1474,9 @@ def update_note(
     payload_text = (text or "").strip()
     if normalized_mode != "frontmatter" and not payload_text:
         raise ValueError("Field 'text' is required")
+
+    if normalized_mode in {"section_append", "section_prepend"} and not str(section_heading or "").strip():
+        raise ValueError("section_heading is required when mode is section_append or section_prepend")
 
     note_path = _resolve_note_path(vault_root, path=path)
     existing = _safe_read_text(note_path)
@@ -1452,6 +1509,19 @@ def update_note(
         else:
             updated = payload_text + "\n\n" + existing
 
+    elif normalized_mode in {"section_append", "section_prepend"}:
+        updated_body = _update_markdown_section(
+            existing_body,
+            heading=str(section_heading or ""),
+            payload_text=payload_text,
+            prepend=normalized_mode == "section_prepend",
+        )
+        body_text = updated_body.strip("\n")
+        if existing_frontmatter:
+            updated = _serialize_frontmatter(existing_frontmatter) + "\n\n" + body_text + "\n"
+        else:
+            updated = body_text + "\n"
+
     else:
         separator = "\n\n" if existing.strip() else ""
         updated = existing.rstrip() + separator + payload_text + "\n"
@@ -1466,6 +1536,8 @@ def update_note(
         "maintenance_updates": maintenance_updates,
         "context": operation_context,
     }
+    if normalized_mode in {"section_append", "section_prepend"}:
+        result["section_heading"] = str(section_heading or "").strip()
     if warnings:
         result["warnings"] = warnings
     _append_log(vault_root, "note.update", result)

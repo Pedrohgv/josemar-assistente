@@ -127,6 +127,26 @@ Simple workflow for testing the self-hosted runner setup.
 2. Echoes test messages
 3. Verifies runner connectivity and permissions
 
+## Privacy Scan Workflow
+
+### privacy-scan
+
+Scans incoming changes for secrets and PII before merge/deploy.
+
+**Triggers:**
+- Push
+- Pull request (non-fork PRs only)
+- Manual (`workflow_dispatch`)
+
+**Behavior:**
+1. Runs on self-hosted runner
+2. Executes gitleaks for secret detection
+3. Runs `scripts/pii_guard.py` on added lines in diff range
+4. Fails when medium/high-confidence PII is detected (email/phone/cpf/cnpj/credit-card)
+
+**Allowlist:**
+- Use `.pii-allowlist` with regex entries for explicit, reviewed exceptions.
+
 ## Deployment Workflow
 
 ### deploy-to-home-server

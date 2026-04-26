@@ -97,6 +97,20 @@ Frontmatter surgical update example:
 }
 ```
 
+Section-targeted update example:
+
+```json
+{
+  "route": "note.update",
+  "payload": {
+    "path": "07-Daily/2026-04-26.md",
+    "mode": "section_append",
+    "section_heading": "Tasks",
+    "text": "- [ ] Confirmar fechamento com cliente"
+  }
+}
+```
+
 Contract rules:
 - Top-level keys: only `route` and `payload`
 - Route params must be inside `payload`
@@ -108,6 +122,9 @@ Contract rules:
 - For "port existing vault", always propose a safe plan before execution.
 - If user requests destructive mode, display a strong warning and strongly recommend a vault backup before continuing.
 - When using `note.update` with `mode: replace`, existing frontmatter is auto-preserved if the replacement text has no YAML block. This prevents accidental frontmatter loss during read-then-replace edits.
+- For "add item to existing section" edits, prefer `note.update` with `mode: section_append` (or `section_prepend`) and explicit `section_heading` to avoid duplicate section creation.
+- For section-intent writes, run a mandatory read-first flow: `note.read` -> verify heading -> `note.update` with `section_append/section_prepend`.
+- If target heading is missing or duplicated, do not silently fallback to raw append/prepend; ask one focused clarification before writing.
 - Read/write note routes ingest contextual guidance from nearest folder `_index.md` (including `## Working Rules`) and from managed snapshot in `Meta/vault-structure.md` when present.
 - After vault write routes (`note.capture`, `note.update`, `note.file`), gateway refreshes managed context blocks in `Meta/vault-structure.md` and folder `_index.md` files while preserving human-authored sections.
 

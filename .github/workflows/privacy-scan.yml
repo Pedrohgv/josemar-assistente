@@ -1,0 +1,59 @@
+name: Privacy Scan
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  scan:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cleanup stale gitleaks temp file
+        run: |
+          sudo rm -f /tmp/gitleaks.tmp || rm -f /tmp/gitleaks.tmp || true
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine diff range
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+            echo "three_dot=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BEFORE="${{ github.event.before }}"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            BEFORE=$(git rev-list --max-parents=0 HEAD)
+          fi
+
+          echo "base=$BEFORE" >> "$GITHUB_OUTPUT"
+          echo "head=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "three_dot=false" >> "$GITHUB_OUTPUT"
+
+      - name: Run PII guard on added lines
+        run: |
+          if [ "${{ steps.range.outputs.three_dot }}" = "true" ]; then
+            python3 scripts/pii_guard.py \
+              --base "${{ steps.range.outputs.base }}" \
+              --head "${{ steps.range.outputs.head }}" \
+              --three-dot \
+              --fail-on medium
+          else
+            python3 scripts/pii_guard.py \
+              --base "${{ steps.range.outputs.base }}" \
+              --head "${{ steps.range.outputs.head }}" \
+              --fail-on medium
+          fi

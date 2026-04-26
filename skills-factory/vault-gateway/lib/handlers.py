@@ -460,6 +460,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 path=payload.get("path"),
                 mode=str(payload.get("mode") or "append"),
                 frontmatter_fields=fm_fields if isinstance(fm_fields, dict) else None,
+                section_heading=payload.get("section_heading"),
             )
             return {
                 "message": "Nota atualizada com sucesso." + _maintenance_suffix(result),
