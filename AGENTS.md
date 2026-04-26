@@ -405,12 +405,14 @@ On container start, the workspace sync script (`scripts/workspace-sync.sh`) clon
 
 ## Security: Secret Scanning
 
-This repository uses **gitleaks** to prevent accidental commits of secrets (API keys, tokens, passwords, etc.).
+This repository uses **gitleaks** and a **PII guard** to reduce accidental exposure of secrets and personal data.
 
 ### Automated Scanning
 
-- **CI/CD:** Every push to any branch is scanned via GitHub Actions (`.github/workflows/gitleaks.yml`)
+- **CI/CD:** Every push to any branch is scanned via GitHub Actions (`.github/workflows/privacy-scan.yml`)
 - **Local:** Pre-commit hooks scan staged changes before each commit (optional but recommended)
+- **Privacy guard:** Added-line PII checks run in pre-commit and in CI via `.github/workflows/privacy-scan.yml`
+- **Optional agentic review:** `privacy-scan` can run `scripts/pii_agentic_review.py` when `PII_AGENTIC_ENABLED=true` with `PII_REVIEW_API_KEY`
 
 ### Setup Pre-commit Hooks (One-Time)
 
@@ -426,9 +428,12 @@ This script creates `venv/` if needed, installs pre-commit, and installs git hoo
 # Normal commit - gitleaks runs automatically
 git commit -m "your message"
 
-# Skip gitleaks (emergency only)
-SKIP=gitleaks git commit -m "your message"
+# Skip checks (emergency only)
+SKIP=gitleaks,pii-guard git commit -m "your message"
 
 # Manual full scan
 source venv/bin/activate && pre-commit run gitleaks --all-files
+
+# Manual staged PII scan
+python3 scripts/pii_guard.py --staged --fail-on medium
 ```

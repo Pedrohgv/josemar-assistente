@@ -1,0 +1,85 @@
+name: privacy-scan
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  scan:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine diff range
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+            echo "three_dot=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BEFORE="${{ github.event.before }}"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            BEFORE=$(git rev-list --max-parents=0 HEAD)
+          fi
+
+          echo "base=$BEFORE" >> "$GITHUB_OUTPUT"
+          echo "head=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "three_dot=false" >> "$GITHUB_OUTPUT"
+
+      - name: Run PII guard on added lines
+        run: |
+          if [ "${{ steps.range.outputs.three_dot }}" = "true" ]; then
+            python3 scripts/pii_guard.py \
+              --base "${{ steps.range.outputs.base }}" \
+              --head "${{ steps.range.outputs.head }}" \
+              --three-dot \
+              --fail-on medium
+          else
+            python3 scripts/pii_guard.py \
+              --base "${{ steps.range.outputs.base }}" \
+              --head "${{ steps.range.outputs.head }}" \
+              --fail-on medium
+          fi
+
+      - name: Run agentic privacy review (optional)
+        if: vars.PII_AGENTIC_ENABLED == 'true' && secrets.PII_REVIEW_API_KEY != ''
+        env:
+          PII_REVIEW_API_KEY: ${{ secrets.PII_REVIEW_API_KEY }}
+          PII_REVIEW_MODEL: ${{ vars.PII_REVIEW_MODEL }}
+          PII_REVIEW_BASE_URL: ${{ vars.PII_REVIEW_BASE_URL }}
+        run: |
+          if [ "${{ steps.range.outputs.three_dot }}" = "true" ]; then
+            python3 scripts/pii_agentic_review.py \
+              --base "${{ steps.range.outputs.base }}" \
+              --head "${{ steps.range.outputs.head }}" \
+              --three-dot \
+              --fail-on high \
+              --output-json pii-agentic-report.json
+          else
+            python3 scripts/pii_agentic_review.py \
+              --base "${{ steps.range.outputs.base }}" \
+              --head "${{ steps.range.outputs.head }}" \
+              --fail-on high \
+              --output-json pii-agentic-report.json
+          fi
+
+      - name: Upload agentic review artifact
+        if: always() && vars.PII_AGENTIC_ENABLED == 'true' && secrets.PII_REVIEW_API_KEY != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: pii-agentic-report
+          path: pii-agentic-report.json
+          if-no-files-found: ignore

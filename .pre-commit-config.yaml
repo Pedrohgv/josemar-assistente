@@ -3,3 +3,11 @@ repos:
     rev: v8.24.2
     hooks:
       - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: pii-guard
+        name: pii-guard
+        entry: python3 scripts/pii_guard.py --staged --fail-on medium
+        language: system
+        pass_filenames: false

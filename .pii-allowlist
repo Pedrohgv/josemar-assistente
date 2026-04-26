@@ -1,0 +1,5 @@
+# Regex allowlist for pii_guard.py findings.
+# One regex per line. Matches against:
+#   file_path:line_number:kind:value:line_text
+#
+# Keep this file minimal and documented when adding exceptions.
