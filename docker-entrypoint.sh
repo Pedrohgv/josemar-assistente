@@ -21,6 +21,34 @@ mkdir -p /root/.openclaw
 if [ -d "/root/.openclaw-source" ]; then
     echo "Copying configuration from source..."
     cp -r /root/.openclaw-source/* /root/.openclaw/ 2>/dev/null || true
+
+    # Keep OpenClaw recovery snapshots aligned with repo source config.
+    # This prevents stale backup content from restoring obsolete env
+    # variable names after config schema changes.
+    # OpenClaw may restore from .last-good, .bak, or .bak.* during startup
+    # recovery, so all must be overwritten.
+    if [ -f "/root/.openclaw-source/openclaw.json" ]; then
+        cp /root/.openclaw-source/openclaw.json /root/.openclaw/openclaw.json
+        cp /root/.openclaw-source/openclaw.json /root/.openclaw/openclaw.json.last-good
+        for bak in /root/.openclaw/openclaw.json.bak /root/.openclaw/openclaw.json.bak.*; do
+            [ -f "$bak" ] && cp /root/.openclaw-source/openclaw.json "$bak"
+        done
+    fi
+
+    # Normalize config snapshots used by OpenClaw recovery.
+    # This keeps TELEGRAM_ENABLED typed as boolean even when OpenClaw
+    # restores from a backup snapshot in JSON form.
+    for cfg in /root/.openclaw/openclaw.json /root/.openclaw/openclaw.json.last-good /root/.openclaw/openclaw.json.bak /root/.openclaw/openclaw.json.bak.*; do
+        [ -f "$cfg" ] || continue
+
+        if [ "${TELEGRAM_ENABLED}" = "false" ]; then
+            sed -E -i 's/enabled[[:space:]]*:[[:space:]]*"\$\{TELEGRAM_ENABLED\}"/enabled: false/g' "$cfg"
+            sed -E -i 's/"enabled"[[:space:]]*:[[:space:]]*"\$\{TELEGRAM_ENABLED\}"/"enabled": false/g' "$cfg"
+        else
+            sed -E -i 's/enabled[[:space:]]*:[[:space:]]*"\$\{TELEGRAM_ENABLED\}"/enabled: true/g' "$cfg"
+            sed -E -i 's/"enabled"[[:space:]]*:[[:space:]]*"\$\{TELEGRAM_ENABLED\}"/"enabled": true/g' "$cfg"
+        fi
+    done
 fi
 
 # Copy credentials from read-only mount to writable location
@@ -70,6 +98,7 @@ fi
 
 # Handle TELEGRAM_ENABLED environment variable
 # Convert string "true"/"false" to proper boolean in config
+# (kept for direct openclaw.json path normalization too)
 if [ -f /root/.openclaw/openclaw.json ]; then
     if [ "${TELEGRAM_ENABLED}" = "false" ]; then
         echo "Disabling Telegram channel (TELEGRAM_ENABLED=false)"

@@ -87,10 +87,12 @@ OLLAMA_API_KEY=your_ollama_api_key_here
 # Telegram
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
 TELEGRAM_ENABLED=true
-PEDRO_TELEGRAM_ID=190731460
+PRIMARY_TELEGRAM_ID=123456789
 
 # Web UI
 GATEWAY_AUTH_PASSWORD=your-secure-password-here
+CONTROL_UI_ALLOWED_ORIGIN_1=https://your-domain.example
+CONTROL_UI_ALLOWED_ORIGIN_2=http://your-server-ip:18789
 
 # Agent State Repo
 WORKSPACE_STATE_REPO=https://github.com/username/josemar-agent-state.git

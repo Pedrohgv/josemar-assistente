@@ -95,7 +95,9 @@ nano .env
 - `TELEGRAM_ENABLED` - Enable/disable Telegram channel (`true`/`false`, default: `true`)
 - `DEEPSEEK_API_KEY` - Optional fallback provider
 - `GATEWAY_AUTH_PASSWORD` - Web UI access password (HTTP Basic Auth)
-- `PEDRO_TELEGRAM_ID` - Primary user ID
+- `PRIMARY_TELEGRAM_ID` - Primary user ID
+- `CONTROL_UI_ALLOWED_ORIGIN_1` - Optional production Web UI origin allowlist entry
+- `CONTROL_UI_ALLOWED_ORIGIN_2` - Optional production Web UI origin allowlist entry
 
 **Local Testing:**
 Set `TELEGRAM_ENABLED=false` in `.env` to disable Telegram for local testing. This prevents conflicts with the production bot while allowing full testing via the Web UI.
@@ -173,7 +175,7 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
     ZAI_API_KEY: "${ZAI_API_KEY}",
     TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}",
     DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
-    PEDRO_TELEGRAM_ID: "${PEDRO_TELEGRAM_ID}",
+    PRIMARY_TELEGRAM_ID: "${PRIMARY_TELEGRAM_ID}",
   },
 
   // Gateway configuration
@@ -248,7 +250,7 @@ Use `${VARIABLE_NAME}` syntax to reference environment variables:
       botToken: "${TELEGRAM_BOT_TOKEN}",
       dmPolicy: "allowlist",
       allowFrom: [
-        "${PEDRO_TELEGRAM_ID}",
+        "${PRIMARY_TELEGRAM_ID}",
       ]
     }
   },
@@ -308,7 +310,7 @@ env: {
   DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}",
   
   // Telegram User IDs (see Channels section for usage pattern)
-  PEDRO_TELEGRAM_ID: "${PEDRO_TELEGRAM_ID}",
+  PRIMARY_TELEGRAM_ID: "${PRIMARY_TELEGRAM_ID}",
 }
 ```
 
@@ -549,7 +551,7 @@ channels: {
     dmPolicy: "allowlist",  // "pairing" | "allowlist" | "open" | "disabled"
     // User IDs are loaded from environment variables (see below)
     allowFrom: [
-      "${PEDRO_TELEGRAM_ID}",
+      "${PRIMARY_TELEGRAM_ID}",
       // Add more users by adding their env var: "${ALICE_TELEGRAM_ID}",
     ],
   }
@@ -563,7 +565,7 @@ Users are managed via environment variables and explicitly listed in `allowFrom`
 1. **Add the user's Telegram ID to `.env`:**
    ```bash
    # Primary user (required)
-   PEDRO_TELEGRAM_ID=123456789
+   PRIMARY_TELEGRAM_ID=123456789
    
    # Additional users (optional)
    ALICE_TELEGRAM_ID=987654321
@@ -573,7 +575,7 @@ Users are managed via environment variables and explicitly listed in `allowFrom`
 2. **Reference them in `config/openclaw.json`:**
    ```json5
    allowFrom: [
-     "${PEDRO_TELEGRAM_ID}",
+     "${PRIMARY_TELEGRAM_ID}",
      "${ALICE_TELEGRAM_ID}",  // Uncomment to add
      // "${BOB_TELEGRAM_ID}",  // Add more as needed
    ]

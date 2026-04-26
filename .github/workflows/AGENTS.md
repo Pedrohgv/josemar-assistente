@@ -27,7 +27,7 @@ The following secrets must be configured in the GitHub repository settings:
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather | Yes |
 | `DEEPSEEK_API_KEY` | DeepSeek API key (optional fallback) | No |
 | `OLLAMA_API_KEY` | Ollama Cloud API key (optional fallback/provider) | No |
-| `PEDRO_TELEGRAM_ID` | Telegram user ID for the primary user | Yes |
+| `PRIMARY_TELEGRAM_ID` | Telegram user ID for the primary user | Yes |
 | `GATEWAY_AUTH_PASSWORD` | HTTP Basic Auth password for OpenClaw web UI | Yes |
 | `GOG_KEYRING_PASSWORD` | Optional passphrase for gogcli keyring (decrypts Google OAuth token store) | No |
 | `WORKSPACE_REPO_TOKEN` | GitHub PAT for agent state repo (needs `repo` scope) | Yes |
@@ -39,6 +39,8 @@ The following secrets must be configured in the GitHub repository settings:
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `WORKSPACE_STATE_REPO` | HTTPS URL of the private agent state repo | Yes |
+| `CONTROL_UI_ALLOWED_ORIGIN_1` | Optional production Web UI origin allowlist entry | No |
+| `CONTROL_UI_ALLOWED_ORIGIN_2` | Optional production Web UI origin allowlist entry | No |
 | `TZ` | Timezone used by Syncthing and backup scheduler | No (default `America/Sao_Paulo`) |
 | `SYNCTHING_GUI_BIND_IP` | Syncthing GUI/API bind IP | No (default `127.0.0.1`) |
 | `TAILSCALE_HOSTNAME` | Optional hostname for Tailscale sidecar node | No (default `josemar-server`) |
@@ -271,7 +273,7 @@ Safely stops the Josemar Assistente service without deleting data.
    - `ZAI_API_KEY` (not `zai_api_key`)
    - `OLLAMA_API_KEY`
    - `TELEGRAM_BOT_TOKEN`
-   - `PEDRO_TELEGRAM_ID`
+   - `PRIMARY_TELEGRAM_ID`
    - `WORKSPACE_REPO_TOKEN`
    - `RCLONE_CONFIG_B64`
    - `TS_AUTHKEY` (if using unattended tailscale sidecar login)
