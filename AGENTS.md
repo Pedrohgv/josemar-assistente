@@ -412,7 +412,6 @@ This repository uses **gitleaks** and a **PII guard** to reduce accidental expos
 - **CI/CD:** Every push to any branch is scanned via GitHub Actions (`.github/workflows/privacy-scan.yml`)
 - **Local:** Pre-commit hooks scan staged changes before each commit (optional but recommended)
 - **Privacy guard:** Added-line PII checks run in pre-commit and in CI via `.github/workflows/privacy-scan.yml`
-- **Optional agentic review:** `privacy-scan` can run `scripts/pii_agentic_review.py` when `PII_AGENTIC_ENABLED=true` with `PII_REVIEW_API_KEY`
 
 ### Setup Pre-commit Hooks (One-Time)
 

@@ -33,7 +33,6 @@ The following secrets must be configured in the GitHub repository settings:
 | `WORKSPACE_REPO_TOKEN` | GitHub PAT for agent state repo (needs `repo` scope) | Yes |
 | `RCLONE_CONFIG_B64` | Base64-encoded `rclone.conf` used by Obsidian backup container | Yes (for backups) |
 | `TS_AUTHKEY` | Tailscale auth key used by sidecar for unattended tailnet login | No (recommended for remote sync automation) |
-| `PII_REVIEW_API_KEY` | API key for optional LLM-powered privacy review in `privacy-scan` workflow | No |
 
 ## Required GitHub Variables
 
@@ -56,9 +55,6 @@ The following secrets must be configured in the GitHub repository settings:
 | `AUX_ML_ALLOWED_INPUT_DIRS` | Comma-separated allowed input roots for OCR | No (default `/root/.openclaw/workspace`) |
 | `AUX_ML_ENFORCE_MEMORY_LIMIT` | Fail fast when memory budget is insufficient | No (default `true`) |
 | `AUX_ML_OCR_MAX_PAGES` | Max pages per OCR PDF job | No (default `50`) |
-| `PII_AGENTIC_ENABLED` | Enable optional LLM-powered privacy review (`true`/`false`) | No (default disabled) |
-| `PII_REVIEW_MODEL` | Optional model name for agentic privacy review | No (default `gpt-4o-mini`) |
-| `PII_REVIEW_BASE_URL` | Optional OpenAI-compatible base URL for agentic review | No (default `https://api.openai.com/v1`) |
 
 Security note: avoid setting `SYNCTHING_GUI_BIND_IP=0.0.0.0`.
 
@@ -147,7 +143,6 @@ Scans incoming changes for secrets and PII before merge/deploy.
 2. Executes gitleaks for secret detection
 3. Runs `scripts/pii_guard.py` on added lines in diff range
 4. Fails when medium/high-confidence PII is detected (email/phone/cpf/cnpj/credit-card)
-5. Optionally runs `scripts/pii_agentic_review.py` when `PII_AGENTIC_ENABLED=true` and `PII_REVIEW_API_KEY` is configured
 
 **Allowlist:**
 - Use `.pii-allowlist` with regex entries for explicit, reviewed exceptions.
