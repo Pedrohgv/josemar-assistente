@@ -22,12 +22,17 @@ if [ -d "/root/.openclaw-source" ]; then
     echo "Copying configuration from source..."
     cp -r /root/.openclaw-source/* /root/.openclaw/ 2>/dev/null || true
 
-    # Keep OpenClaw recovery snapshot aligned with repo source config.
-    # This prevents stale openclaw.json.last-good content from restoring
-    # obsolete env variable names after config schema changes.
+    # Keep OpenClaw recovery snapshots aligned with repo source config.
+    # This prevents stale backup content from restoring obsolete env
+    # variable names after config schema changes.
+    # OpenClaw may restore from .last-good, .bak, or .bak.* during startup
+    # recovery, so all must be overwritten.
     if [ -f "/root/.openclaw-source/openclaw.json" ]; then
         cp /root/.openclaw-source/openclaw.json /root/.openclaw/openclaw.json
         cp /root/.openclaw-source/openclaw.json /root/.openclaw/openclaw.json.last-good
+        for bak in /root/.openclaw/openclaw.json.bak /root/.openclaw/openclaw.json.bak.*; do
+            [ -f "$bak" ] && cp /root/.openclaw-source/openclaw.json "$bak"
+        done
     fi
 
     # Normalize config snapshots used by OpenClaw recovery.
