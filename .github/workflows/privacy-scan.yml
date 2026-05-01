@@ -15,17 +15,48 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Skip push scan when PR exists
+        id: pr_guard
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ "${BRANCH}" = "main" ]; then
+            echo "skip_scan=false" >> "$GITHUB_OUTPUT"
+            echo "Main branch push detected; running push scan."
+            exit 0
+          fi
+
+          prs=$(curl -sS \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/pulls?state=open&head=${OWNER}:${BRANCH}&per_page=1")
+
+          if [ "$(echo "$prs" | python3 -c "import sys, json; d=json.load(sys.stdin); print(len(d) if isinstance(d, list) else 0)")" -gt 0 ]; then
+            echo "skip_scan=true" >> "$GITHUB_OUTPUT"
+            echo "Open PR detected for branch ${BRANCH}; skipping push scan."
+          else
+            echo "skip_scan=false" >> "$GITHUB_OUTPUT"
+            echo "No open PR detected; running push scan."
+          fi
+
       - name: Cleanup stale gitleaks temp file
+        if: steps.pr_guard.outputs.skip_scan != 'true'
         run: |
           sudo rm -f /tmp/gitleaks.tmp || rm -f /tmp/gitleaks.tmp || true
 
       - name: Run gitleaks
+        if: steps.pr_guard.outputs.skip_scan != 'true'
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Determine diff range
         id: range
+        if: steps.pr_guard.outputs.skip_scan != 'true'
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
@@ -44,6 +75,7 @@ jobs:
           echo "three_dot=false" >> "$GITHUB_OUTPUT"
 
       - name: Run PII guard on added lines
+        if: steps.pr_guard.outputs.skip_scan != 'true'
         run: |
           if [ "${{ steps.range.outputs.three_dot }}" = "true" ]; then
             python3 scripts/pii_guard.py \
