@@ -40,6 +40,8 @@ Personality files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`) are created
 
 Operational files (`TOOLS.md`, `BOOT.md`, `HEARTBEAT.md`) are pre-seeded in this template to document core capabilities available out of the box.
 
+This template also includes a memory checkpoint cron job (`cron/jobs.json`) plus `memory/flush-state.json` to keep daily memory logs updated incrementally with reduced duplication.
+
 ## Skill Ownership Model
 
 This project separates skills by ownership:

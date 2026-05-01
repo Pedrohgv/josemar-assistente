@@ -1,4 +1,31 @@
 {
   "$schema": "https://openclaw.ai/schemas/cron-jobs.json",
-  "jobs": []
+  "jobs": [
+    {
+      "id": "9bb8cc42-bca2-4516-b7c0-4305d0315fc9",
+      "agentId": "josemar",
+      "sessionKey": "agent:josemar:main",
+      "name": "Checkpoint de memória",
+      "description": "Checkpoint incremental de memória para garantir memory daily log (memory/YYYY-MM-DD.md) sem duplicações",
+      "enabled": true,
+      "schedule": {
+        "expr": "0 10,15,21 * * *",
+        "kind": "cron",
+        "tz": "America/Sao_Paulo"
+      },
+      "sessionTarget": "main",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "agentTurn",
+        "message": "Checkpoint de memória (sem resposta ao usuário).\n\n1. Use NO_REPLY.\n2. Garanta que exista memory/YYYY-MM-DD.md para hoje; crie se não existir.\n3. Leia memory/YYYY-MM-DD.md e memory/flush-state.json antes de escrever.\n4. Faça um resumo incremental do que aconteceu desde o último checkpoint, sem repetir itens já registrados hoje.\n5. Escreva apenas fatos relevantes (decisões, mudanças de configuração, ações executadas, pendências).\n6. Se não houver novidade real desde o último checkpoint, não altere o memory daily log (memory/YYYY-MM-DD.md).\n7. Atualize memory/flush-state.json com lastCheckpointAt (ISO-8601) e lastSummaryHash (hash do resumo incremental).",
+        "toolsAllow": [
+          "read",
+          "write"
+        ]
+      },
+      "delivery": {
+        "mode": "none"
+      }
+    }
+  ]
 }

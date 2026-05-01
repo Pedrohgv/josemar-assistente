@@ -158,6 +158,19 @@ Detailed runbook: `docs/obsidian-operations.md`.
 
 The main configuration is in `config/openclaw.json` (JSON5 format). See `config/AGENTS.md` for complete reference.
 
+### Memory Persistence Preferences
+
+This project uses explicit memory persistence preferences to reduce context loss between sessions:
+
+- **Long idle session window**: `session.reset.idleMinutes` is set to `1440` (24h) so conversations are less likely to reset before memory safeguards can run.
+- **Pre-compaction memory flush enabled**: `agents.defaults.compaction.memoryFlush.enabled: true` with `softThresholdTokens: 4000` and `reserveTokensFloor: 40000`.
+- **Memory checkpoint cron**: state repos should include a recurring checkpoint job that updates the **memory daily log** at `memory/YYYY-MM-DD.md` incrementally.
+- **Dedup cursor file**: `memory/flush-state.json` tracks checkpoint progress to reduce repeated entries in the same day.
+
+Terminology note:
+- Use **memory daily log** for `memory/YYYY-MM-DD.md`.
+- Use **Obsidian daily note** only for vault files under `07-Daily/`.
+
 ### Auxiliary ML Service (Optional)
 
 The auxiliary ML service runs in a dedicated container and is designed for queue-based, long-running jobs (minutes are acceptable). It currently starts with OCR (`glm-ocr`) and keeps a modular model registry for future additions.
@@ -238,7 +251,8 @@ josemar-assistente/
 │   ├── .sync-manifest              # Files to version
 │   ├── .gitignore                  # Security ignore list
 │   ├── skills/                     # User-owned state skills
-│   └── cron/jobs.json              # Cron definitions synced from state repo
+│   ├── cron/jobs.json              # Cron definitions synced from state repo
+│   └── memory/flush-state.json     # Checkpoint cursor for memory daily log dedup
 ├── config/                         # OpenClaw configuration
 │   ├── AGENTS.md                   # Config reference
 │   └── openclaw.json               # Main config

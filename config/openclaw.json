@@ -186,6 +186,13 @@
       workspace: "~/.openclaw/workspace",
       userTimezone: "${JOSEMAR_TIMEZONE}",
       envelopeTimezone: "${JOSEMAR_TIMEZONE}",
+      compaction: {
+        reserveTokensFloor: 40000,
+        memoryFlush: {
+          enabled: true,
+          softThresholdTokens: 4000,
+        },
+      },
       model: {
         primary: "ollama/kimi-k2.6:cloud",
         fallbacks: ["zai/glm-5", "zai/glm-4.7", "deepseek/deepseek-chat", "ollama/glm-5.1:cloud"],
@@ -274,7 +281,7 @@
     scope: "per-sender",
     reset: {
       mode: "idle",
-      idleMinutes: 60,
+      idleMinutes: 1440,
     },
     store: "~/.openclaw/agents/josemar/sessions/sessions.json",
   },
