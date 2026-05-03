@@ -13,7 +13,7 @@
         "kind": "cron",
         "tz": "America/Sao_Paulo"
       },
-      "sessionTarget": "main",
+      "sessionTarget": "isolated",
       "wakeMode": "now",
       "payload": {
         "kind": "agentTurn",
