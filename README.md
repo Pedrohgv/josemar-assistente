@@ -1,186 +1,174 @@
-# Josemar Assistente - OpenClaw Bot
+# Josemar Assistente
 
-A self-hosted OpenClaw bot running in Docker with Telegram integration and PDF extraction capabilities.
+Self-hosted OpenClaw assistant infrastructure for running a private AI assistant with Telegram, Web UI access, git-backed agent state, an Obsidian vault, and optional queue-based local ML jobs.
 
-## Features
+This repository is the public/platform layer. Personal identity, memories, private workflows, and user-specific skills live in a separate private `agent-state` repository so this repo can evolve independently from each user's assistant state.
 
-- **OpenClaw Gateway**: Self-hosted AI agent gateway
-- **Telegram Integration**: Native Telegram bot support
-- **PDF Extraction**: Process Brazilian credit card invoice PDFs
-- **Multi-Provider LLM Support**: GLM, DeepSeek, Ollama Cloud, and OpenAI-compatible APIs
-- **Brazilian Portuguese**: Native language interaction
-- **Docker Deployment**: Containerized with persistent workspace storage
-- **Git-Backed Agent State**: Workspace files versioned in a private git repo
-- **Obsidian Vault Sync**: Syncthing sync over private network (Tailscale-ready)
-- **Google Drive Backups**: Daily rotating Obsidian vault backups via rclone
-- **Auxiliary ML Batch Container**: Optional llama.cpp service with FIFO queue for long-running OCR/transcription tasks
+## What This Repo Provides
 
-## Prerequisites
+- **OpenClaw Gateway**: self-hosted agent gateway with password-protected Web UI.
+- **Telegram channel**: allowlisted Telegram DM access, with `TELEGRAM_ENABLED=false` support for safe local testing.
+- **Independent agent state**: private git-backed workspace for personality files, memory logs, cron jobs, avatars, and user-owned skills.
+- **Two-scope skills model**: repo-owned platform skills in `skills-factory/`, user-owned skills in `agent-state/skills/`.
+- **Obsidian vault infrastructure**: dedicated Docker volume mounted into OpenClaw, synchronized with Syncthing over a Tailscale sidecar.
+- **Google Drive vault backups**: daily rotating backup slots via rclone.
+- **Optional auxiliary ML service**: internal `aux-ml` container for FIFO, one-at-a-time long-running OCR jobs through llama.cpp.
+- **Multi-provider LLM config**: Ollama Cloud, Z.AI/GLM, DeepSeek, and other OpenAI-compatible providers can be configured.
+- **Security checks**: gitleaks and a custom PII guard in CI and optional pre-commit hooks.
 
-- Docker and Docker Compose
-- Z.AI API key (for GLM models - e.g., GLM-5, GLM-4.7)
-- Telegram Bot Token (from @BotFather)
-- DeepSeek API key (optional, for alternative LLM)
-- Ollama Cloud API key (optional, for Ollama Cloud models)
-- A **private** GitHub repo for agent state versioning
+Domain-specific behavior, such as Brazilian credit-card invoice extraction, belongs in a user's private state-repo skills unless it is explicitly added to `skills-factory/`. The public repo currently ships the infrastructure needed to support OCR and custom skills, not that personal extraction workflow itself.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  User[User] --> Telegram[Telegram Bot]
+  User --> WebUI[OpenClaw Web UI]
+
+  Telegram --> Gateway[OpenClaw Gateway]
+  WebUI --> Gateway
+
+  Gateway --> Agent[Josemar Agent]
+  Agent --> Models[LLM Providers<br/>Ollama Cloud / Z.AI / DeepSeek]
+  Agent --> CoreSkills[Repo Core Skills<br/>/opt/josemar/skills]
+  Agent --> StateSkills[User State Skills<br/>workspace/skills]
+  Agent --> Vault[Obsidian Vault<br/>obsidian-vault volume]
+
+  CoreSkills --> AuxML[aux-ml API<br/>optional]
+  AuxML --> Llama[llama.cpp Router<br/>OCR models]
+
+  Agent --> Workspace[OpenClaw Workspace<br/>openclaw-workspace volume]
+  Workspace <--> StateRepo[Private Agent State Repo]
+  Vault <--> Syncthing[Syncthing]
+  Syncthing <--> Tailscale[Tailscale Sidecar]
+  Vault --> Backup[rclone Backup]
+  Backup --> GDrive[Google Drive Slots]
+```
+
+## State Separation
+
+The main repository can stay public because user-specific assistant state is isolated in a private nested repo mounted at `agent-state/`.
+
+```mermaid
+flowchart TB
+  PublicRepo[Public Platform Repo] --> Image[Docker Image]
+  PublicRepo --> CoreSkills[skills-factory<br/>repo-owned skills]
+  PublicRepo --> Config[config/openclaw.json]
+  PublicRepo --> Compose[docker-compose.yml]
+
+  PrivateRepo[Private Agent State Repo] --> Personality[SOUL.md / IDENTITY.md / USER.md]
+  PrivateRepo --> Memory[memory/YYYY-MM-DD.md]
+  PrivateRepo --> UserSkills[skills/*]
+  PrivateRepo --> Cron[cron/jobs.json]
+  PrivateRepo --> Avatars[avatars/*]
+
+  Image --> Runtime[OpenClaw Runtime]
+  CoreSkills --> Runtime
+  Config --> Runtime
+  Compose --> Runtime
+  PrivateRepo <--> Workspace[Runtime Workspace Git Repo]
+  Workspace --> Runtime
+```
+
+The workspace sync script only versions paths listed in `.sync-manifest`, uses the remote state repo as the blessed conflict winner, rotates memory logs, and can auto-commit/push state changes from the running assistant.
+
+## Obsidian Vault Flow
+
+```mermaid
+flowchart LR
+  OpenClaw[OpenClaw Container<br/>/root/.openclaw/obsidian] <--> Vault[(obsidian-vault volume)]
+  Vault <--> Syncthing[Syncthing Container]
+  Syncthing <--> Tailscale[Tailscale Sidecar<br/>private network]
+  Tailscale <--> Devices[Laptop / Mobile Devices]
+  Vault --> Backup[obsidian-backup Container]
+  Backup --> RcloneConfig[(obsidian-rclone-config)]
+  Backup --> SlotState[(obsidian-backup-state)]
+  Backup --> Drive[Google Drive<br/>slot-1 ... slot-N]
+```
+
+The vault is not git-versioned. It persists in its own Docker volume, syncs through Syncthing, and is backed up by rotating rclone snapshots.
 
 ## Quick Start
 
-### 1. Create Agent State Repo
-
-Create a private GitHub repo for agent state (this stores personality, skills, memory):
+### 1. Clone and Prepare State
 
 ```bash
-# Use the template in templates/agent-state-template/
-# See templates/agent-state-template/README.md for instructions
-```
-
-### 2. Clone and Configure
-
-```bash
-cd repos/josemar-assistente
-git clone <your-private-repo-url> agent-state
+git clone <this-repo-url> josemar-assistente
+cd josemar-assistente
 cp .env.example .env
-# Edit .env with your API keys and agent state repo URL
 ```
 
-If you do not have a private state repo yet, initialize from template:
+Clone your private state repo into `agent-state/`:
+
+```bash
+git clone <your-private-agent-state-repo-url> agent-state
+```
+
+If you do not have a state repo yet, initialize from the template:
 
 ```bash
 cp -r templates/agent-state-template/ agent-state
-cd agent-state && git init && git add -A && git commit -m "Initial state"
+cd agent-state
+git init
+git add -A
+git commit -m "Initial state"
+cd ..
 ```
 
-### 3. Build and Run
+### 2. Configure `.env`
+
+For production with Telegram and automatic state sync, set:
+
+```bash
+GATEWAY_AUTH_PASSWORD=your-secure-password
+TELEGRAM_BOT_TOKEN=your-telegram-token
+PRIMARY_TELEGRAM_ID=123456789
+WORKSPACE_STATE_REPO=https://github.com/username/private-agent-state.git
+WORKSPACE_REPO_TOKEN=your-github-pat
+```
+
+Set the model provider keys used by your configured primary and fallback models. The current default config uses `ollama/kimi-k2.6:cloud` as the primary model, with Z.AI, DeepSeek, and `ollama/glm-5.1:cloud` fallbacks:
+
+```bash
+OLLAMA_API_KEY=your-ollama-cloud-key
+ZAI_API_KEY=your-zai-key
+DEEPSEEK_API_KEY=your-deepseek-key
+```
+
+For local testing, disable Telegram so you do not conflict with a production bot using the same token:
+
+```bash
+TELEGRAM_ENABLED=false
+```
+
+For Web UI-only local testing, Telegram credentials are optional when Telegram is disabled. If you are testing without remote state sync, `WORKSPACE_STATE_REPO` and `WORKSPACE_REPO_TOKEN` can also be left empty.
+
+See `.env.example` for the full variable list.
+
+### 3. Start Locally
 
 ```bash
 docker compose build
 docker compose up -d
+docker compose logs -f openclaw
 ```
 
-**Note**: Use `docker compose` (with space) for Docker Compose V2, or `docker-compose` (with hyphen) for V1.
+Access the Web UI at:
 
-### 4. Check Logs
+```text
+http://operator:YOUR_GATEWAY_AUTH_PASSWORD@localhost:18789/
+```
+
+If the browser shows a pairing-required message, approve the device:
 
 ```bash
-docker compose logs -f
+docker compose exec openclaw openclaw devices list
+docker compose exec openclaw openclaw devices approve <requestId>
 ```
 
-### 5. Interact with Bot
+### 4. Optional Aux-ML
 
-- Start a conversation with your Telegram bot
-- Send a PDF credit card invoice for processing
-- Ask questions in Brazilian Portuguese
-
-## Configuration
-
-### Environment Variables
-
-Create a `.env` file with:
-
-```bash
-# LLM Provider
-ZAI_API_KEY=your_zai_api_key_here
-DEEPSEEK_API_KEY=your_deepseek_api_key_here
-OLLAMA_API_KEY=your_ollama_api_key_here
-
-# Telegram
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
-TELEGRAM_ENABLED=true
-PRIMARY_TELEGRAM_ID=123456789
-
-# Web UI
-GATEWAY_AUTH_PASSWORD=your-secure-password-here
-CONTROL_UI_ALLOWED_ORIGIN_1=https://your-domain.example
-CONTROL_UI_ALLOWED_ORIGIN_2=http://your-server-ip:18789
-
-# Agent State Repo
-WORKSPACE_STATE_REPO=https://github.com/username/josemar-agent-state.git
-WORKSPACE_REPO_TOKEN=your_github_pat_here
-
-# Sync Configuration
-WORKSPACE_SYNC_ON_START=true
-WORKSPACE_SYNC_INTERVAL=60
-WORKSPACE_MEMORY_DAYS=30
-
-# Auxiliary ML service (optional)
-AUX_ML_ENABLED=false
-COMPOSE_PROFILES=
-AUX_ML_GLM_OCR_URL=
-AUX_ML_GLM_OCR_SHA256=
-AUX_ML_GLM_OCR_MMPROJ_URL=
-AUX_ML_GLM_OCR_MMPROJ_SHA256=
-AUX_ML_URL=http://aux-ml:8091
-AUX_ML_MEMORY_LIMIT=8192m
-AUX_ML_MEMORY_LIMIT_MB=8192
-AUX_ML_MAX_QUEUE=50
-AUX_ML_JOB_TIMEOUT_SECONDS=1800
-AUX_ML_POLL_INTERVAL_SECONDS=2
-AUX_ML_LLAMACPP_TIMEOUT_SECONDS=1800
-AUX_ML_ALLOWED_INPUT_DIRS=/root/.openclaw/workspace
-AUX_ML_ENFORCE_MEMORY_LIMIT=true
-AUX_ML_OCR_MAX_PAGES=50
-
-# Obsidian Sync/Backup
-TS_AUTHKEY=tskey-xxxxx
-TAILSCALE_HOSTNAME=josemar-server
-TS_EXTRA_ARGS=
-SYNCTHING_GUI_BIND_IP=127.0.0.1
-TZ=America/Sao_Paulo
-```
-
-See `.env.example` for the complete list.
-
-### Remote Vault Sync (Tailscale)
-
-To sync Obsidian outside your home network, use Tailscale on server and laptop:
-
-1. Install Tailscale on both devices.
-2. Join the same tailnet (`tailscale up`).
-3. Configure `TS_AUTHKEY` so the server `tailscale` sidecar joins your tailnet automatically.
-4. In Syncthing, set each device address to `tcp://<peer-tailscale-ip>:22000`.
-
-Laptop persistence check (after reboot):
-
-```bash
-systemctl is-enabled tailscaled
-```
-
-If needed:
-
-```bash
-sudo systemctl enable --now tailscaled
-```
-
-Detailed runbook: `docs/obsidian-operations.md`.
-
-### OpenClaw Configuration
-
-The main configuration is in `config/openclaw.json` (JSON5 format). See `config/AGENTS.md` for complete reference.
-
-### Memory Persistence Preferences
-
-This project uses explicit memory persistence preferences to reduce context loss between sessions:
-
-- **Long idle session window**: `session.reset.idleMinutes` is set to `1440` (24h) so conversations are less likely to reset before memory safeguards can run.
-- **Pre-compaction memory flush enabled**: `agents.defaults.compaction.memoryFlush.enabled: true` with `softThresholdTokens: 4000` and `reserveTokensFloor: 40000`.
-- **Memory checkpoint cron**: state repos should include a recurring checkpoint job that updates the **memory daily log** at `memory/YYYY-MM-DD.md` incrementally.
-- **Dedup cursor file**: `memory/flush-state.json` tracks checkpoint progress to reduce repeated entries in the same day.
-
-Terminology note:
-- Use **memory daily log** for `memory/YYYY-MM-DD.md`.
-- Use **Obsidian daily note** only for vault files under `07-Daily/`.
-
-### Auxiliary ML Service (Optional)
-
-The auxiliary ML service runs in a dedicated container and is designed for queue-based, long-running jobs (minutes are acceptable). It currently starts with OCR (`glm-ocr`) and keeps a modular model registry for future additions.
-
-- **Single worker**: exactly one job runs at a time
-- **FIFO queue**: requests are processed in order
-- **Model lifecycle**: load on demand, unload when the next queued job is a different model (or queue is empty)
-- **Internal only**: no host port exposure by default (`http://aux-ml:8091`)
-
-To enable locally:
+Enable the auxiliary ML container locally only when needed:
 
 ```bash
 # In .env
@@ -190,184 +178,212 @@ COMPOSE_PROFILES=aux-ml
 docker compose up -d --build
 ```
 
-Place model files in `aux-ml/models/` before building (see `aux-ml/models/README.md`).
-If files are not present locally, build auto-downloads default Q8 model + mmproj from Hugging Face.
-You can override URLs/checksums with `AUX_ML_GLM_OCR_URL`, `AUX_ML_GLM_OCR_SHA256`, `AUX_ML_GLM_OCR_MMPROJ_URL`, and `AUX_ML_GLM_OCR_MMPROJ_SHA256`.
+The deploy workflow treats unset `AUX_ML_ENABLED` as enabled and writes `COMPOSE_PROFILES=aux-ml`. Set `AUX_ML_ENABLED=false` explicitly in deployment variables if you do not want the auxiliary service.
+
+## Repository Layout
+
+```text
+josemar-assistente/
+├── agent-state/                  # Nested private git repo for assistant state
+├── aux-ml/                       # Optional FastAPI + llama.cpp queue service
+├── config/                       # OpenClaw JSON5 configuration
+├── credentials/                  # Local credentials, not versioned
+├── docs/                         # Operations runbooks
+├── scripts/                      # Workspace sync, backup, privacy tooling
+├── skills-factory/               # Repo-owned core skills shipped in image
+├── templates/agent-state-template/ # Starter private state repo template
+├── tests/                        # Python unit tests
+├── .github/workflows/            # Deploy, stop, runner test, privacy scan
+├── docker-compose.yml            # Service topology and persistent volumes
+├── docker-entrypoint.sh          # Runtime config/state bootstrap
+└── Dockerfile                    # Custom OpenClaw image
+```
+
+## Runtime Services and Volumes
+
+| Service | Purpose |
+| --- | --- |
+| `openclaw` | Main OpenClaw gateway, Telegram channel, Web UI, agent runtime. |
+| `aux-ml` | Optional internal queue API for long-running OCR jobs. |
+| `tailscale` | Private-network sidecar for Syncthing connectivity. |
+| `syncthing` | Syncs the Obsidian vault to trusted devices. |
+| `obsidian-backup` | Runs daily rclone backups into rotating Google Drive slots. |
+
+| Volume | Purpose |
+| --- | --- |
+| `openclaw-workspace` | OpenClaw runtime state, sessions, devices, workspace git repo. |
+| `obsidian-vault` | Obsidian notes and attachments, not git-versioned. |
+| `syncthing-config` | Syncthing identity and folder/device config. |
+| `tailscale-state` | Tailscale node identity and login state. |
+| `obsidian-rclone-config` | rclone config used by vault backup container. |
+| `obsidian-backup-state` | Rotating backup slot pointer. |
 
 ## Skills
 
-Skills are split by ownership:
+Skills are intentionally split by ownership:
 
-- **Repo-shipped core skills**: `skills-factory/` (copied into image at `/opt/josemar/skills`)
-- **User-owned state skills**: `agent-state/skills/` (private state repo, different per user)
+| Scope | Location | Owner | Use |
+| --- | --- | --- | --- |
+| Core platform skills | `skills-factory/` copied to `/opt/josemar/skills` | This repo | Stable runtime capabilities shared by all deployments. |
+| User state skills | `agent-state/skills/` synced to workspace | Private state repo | Personal workflows, user-specific automations, domain-specific processors. |
 
-Current core repo-shipped skills:
+Current repo-shipped skills:
 
-- **vault-gateway**: Single entrypoint for vault routing and operations
-- **aux-ml**: Skill interface for queue-based auxiliary ML jobs
-- **workspace-sync**: Skill interface for workspace git sync/status/commit/push flows
+- `vault-gateway`: entrypoint for vault routing and operations.
+- `aux-ml`: skill interface for queue-based auxiliary ML jobs.
+- `workspace-sync`: skill interface for workspace git sync, status, commit, and push flows.
 
-### Skill Ownership Policy
+Keep personal or sensitive workflows in `agent-state/skills/`, not in this repository.
+The workspace sync script also protects `skills/vault-gateway` from private state-repo overrides so the repo-shipped vault gateway remains the canonical platform entrypoint.
 
-- Keep platform functionality in `skills-factory/`
-- Keep user-specific workflows only in each user's private state repo
-- Do not commit user-specific skills to this main repository
+## Agent State Sync
 
-### Adding Skills
+```mermaid
+sequenceDiagram
+  participant Entrypoint as docker-entrypoint.sh
+  participant Workspace as Runtime Workspace
+  participant Remote as Private State Repo
+  participant OpenClaw as OpenClaw
 
-For core repo-shipped skills:
-
-1. Create or update files under `skills-factory/<skill-name>/`
-2. Rebuild/redeploy so the image ships the new version
-
-For user-owned skills:
-
-1. Create skill in `agent-state/skills/<skill-name>/`
-2. Add `SKILL.md` with YAML frontmatter and executable script
-3. No main-repo config change is needed
-4. Changes sync via the state repo workflow
-
-See `agent-state/skills/AGENTS.md` for skill authoring details.
-
-## Credential Management
-
-Credentials are stored in `credentials/<service>/` and mounted into the container:
-
-```
-credentials/
-├── README.md
-└── gogcli/
-    ├── README.md
-    └── josemar-assistente-openclaw-credentials.json
+  Entrypoint->>Workspace: Ensure workspace git repo exists
+  Entrypoint->>Workspace: Commit local tracked changes
+  Entrypoint->>Remote: Fetch configured branch
+  Remote-->>Workspace: Pull remote state
+  Entrypoint->>Workspace: Resolve conflicts with remote winning
+  Entrypoint->>Workspace: Stage only .sync-manifest paths
+  Workspace->>Remote: Push resulting state
+  Entrypoint->>OpenClaw: Start gateway
 ```
 
-See `credentials/README.md` for setup instructions.
+The sync logic also removes private `skills/vault-gateway` overrides before staging so the repo-owned gateway skill remains authoritative.
 
-## Project Structure
+Important state-sync variables:
 
+- `WORKSPACE_STATE_REPO`: private git repo URL.
+- `WORKSPACE_REPO_TOKEN`: PAT with access to that private repo.
+- `WORKSPACE_GIT_BRANCH`: branch to sync, default `main`.
+- `WORKSPACE_SYNC_ON_START`: run sync during container startup.
+- `WORKSPACE_SYNC_INTERVAL`: periodic sync interval in minutes; `0` disables periodic sync.
+- `WORKSPACE_MEMORY_DAYS`: memory daily log retention window.
+- `WORKSPACE_GIT_USER_EMAIL` and `WORKSPACE_GIT_USER_NAME`: auto-commit identity.
+
+## Obsidian Sync and Backup
+
+OpenClaw mounts the vault at `/root/.openclaw/obsidian`. Syncthing mounts the same Docker volume and syncs it to trusted devices through the `tailscale` sidecar. The backup container mounts the vault read-only and writes rotating snapshots to Google Drive.
+
+Key settings:
+
+- `TS_AUTHKEY`: optional Tailscale auth key for unattended sidecar login.
+- `SYNCTHING_GUI_BIND_IP`: defaults to `127.0.0.1`; avoid exposing the GUI publicly.
+- `OBSIDIAN_BACKUP_TIME`: daily backup time, default `03:15`.
+- `OBSIDIAN_BACKUP_SLOTS`: number of rotating Google Drive slots, default `5`.
+- `OBSIDIAN_GDRIVE_REMOTE` and `OBSIDIAN_GDRIVE_PATH`: rclone destination.
+
+Full runbook: `docs/obsidian-operations.md`.
+
+## Auxiliary ML Service
+
+`aux-ml` is optional and internal-only by default. It exposes a FastAPI queue on `http://aux-ml:8091` for jobs that can take minutes, currently focused on OCR.
+
+```mermaid
+sequenceDiagram
+  participant Skill as aux-ml Skill
+  participant API as aux-ml API
+  participant Queue as FIFO Queue
+  participant Worker as Single Worker
+  participant Router as llama.cpp Router
+
+  Skill->>API: POST /jobs or /run
+  API->>Queue: Enqueue job
+  Worker->>Queue: Pop next job
+  Worker->>Router: Load required model
+  Worker->>Router: Run OCR request
+  Router-->>Worker: OCR result
+  Worker-->>API: Store terminal job result
+  Skill->>API: GET /jobs/{job_id}
 ```
-josemar-assistente/
-├── agent-state/                    # Nested git repo: agent workspace (private repo)
-│   ├── .sync-manifest              # Files to version
-│   ├── .gitignore                  # Security ignore list
-│   ├── skills/                     # User-owned state skills
-│   ├── cron/jobs.json              # Cron definitions synced from state repo
-│   └── memory/flush-state.json     # Checkpoint cursor for memory daily log dedup
-├── config/                         # OpenClaw configuration
-│   ├── AGENTS.md                   # Config reference
-│   └── openclaw.json               # Main config
-├── credentials/                    # Service credentials (NOT versioned)
-│   └── README.md                   # Setup guide
-├── scripts/
-│   ├── workspace-sync.sh           # Git sync logic
-│   ├── obsidian-backup.sh          # Obsidian backup and slot rotation
-│   └── obsidian-backup-daemon.sh   # Daily backup scheduler
-├── aux-ml/                         # Auxiliary llama.cpp batch processing service
-├── skills-factory/                 # Repo-owned core skills shipped in image
-│   ├── vault-gateway/
-│   ├── aux-ml/
-│   └── workspace-sync/
-├── docs/
-│   ├── obsidian-operations.md      # Syncthing/backup setup and operations runbook
-│   └── aux-ml.md                   # Auxiliary ML operations runbook
-├── templates/
-│   └── agent-state-template/       # Template for new agent state repos
-├── .github/workflows/              # CI/CD
-│   └── deploy-to-home-server.yml   # Deployment workflow
-├── Dockerfile                      # Custom OpenClaw image
-├── docker-compose.yml              # Deployment config
-├── docker-entrypoint.sh            # Container startup
-└── .env.example                    # Environment variables template
-```
+
+Useful endpoints:
+
+- `GET /health`: service and memory status.
+- `GET /queue`: queued/running jobs and loaded model.
+- `POST /jobs`: submit asynchronous job.
+- `GET /jobs/{job_id}`: fetch job status/result.
+- `POST /run`: submit and wait for terminal state.
+
+Full runbook: `docs/aux-ml.md`.
 
 ## Deployment
 
-Deployment is handled via GitHub Actions:
+Production deployment is handled by GitHub Actions on a self-hosted runner.
 
-1. Set required secrets (see `.github/workflows/AGENTS.md`)
-2. For unattended remote sync setup, add optional secret `TS_AUTHKEY` (Tailscale auth key)
-3. Set required variables: `WORKSPACE_STATE_REPO` (plus optional `TAILSCALE_HOSTNAME`, `TS_EXTRA_ARGS`, and optional `AUX_ML_*` variables if enabling aux-ml)
-4. Run the `deploy-to-home-server` workflow
+Workflows:
 
-**Fresh Start:** The workflow has a `fresh_start` option that erases ALL data (with a safety countdown).
+- `deploy-to-home-server.yml`: builds, writes `.env` from secrets/variables, loads rclone config, starts services, and checks service status.
+- `stop-service.yml`: stops services without deleting data.
+- `privacy-scan.yml`: runs gitleaks and PII checks on changes.
+- `test-workflow.yml`: verifies self-hosted runner setup.
+
+The deploy workflow has a `fresh_start` option. It removes only the `openclaw-workspace` volume after a safety countdown; it does not remove Obsidian vault, Syncthing, Tailscale, rclone config, or backup state volumes.
+
+Workflow details: `.github/workflows/AGENTS.md`.
+
+## Configuration Notes
+
+- Source config lives in `config/openclaw.json` and uses JSON5 syntax.
+- The entrypoint copies source config into the runtime volume on startup and aligns `openclaw.json`, `.last-good`, `.bak`, and `.bak.*` snapshots.
+- `TELEGRAM_ENABLED` is normalized to a JSON boolean during startup.
+- Agent prompts and personality are not in `openclaw.json`; they live in private state-repo workspace files such as `SOUL.md`, `IDENTITY.md`, `USER.md`, and `MEMORY.md`.
+
+Config recovery runbook: `docs/config-recovery.md`.
 
 ## Development
 
-### Building the Image
-
-```bash
-docker compose build
-```
-
-### Running Vault Gateway Tests
+Run unit tests:
 
 ```bash
 python3 -m unittest discover -s tests -v
+```
 
-# Scoped run for vault-gateway contract tests
+Run a scoped test file:
+
+```bash
 python3 -m unittest tests.vault_gateway.test_gateway_contract -v
 ```
 
-### Viewing Logs
+Set up optional pre-commit hooks:
 
 ```bash
-docker compose logs -f openclaw
+./scripts/setup-pre-commit.sh
 ```
 
-### Local Testing
-
-Disable Telegram to avoid conflicts with production:
+Manual privacy checks:
 
 ```bash
-# In .env
-TELEGRAM_ENABLED=false
-
-docker compose up -d
+python3 scripts/pii_guard.py --staged --fail-on medium
 ```
 
-If testing the auxiliary ML service, also set `COMPOSE_PROFILES=aux-ml` in `.env`.
+## Credentials
 
-Access Web UI at `http://operator:YOUR_PASSWORD@localhost:18789/`
+Credentials go under `credentials/<service>/` and are mounted read-only into the OpenClaw container. Do not commit real credentials.
 
-## Architecture
+Common examples:
 
-### Docker Deployment
+- `credentials/rclone/rclone.conf`: Google Drive backup configuration, usually loaded into the `obsidian-rclone-config` Docker volume.
+- `credentials/gogcli/`: optional gogcli OAuth/keyring material.
 
-- **Image**: Based on `ghcr.io/openclaw/openclaw:latest` with Python, pymupdf, git, gogcli
-- **Auxiliary ML**: Optional dedicated `aux-ml` container based on `llama.cpp` server for queued batch inference
-- **Volumes**:
-  - `openclaw-workspace` for OpenClaw runtime state
-  - `obsidian-vault` for Obsidian notes and attachments
-  - `syncthing-config` for Syncthing identity and config
-  - `tailscale-state` for Tailscale sidecar identity and login state
-  - `obsidian-backup-state` for backup slot pointer
-- **Entrypoint**: Copies config, mounts credentials, runs git sync, starts OpenClaw
+See `credentials/README.md` for setup details.
 
-### Agent State Sync
+## Documentation Index
 
-- **On start**: Commits local changes, fetches remote, merges (remote wins conflicts), pushes
-- **Periodic**: Auto-commits and pushes at configurable interval
-- **Security**: Only files in `.sync-manifest` are versioned
-- **Cron source of truth**: OpenClaw cron jobs are loaded from `agent-state/cron/jobs.json`
-- **Memory rotation**: Logs older than N days are automatically removed
-
-### Skills System
-
-Two-scope skill system:
-- **Core scope** (`skills-factory/`): repo-owned, image-shipped platform capabilities
-- **State scope** (`agent-state/skills/`): user-owned capabilities kept in private state repos
-- If a skill name exists in both scopes, treat the core repo-shipped version as the canonical platform source
-
-## Documentation
-
-- **AGENTS.md**: Root project documentation
-- **config/AGENTS.md**: Configuration reference
-- **agent-state/skills/AGENTS.md**: Skills development guide
-- **credentials/README.md**: Credential management
-- **.github/workflows/AGENTS.md**: CI/CD documentation
-- **docs/obsidian-operations.md**: Obsidian sync/backup operations runbook
-- **docs/aux-ml.md**: Auxiliary ML queue/model lifecycle operations
-- **templates/agent-state-template/README.md**: Agent state setup
+- `AGENTS.md`: root project architecture and assistant guidance.
+- `config/AGENTS.md`: OpenClaw configuration reference.
+- `credentials/README.md`: credential setup and storage rules.
+- `docs/aux-ml.md`: auxiliary ML API, queue, model lifecycle, and OCR operations.
+- `docs/config-recovery.md`: OpenClaw config snapshot recovery behavior.
+- `docs/obsidian-operations.md`: Syncthing, Tailscale, rclone backup, and restore runbook.
+- `.github/workflows/AGENTS.md`: deployment, stop, privacy scan, and runner workflow documentation.
+- `templates/agent-state-template/README.md`: starting point for a private state repo.
 
 ## License
 

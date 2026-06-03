@@ -175,10 +175,12 @@ The deployment handles agent state via git sync:
 
 **Skills Deployment:**
 
-Skills are versioned in the agent-state repo (`agent-state/skills/`). On container start:
-1. The entrypoint runs the git sync script
-2. Skills in the workspace are updated from the git repo
-3. No separate "repo skills" vs "runtime skills" distinction
+Skills are split by ownership:
+
+- Repo-owned platform skills live in `skills-factory/` and are copied into the image at `/opt/josemar/skills`.
+- User-owned skills live in the private state repo under `agent-state/skills/` and sync into the runtime workspace.
+- On container start, the entrypoint runs workspace git sync before OpenClaw loads skills.
+- `workspace-sync.sh` removes private `skills/vault-gateway` overrides so the repo-shipped vault gateway remains canonical.
 
 **Behavior:**
 1. Checks out the repository (with submodules for `agent-state/`)
