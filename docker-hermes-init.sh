@@ -72,6 +72,51 @@ elif [ ! -d "${WORKSPACE_DIR}/.git" ]; then
     seed_workspace_from_manifest
 fi
 
+mkdir -p "${WORKSPACE_DIR}/cron"
+
+if [ ! -f "${WORKSPACE_DIR}/cron/jobs.json" ] && [ -f "${HERMES_HOME}/cron/jobs.json" ]; then
+    log "Seeding workspace cron/jobs.json from Hermes home"
+    cp "${HERMES_HOME}/cron/jobs.json" "${WORKSPACE_DIR}/cron/jobs.json"
+fi
+
+if [ ! -f "${WORKSPACE_DIR}/cron/jobs.json" ]; then
+    log "Creating empty workspace cron/jobs.json"
+    cat > "${WORKSPACE_DIR}/cron/jobs.json" <<'EOF'
+{
+  "jobs": [],
+  "updated_at": null
+}
+EOF
+fi
+
+if [ -d "${HERMES_HOME}/cron" ] && [ ! -L "${HERMES_HOME}/cron" ]; then
+    if [ -f "${HERMES_HOME}/cron/jobs.json" ] && [ ! -f "${WORKSPACE_DIR}/cron/jobs.json" ]; then
+        log "Seeding workspace cron/jobs.json from legacy Hermes cron directory"
+        cp "${HERMES_HOME}/cron/jobs.json" "${WORKSPACE_DIR}/cron/jobs.json"
+    fi
+    log "Replacing Hermes cron directory with workspace-backed symlink"
+    rm -rf "${HERMES_HOME}/cron"
+fi
+
+if [ ! -L "${HERMES_HOME}/cron" ]; then
+    ln -s "${WORKSPACE_DIR}/cron" "${HERMES_HOME}/cron"
+fi
+
+if [ -f "${WORKSPACE_DIR}/cron/jobs.json" ] && [ ! -f "${HERMES_HOME}/cron/jobs.json" ]; then
+    cp "${WORKSPACE_DIR}/cron/jobs.json" "${HERMES_HOME}/cron/jobs.json"
+fi
+
+mkdir -p /root/.openclaw
+if [ ! -e /root/.openclaw/workspace ]; then
+    ln -s "${WORKSPACE_DIR}" /root/.openclaw/workspace
+fi
+if [ ! -e /root/.openclaw/obsidian ]; then
+    ln -s "${OBSIDIAN_VAULT_DIR}" /root/.openclaw/obsidian
+fi
+if [ ! -e /root/.openclaw/credentials ]; then
+    ln -s "${CREDENTIALS_DIR}" /root/.openclaw/credentials
+fi
+
 if [ -d "$CREDENTIALS_SOURCE_DIR" ]; then
     log "Copying mounted credentials into Hermes data volume"
     rm -rf "${CREDENTIALS_DIR:?}/"*
