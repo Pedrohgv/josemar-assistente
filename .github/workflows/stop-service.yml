@@ -17,8 +17,8 @@ jobs:
 
       - name: Verify services stopped
         run: |
-          if docker ps | grep -q josemar-assistente; then
-            echo "ERROR: Container is still running!"
+          if docker ps | grep -Eq 'josemar-hermes|josemar-aux-ml|josemar-syncthing|josemar-tailscale|josemar-obsidian-backup'; then
+            echo "ERROR: One or more services are still running!"
             exit 1
           else
             echo "SUCCESS: Services stopped successfully"

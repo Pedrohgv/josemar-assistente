@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       fresh_start:
-        description: 'WARNING: This ERASES OPENCLAW WORKSPACE DATA - memory, skills, sessions, uploaded files. This action is IRREVERSIBLE. Obsidian vault volume is NOT removed.'
+        description: 'WARNING: This ERASES LEGACY WORKSPACE COMPATIBILITY DATA (openclaw-workspace volume). This action is IRREVERSIBLE. Obsidian vault volume is NOT removed.'
         required: false
         default: false
         type: boolean
@@ -39,8 +39,6 @@ jobs:
         env:
           WORKSPACE_STATE_REPO: ${{ vars.WORKSPACE_STATE_REPO }}
           SYNCTHING_GUI_BIND_IP: ${{ vars.SYNCTHING_GUI_BIND_IP }}
-          HERMES_TELEGRAM_ENABLED: ${{ vars.HERMES_TELEGRAM_ENABLED }}
-          TELEGRAM_ENABLED: ${{ vars.TELEGRAM_ENABLED }}
         run: |
           if [ -z "$WORKSPACE_STATE_REPO" ]; then
             echo "ERROR: Repository variable WORKSPACE_STATE_REPO is required"
@@ -59,40 +57,25 @@ jobs:
             fi
           fi
 
-          if [ "$HERMES_TELEGRAM_ENABLED" = "true" ] && [ "$TELEGRAM_ENABLED" != "false" ]; then
-            echo "ERROR: HERMES_TELEGRAM_ENABLED=true requires repository variable TELEGRAM_ENABLED=false"
-            echo "Telegram bot tokens can only be polled by one runtime at a time."
-            exit 1
-          fi
-
       - name: Create .env file
         env:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_ENABLED_VALUE: ${{ vars.TELEGRAM_ENABLED == 'false' && 'false' || 'true' }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           PRIMARY_TELEGRAM_ID: ${{ secrets.PRIMARY_TELEGRAM_ID }}
-          GATEWAY_AUTH_PASSWORD: ${{ secrets.GATEWAY_AUTH_PASSWORD }}
           GOG_KEYRING_PASSWORD: ${{ secrets.GOG_KEYRING_PASSWORD }}
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
-          CONTROL_UI_ALLOWED_ORIGIN_1: ${{ vars.CONTROL_UI_ALLOWED_ORIGIN_1 }}
-          CONTROL_UI_ALLOWED_ORIGIN_2: ${{ vars.CONTROL_UI_ALLOWED_ORIGIN_2 }}
           WORKSPACE_STATE_REPO: ${{ vars.WORKSPACE_STATE_REPO }}
           WORKSPACE_REPO_TOKEN: ${{ secrets.WORKSPACE_REPO_TOKEN }}
           WORKSPACE_SYNC_ON_START_VALUE: ${{ github.event.inputs.skip_git_sync == 'false' && 'true' || 'false' }}
           HERMES_BASE_IMAGE: ${{ vars.HERMES_BASE_IMAGE }}
           GOGCLI_REF: ${{ vars.GOGCLI_REF }}
-          HERMES_TELEGRAM_BOT_TOKEN: ${{ vars.HERMES_TELEGRAM_ENABLED == 'true' && secrets.TELEGRAM_BOT_TOKEN || '' }}
-          HERMES_TELEGRAM_ALLOWED_USERS: ${{ secrets.PRIMARY_TELEGRAM_ID }}
-          HERMES_TELEGRAM_HOME_CHANNEL: ${{ secrets.PRIMARY_TELEGRAM_ID }}
-          HERMES_GATEWAY_ALLOWED_USERS: ${{ secrets.PRIMARY_TELEGRAM_ID }}
           TZ_VALUE: ${{ vars.TZ }}
           TAILSCALE_HOSTNAME: ${{ vars.TAILSCALE_HOSTNAME }}
           TS_EXTRA_ARGS: ${{ vars.TS_EXTRA_ARGS }}
           SYNCTHING_GUI_BIND_IP: ${{ vars.SYNCTHING_GUI_BIND_IP }}
           AUX_ML_ENABLED_INPUT: ${{ vars.AUX_ML_ENABLED }}
-          HERMES_ENABLED: ${{ vars.HERMES_ENABLED }}
           AUX_ML_MEMORY_LIMIT: ${{ vars.AUX_ML_MEMORY_LIMIT }}
           AUX_ML_MEMORY_LIMIT_MB: ${{ vars.AUX_ML_MEMORY_LIMIT_MB }}
           AUX_ML_MAX_QUEUE: ${{ vars.AUX_ML_MAX_QUEUE }}
@@ -113,14 +96,6 @@ jobs:
             COMPOSE_PROFILES_VALUE="aux-ml"
           fi
 
-          if [ "$HERMES_ENABLED" = "true" ]; then
-            if [ -n "$COMPOSE_PROFILES_VALUE" ]; then
-              COMPOSE_PROFILES_VALUE="${COMPOSE_PROFILES_VALUE},hermes"
-            else
-              COMPOSE_PROFILES_VALUE="hermes"
-            fi
-          fi
-
           umask 077
           : > .env
           write_env() {
@@ -129,15 +104,11 @@ jobs:
 
           write_env ZAI_API_KEY "$ZAI_API_KEY"
           write_env TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
-          write_env TELEGRAM_ENABLED "$TELEGRAM_ENABLED_VALUE"
           write_env DEEPSEEK_API_KEY "$DEEPSEEK_API_KEY"
           write_env OLLAMA_API_KEY "$OLLAMA_API_KEY"
           write_env PRIMARY_TELEGRAM_ID "$PRIMARY_TELEGRAM_ID"
-          write_env GATEWAY_AUTH_PASSWORD "$GATEWAY_AUTH_PASSWORD"
           write_env GOG_KEYRING_PASSWORD "$GOG_KEYRING_PASSWORD"
           write_env TS_AUTHKEY "$TS_AUTHKEY"
-          write_env CONTROL_UI_ALLOWED_ORIGIN_1 "$CONTROL_UI_ALLOWED_ORIGIN_1"
-          write_env CONTROL_UI_ALLOWED_ORIGIN_2 "$CONTROL_UI_ALLOWED_ORIGIN_2"
           write_env WORKSPACE_STATE_REPO "$WORKSPACE_STATE_REPO"
           write_env WORKSPACE_REPO_TOKEN "$WORKSPACE_REPO_TOKEN"
           write_env WORKSPACE_SYNC_ON_START "$WORKSPACE_SYNC_ON_START_VALUE"
@@ -145,10 +116,10 @@ jobs:
           write_env WORKSPACE_MEMORY_DAYS "30"
           write_env HERMES_BASE_IMAGE "$HERMES_BASE_IMAGE"
           write_env GOGCLI_REF "$GOGCLI_REF"
-          write_env HERMES_TELEGRAM_BOT_TOKEN "$HERMES_TELEGRAM_BOT_TOKEN"
-          write_env HERMES_TELEGRAM_ALLOWED_USERS "$HERMES_TELEGRAM_ALLOWED_USERS"
-          write_env HERMES_TELEGRAM_HOME_CHANNEL "$HERMES_TELEGRAM_HOME_CHANNEL"
-          write_env HERMES_GATEWAY_ALLOWED_USERS "$HERMES_GATEWAY_ALLOWED_USERS"
+          write_env HERMES_TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
+          write_env HERMES_TELEGRAM_ALLOWED_USERS "$PRIMARY_TELEGRAM_ID"
+          write_env HERMES_TELEGRAM_HOME_CHANNEL "$PRIMARY_TELEGRAM_ID"
+          write_env HERMES_GATEWAY_ALLOWED_USERS "$PRIMARY_TELEGRAM_ID"
           write_env TZ "$TZ_VALUE"
           write_env TAILSCALE_HOSTNAME "$TAILSCALE_HOSTNAME"
           write_env TS_EXTRA_ARGS "$TS_EXTRA_ARGS"
@@ -227,12 +198,12 @@ jobs:
           echo "Waiting 10 seconds before proceeding..."
           echo "Press Cancel on this workflow to abort."
           sleep 10
-          docker compose down || true
+          docker compose down --remove-orphans || true
           docker volume rm josemar-assistente_openclaw-workspace 2>/dev/null || true
           echo "Workspace volume removed"
 
       - name: Stop existing services
-        run: docker compose down
+        run: docker compose down --remove-orphans
 
       - name: Clean up old Docker images
         run: |
@@ -286,16 +257,12 @@ jobs:
           done
 
       - name: Verify deployment
-        run: docker ps | grep josemar-assistente
-
-      - name: Verify Hermes deployment
-        if: vars.HERMES_ENABLED == 'true'
         run: docker ps | grep josemar-hermes
 
       - name: Verify skill deployment
         run: |
           echo "Checking deployed skills..."
-          docker compose exec -T openclaw ls -la /root/.openclaw/skills/ 2>/dev/null || echo "No skills deployed yet"
+          docker compose exec -T hermes ls -la /opt/josemar/skills/ 2>/dev/null || echo "No skills deployed yet"
 
       - name: Cleanup sensitive files
         if: always()

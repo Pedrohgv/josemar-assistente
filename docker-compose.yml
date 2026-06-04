@@ -1,71 +1,4 @@
 services:
-  openclaw:
-    build: .
-    container_name: josemar-assistente
-    restart: unless-stopped
-    volumes:
-      # Mount configuration directory as source (entrypoint will copy)
-      - ./config:/root/.openclaw-source:ro
-      # Use named volume for ALL persistent OpenClaw state (devices, workspace, sessions, etc.)
-      - openclaw-workspace:/root/.openclaw
-      # Dedicated Obsidian vault volume (not git-versioned)
-      - obsidian-vault:/root/.openclaw/obsidian
-      # Mount agent-state submodule to workspace for git sync
-      - ./agent-state:/root/.openclaw-source-agent-state:ro
-      # Mount credentials directory to OpenClaw standard location
-      # Follows convention: ~/.openclaw/credentials/<service>/
-      - ./credentials:/root/.openclaw-credentials:ro
-    environment:
-      # Environment variables for API keys (to be set in .env file)
-      - ZAI_API_KEY=${ZAI_API_KEY:-}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-true}
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
-      - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
-      - PRIMARY_TELEGRAM_ID=${PRIMARY_TELEGRAM_ID:-}
-      - CONTROL_UI_ALLOWED_ORIGIN_1=${CONTROL_UI_ALLOWED_ORIGIN_1:-}
-      - CONTROL_UI_ALLOWED_ORIGIN_2=${CONTROL_UI_ALLOWED_ORIGIN_2:-}
-      - GATEWAY_AUTH_PASSWORD=${GATEWAY_AUTH_PASSWORD:-}
-      - GOG_KEYRING_PASSWORD=${GOG_KEYRING_PASSWORD:-}
-      # Persist gogcli OAuth tokens in workspace volume (survives container restarts)
-      - XDG_CONFIG_HOME=/root/.openclaw/workspace/.config
-      # Additional users can be added here following the pattern:
-      # - ALICE_TELEGRAM_ID=${ALICE_TELEGRAM_ID:-}
-      # - BOB_TELEGRAM_ID=${BOB_TELEGRAM_ID:-}
-      # Agent state repository configuration
-      - WORKSPACE_STATE_REPO=${WORKSPACE_STATE_REPO:-}
-      - WORKSPACE_REPO_TOKEN=${WORKSPACE_REPO_TOKEN:-}
-      - WORKSPACE_SYNC_ON_START=${WORKSPACE_SYNC_ON_START:-true}
-      - WORKSPACE_SYNC_INTERVAL=${WORKSPACE_SYNC_INTERVAL:-60}
-      - WORKSPACE_MEMORY_DAYS=${WORKSPACE_MEMORY_DAYS:-30}
-      - WORKSPACE_GIT_BRANCH=${WORKSPACE_GIT_BRANCH:-main}
-      - WORKSPACE_GIT_USER_EMAIL=${WORKSPACE_GIT_USER_EMAIL:-agent@josemar.local}
-      - WORKSPACE_GIT_USER_NAME=${WORKSPACE_GIT_USER_NAME:-Josemar Agent}
-      # Auxiliary ML service integration (optional)
-      - AUX_ML_ENABLED=${AUX_ML_ENABLED:-false}
-      - AUX_ML_URL=${AUX_ML_URL:-http://aux-ml:8091}
-      - AUX_ML_JOB_TIMEOUT_SECONDS=${AUX_ML_JOB_TIMEOUT_SECONDS:-1800}
-      - AUX_ML_POLL_INTERVAL_SECONDS=${AUX_ML_POLL_INTERVAL_SECONDS:-2}
-      # Timezone (defaults to Brazil UTC-3)
-      - TZ=${TZ:-America/Sao_Paulo}
-      - JOSEMAR_TIMEZONE=${JOSEMAR_TIMEZONE:-America/Sao_Paulo}
-      # Other environment variables
-      - OPENCLAW_LOG_LEVEL=info
-    ports:
-      # Metrics port
-      - "9090:9090"
-      # OpenClaw Gateway UI (requires GATEWAY_AUTH_PASSWORD)
-      - "18789:18789"
-    networks:
-      - openclaw-network
-    # Health check
-    healthcheck:
-      test: ["CMD", "openclaw", "--version"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
   aux-ml:
     profiles:
       - aux-ml
@@ -100,15 +33,13 @@ services:
       - LLAMA_TIMEOUT=${AUX_ML_LLAMACPP_TIMEOUT_SECONDS:-1800}
       - LLAMA_CONT_BATCHING=false
     volumes:
-      - openclaw-workspace:/root/.openclaw:ro
+      - hermes-workspace:/root/.openclaw/workspace:ro
       - hermes-workspace:/opt/data/workspace:ro
     mem_limit: ${AUX_ML_MEMORY_LIMIT:-8192m}
     networks:
       - openclaw-network
 
   hermes:
-    profiles:
-      - hermes
     build:
       context: .
       dockerfile: Dockerfile.hermes
@@ -123,8 +54,6 @@ services:
       - hermes-data:/opt/data
       # Workspace is separate so aux-ml can read input files without credential access
       - hermes-workspace:/opt/data/workspace
-      # Read-only legacy OpenClaw state for inspection/migration; not used as Hermes home
-      - openclaw-workspace:/opt/josemar/openclaw-legacy:ro
       # Dedicated Obsidian vault volume shared with the current deployment
       - obsidian-vault:/opt/data/obsidian
       # Mounted state repo can seed local development when WORKSPACE_STATE_REPO is absent
@@ -150,10 +79,10 @@ services:
       - GLM_API_KEY=${ZAI_API_KEY:-}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
-      - TELEGRAM_BOT_TOKEN=${HERMES_TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_ALLOWED_USERS=${HERMES_TELEGRAM_ALLOWED_USERS:-}
-      - TELEGRAM_HOME_CHANNEL=${HERMES_TELEGRAM_HOME_CHANNEL:-}
-      - GATEWAY_ALLOWED_USERS=${HERMES_GATEWAY_ALLOWED_USERS:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_ALLOWED_USERS=${PRIMARY_TELEGRAM_ID:-}
+      - TELEGRAM_HOME_CHANNEL=${PRIMARY_TELEGRAM_ID:-}
+      - GATEWAY_ALLOWED_USERS=${PRIMARY_TELEGRAM_ID:-}
       - GOG_KEYRING_PASSWORD=${GOG_KEYRING_PASSWORD:-}
       - XDG_CONFIG_HOME=/opt/data/workspace/.config
       - WORKSPACE_DIR=/opt/data/workspace
@@ -255,8 +184,6 @@ networks:
     driver: bridge
 
 volumes:
-  openclaw-workspace:
-    driver: local
   hermes-data:
     driver: local
   hermes-workspace:
