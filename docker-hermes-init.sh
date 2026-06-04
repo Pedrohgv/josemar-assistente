@@ -85,14 +85,17 @@ if [ -d "$CREDENTIALS_SOURCE_DIR" ]; then
 fi
 
 if [ "${HERMES_SYNC_JOSEMAR_SOUL:-true}" = "true" ] && [ -f "${WORKSPACE_DIR}/SOUL.md" ]; then
-    log "Syncing Josemar SOUL.md into Hermes home"
-    cp "${WORKSPACE_DIR}/SOUL.md" "${HERMES_HOME}/SOUL.md"
+    log "Linking SOUL.md from workspace into Hermes home"
+    rm -f "${HERMES_HOME}/SOUL.md"
+    ln -s "${WORKSPACE_DIR}/SOUL.md" "${HERMES_HOME}/SOUL.md"
 fi
 
+rm -rf "${HERMES_HOME}/memories"
 mkdir -p "${HERMES_HOME}/memories"
 for memory_file in MEMORY.md USER.md; do
     if [ -f "${WORKSPACE_DIR}/${memory_file}" ]; then
-        cp "${WORKSPACE_DIR}/${memory_file}" "${HERMES_HOME}/memories/${memory_file}"
+        log "Linking ${memory_file} from workspace into Hermes home"
+        ln -s "${WORKSPACE_DIR}/${memory_file}" "${HERMES_HOME}/memories/${memory_file}"
     fi
 done
 
