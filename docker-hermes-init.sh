@@ -50,11 +50,25 @@ seed_workspace_from_manifest() {
     done < "${SOURCE_STATE_DIR}/.sync-manifest"
 }
 
-if [ -n "${WORKSPACE_STATE_REPO:-}" ]; then
-    log "Running workspace git sync"
-    WORKSPACE_DIR="$WORKSPACE_DIR" /usr/local/bin/workspace-sync.sh || \
-        log "WARNING: workspace git sync failed; continuing with existing workspace"
-else
+if [ -n "${WORKSPACE_STATE_REPO:-}" ] && [ ! -d "${WORKSPACE_DIR}/.git" ]; then
+    log "Running workspace git sync as hermes user"
+    chown -R "${HERMES_UID_VALUE}:${HERMES_GID_VALUE}" "$WORKSPACE_DIR" 2>/dev/null || true
+    su -s /bin/sh hermes -c "
+        WORKSPACE_DIR='${WORKSPACE_DIR}'
+        WORKSPACE_STATE_REPO='${WORKSPACE_STATE_REPO}'
+        WORKSPACE_REPO_TOKEN='${WORKSPACE_REPO_TOKEN}'
+        WORKSPACE_GIT_BRANCH='${WORKSPACE_GIT_BRANCH:-main}'
+        WORKSPACE_GIT_USER_EMAIL='${WORKSPACE_GIT_USER_EMAIL:-agent@josemar.local}'
+        WORKSPACE_GIT_USER_NAME='${WORKSPACE_GIT_USER_NAME:-Josemar Agent}'
+        WORKSPACE_SYNC_ON_START='${WORKSPACE_SYNC_ON_START:-true}'
+        WORKSPACE_SYNC_INTERVAL='${WORKSPACE_SYNC_INTERVAL:-0}'
+        WORKSPACE_MEMORY_DAYS='${WORKSPACE_MEMORY_DAYS:-30}'
+        export WORKSPACE_DIR WORKSPACE_STATE_REPO WORKSPACE_REPO_TOKEN
+        export WORKSPACE_GIT_BRANCH WORKSPACE_GIT_USER_EMAIL WORKSPACE_GIT_USER_NAME
+        export WORKSPACE_SYNC_ON_START WORKSPACE_SYNC_INTERVAL WORKSPACE_MEMORY_DAYS
+        /usr/local/bin/workspace-sync.sh
+    " || log "WARNING: workspace git sync failed; continuing"
+elif [ ! -d "${WORKSPACE_DIR}/.git" ]; then
     seed_workspace_from_manifest
 fi
 
