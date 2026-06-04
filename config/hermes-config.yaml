@@ -2,7 +2,7 @@
 # Secrets are passed through environment variables or /opt/data/.env.
 
 model:
-  default: "deepseek-v4-pro"
+  default: "kimi-k2.6"
   provider: "ollama-cloud"
 
 terminal:
