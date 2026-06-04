@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+
+.git/
+.github/
+.opencode/
+dump_folder/
+venv/
+
+credentials/
+agent-state/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/

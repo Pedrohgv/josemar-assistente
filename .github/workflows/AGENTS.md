@@ -33,6 +33,7 @@ The following secrets must be configured in the GitHub repository settings:
 | `WORKSPACE_REPO_TOKEN` | GitHub PAT for agent state repo (needs `repo` scope) | Yes |
 | `RCLONE_CONFIG_B64` | Base64-encoded `rclone.conf` used by Obsidian backup container | Yes (for backups) |
 | `TS_AUTHKEY` | Tailscale auth key used by sidecar for unattended tailnet login | No (recommended for remote sync automation) |
+| `HERMES_API_SERVER_KEY` | Bearer token for Hermes API server when enabled | No (required if `HERMES_API_SERVER_ENABLED=true`) |
 
 ## Required GitHub Variables
 
@@ -52,9 +53,18 @@ The following secrets must be configured in the GitHub repository settings:
 | `AUX_ML_JOB_TIMEOUT_SECONDS` | Aux-ml per-job timeout | No (default `1800`) |
 | `AUX_ML_POLL_INTERVAL_SECONDS` | Queue/model poll interval for aux-ml | No (default `2`) |
 | `AUX_ML_LLAMACPP_TIMEOUT_SECONDS` | llama.cpp server read/write timeout for long OCR requests | No (default `1800`) |
-| `AUX_ML_ALLOWED_INPUT_DIRS` | Comma-separated allowed input roots for OCR | No (default `/root/.openclaw/workspace`) |
+| `AUX_ML_ALLOWED_INPUT_DIRS` | Comma-separated allowed input roots for OCR | No (default `/root/.openclaw/workspace,/opt/data/workspace`) |
 | `AUX_ML_ENFORCE_MEMORY_LIMIT` | Fail fast when memory budget is insufficient | No (default `true`) |
 | `AUX_ML_OCR_MAX_PAGES` | Max pages per OCR PDF job | No (default `50`) |
+| `HERMES_ENABLED` | Enable the parallel Hermes Agent service/profile (`true`/`false`) | No (default disabled) |
+| `HERMES_TELEGRAM_ENABLED` | Pass the Telegram token to Hermes. Set `TELEGRAM_ENABLED=false` to avoid token conflicts with OpenClaw. | No (default disabled) |
+| `HERMES_MODEL` | Hermes model override | No (default `glm-5`) |
+| `HERMES_BASE_IMAGE` | Pinned Hermes base image override for deliberate upgrades | No |
+| `GOGCLI_REF` | Pinned gogcli commit/ref override for deliberate upgrades | No |
+| `HERMES_DASHBOARD` | Enable Hermes dashboard (`1`/`0`) | No (default disabled) |
+| `HERMES_DASHBOARD_BIND_IP` | Host IP for published Hermes dashboard port | No (default `127.0.0.1`) |
+| `HERMES_API_SERVER_ENABLED` | Enable Hermes OpenAI-compatible API server | No (default disabled) |
+| `HERMES_API_SERVER_BIND_IP` | Host IP for published Hermes API server port | No (default `127.0.0.1`) |
 
 Security note: avoid setting `SYNCTHING_GUI_BIND_IP=0.0.0.0`.
 
@@ -65,6 +75,16 @@ Deploy now fails fast if `tailscale` sidecar is running but not connected/logged
 When `AUX_ML_ENABLED` is unset, the workflow treats it as `true` and writes `COMPOSE_PROFILES=aux-ml`.
 Set `AUX_ML_ENABLED=false` only when you explicitly want to disable aux-ml for a deployment.
 When aux-ml is enabled, workflow logs whether model files are local or will be downloaded from compose defaults (`glm-ocr` + `mmproj`).
+
+Hermes migration profile:
+
+- Set `HERMES_ENABLED=true` to include the `hermes` Compose profile.
+- Hermes stores native state in the `hermes-data` volume and does not replace `openclaw-workspace`.
+- Hermes Telegram is not enabled by default. Set `HERMES_TELEGRAM_ENABLED=true` only when you intend Hermes to own the bot token.
+- If Hermes uses the production Telegram token, set `TELEGRAM_ENABLED=false` so OpenClaw does not poll with the same token.
+- The deploy workflow fails fast if `HERMES_TELEGRAM_ENABLED=true` without `TELEGRAM_ENABLED=false`.
+- Hermes dashboard/API ports bind to `127.0.0.1` by default; expose them publicly only behind explicit auth/tunnel controls.
+- Use `COMPOSE_PROFILES=aux-ml,hermes` locally when both optional services should run.
 
 ### Obsidian Backup Defaults (from Compose)
 

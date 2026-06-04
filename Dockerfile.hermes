@@ -1,0 +1,50 @@
+ARG GO_IMAGE=golang:1.25.8
+ARG HERMES_BASE_IMAGE=nousresearch/hermes-agent@sha256:64d839ecc207c70cec5e7a5d18cf644ec3be4a8ce8b81f11dd3c2ef737dcf433
+
+# Stage 1: Build gogcli
+FROM ${GO_IMAGE} AS gogcli-builder
+
+ARG GOGCLI_REF=e88964a1b1a46483fbc6a55ecbf2192ff522f2ea
+
+WORKDIR /build
+RUN git clone https://github.com/Pedrohgv/gogcli.git . && \
+    git checkout "$GOGCLI_REF" && \
+    make build
+
+# Stage 2: Josemar-flavored Hermes image
+FROM ${HERMES_BASE_IMAGE}
+
+USER root
+
+# Install Josemar skill/runtime dependencies not guaranteed by the base Hermes image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    gh \
+    python3 \
+    python3-pip \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The Hermes image uses a venv as default python3; ensure pip exists there
+# and install Josemar dependencies into the venv so skills can import them.
+RUN /opt/hermes/.venv/bin/python3 -m ensurepip --upgrade \
+    && /opt/hermes/.venv/bin/python3 -m pip install --no-cache-dir pymupdf
+
+COPY --from=gogcli-builder /build/bin/gog /usr/local/bin/gog
+RUN chmod +x /usr/local/bin/gog
+
+RUN mkdir -p /opt/josemar/skills /opt/josemar/hermes
+
+COPY skills-factory/vault-gateway /opt/josemar/skills/vault-gateway
+COPY skills-factory/aux-ml /opt/josemar/skills/aux-ml
+COPY skills-factory/workspace-sync /opt/josemar/skills/workspace-sync
+RUN chmod +x /opt/josemar/skills/vault-gateway/vault-gateway \
+    /opt/josemar/skills/aux-ml/aux-ml \
+    /opt/josemar/skills/workspace-sync/workspace-sync
+
+COPY scripts/workspace-sync.sh /usr/local/bin/workspace-sync.sh
+RUN chmod +x /usr/local/bin/workspace-sync.sh
+
+COPY config/hermes-config.yaml /opt/josemar/hermes/config.yaml
+COPY docker-hermes-init.sh /etc/cont-init.d/00-josemar-setup
+RUN chmod +x /etc/cont-init.d/00-josemar-setup

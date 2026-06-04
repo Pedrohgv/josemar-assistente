@@ -1,0 +1,63 @@
+# Josemar Hermes Agent configuration template.
+# Secrets are passed through environment variables or /opt/data/.env.
+
+model:
+  default: "glm-5"
+  provider: "zai"
+
+terminal:
+  backend: "local"
+  cwd: "/opt/data/workspace"
+  timeout: 180
+  lifetime_seconds: 300
+  container_cpu: 1
+  container_memory: 5120
+  container_disk: 51200
+  container_persistent: true
+
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 2200
+  user_char_limit: 1375
+  nudge_interval: 10
+  flush_min_turns: 6
+
+session_reset:
+  mode: both
+  idle_minutes: 1440
+  at_hour: 4
+
+group_sessions_per_user: true
+
+compression:
+  enabled: true
+  threshold: 0.50
+  target_ratio: 0.20
+  protect_last_n: 20
+  protect_first_n: 3
+
+skills:
+  creation_nudge_interval: 15
+  external_dirs:
+    - /opt/josemar/skills
+    - /opt/data/workspace/skills
+
+platform_toolsets:
+  cli: [hermes-cli]
+  telegram: [hermes-telegram]
+
+display:
+  compact: true
+  tool_progress: new
+  interim_assistant_messages: true
+  long_running_notifications: true
+  platforms:
+    telegram:
+      tool_progress: off
+      cleanup_progress: true
+
+agent:
+  max_turns: 60
+  reasoning_effort: "medium"
+  verbose: false

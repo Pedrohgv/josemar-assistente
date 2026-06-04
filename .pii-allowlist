@@ -3,3 +3,6 @@
 #   file_path:line_number:kind:value:line_text
 #
 # Keep this file minimal and documented when adding exceptions.
+agent@josemar\.local
+token@github\.com
+YOUR_GATEWAY_AUTH_PASSWORD@your-domain\.com
