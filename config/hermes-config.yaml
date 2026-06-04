@@ -2,8 +2,8 @@
 # Secrets are passed through environment variables or /opt/data/.env.
 
 model:
-  default: "glm-5"
-  provider: "zai"
+  default: "deepseek-v4-pro"
+  provider: "ollama-cloud"
 
 terminal:
   backend: "local"
