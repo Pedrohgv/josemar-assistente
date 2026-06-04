@@ -158,7 +158,7 @@ services:
       - XDG_CONFIG_HOME=/opt/data/workspace/.config
       - WORKSPACE_DIR=/opt/data/workspace
       - OBSIDIAN_VAULT_DIR=/opt/data/obsidian
-      - VAULT_GATEWAY_ALLOWED_ROOTS=/opt/data/obsidian,/opt/data/workspace
+      - VAULT_GATEWAY_ALLOWED_ROOTS=/opt/data/obsidian:/opt/data/workspace
       - JOSEMAR_CREDENTIALS_DIR=/opt/data/credentials
       - WORKSPACE_STATE_REPO=${WORKSPACE_STATE_REPO:-}
       - WORKSPACE_REPO_TOKEN=${WORKSPACE_REPO_TOKEN:-}
