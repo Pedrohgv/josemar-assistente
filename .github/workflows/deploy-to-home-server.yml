@@ -41,8 +41,6 @@ jobs:
           SYNCTHING_GUI_BIND_IP: ${{ vars.SYNCTHING_GUI_BIND_IP }}
           HERMES_TELEGRAM_ENABLED: ${{ vars.HERMES_TELEGRAM_ENABLED }}
           TELEGRAM_ENABLED: ${{ vars.TELEGRAM_ENABLED }}
-          HERMES_API_SERVER_ENABLED: ${{ vars.HERMES_API_SERVER_ENABLED }}
-          HERMES_API_SERVER_KEY: ${{ secrets.HERMES_API_SERVER_KEY }}
         run: |
           if [ -z "$WORKSPACE_STATE_REPO" ]; then
             echo "ERROR: Repository variable WORKSPACE_STATE_REPO is required"
@@ -67,11 +65,6 @@ jobs:
             exit 1
           fi
 
-          if [ "$HERMES_API_SERVER_ENABLED" = "true" ] && [ -z "$HERMES_API_SERVER_KEY" ]; then
-            echo "ERROR: HERMES_API_SERVER_ENABLED=true requires secret HERMES_API_SERVER_KEY"
-            exit 1
-          fi
-
       - name: Create .env file
         env:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
@@ -90,20 +83,6 @@ jobs:
           WORKSPACE_SYNC_ON_START_VALUE: ${{ github.event.inputs.skip_git_sync == 'false' && 'true' || 'false' }}
           HERMES_BASE_IMAGE: ${{ vars.HERMES_BASE_IMAGE }}
           GOGCLI_REF: ${{ vars.GOGCLI_REF }}
-          HERMES_MODEL: ${{ vars.HERMES_MODEL }}
-          HERMES_UID: ${{ vars.HERMES_UID }}
-          HERMES_GID: ${{ vars.HERMES_GID }}
-          HERMES_DASHBOARD: ${{ vars.HERMES_DASHBOARD }}
-          HERMES_DASHBOARD_HOST: ${{ vars.HERMES_DASHBOARD_HOST }}
-          HERMES_DASHBOARD_BIND_IP: ${{ vars.HERMES_DASHBOARD_BIND_IP }}
-          HERMES_DASHBOARD_PORT: ${{ vars.HERMES_DASHBOARD_PORT }}
-          HERMES_DASHBOARD_INSECURE: ${{ vars.HERMES_DASHBOARD_INSECURE }}
-          HERMES_API_SERVER_ENABLED: ${{ vars.HERMES_API_SERVER_ENABLED }}
-          HERMES_API_SERVER_HOST: ${{ vars.HERMES_API_SERVER_HOST }}
-          HERMES_API_SERVER_BIND_IP: ${{ vars.HERMES_API_SERVER_BIND_IP }}
-          HERMES_API_SERVER_PORT: ${{ vars.HERMES_API_SERVER_PORT }}
-          HERMES_API_SERVER_KEY: ${{ secrets.HERMES_API_SERVER_KEY }}
-          HERMES_API_SERVER_CORS_ORIGINS: ${{ vars.HERMES_API_SERVER_CORS_ORIGINS }}
           HERMES_TELEGRAM_BOT_TOKEN: ${{ vars.HERMES_TELEGRAM_ENABLED == 'true' && secrets.TELEGRAM_BOT_TOKEN || '' }}
           HERMES_TELEGRAM_ALLOWED_USERS: ${{ secrets.PRIMARY_TELEGRAM_ID }}
           HERMES_TELEGRAM_HOME_CHANNEL: ${{ secrets.PRIMARY_TELEGRAM_ID }}
@@ -166,20 +145,6 @@ jobs:
           write_env WORKSPACE_MEMORY_DAYS "30"
           write_env HERMES_BASE_IMAGE "$HERMES_BASE_IMAGE"
           write_env GOGCLI_REF "$GOGCLI_REF"
-          write_env HERMES_MODEL "$HERMES_MODEL"
-          write_env HERMES_UID "$HERMES_UID"
-          write_env HERMES_GID "$HERMES_GID"
-          write_env HERMES_DASHBOARD "$HERMES_DASHBOARD"
-          write_env HERMES_DASHBOARD_HOST "$HERMES_DASHBOARD_HOST"
-          write_env HERMES_DASHBOARD_BIND_IP "$HERMES_DASHBOARD_BIND_IP"
-          write_env HERMES_DASHBOARD_PORT "$HERMES_DASHBOARD_PORT"
-          write_env HERMES_DASHBOARD_INSECURE "$HERMES_DASHBOARD_INSECURE"
-          write_env HERMES_API_SERVER_ENABLED "$HERMES_API_SERVER_ENABLED"
-          write_env HERMES_API_SERVER_HOST "$HERMES_API_SERVER_HOST"
-          write_env HERMES_API_SERVER_BIND_IP "$HERMES_API_SERVER_BIND_IP"
-          write_env HERMES_API_SERVER_PORT "$HERMES_API_SERVER_PORT"
-          write_env HERMES_API_SERVER_KEY "$HERMES_API_SERVER_KEY"
-          write_env HERMES_API_SERVER_CORS_ORIGINS "$HERMES_API_SERVER_CORS_ORIGINS"
           write_env HERMES_TELEGRAM_BOT_TOKEN "$HERMES_TELEGRAM_BOT_TOKEN"
           write_env HERMES_TELEGRAM_ALLOWED_USERS "$HERMES_TELEGRAM_ALLOWED_USERS"
           write_env HERMES_TELEGRAM_HOME_CHANNEL "$HERMES_TELEGRAM_HOME_CHANNEL"

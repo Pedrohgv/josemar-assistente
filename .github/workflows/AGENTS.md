@@ -57,14 +57,9 @@ The following secrets must be configured in the GitHub repository settings:
 | `AUX_ML_ENFORCE_MEMORY_LIMIT` | Fail fast when memory budget is insufficient | No (default `true`) |
 | `AUX_ML_OCR_MAX_PAGES` | Max pages per OCR PDF job | No (default `50`) |
 | `HERMES_ENABLED` | Enable the parallel Hermes Agent service/profile (`true`/`false`) | No (default disabled) |
-| `HERMES_TELEGRAM_ENABLED` | Pass the Telegram token to Hermes. Set `TELEGRAM_ENABLED=false` to avoid token conflicts with OpenClaw. | No (default disabled) |
-| `HERMES_MODEL` | Hermes model override | No (default `glm-5`) |
-| `HERMES_BASE_IMAGE` | Pinned Hermes base image override for deliberate upgrades | No |
-| `GOGCLI_REF` | Pinned gogcli commit/ref override for deliberate upgrades | No |
-| `HERMES_DASHBOARD` | Enable Hermes dashboard (`1`/`0`) | No (default disabled) |
-| `HERMES_DASHBOARD_BIND_IP` | Host IP for published Hermes dashboard port | No (default `127.0.0.1`) |
-| `HERMES_API_SERVER_ENABLED` | Enable Hermes OpenAI-compatible API server | No (default disabled) |
-| `HERMES_API_SERVER_BIND_IP` | Host IP for published Hermes API server port | No (default `127.0.0.1`) |
+| `HERMES_TELEGRAM_ENABLED` | Pass the Telegram token to Hermes. Requires `TELEGRAM_ENABLED=false`. | No (default disabled) |
+| `HERMES_BASE_IMAGE` | Pinned Hermes base image override for deliberate upgrades | No (defaults to pinned digest in compose) |
+| `GOGCLI_REF` | Pinned gogcli commit/ref override for deliberate upgrades | No (defaults to pinned commit in compose) |
 
 Security note: avoid setting `SYNCTHING_GUI_BIND_IP=0.0.0.0`.
 

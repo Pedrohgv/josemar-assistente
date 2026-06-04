@@ -18,15 +18,6 @@ HERMES_GID_VALUE="${HERMES_GID:-${PGID:-10000}}"
 
 mkdir -p "$HERMES_HOME" "$WORKSPACE_DIR" "$OBSIDIAN_VAULT_DIR" "$CREDENTIALS_DIR"
 
-case "${API_SERVER_ENABLED:-false}" in
-    true|1|yes|on)
-        if [ -z "${API_SERVER_KEY:-}" ]; then
-            echo "[josemar-hermes] ERROR: API_SERVER_ENABLED requires API_SERVER_KEY" >&2
-            exit 1
-        fi
-        ;;
-esac
-
 if [ ! -f "${HERMES_HOME}/config.yaml" ] && [ -f /opt/josemar/hermes/config.yaml ]; then
     log "Seeding Hermes config.yaml"
     cp /opt/josemar/hermes/config.yaml "${HERMES_HOME}/config.yaml"
