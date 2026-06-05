@@ -4,7 +4,7 @@ This document describes the optional `aux-ml` container used for long-running, q
 
 ## Goals
 
-- Run auxiliary models separately from OpenClaw/Josemar.
+- Run auxiliary models separately from Hermes/Josemar.
 - Process jobs as batch workloads (minute-scale jobs are acceptable).
 - Keep strict FIFO ordering and process one job at a time.
 - Load models on demand and unload them when not needed.
@@ -94,7 +94,7 @@ from llama-router child requests.
 {
   "task": "ocr",
   "model": "glm-ocr",
-  "file_path": "/root/.openclaw/workspace/uploads/invoice.pdf",
+  "file_path": "/opt/data/workspace/uploads/invoice.pdf",
   "prompt": "Text Recognition:",
   "column_split": 1,
   "column_split_pages": [2]
@@ -133,7 +133,7 @@ When adding bigger models, update both:
 
 - OCR file paths are restricted to roots declared by `AUX_ML_ALLOWED_INPUT_DIRS`.
 - Service has no host port mapping by default.
-- OpenClaw calls the service via internal Docker networking.
+- Hermes calls the service via internal Docker networking.
 
 ## Extending to New Models
 

@@ -123,7 +123,7 @@ echo '{"action": "gh", "command": "pr create --title fix --body desc"}' | worksp
 
 - Only files listed in `.sync-manifest` are staged/committed
 - Merge conflicts use remote-wins strategy
-- The workspace directory is `/root/.openclaw/workspace` inside the container
+- The workspace directory is `/opt/data/workspace` inside the container
 - `gh` commands run in the context of the workspace git repo
 - Credentials are automatically configured from environment variables
 - Remote URLs are kept clean (no embedded tokens) to prevent duplication issues

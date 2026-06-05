@@ -14,7 +14,7 @@ Use this file as the source of truth for future operators.
 - `tailscale` sidecar provides private network connectivity for sync.
 - `syncthing` container syncs the vault to client devices through the sidecar namespace.
 - `obsidian-backup` container uploads one rotating snapshot per day to Google Drive.
-- `openclaw` mounts the same vault volume at `/root/.openclaw/obsidian`.
+- `hermes` mounts the same vault volume at `/opt/data/obsidian`.
 
 Key volumes:
 
@@ -123,7 +123,7 @@ dc logs --tail=80 obsidian-backup
 
 Expected:
 
-- `openclaw`, `tailscale`, `syncthing`, `obsidian-backup` are `Up`
+- `hermes`, `tailscale`, `syncthing`, `obsidian-backup` are `Up`
 - Tailscale reports a `100.x.y.z` address
 
 Check runtime state explicitly:
@@ -299,7 +299,7 @@ Expected files/directories:
 1. Stop writers:
 
 ```bash
-dc stop openclaw syncthing
+dc stop hermes syncthing
 ```
 
 2. Get vault volume mountpoint:
@@ -322,7 +322,7 @@ docker run --rm \
 4. Start services:
 
 ```bash
-dc up -d syncthing openclaw
+dc up -d syncthing hermes
 ```
 
 5. Confirm sync health:
@@ -342,7 +342,7 @@ Normal redeploy preserves:
 
 Workflow `fresh_start=true` removes only:
 
-- `openclaw-workspace`
+- `openclaw-workspace` (legacy compatibility volume only)
 
 It does not remove Obsidian volumes.
 

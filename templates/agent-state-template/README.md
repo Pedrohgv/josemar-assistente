@@ -26,9 +26,9 @@ This is a **private** git repo that stores the agent's identity, personality, sk
 
 ## First-Time Bootstrap
 
-On the first run, if the workspace has no personality files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`), OpenClaw runs an interactive bootstrap ritual. It asks questions one at a time to define the agent's name, personality, and user preferences, then writes the results to the workspace files.
+On the first run, if the workspace has no personality files (`SOUL.md`, `USER.md`, `AGENTS.md`), Hermes will guide initial setup through normal agent interaction.
 
-**For bootstrap to run, the initial commit to the state repo should NOT include personality `.md` files.** Only include:
+**For clean bootstrap behavior, the initial commit to the state repo should NOT include personality `.md` files.** Only include:
 - `.gitignore`
 - `.sync-manifest`
 - `skills/`
@@ -36,7 +36,7 @@ On the first run, if the workspace has no personality files (`SOUL.md`, `IDENTIT
 - `memory/`
 - `avatars/`
 
-Personality files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`) are created by OpenClaw during bootstrap and automatically versioned by periodic sync.
+Personality files (`SOUL.md`, `USER.md`, `AGENTS.md`, optionally `MEMORY.md`) are created/maintained by Hermes and automatically versioned by periodic sync.
 
 Operational files (`TOOLS.md`, `BOOT.md`, `HEARTBEAT.md`) are pre-seeded in this template to document core capabilities available out of the box.
 
@@ -51,26 +51,25 @@ This project separates skills by ownership:
 
 Do not copy user-specific skills into the main repository. Keep them in the state repo.
 
-**To trigger bootstrap on an existing deployment:**
+**To trigger bootstrap-like setup on an existing deployment:**
 1. Delete all personality `.md` files from the state repo and push
 2. Deploy with `fresh_start: true` (deletes Docker volume, forces fresh clone)
-3. On first message, OpenClaw will start the Q&A ritual
+3. On first message, Hermes will rebuild baseline context from your prompts and state
 
 ## File Map
 
 | File | Purpose | Created by |
 |------|---------|------------|
-| `AGENTS.md` | Operating instructions for the agent | Bootstrap / manual |
-| `SOUL.md` | Persona, tone, boundaries | Bootstrap / manual |
-| `USER.md` | User information and preferences | Bootstrap / manual |
-| `IDENTITY.md` | Agent name, vibe, emoji | Bootstrap |
-| `MEMORY.md` | Long-term curated memory | Bootstrap / agent |
+| `AGENTS.md` | Operating instructions for the agent | Agent / manual |
+| `SOUL.md` | Persona, tone, boundaries | Agent / manual |
+| `USER.md` | User information and preferences | Agent / manual |
+| `MEMORY.md` | Long-term curated memory | Agent |
 | `TOOLS.md` | Core capability notes and conventions | Template / manual |
 | `HEARTBEAT.md` | Heartbeat checklist (optional) | Template / manual |
 | `BOOT.md` | Startup checklist (optional) | Template / manual |
-| `BOOTSTRAP.md` | One-time setup ritual (auto-deleted) | OpenClaw |
+| `BOOTSTRAP.md` | One-time setup ritual (optional, user-defined) | Manual |
 | `skills/` | Agent skills (SKILL.md + executables) | Manual |
-| `cron/jobs.json` | Cron job definitions loaded by OpenClaw | Manual / agent |
+| `cron/jobs.json` | Cron job definitions loaded by Hermes | Manual / agent |
 | `memory/` | Daily memory logs (rotated) | Agent |
 | `avatars/` | Agent avatar images | Manual |
 
