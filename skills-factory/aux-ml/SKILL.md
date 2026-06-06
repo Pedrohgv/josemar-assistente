@@ -20,7 +20,7 @@ Submits and tracks long-running auxiliary ML jobs in the `aux-ml` container.
 
 ## Important Notes
 
-- **File location:** Input files should use `/opt/data/workspace/` (e.g. `uploads/`). Compatibility path `/root/.openclaw/workspace/` is also accepted.
+- **File location:** Input files should use `/opt/data/workspace/` (e.g. `uploads/`).
 - **Processing time:** OCR jobs can take **30+ minutes** depending on page count, column split, and model load. Set `timeout_seconds` accordingly (recommend ≥ 1800).
 - **Queue system:** Jobs are processed sequentially. Use `queue_status` to check depth before submitting. Avoid submitting duplicate or unnecessary jobs to prevent queue buildup.
 

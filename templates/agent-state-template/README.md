@@ -2,7 +2,7 @@
 
 Template for the [Josemar Assistente](../) agent state repository.
 
-This is a **private** git repo that stores the agent's identity, personality, skills, and memory. It is synced automatically with the running Docker container.
+This is a **private** git repo that stores the agent's identity, personality, user-owned skills, cron jobs, and concise memory files. It is synced automatically with the running Docker container.
 
 ## Setup
 
@@ -33,12 +33,9 @@ On the first run, if the workspace has no personality files (`SOUL.md`, `USER.md
 - `.sync-manifest`
 - `skills/`
 - `cron/jobs.json`
-- `memory/`
 - `avatars/`
 
 Personality files (`SOUL.md`, `USER.md`, `AGENTS.md`, optionally `MEMORY.md`) are created/maintained by Hermes and automatically versioned by periodic sync.
-
-This template also includes a memory checkpoint cron job (`cron/jobs.json`) plus `memory/flush-state.json` to keep daily memory logs updated incrementally with reduced duplication.
 
 ## Skill Ownership Model
 
@@ -72,7 +69,6 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 | `BOOT.md` | Startup checklist (optional) | Template / manual |
 | `skills/` | Agent skills (SKILL.md + executables) | Manual |
 | `cron/jobs.json` | Cron job definitions loaded by Hermes | Manual / agent |
-| `memory/` | Daily memory logs (rotated) | Agent |
 | `avatars/` | Agent avatar images | Manual |
 
 ## Security
@@ -86,4 +82,3 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 
 - On container start: agent's local changes are committed, then merged with remote (remote wins conflicts)
 - Periodic: changes are auto-committed and pushed (configurable interval)
-- Memory logs are rotated based on `WORKSPACE_MEMORY_DAYS`

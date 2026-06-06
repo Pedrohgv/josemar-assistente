@@ -48,7 +48,6 @@ All workflows run on a self-hosted runner.
 | `AUX_ML_JOB_TIMEOUT_SECONDS` | No | aux-ml job timeout |
 | `AUX_ML_POLL_INTERVAL_SECONDS` | No | aux-ml poll interval |
 | `AUX_ML_LLAMACPP_TIMEOUT_SECONDS` | No | llama.cpp timeout |
-| `AUX_ML_ALLOWED_INPUT_DIRS` | No | Allowed OCR input roots |
 | `AUX_ML_ENFORCE_MEMORY_LIMIT` | No | Enforce aux-ml memory check |
 | `AUX_ML_OCR_MAX_PAGES` | No | OCR max pages per file |
 | `HERMES_BASE_IMAGE` | No | Override pinned Hermes base image |
@@ -60,7 +59,7 @@ Security note: keep `SYNCTHING_GUI_BIND_IP` on localhost unless explicitly secur
 
 - Deploy writes `.env` from repository secrets/variables.
 - Deploy uses `docker compose down --remove-orphans` before rebuild/start.
-- `fresh_start=true` removes only legacy `openclaw-workspace` volume.
+- `fresh_start=true` removes only the `hermes-workspace` volume.
 - Deploy verifies Hermes container health (`josemar-hermes`).
 - Deploy verifies repo-owned skills under `/opt/josemar/skills`.
 - Deploy removes plaintext `.env` at the end.

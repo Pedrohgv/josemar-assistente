@@ -39,7 +39,7 @@ def _env_float(name: str, default: float) -> float:
 
 def _parse_allowed_input_dirs(raw: str | None) -> tuple[Path, ...]:
     if not raw:
-        return (Path("/root/.openclaw/workspace"),)
+        return (Path("/opt/data/workspace"),)
 
     entries: list[Path] = []
     for part in raw.split(","):
@@ -49,7 +49,7 @@ def _parse_allowed_input_dirs(raw: str | None) -> tuple[Path, ...]:
         entries.append(Path(stripped).expanduser())
 
     if not entries:
-        return (Path("/root/.openclaw/workspace"),)
+        return (Path("/opt/data/workspace"),)
     return tuple(entries)
 
 

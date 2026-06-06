@@ -62,10 +62,9 @@ if [ -n "${WORKSPACE_STATE_REPO:-}" ] && [ ! -d "${WORKSPACE_DIR}/.git" ]; then
         WORKSPACE_GIT_USER_NAME='${WORKSPACE_GIT_USER_NAME:-Josemar Agent}'
         WORKSPACE_SYNC_ON_START='${WORKSPACE_SYNC_ON_START:-true}'
         WORKSPACE_SYNC_INTERVAL='${WORKSPACE_SYNC_INTERVAL:-0}'
-        WORKSPACE_MEMORY_DAYS='${WORKSPACE_MEMORY_DAYS:-30}'
         export WORKSPACE_DIR WORKSPACE_STATE_REPO WORKSPACE_REPO_TOKEN
         export WORKSPACE_GIT_BRANCH WORKSPACE_GIT_USER_EMAIL WORKSPACE_GIT_USER_NAME
-        export WORKSPACE_SYNC_ON_START WORKSPACE_SYNC_INTERVAL WORKSPACE_MEMORY_DAYS
+        export WORKSPACE_SYNC_ON_START WORKSPACE_SYNC_INTERVAL
         /usr/local/bin/workspace-sync.sh
     " || log "WARNING: workspace git sync failed; continuing"
 elif [ ! -d "${WORKSPACE_DIR}/.git" ]; then
@@ -104,17 +103,6 @@ fi
 
 if [ -f "${WORKSPACE_DIR}/cron/jobs.json" ] && [ ! -f "${HERMES_HOME}/cron/jobs.json" ]; then
     cp "${WORKSPACE_DIR}/cron/jobs.json" "${HERMES_HOME}/cron/jobs.json"
-fi
-
-mkdir -p /root/.openclaw
-if [ ! -e /root/.openclaw/workspace ]; then
-    ln -s "${WORKSPACE_DIR}" /root/.openclaw/workspace
-fi
-if [ ! -e /root/.openclaw/obsidian ]; then
-    ln -s "${OBSIDIAN_VAULT_DIR}" /root/.openclaw/obsidian
-fi
-if [ ! -e /root/.openclaw/credentials ]; then
-    ln -s "${CREDENTIALS_DIR}" /root/.openclaw/credentials
 fi
 
 if [ -d "$CREDENTIALS_SOURCE_DIR" ]; then

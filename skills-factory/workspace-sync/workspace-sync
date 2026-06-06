@@ -2,7 +2,7 @@
 
 set -e
 
-WORKSPACE_DIR="${WORKSPACE_DIR:-/root/.openclaw/workspace}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/opt/data/workspace}"
 MANIFEST_PATH="${WORKSPACE_DIR}/.sync-manifest"
 REPO_TOKEN="${WORKSPACE_REPO_TOKEN:-}"
 

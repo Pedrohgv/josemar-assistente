@@ -22,7 +22,7 @@ services:
       - AUX_ML_MAX_QUEUE=${AUX_ML_MAX_QUEUE:-50}
       - AUX_ML_JOB_TIMEOUT_SECONDS=${AUX_ML_JOB_TIMEOUT_SECONDS:-1800}
       - AUX_ML_POLL_INTERVAL_SECONDS=${AUX_ML_POLL_INTERVAL_SECONDS:-1}
-      - AUX_ML_ALLOWED_INPUT_DIRS=${AUX_ML_ALLOWED_INPUT_DIRS:-/root/.openclaw/workspace,/opt/data/workspace}
+      - AUX_ML_ALLOWED_INPUT_DIRS=${AUX_ML_ALLOWED_INPUT_DIRS:-/opt/data/workspace}
       - AUX_ML_ENFORCE_MEMORY_LIMIT=${AUX_ML_ENFORCE_MEMORY_LIMIT:-true}
       - AUX_ML_MEMORY_LIMIT_MB=${AUX_ML_MEMORY_LIMIT_MB:-8192}
       - AUX_ML_OCR_MAX_PAGES=${AUX_ML_OCR_MAX_PAGES:-50}
@@ -33,11 +33,10 @@ services:
       - LLAMA_TIMEOUT=${AUX_ML_LLAMACPP_TIMEOUT_SECONDS:-1800}
       - LLAMA_CONT_BATCHING=false
     volumes:
-      - hermes-workspace:/root/.openclaw/workspace:ro
       - hermes-workspace:/opt/data/workspace:ro
     mem_limit: ${AUX_ML_MEMORY_LIMIT:-8192m}
     networks:
-      - openclaw-network
+      - josemar-network
 
   hermes:
     build:
@@ -93,7 +92,6 @@ services:
       - WORKSPACE_REPO_TOKEN=${WORKSPACE_REPO_TOKEN:-}
       - WORKSPACE_SYNC_ON_START=${WORKSPACE_SYNC_ON_START:-true}
       - WORKSPACE_SYNC_INTERVAL=${WORKSPACE_SYNC_INTERVAL:-60}
-      - WORKSPACE_MEMORY_DAYS=${WORKSPACE_MEMORY_DAYS:-30}
       - WORKSPACE_GIT_BRANCH=${WORKSPACE_GIT_BRANCH:-main}
       - WORKSPACE_GIT_USER_EMAIL=${WORKSPACE_GIT_USER_EMAIL:-agent@josemar.local}
       - WORKSPACE_GIT_USER_NAME=${WORKSPACE_GIT_USER_NAME:-Josemar Agent}
@@ -109,7 +107,7 @@ services:
       # Hermes dashboard (disabled unless HERMES_DASHBOARD=1)
       - "${HERMES_DASHBOARD_BIND_IP:-0.0.0.0}:${HERMES_DASHBOARD_PORT:-9119}:9119"
     networks:
-      - openclaw-network
+      - josemar-network
     healthcheck:
       test: ["CMD", "hermes", "version"]
       interval: 30s
@@ -154,7 +152,7 @@ services:
       # Syncthing GUI/API should stay localhost-only by default
       - "${SYNCTHING_GUI_BIND_IP:-127.0.0.1}:8384:8384"
     networks:
-      - openclaw-network
+      - josemar-network
 
   obsidian-backup:
     image: rclone/rclone:latest
@@ -177,10 +175,10 @@ services:
       - obsidian-backup-state:/state
     entrypoint: ["/bin/sh", "/scripts/obsidian-backup-daemon.sh"]
     networks:
-      - openclaw-network
+      - josemar-network
 
 networks:
-  openclaw-network:
+  josemar-network:
     driver: bridge
 
 volumes:

@@ -342,7 +342,7 @@ Normal redeploy preserves:
 
 Workflow `fresh_start=true` removes only:
 
-- `openclaw-workspace` (legacy compatibility volume only)
+- `hermes-workspace` (agent state workspace)
 
 It does not remove Obsidian volumes.
 

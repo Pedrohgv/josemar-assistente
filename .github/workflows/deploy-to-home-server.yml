@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       fresh_start:
-        description: 'WARNING: This ERASES LEGACY WORKSPACE COMPATIBILITY DATA (openclaw-workspace volume). This action is IRREVERSIBLE. Obsidian vault volume is NOT removed.'
+        description: 'WARNING: This ERASES AGENT WORKSPACE DATA (hermes-workspace volume). This action is IRREVERSIBLE. Obsidian vault volume is NOT removed.'
         required: false
         default: false
         type: boolean
@@ -82,7 +82,6 @@ jobs:
           AUX_ML_JOB_TIMEOUT_SECONDS: ${{ vars.AUX_ML_JOB_TIMEOUT_SECONDS }}
           AUX_ML_POLL_INTERVAL_SECONDS: ${{ vars.AUX_ML_POLL_INTERVAL_SECONDS }}
           AUX_ML_LLAMACPP_TIMEOUT_SECONDS: ${{ vars.AUX_ML_LLAMACPP_TIMEOUT_SECONDS }}
-          AUX_ML_ALLOWED_INPUT_DIRS: ${{ vars.AUX_ML_ALLOWED_INPUT_DIRS }}
           AUX_ML_ENFORCE_MEMORY_LIMIT: ${{ vars.AUX_ML_ENFORCE_MEMORY_LIMIT }}
           AUX_ML_OCR_MAX_PAGES: ${{ vars.AUX_ML_OCR_MAX_PAGES }}
         run: |
@@ -113,7 +112,6 @@ jobs:
           write_env WORKSPACE_REPO_TOKEN "$WORKSPACE_REPO_TOKEN"
           write_env WORKSPACE_SYNC_ON_START "$WORKSPACE_SYNC_ON_START_VALUE"
           write_env WORKSPACE_SYNC_INTERVAL "60"
-          write_env WORKSPACE_MEMORY_DAYS "30"
           write_env HERMES_BASE_IMAGE "$HERMES_BASE_IMAGE"
           write_env GOGCLI_REF "$GOGCLI_REF"
           write_env HERMES_TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
@@ -133,7 +131,7 @@ jobs:
           write_env AUX_ML_JOB_TIMEOUT_SECONDS "$AUX_ML_JOB_TIMEOUT_SECONDS"
           write_env AUX_ML_POLL_INTERVAL_SECONDS "$AUX_ML_POLL_INTERVAL_SECONDS"
           write_env AUX_ML_LLAMACPP_TIMEOUT_SECONDS "$AUX_ML_LLAMACPP_TIMEOUT_SECONDS"
-          write_env AUX_ML_ALLOWED_INPUT_DIRS "$AUX_ML_ALLOWED_INPUT_DIRS"
+          write_env AUX_ML_ALLOWED_INPUT_DIRS "/opt/data/workspace"
           write_env AUX_ML_ENFORCE_MEMORY_LIMIT "$AUX_ML_ENFORCE_MEMORY_LIMIT"
           write_env AUX_ML_OCR_MAX_PAGES "$AUX_ML_OCR_MAX_PAGES"
 
@@ -199,7 +197,7 @@ jobs:
           echo "Press Cancel on this workflow to abort."
           sleep 10
           docker compose down --remove-orphans || true
-          docker volume rm josemar-assistente_openclaw-workspace 2>/dev/null || true
+          docker volume rm josemar-assistente_hermes-workspace 2>/dev/null || true
           echo "Workspace volume removed"
 
       - name: Stop existing services

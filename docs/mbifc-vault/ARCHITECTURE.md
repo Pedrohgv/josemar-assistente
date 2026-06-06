@@ -18,7 +18,7 @@ Provide MBIFC vault capabilities to Josemar through one public skill entrypoint,
 ## Source of Truth
 
 - Bundle source of truth: repository files under `skills-factory/vault-gateway/`
-- Runtime loading: image-managed directory via OpenClaw `skills.load.extraDirs` (`/opt/josemar/skills`)
+- Runtime loading: image-managed directory bundled into the Hermes container at `/opt/josemar/skills`
 - Legacy workspace vault skills are not part of the core bundle to avoid context bloat.
 - This keeps Obsidian capability shipped with Josemar, not tied to state-repo drift
 

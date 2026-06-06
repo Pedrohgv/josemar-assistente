@@ -4,7 +4,7 @@
 
 - State: active
 - Source: `My-Brain-Is-Full-Crew/skills/inbox-triage/SKILL.md`
-- Mode: OpenClaw-native gateway flow
+- Mode: Hermes vault-gateway flow
 
 ## Purpose
 
