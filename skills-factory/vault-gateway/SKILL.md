@@ -14,6 +14,16 @@ Use this skill as the only public interface for vault operations.
 - Keep transcription capability present but dormant until backend setup is complete.
 - Caller must provide explicit `route` in JSON input.
 
+## How to Invoke
+
+The gateway is a standalone executable that reads JSON from stdin. Pipe your request directly:
+
+```bash
+echo '{"route":"note.read","payload":{"path":"07-Daily/2026-05-31.md"}}' | /opt/josemar/skills/vault-gateway/vault-gateway
+```
+
+**Do NOT import internal modules directly** (`lib/handlers.py`, `lib/router.py`, etc.) — always use the executable via stdin. Internal modules are implementation details, not a public API.
+
 ## Active Routes
 
 - onboarding
