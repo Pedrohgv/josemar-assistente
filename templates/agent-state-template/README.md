@@ -2,7 +2,7 @@
 
 Template for the [Josemar Assistente](../) agent state repository.
 
-This is a **private** git repo that stores the agent's identity, personality, skills, and memory. It is synced automatically with the running Docker container.
+This is a **private** git repo that stores the agent's identity, personality, user-owned skills, cron jobs, and concise memory files. It is synced automatically with the running Docker container.
 
 ## Setup
 
@@ -26,21 +26,16 @@ This is a **private** git repo that stores the agent's identity, personality, sk
 
 ## First-Time Bootstrap
 
-On the first run, if the workspace has no personality files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`), OpenClaw runs an interactive bootstrap ritual. It asks questions one at a time to define the agent's name, personality, and user preferences, then writes the results to the workspace files.
+On the first run, if the workspace has no personality files (`SOUL.md`, `USER.md`, `AGENTS.md`), Hermes will guide initial setup through normal agent interaction.
 
-**For bootstrap to run, the initial commit to the state repo should NOT include personality `.md` files.** Only include:
+**For clean bootstrap behavior, the initial commit to the state repo should NOT include personality `.md` files.** Only include:
 - `.gitignore`
 - `.sync-manifest`
 - `skills/`
 - `cron/jobs.json`
-- `memory/`
 - `avatars/`
 
-Personality files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `AGENTS.md`) are created by OpenClaw during bootstrap and automatically versioned by periodic sync.
-
-Operational files (`TOOLS.md`, `BOOT.md`, `HEARTBEAT.md`) are pre-seeded in this template to document core capabilities available out of the box.
-
-This template also includes a memory checkpoint cron job (`cron/jobs.json`) plus `memory/flush-state.json` to keep daily memory logs updated incrementally with reduced duplication.
+Personality files (`SOUL.md`, `USER.md`, `AGENTS.md`, optionally `MEMORY.md`) are created/maintained by Hermes and automatically versioned by periodic sync.
 
 ## Skill Ownership Model
 
@@ -51,27 +46,29 @@ This project separates skills by ownership:
 
 Do not copy user-specific skills into the main repository. Keep them in the state repo.
 
-**To trigger bootstrap on an existing deployment:**
+### Skill edit policy
+
+- Treat repo-owned core skills (`/opt/josemar/skills/*`) as maintained through normal development in the main public repository (branch/commit/PR).
+- In runtime self-improvement flows, prefer writing a patch proposal for repo-owned skills instead of creating sidecar skills (for example `*-pitfalls`).
+- User-owned skills in `/opt/data/workspace/skills/*` can be patched directly and are expected to be versioned through the state repo sync flow.
+- Avoid duplicate skill sprawl: patch an existing user-owned skill before creating a new skill with overlapping scope.
+
+**To trigger bootstrap-like setup on an existing deployment:**
 1. Delete all personality `.md` files from the state repo and push
 2. Deploy with `fresh_start: true` (deletes Docker volume, forces fresh clone)
-3. On first message, OpenClaw will start the Q&A ritual
+3. On first message, Hermes will rebuild baseline context from your prompts and state
 
 ## File Map
 
 | File | Purpose | Created by |
 |------|---------|------------|
-| `AGENTS.md` | Operating instructions for the agent | Bootstrap / manual |
-| `SOUL.md` | Persona, tone, boundaries | Bootstrap / manual |
-| `USER.md` | User information and preferences | Bootstrap / manual |
-| `IDENTITY.md` | Agent name, vibe, emoji | Bootstrap |
-| `MEMORY.md` | Long-term curated memory | Bootstrap / agent |
-| `TOOLS.md` | Core capability notes and conventions | Template / manual |
-| `HEARTBEAT.md` | Heartbeat checklist (optional) | Template / manual |
+| `AGENTS.md` | Operating instructions for the agent | Agent / manual |
+| `SOUL.md` | Persona, tone, boundaries | Agent / manual |
+| `USER.md` | User information and preferences | Agent / manual |
+| `MEMORY.md` | Long-term curated memory | Agent |
 | `BOOT.md` | Startup checklist (optional) | Template / manual |
-| `BOOTSTRAP.md` | One-time setup ritual (auto-deleted) | OpenClaw |
 | `skills/` | Agent skills (SKILL.md + executables) | Manual |
-| `cron/jobs.json` | Cron job definitions loaded by OpenClaw | Manual / agent |
-| `memory/` | Daily memory logs (rotated) | Agent |
+| `cron/jobs.json` | Cron job definitions loaded by Hermes | Manual / agent |
 | `avatars/` | Agent avatar images | Manual |
 
 ## Security
@@ -85,4 +82,3 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 
 - On container start: agent's local changes are committed, then merged with remote (remote wins conflicts)
 - Periodic: changes are auto-committed and pushed (configurable interval)
-- Memory logs are rotated based on `WORKSPACE_MEMORY_DAYS`

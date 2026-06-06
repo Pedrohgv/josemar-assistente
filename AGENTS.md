@@ -1,440 +1,97 @@
 # AGENTS.md
 
-**Purpose:** Root guidance for AI assistants working with the Josemar Assistente project. This is your entry point - for detailed implementation, navigate to the relevant subdirectory.
-
----
+Purpose: Root guidance for AI assistants working with the Josemar Assistente project.
 
 ## Project Overview
 
-Josemar Assistente is a self-hosted AI assistant bot built on OpenClaw, running in Docker with Telegram integration. It specializes in processing Brazilian credit card invoice PDFs and provides intelligent assistance in Brazilian Portuguese.
+Josemar Assistente is a self-hosted AI assistant built on Hermes, running in Docker with Telegram integration.
 
-**Core Architecture:**
-- **OpenClaw Gateway** - AI agent orchestration (multi-provider LLM support)
-- **Telegram Channel** - Bot interface for user interaction
-- **Two-Scope Skills System** - Repo-owned core skills plus user-owned state skills
-- **Auxiliary ML Container** - Optional queue-based `llama.cpp` service for long-running OCR/transcription jobs
-- **Git-Backed Agent State** - Workspace files versioned in a private git repo
-- **Obsidian Vault Infrastructure** - Dedicated vault volume synced with Syncthing
-- **Google Drive Vault Backups** - Daily rotating backup slots managed by rclone
-- **Docker Deployment** - Containerized with persistent workspace storage
-
-**Key Technologies:**
-- **OpenClaw** - Self-hosted AI agent gateway (supports multiple LLM providers: GLM, DeepSeek, Ollama Cloud, OpenAI-compatible APIs)
-- **Docker & Docker Compose** - Containerized deployment
-- **Python 3** - Custom skills and PDF processing (pymupdf)
-- **llama.cpp** - Self-hosted local inference server for auxiliary models
-- **Telegram** - Bot interface
-- **Git** - Workspace state versioning
-- **JSON5** - Configuration format
-
----
+Core architecture:
+- Hermes gateway runtime (dashboard/API/Telegram/cron/skills)
+- Two-scope skills (repo-owned `skills-factory/` + user-owned `agent-state/skills/`)
+- Git-backed state sync (`scripts/workspace-sync.sh`)
+- Obsidian vault operations (`vault-gateway` + Syncthing + backup)
+- Optional `aux-ml` queue service for long OCR jobs
 
 ## Directory Structure
 
-```
+```text
 josemar-assistente/
-├── agent-state/            # Nested git repo: agent workspace state (private repo)
-│   ├── .sync-manifest      # Explicit list of files to version
-│   ├── .gitignore          # Security: prevents secret commits
-│   ├── skills/             # User-owned skills (private state repo)
-│   ├── memory/             # Daily memory logs (rotated)
-│   └── avatars/            # Agent avatars
-├── config/                 # OpenClaw configuration
-├── credentials/            # Service credentials (NOT versioned)
-│   ├── README.md           # Credential setup guide
-│   └── <service>/          # One folder per service
-├── scripts/                # Helper scripts
-│   ├── workspace-sync.sh          # Git sync logic
-│   ├── obsidian-backup.sh         # Vault backup + slot rotation logic
-│   └── obsidian-backup-daemon.sh  # Daily backup scheduler
-├── aux-ml/                 # Auxiliary ML service (queue + model lifecycle)
-├── skills-factory/         # Repo-owned core skills shipped in image
-│   ├── vault-gateway/
-│   ├── aux-ml/
-│   └── workspace-sync/
-├── templates/              # Templates for new deployments
-│   └── agent-state-template/
+├── agent-state/            # Nested private repo: user state (memory/persona/skills)
+├── credentials/            # Service credentials (not versioned)
+├── scripts/                # Workspace sync, backup, privacy tooling
+├── aux-ml/                 # Auxiliary ML service
+├── skills-factory/         # Repo-owned core skills
+├── templates/              # Bootstrap template for private state repo
 ├── .github/workflows/      # CI/CD automation
-├── Dockerfile              # Custom OpenClaw image
-├── docker-compose.yml      # Deployment configuration
-└── .env.example            # Environment variables template
+├── docker-compose.yml      # Runtime stack
+├── Dockerfile.hermes       # Hermes runtime image
+└── .env.example            # Environment template
 ```
 
-**Workspace Storage:**
-- `openclaw-workspace` stores OpenClaw runtime state (workspace repo, sessions, paired devices)
-- `obsidian-vault` stores Obsidian markdown files and attachments (not git-versioned)
-- `syncthing-config` stores Syncthing device identity and sync settings
-- `tailscale-state` stores Tailscale sidecar identity/login state
-- `obsidian-rclone-config` stores rclone auth for Obsidian backups
-- `obsidian-backup-state` stores backup slot rotation pointer (`next-slot`)
-- Docker volume paths on host use `/var/lib/docker/volumes/<volume-name>/_data/`
-- Workspace repo files are automatically synced to a private git repo (`agent-state/`)
+## Runtime Storage
 
-**Agent State Repo:**
-- A private git repo that version-controls workspace files (personality, skills, memory)
-- Synced automatically on container start and periodically
-- Only files listed in `.sync-manifest` are versioned (security-first)
-- Merge strategy: remote wins on conflicts (remote is the "blessed" version)
+- `hermes-data`: Hermes native state (`/opt/data`)
+- `hermes-workspace`: git-synced workspace (`/opt/data/workspace`)
+- `obsidian-vault`: notes/attachments (not git-versioned)
+- `syncthing-config`, `tailscale-state`, `obsidian-rclone-config`, `obsidian-backup-state`
 
----
+## Local Development
 
-## Development Environment
+Use local Docker compose in this repo by default.
 
-**Context:** Unless explicitly stated otherwise, assume you are in the **local development environment** (user/developer machine).
+```bash
+docker compose up -d
+docker compose logs -f hermes
+```
 
-**Local Testing:** You can safely test locally by disabling Telegram (see "Local Development & Testing" section below). This avoids conflicts with the production bot while allowing full functionality testing via the Web UI.
+For optional aux-ml:
 
----
-
-## Local Development & Testing
-
-You can safely test locally without disconnecting the production bot:
-
-1. **Disable Telegram in `.env`:**
-   ```bash
-   TELEGRAM_ENABLED=false
-   ```
-
-2. **Start the service locally:**
-   ```bash
-   docker-compose up -d
-   ```
-
-   To include auxiliary ML batch processing locally, set `COMPOSE_PROFILES=aux-ml` in `.env` before starting.
-
-3. **Access the Web UI:**
-   The browser will prompt for HTTP Basic Auth. Enter:
-   - Username: `operator` (or any username - OpenClaw ignores it)
-   - Password: Your `GATEWAY_AUTH_PASSWORD` from `.env`
-   
-   Or access via URL:
-   ```
-   http://operator:YOUR_GATEWAY_AUTH_PASSWORD@localhost:18789/
-   ```
-
-4. **Approve device pairing** (first time only):
-   When you first access the Web UI, you'll see "pairing required". Approve your browser:
-   ```bash
-   # List pending devices
-   docker compose exec openclaw openclaw devices list
-   
-   # Approve the pending device
-   docker compose exec openclaw openclaw devices approve <requestId>
-   ```
-   The device will be remembered for future connections.
-
-5. **Test via browser interface** - All functionality works except Telegram
-
-   Optional Obsidian stack testing:
-   - Configure `TS_AUTHKEY` in `.env` so the `tailscale` sidecar joins your tailnet
-   - Access Syncthing UI at `http://127.0.0.1:8384`
-   - Load rclone config into volume `obsidian-rclone-config` before testing backups (see `docs/obsidian-operations.md`)
-
-6. **Stop when done:**
-   ```bash
-   docker-compose down
-   ```
-
-**Why this works:** The Telegram bot token can only be used by one active deployment. By setting `TELEGRAM_ENABLED=false`, the Telegram channel is disabled locally, avoiding conflicts while still allowing full testing through the Web UI.
-
----
+```bash
+COMPOSE_PROFILES=aux-ml docker compose up -d
+```
 
 ## Git Workflow
 
-### Branch Strategy
+- Create feature branches for non-trivial work.
+- Do not commit directly to `main` unless explicitly requested.
+- Keep commits focused and scoped.
 
-**Always create a new branch for:**
-- New features
-- Bug fixes
-- Configuration changes
-- Documentation updates
+## Agent State Repo Rules
 
-**Branch naming:**
-- `feature/description` - e.g., `feature/add-gog-integration`
-- `fix/description` - e.g., `fix/pdf-extractor-error`
-- `update/description` - e.g., `update/documentation`
+`agent-state/` is a nested private repo and source of truth for user-owned state.
 
-**Never commit directly to main** (except trivial fixes like typos)
+- Personality/context files live there (`SOUL.md`, `MEMORY.md`, `USER.md`, `AGENTS.md`, etc.).
+- User-owned skills live there (`agent-state/skills/*`).
+- Only paths in `.sync-manifest` are auto-versioned by sync.
 
-### Workflow
+When modifying user state, commit/push inside `agent-state` repo when requested.
 
-```bash
-# 1. Create and switch to new branch
-git checkout -b feature/my-feature-name
+## Skills Ownership
 
-# 2. Make your changes
-# ... edit files ...
+- Repo-owned skills: `skills-factory/*` -> copied to `/opt/josemar/skills`.
+- User-owned skills: `agent-state/skills/*` -> synced into workspace.
+- Keep `vault-gateway` as the canonical vault mutation entrypoint.
 
-# 3. Stage and commit
-git add .
-git commit -m "Description of changes"
+## Security Rules
 
-# 4. Push to remote
-git push -u origin feature/my-feature-name
-```
+1. Never commit secrets.
+2. Keep credentials under `credentials/<service>/`.
+3. Keep `agent-state` private.
+4. Respect `.sync-manifest` boundaries.
+5. Run staged PII checks before commit when requested.
 
-### After Pushing
-
-1. Changes are tested on the branch
-2. Deploy via GitHub Actions workflow when ready
-3. Production deployment happens from main after merge
-
----
-
-## Architecture Overview
-
-### Components
-
-1. **OpenClaw Gateway** (`ghcr.io/openclaw/openclaw:latest`)
-   - Manages channels, agents, and skills
-   - Multi-provider LLM support (Z.AI, DeepSeek, etc.)
-   - Session management and conversation routing
-
-2. **Agents**
-   - Default agent: "Josemar"
-   - Configurable models: `{provider}/{model-id}` pattern
-   - Identity and personality defined in workspace files (SOUL.md, etc.)
-
-3. **Channels**
-   - Telegram bot integration (can be disabled via `TELEGRAM_ENABLED`)
-   - User access controlled via allowlist
-
-4. **Skills (Two Ownership Scopes)**
-   - **Core repo-owned skills** ship from `skills-factory/` into `/opt/josemar/skills/` in the image
-   - Current core skills: `vault-gateway`, `aux-ml`, `workspace-sync`
-   - **User-owned skills** live in `agent-state/skills/` (private state repo)
-   - User-owned skills can be modified at runtime and synced via state-repo git workflow
-
-5. **Workspace State (Git-Backed)**
-   - Personality files (SOUL.md, IDENTITY.md, etc.) versioned
-   - Skills versioned
-   - Memory logs versioned with rotation
-   - Synced via `scripts/workspace-sync.sh`
-
-6. **Credentials**
-   - Stored in `credentials/<service>/` on host (not versioned)
-   - Mounted read-only into container at `/root/.openclaw/credentials/<service>/`
-   - See `credentials/README.md` for setup guide
-
-7. **Syncthing (Vault Sync)**
-   - Syncs `obsidian-vault` volume to laptop/mobile devices
-   - Uses a `tailscale` sidecar for private-network connectivity (Syncthing shares sidecar network namespace)
-   - Device trust model: explicit device ID pairing
-
-8. **Obsidian Backup (rclone)**
-   - Daily scheduler runs in `obsidian-backup` container
-   - Syncs vault into rotating slots (`slot-1` ... `slot-5`) in Google Drive
-   - Auth loaded from `credentials/rclone/rclone.conf` (or CI secret restore)
-
-9. **Auxiliary ML Service (`aux-ml`)**
-   - Optional container running `llama.cpp` server in router mode
-   - Provides FIFO queue and one-at-a-time batch processing for long tasks
-   - Loads model on demand; unloads when queue is empty or next job uses another model
-
-### Data Flow
-
-1. User sends message/PDF via Telegram (or Web UI if testing locally)
-2. Gateway routes to appropriate agent
-3. Agent invokes LLM with system prompts and context
-4. LLM may call skills (PDF extraction, etc.)
-5. Skill processes and returns structured data
-6. LLM formats response
-7. Response sent to user via Telegram (or displayed in Web UI)
-8. Periodically, workspace changes are committed and pushed to agent-state repo
-9. Syncthing mirrors the Obsidian vault to paired devices
-10. Daily backup job uploads current vault snapshot to rotating Google Drive slots
-11. For heavy jobs, Josemar skill submits task to `aux-ml`, polls completion, and returns result
-
----
-
-## Configuration
-
-**Main Config:** `config/openclaw.json` (JSON5 format)
-
-**Environment Variables:**
-- `ZAI_API_KEY` - Primary LLM provider
-- `TELEGRAM_BOT_TOKEN` - Bot authentication
-- `TELEGRAM_ENABLED` - Enable/disable Telegram (`true`/`false`, default: `true`)
-- `DEEPSEEK_API_KEY` - Optional fallback provider
-- `OLLAMA_API_KEY` - Optional Ollama Cloud provider key
-- `GATEWAY_AUTH_PASSWORD` - Web UI access password (HTTP Basic Auth)
-- `PRIMARY_TELEGRAM_ID` - Primary user (add more as needed)
-- `CONTROL_UI_ALLOWED_ORIGIN_1` - Optional production Web UI origin allowlist entry
-- `CONTROL_UI_ALLOWED_ORIGIN_2` - Optional production Web UI origin allowlist entry
-- `GOG_KEYRING_PASSWORD` - Optional passphrase used by gogcli keyring to decrypt Google OAuth token storage
-- `WORKSPACE_STATE_REPO` - Private git repo URL for agent state
-- `WORKSPACE_REPO_TOKEN` - GitHub PAT for agent state repo (use GitHub secret in deployment)
-- `WORKSPACE_SYNC_ON_START` - Enable/disable git sync on start (`true`/`false`)
-- `WORKSPACE_SYNC_INTERVAL` - Minutes between periodic syncs (0 = disabled)
-- `WORKSPACE_MEMORY_DAYS` - Days to keep memory logs
-- `TS_AUTHKEY` - Tailscale auth key used by sidecar for unattended tailnet login
-- `SYNCTHING_GUI_BIND_IP` - Bind IP for Syncthing GUI/API (`127.0.0.1` recommended)
-- `TAILSCALE_HOSTNAME` - Optional hostname for tailscale sidecar node (default `josemar-server`)
-- `TS_EXTRA_ARGS` - Optional extra flags passed to `tailscale up` in sidecar
-- `TZ` - Timezone used by Syncthing and backup scheduler
-- `OBSIDIAN_BACKUP_TIME` - Daily backup time (`HH:MM`, default `03:15`)
-- `OBSIDIAN_BACKUP_RUN_ON_START` - Run one backup when backup container starts
-- `OBSIDIAN_BACKUP_SLOTS` - Number of rotating slots kept in Drive (default `5`)
-- `OBSIDIAN_GDRIVE_REMOTE` - rclone remote name (default `gdrive`)
-- `OBSIDIAN_GDRIVE_PATH` - Google Drive destination folder for slot backups
-- `AUX_ML_ENABLED` - Feature flag for aux-ml skill integration (`true`/`false`)
-- `COMPOSE_PROFILES` - Set to `aux-ml` to start/build auxiliary ML service
-- `AUX_ML_GLM_OCR_URL` - Optional build-time download URL override for `glm-ocr.gguf` model
-- `AUX_ML_GLM_OCR_SHA256` - Optional SHA256 checksum override for downloaded `glm-ocr.gguf`
-- `AUX_ML_GLM_OCR_MMPROJ_URL` - Optional build-time download URL override for `mmproj-glm-ocr.gguf`
-- `AUX_ML_GLM_OCR_MMPROJ_SHA256` - Optional SHA256 checksum override for downloaded `mmproj-glm-ocr.gguf`
-- `AUX_ML_URL` - Internal URL for auxiliary ML API (default `http://aux-ml:8091`)
-- `AUX_ML_MEMORY_LIMIT` - Docker memory limit for `aux-ml` container (should match largest model requirement)
-- `AUX_ML_MEMORY_LIMIT_MB` - Numeric memory budget used for runtime validation
-- `AUX_ML_MAX_QUEUE` - Maximum queued auxiliary ML jobs
-- `AUX_ML_JOB_TIMEOUT_SECONDS` - Per-job timeout for long-running tasks
-- `AUX_ML_POLL_INTERVAL_SECONDS` - Poll interval for queue/model status checks
-- `AUX_ML_LLAMACPP_TIMEOUT_SECONDS` - llama.cpp server read/write timeout for long OCR inference requests
-- `AUX_ML_ALLOWED_INPUT_DIRS` - Comma-separated allowed roots for OCR file inputs
-- `AUX_ML_ENFORCE_MEMORY_LIMIT` - Fail fast if configured memory budget is insufficient
-- `AUX_ML_OCR_MAX_PAGES` - Max pages allowed per OCR PDF request
-- `JOSEMAR_TIMEZONE` - IANA timezone for agent system prompts and message envelope timestamps (default `America/Sao_Paulo`)
-
-**Agent Personality:** Configured in workspace markdown files (SOUL.md, MEMORY.md) - not in JSON config.
-
----
-
-## Where to Find Details
-
-**For specific tasks, navigate to the relevant directory:**
-
-- **Configuration details, Web UI setup, troubleshooting** -> `config/`
-- **Core skill development (repo-owned)** -> `skills-factory/`
-- **User skill development (state-owned)** -> `agent-state/skills/`
-- **Credential setup and management** -> `credentials/`
-- **CI/CD workflows, GitHub Actions, runner setup** -> `.github/workflows/`
-- **Docker deployment, environment setup** -> See `docker-compose.yml` and `.env.example`
-- **Auxiliary ML service API and operations** -> `docs/aux-ml.md` and `aux-ml/`
-- **Obsidian sync/backup operations** -> `docs/obsidian-operations.md`
-- **Agent state template** -> `templates/agent-state-template/`
-- **External docs:** https://docs.openclaw.dev
-
-**The subdirectory AGENTS.md files contain complete implementation details for their domains.**
-
----
-
-## Agent State Repository
-
-The `agent-state/` directory is a **nested git repo** (not a submodule) containing Josemar's personality, skills, and memory. It is gitignored by the main repo - each user should set up their own private state repo.
-
-### First-Time Setup
+## Testing
 
 ```bash
-# Clone your private state repo into agent-state/
-git clone https://github.com/YOUR_USER/your-agent-state.git agent-state
+python3 -m unittest discover -s tests -v
+python3 -m unittest tests.vault_gateway.test_gateway_contract -v
 ```
 
-If you don't have a state repo yet, copy the template:
-```bash
-cp -r templates/agent-state-template/ agent-state
-cd agent-state && git init && git add -A && git commit -m "Initial state"
-```
+## Key References
 
-### Structure
-
-```
-agent-state/
-├── .sync-manifest      # ONLY files listed here are versioned (security-first)
-├── .gitignore          # Blocks secrets, PDFs, runtime files
-├── skills/             # User-owned skills (private, per user)
-│   └── AGENTS.md       # Skill development guide
-├── cron/               # OpenClaw scheduled jobs (jobs.json)
-├── memory/             # Daily memory logs (YYYY-MM-DD.md)
-└── avatars/            # Agent avatars
-```
-
-### Making Changes to Agent State
-
-When the user asks you to modify Josemar's personality, skills, memory, or any workspace file:
-
-1. **Navigate to the state repo:**
-   ```bash
-   cd agent-state
-   ```
-
-2. **Make your changes** (edit personality files, create/modify skills, etc.)
-
-3. **Commit and push** in the state repo:
-   ```bash
-   git add .
-   git commit -m "description of changes"
-   git push
-   ```
-
-No need to update the main repo - `agent-state/` is gitignored.
-
-### What Gets Versioned
-
-Only files matching patterns in `.sync-manifest` are committed by the auto-sync script. This is a security measure to prevent accidental secret leaks.
-
-Current tracked patterns:
-- Core personality files (SOUL.md, MEMORY.md, IDENTITY.md, USER.md, TOOLS.md, HEARTBEAT.md, BOOT.md, AGENTS.md)
-- Skills: `skills/*/*`
-- Cron jobs: `cron/jobs.json`
-- Memory logs: `memory/YYYY-MM-DD.md`
-- Avatars: `avatars/*`
-
-### Merge Strategy
-
-Remote wins on conflicts. The remote repo is the authoritative version.
-
-### Runtime Behavior
-
-On container start, the workspace sync script (`scripts/workspace-sync.sh`) clones or syncs the state repo based on the `WORKSPACE_STATE_REPO` env var. See `docker-entrypoint.sh` for details.
-
----
-
-## Critical Warnings
-
-1. **Never commit secrets** - Use `.env` file (already in .gitignore) and GitHub Secrets
-2. **Always disable Telegram for local testing** - Set `TELEGRAM_ENABLED=false` to avoid production conflicts
-3. **Always work in branches** - Push to server for production deployment
-4. **Agent state repo must be private** - Contains personality and memory files
-5. **Only files in `.sync-manifest` are versioned** - This prevents accidental secret leaks
-6. **Credentials go in `credentials/`** - Never in workspace or agent-state
-7. **Docker volume is the primary storage** - Git repo is backup/sync, not the source of truth
-8. **Keep Syncthing private-network-only** - Use Tailscale sidecar networking and disable global discovery/relays
-9. **Keep template TOOLS aligned with bundled skills** - `templates/agent-state-template/TOOLS.md` must always document every bundled skill available in runtime under `/opt/josemar/skills/`; update it whenever bundled skills are added, removed, or materially changed
-
----
-
-## Security: Secret Scanning
-
-This repository uses **gitleaks** and a **PII guard** to reduce accidental exposure of secrets and personal data.
-
-### Automated Scanning
-
-- **CI/CD:** Every push to any branch is scanned via GitHub Actions (`.github/workflows/privacy-scan.yml`)
-- **Local:** Pre-commit hooks scan staged changes before each commit (optional but recommended)
-- **Privacy guard:** Added-line PII checks run in pre-commit and in CI via `.github/workflows/privacy-scan.yml`
-- **OpenCode runtime guard:** `opencode.json` loads `.opencode/plugins/pii-commit-guard.mjs`, which intercepts `git commit` bash calls and runs staged PII checks before allowing commit execution
-- **OpenCode commit behavior (mandatory):** whenever a commit is requested in this repo, OpenCode must run the `pii-commit-check` skill before creating the commit
-
-### Setup Pre-commit Hooks (One-Time)
-
-```bash
-./scripts/setup-pre-commit.sh
-```
-
-This script creates `venv/` if needed, installs pre-commit, and installs git hooks. After setup, gitleaks runs automatically on every `git commit`.
-
-### Usage
-
-```bash
-# Normal commit - gitleaks runs automatically
-git commit -m "your message"
-
-# Skip checks (emergency only)
-SKIP=gitleaks,pii-guard git commit -m "your message"
-
-# Manual full scan
-source venv/bin/activate && pre-commit run gitleaks --all-files
-
-# Manual staged PII scan
-python3 scripts/pii_guard.py --staged --fail-on medium
-```
+- `README.md` - top-level runtime and operations guide
+- `.github/workflows/AGENTS.md` - deploy/stop/privacy workflow documentation
+- `credentials/README.md` - credential setup
+- `docs/aux-ml.md` - aux-ml operations
+- `docs/obsidian-operations.md` - Obsidian sync/backup runbook

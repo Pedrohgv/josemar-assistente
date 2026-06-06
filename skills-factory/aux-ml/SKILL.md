@@ -20,7 +20,7 @@ Submits and tracks long-running auxiliary ML jobs in the `aux-ml` container.
 
 ## Important Notes
 
-- **File location:** Input files must reside inside `/root/.openclaw/workspace/` (e.g. `uploads/`). Files outside this root are rejected.
+- **File location:** Input files should use `/opt/data/workspace/` (e.g. `uploads/`).
 - **Processing time:** OCR jobs can take **30+ minutes** depending on page count, column split, and model load. Set `timeout_seconds` accordingly (recommend ≥ 1800).
 - **Queue system:** Jobs are processed sequentially. Use `queue_status` to check depth before submitting. Avoid submitting duplicate or unnecessary jobs to prevent queue buildup.
 
@@ -33,7 +33,7 @@ Submit an OCR job and optionally wait for completion.
 ```bash
 echo '{
   "action": "ocr_file",
-  "file_path": "/root/.openclaw/workspace/uploads/invoice.pdf",
+  "file_path": "/opt/data/workspace/uploads/invoice.pdf",
   "model": "glm-ocr",
   "wait": true
 }' | aux-ml
@@ -56,7 +56,7 @@ echo '{
   "action": "submit_job",
   "task": "ocr",
   "model": "glm-ocr",
-  "file_path": "/root/.openclaw/workspace/uploads/invoice.pdf"
+  "file_path": "/opt/data/workspace/uploads/invoice.pdf"
 }' | aux-ml
 ```
 

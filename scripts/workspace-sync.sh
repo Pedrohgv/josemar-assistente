@@ -4,7 +4,7 @@
 
 set -e
 
-WORKSPACE_DIR="${WORKSPACE_DIR:-/root/.openclaw/workspace}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/opt/data/workspace}"
 REPO_URL="${WORKSPACE_STATE_REPO:-}"
 REPO_TOKEN="${WORKSPACE_REPO_TOKEN:-}"
 BRANCH="${WORKSPACE_GIT_BRANCH:-main}"
@@ -12,7 +12,6 @@ GIT_EMAIL="${WORKSPACE_GIT_USER_EMAIL:-agent@josemar.local}"
 GIT_NAME="${WORKSPACE_GIT_USER_NAME:-Josemar Agent}"
 SYNC_ON_START="${WORKSPACE_SYNC_ON_START:-true}"
 SYNC_INTERVAL="${WORKSPACE_SYNC_INTERVAL:-60}"
-MEMORY_DAYS="${WORKSPACE_MEMORY_DAYS:-30}"
 MANIFEST_PATH="${WORKSPACE_DIR}/.sync-manifest"
 PROTECTED_SKILL_DIR="skills/vault-gateway"
 
@@ -102,32 +101,6 @@ commit_guardrail_cleanup() {
 
     git commit -m "Guardrail: remove workspace vault-gateway override"
     return 0
-}
-
-rotate_memory_logs() {
-    if [ "$MEMORY_DAYS" -le 0 ] 2>/dev/null; then
-        return
-    fi
-
-    memory_dir="${WORKSPACE_DIR}/memory"
-    if [ ! -d "$memory_dir" ]; then
-        return
-    fi
-
-    count=0
-    for f in "$memory_dir"/*.md; do
-        [ -f "$f" ] || continue
-
-        if find "$f" -mtime +"$MEMORY_DAYS" 2>/dev/null | grep -q .; then
-            log_info "Rotating old memory log: $(basename "$f")"
-            git rm "$f" 2>/dev/null || rm -f "$f"
-            count=$((count + 1))
-        fi
-    done
-
-    if [ "$count" -gt 0 ]; then
-        git commit -m "Rotate memory logs: removed $count files older than ${MEMORY_DAYS} days" 2>/dev/null || true
-    fi
 }
 
 do_initial_clone() {
@@ -259,7 +232,6 @@ do_periodic_sync() {
     fi
 
     if [ "$committed" -eq 1 ]; then
-        rotate_memory_logs
         log_info "Pushing to remote..."
         git push origin "HEAD:$BRANCH" || log_warn "Failed to push to remote"
     fi
@@ -298,7 +270,6 @@ main() {
         log_info "Sync on start disabled, configuring git only"
     fi
 
-    rotate_memory_logs
     start_sync_daemon
 }
 

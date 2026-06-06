@@ -1,31 +1,4 @@
 {
-  "$schema": "https://openclaw.ai/schemas/cron-jobs.json",
-  "jobs": [
-    {
-      "id": "9bb8cc42-bca2-4516-b7c0-4305d0315fc9",
-      "agentId": "josemar",
-      "sessionKey": "agent:josemar:main",
-      "name": "Checkpoint de memória",
-      "description": "Fallback de memória: registra apenas lacunas no memory daily log (memory/YYYY-MM-DD.md) sem duplicações",
-      "enabled": true,
-      "schedule": {
-        "expr": "0 10,15,21 * * *",
-        "kind": "cron",
-        "tz": "America/Sao_Paulo"
-      },
-      "sessionTarget": "isolated",
-      "wakeMode": "now",
-      "payload": {
-        "kind": "agentTurn",
-        "message": "Checkpoint de memória (fallback; sem resposta ao usuário).\n\n1. Use NO_REPLY.\n2. Esta rotina é fallback: a regra principal é write-at-source durante a sessão principal.\n3. Garanta que exista memory/YYYY-MM-DD.md para hoje; crie se não existir.\n4. Leia memory/YYYY-MM-DD.md e memory/flush-state.json antes de escrever.\n5. Se o memory daily log já estiver com entradas recentes e suficientes do dia, não invente nem reescreva: apenas finalize sem alterar o arquivo.\n6. Se houver lacunas reais, acrescente apenas fatos objetivos e curtos (decisões, mudanças de configuração, ações executadas, pendências), sem duplicar conteúdo já registrado hoje.\n7. Se não houver novidade real desde o último checkpoint, não altere o memory daily log (memory/YYYY-MM-DD.md).\n8. Atualize memory/flush-state.json com lastCheckpointAt (ISO-8601) e lastSummaryHash (hash do resumo incremental, ou hash vazio se não houve adição).",
-        "toolsAllow": [
-          "read",
-          "write"
-        ]
-      },
-      "delivery": {
-        "mode": "none"
-      }
-    }
-  ]
+  "jobs": [],
+  "updated_at": "2026-06-05T00:00:00.000000-03:00"
 }

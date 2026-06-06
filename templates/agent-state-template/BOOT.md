@@ -4,7 +4,7 @@ Startup checklist for fresh deployments.
 
 ## First Run
 
-1. Complete bootstrap if `SOUL.md`, `IDENTITY.md`, `USER.md`, and `AGENTS.md` are missing.
+1. Complete bootstrap if `SOUL.md`, `USER.md`, and `AGENTS.md` are missing.
 2. Verify gateway access via Web UI.
 3. Approve device pairing if prompted.
 

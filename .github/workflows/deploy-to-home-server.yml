@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       fresh_start:
-        description: 'WARNING: This ERASES OPENCLAW WORKSPACE DATA - memory, skills, sessions, uploaded files. This action is IRREVERSIBLE. Obsidian vault volume is NOT removed.'
+        description: 'WARNING: This ERASES AGENT WORKSPACE DATA (hermes-workspace volume). This action is IRREVERSIBLE. Obsidian vault volume is NOT removed.'
         required: false
         default: false
         type: boolean
@@ -36,13 +36,16 @@ jobs:
           echo "Docker socket permissions: $(ls -la /var/run/docker.sock 2>/dev/null || echo 'Docker socket not found')"
 
       - name: Validate required repository variables
+        env:
+          WORKSPACE_STATE_REPO: ${{ vars.WORKSPACE_STATE_REPO }}
+          SYNCTHING_GUI_BIND_IP: ${{ vars.SYNCTHING_GUI_BIND_IP }}
         run: |
-          if [ -z "${{ vars.WORKSPACE_STATE_REPO }}" ]; then
+          if [ -z "$WORKSPACE_STATE_REPO" ]; then
             echo "ERROR: Repository variable WORKSPACE_STATE_REPO is required"
             exit 1
           fi
 
-          GUI_BIND_IP="${{ vars.SYNCTHING_GUI_BIND_IP }}"
+          GUI_BIND_IP="$SYNCTHING_GUI_BIND_IP"
           if [ -n "$GUI_BIND_IP" ]; then
             if [ "$GUI_BIND_IP" = "0.0.0.0" ]; then
               echo "ERROR: SYNCTHING_GUI_BIND_IP cannot be 0.0.0.0"
@@ -55,55 +58,89 @@ jobs:
           fi
 
       - name: Create .env file
+        env:
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          PRIMARY_TELEGRAM_ID: ${{ secrets.PRIMARY_TELEGRAM_ID }}
+          GOG_KEYRING_PASSWORD: ${{ secrets.GOG_KEYRING_PASSWORD }}
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+          WORKSPACE_STATE_REPO: ${{ vars.WORKSPACE_STATE_REPO }}
+          WORKSPACE_REPO_TOKEN: ${{ secrets.WORKSPACE_REPO_TOKEN }}
+          WORKSPACE_SYNC_ON_START_VALUE: ${{ github.event.inputs.skip_git_sync == 'false' && 'true' || 'false' }}
+          HERMES_BASE_IMAGE: ${{ vars.HERMES_BASE_IMAGE }}
+          GOGCLI_REF: ${{ vars.GOGCLI_REF }}
+          TZ_VALUE: ${{ vars.TZ }}
+          TAILSCALE_HOSTNAME: ${{ vars.TAILSCALE_HOSTNAME }}
+          TS_EXTRA_ARGS: ${{ vars.TS_EXTRA_ARGS }}
+          SYNCTHING_GUI_BIND_IP: ${{ vars.SYNCTHING_GUI_BIND_IP }}
+          AUX_ML_ENABLED_INPUT: ${{ vars.AUX_ML_ENABLED }}
+          AUX_ML_MEMORY_LIMIT: ${{ vars.AUX_ML_MEMORY_LIMIT }}
+          AUX_ML_MEMORY_LIMIT_MB: ${{ vars.AUX_ML_MEMORY_LIMIT_MB }}
+          AUX_ML_MAX_QUEUE: ${{ vars.AUX_ML_MAX_QUEUE }}
+          AUX_ML_JOB_TIMEOUT_SECONDS: ${{ vars.AUX_ML_JOB_TIMEOUT_SECONDS }}
+          AUX_ML_POLL_INTERVAL_SECONDS: ${{ vars.AUX_ML_POLL_INTERVAL_SECONDS }}
+          AUX_ML_LLAMACPP_TIMEOUT_SECONDS: ${{ vars.AUX_ML_LLAMACPP_TIMEOUT_SECONDS }}
+          AUX_ML_ENFORCE_MEMORY_LIMIT: ${{ vars.AUX_ML_ENFORCE_MEMORY_LIMIT }}
+          AUX_ML_OCR_MAX_PAGES: ${{ vars.AUX_ML_OCR_MAX_PAGES }}
         run: |
-          umask 077
-          cat > .env << EOF
-          ZAI_API_KEY=${{ secrets.ZAI_API_KEY }}
-          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
-          DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}
-          OLLAMA_API_KEY=${{ secrets.OLLAMA_API_KEY }}
-          PRIMARY_TELEGRAM_ID=${{ secrets.PRIMARY_TELEGRAM_ID }}
-          GATEWAY_AUTH_PASSWORD=${{ secrets.GATEWAY_AUTH_PASSWORD }}
-          GOG_KEYRING_PASSWORD=${{ secrets.GOG_KEYRING_PASSWORD }}
-          TS_AUTHKEY=${{ secrets.TS_AUTHKEY }}
-          CONTROL_UI_ALLOWED_ORIGIN_1=${{ vars.CONTROL_UI_ALLOWED_ORIGIN_1 }}
-          CONTROL_UI_ALLOWED_ORIGIN_2=${{ vars.CONTROL_UI_ALLOWED_ORIGIN_2 }}
-          WORKSPACE_STATE_REPO=${{ vars.WORKSPACE_STATE_REPO }}
-          WORKSPACE_REPO_TOKEN=${{ secrets.WORKSPACE_REPO_TOKEN }}
-          WORKSPACE_SYNC_ON_START=${{ github.event.inputs.skip_git_sync == 'false' && 'true' || 'false' }}
-          WORKSPACE_SYNC_INTERVAL=60
-          WORKSPACE_MEMORY_DAYS=30
-          TZ=${{ vars.TZ }}
-          TAILSCALE_HOSTNAME=${{ vars.TAILSCALE_HOSTNAME }}
-          TS_EXTRA_ARGS=${{ vars.TS_EXTRA_ARGS }}
-          SYNCTHING_GUI_BIND_IP=${{ vars.SYNCTHING_GUI_BIND_IP }}
-          AUX_ML_ENABLED=${{ vars.AUX_ML_ENABLED == 'false' && 'false' || 'true' }}
-          COMPOSE_PROFILES=${{ vars.AUX_ML_ENABLED == 'false' && '' || 'aux-ml' }}
-          AUX_ML_URL=http://aux-ml:8091
-          AUX_ML_MEMORY_LIMIT=${{ vars.AUX_ML_MEMORY_LIMIT }}
-          AUX_ML_MEMORY_LIMIT_MB=${{ vars.AUX_ML_MEMORY_LIMIT_MB }}
-          AUX_ML_MAX_QUEUE=${{ vars.AUX_ML_MAX_QUEUE }}
-          AUX_ML_JOB_TIMEOUT_SECONDS=${{ vars.AUX_ML_JOB_TIMEOUT_SECONDS }}
-          AUX_ML_POLL_INTERVAL_SECONDS=${{ vars.AUX_ML_POLL_INTERVAL_SECONDS }}
-          AUX_ML_LLAMACPP_TIMEOUT_SECONDS=${{ vars.AUX_ML_LLAMACPP_TIMEOUT_SECONDS }}
-          AUX_ML_ALLOWED_INPUT_DIRS=${{ vars.AUX_ML_ALLOWED_INPUT_DIRS }}
-          AUX_ML_ENFORCE_MEMORY_LIMIT=${{ vars.AUX_ML_ENFORCE_MEMORY_LIMIT }}
-          AUX_ML_OCR_MAX_PAGES=${{ vars.AUX_ML_OCR_MAX_PAGES }}
-          EOF
-          chmod 600 .env
-
-      - name: Set compose profiles
-        run: |
-          AUX_ML_ENABLED="${{ vars.AUX_ML_ENABLED }}"
+          AUX_ML_ENABLED="$AUX_ML_ENABLED_INPUT"
           if [ -z "$AUX_ML_ENABLED" ]; then
             AUX_ML_ENABLED="true"
           fi
 
+          COMPOSE_PROFILES_VALUE=""
           if [ "$AUX_ML_ENABLED" = "true" ]; then
-            echo "COMPOSE_PROFILES=aux-ml" >> "$GITHUB_ENV"
-          else
-            echo "COMPOSE_PROFILES=" >> "$GITHUB_ENV"
+            COMPOSE_PROFILES_VALUE="aux-ml"
           fi
+
+          umask 077
+          : > .env
+          write_env() {
+            printf '%s=%s\n' "$1" "$2" >> .env
+          }
+
+          write_env ZAI_API_KEY "$ZAI_API_KEY"
+          write_env TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
+          write_env DEEPSEEK_API_KEY "$DEEPSEEK_API_KEY"
+          write_env OLLAMA_API_KEY "$OLLAMA_API_KEY"
+          write_env PRIMARY_TELEGRAM_ID "$PRIMARY_TELEGRAM_ID"
+          write_env GOG_KEYRING_PASSWORD "$GOG_KEYRING_PASSWORD"
+          write_env TS_AUTHKEY "$TS_AUTHKEY"
+          write_env WORKSPACE_STATE_REPO "$WORKSPACE_STATE_REPO"
+          write_env WORKSPACE_REPO_TOKEN "$WORKSPACE_REPO_TOKEN"
+          write_env WORKSPACE_SYNC_ON_START "$WORKSPACE_SYNC_ON_START_VALUE"
+          write_env WORKSPACE_SYNC_INTERVAL "60"
+          write_env HERMES_BASE_IMAGE "$HERMES_BASE_IMAGE"
+          write_env GOGCLI_REF "$GOGCLI_REF"
+          write_env HERMES_TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
+          write_env HERMES_TELEGRAM_ALLOWED_USERS "$PRIMARY_TELEGRAM_ID"
+          write_env HERMES_TELEGRAM_HOME_CHANNEL "$PRIMARY_TELEGRAM_ID"
+          write_env HERMES_GATEWAY_ALLOWED_USERS "$PRIMARY_TELEGRAM_ID"
+          write_env TZ "$TZ_VALUE"
+          write_env TAILSCALE_HOSTNAME "$TAILSCALE_HOSTNAME"
+          write_env TS_EXTRA_ARGS "$TS_EXTRA_ARGS"
+          write_env SYNCTHING_GUI_BIND_IP "$SYNCTHING_GUI_BIND_IP"
+          write_env AUX_ML_ENABLED "$AUX_ML_ENABLED"
+          write_env COMPOSE_PROFILES "$COMPOSE_PROFILES_VALUE"
+          write_env AUX_ML_URL "http://aux-ml:8091"
+          write_env AUX_ML_MEMORY_LIMIT "$AUX_ML_MEMORY_LIMIT"
+          write_env AUX_ML_MEMORY_LIMIT_MB "$AUX_ML_MEMORY_LIMIT_MB"
+          write_env AUX_ML_MAX_QUEUE "$AUX_ML_MAX_QUEUE"
+          write_env AUX_ML_JOB_TIMEOUT_SECONDS "$AUX_ML_JOB_TIMEOUT_SECONDS"
+          write_env AUX_ML_POLL_INTERVAL_SECONDS "$AUX_ML_POLL_INTERVAL_SECONDS"
+          write_env AUX_ML_LLAMACPP_TIMEOUT_SECONDS "$AUX_ML_LLAMACPP_TIMEOUT_SECONDS"
+          write_env AUX_ML_ALLOWED_INPUT_DIRS "/opt/data/workspace"
+          write_env AUX_ML_ENFORCE_MEMORY_LIMIT "$AUX_ML_ENFORCE_MEMORY_LIMIT"
+          write_env AUX_ML_OCR_MAX_PAGES "$AUX_ML_OCR_MAX_PAGES"
+
+          chmod 600 .env
+          echo "COMPOSE_PROFILES=$COMPOSE_PROFILES_VALUE" >> "$GITHUB_ENV"
+
+      - name: Set compose profiles
+        run: |
+          echo "COMPOSE_PROFILES=${COMPOSE_PROFILES}"
 
       - name: Validate aux-ml model source
         if: vars.AUX_ML_ENABLED != 'false'
@@ -159,12 +196,12 @@ jobs:
           echo "Waiting 10 seconds before proceeding..."
           echo "Press Cancel on this workflow to abort."
           sleep 10
-          docker compose down || true
-          docker volume rm josemar-assistente_openclaw-workspace 2>/dev/null || true
+          docker compose down --remove-orphans || true
+          docker volume rm josemar-assistente_hermes-workspace 2>/dev/null || true
           echo "Workspace volume removed"
 
       - name: Stop existing services
-        run: docker compose down
+        run: docker compose down --remove-orphans
 
       - name: Clean up old Docker images
         run: |
@@ -218,12 +255,12 @@ jobs:
           done
 
       - name: Verify deployment
-        run: docker ps | grep josemar-assistente
+        run: docker ps | grep josemar-hermes
 
       - name: Verify skill deployment
         run: |
           echo "Checking deployed skills..."
-          docker compose exec -T openclaw ls -la /root/.openclaw/skills/ 2>/dev/null || echo "No skills deployed yet"
+          docker compose exec -T hermes ls -la /opt/josemar/skills/ 2>/dev/null || echo "No skills deployed yet"
 
       - name: Cleanup sensitive files
         if: always()
