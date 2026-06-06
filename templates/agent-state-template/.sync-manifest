@@ -2,10 +2,7 @@
 AGENTS.md
 SOUL.md
 USER.md
-IDENTITY.md
 MEMORY.md
-TOOLS.md
-HEARTBEAT.md
 BOOT.md
 
 # Skills (all files in skill directories)
@@ -18,5 +15,5 @@ memory/flush-state.json
 # Avatars
 avatars/*
 
-# OpenClaw cron jobs
+# Hermes cron jobs
 cron/jobs.json

@@ -20,7 +20,6 @@
 .DS_Store
 Thumbs.db
 workspace-state.json
-.openclaw/
 .config/gogcli/
 *.pyc
 __pycache__/

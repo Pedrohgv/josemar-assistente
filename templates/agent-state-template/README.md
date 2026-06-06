@@ -38,8 +38,6 @@ On the first run, if the workspace has no personality files (`SOUL.md`, `USER.md
 
 Personality files (`SOUL.md`, `USER.md`, `AGENTS.md`, optionally `MEMORY.md`) are created/maintained by Hermes and automatically versioned by periodic sync.
 
-Operational files (`TOOLS.md`, `BOOT.md`, `HEARTBEAT.md`) are pre-seeded in this template to document core capabilities available out of the box.
-
 This template also includes a memory checkpoint cron job (`cron/jobs.json`) plus `memory/flush-state.json` to keep daily memory logs updated incrementally with reduced duplication.
 
 ## Skill Ownership Model
@@ -50,6 +48,13 @@ This project separates skills by ownership:
 - **User-owned skills** live in this private state repo (`skills/`) and are specific to each user/deployment.
 
 Do not copy user-specific skills into the main repository. Keep them in the state repo.
+
+### Skill edit policy
+
+- Treat repo-owned core skills (`/opt/josemar/skills/*`) as maintained through normal development in the main public repository (branch/commit/PR).
+- In runtime self-improvement flows, prefer writing a patch proposal for repo-owned skills instead of creating sidecar skills (for example `*-pitfalls`).
+- User-owned skills in `/opt/data/workspace/skills/*` can be patched directly and are expected to be versioned through the state repo sync flow.
+- Avoid duplicate skill sprawl: patch an existing user-owned skill before creating a new skill with overlapping scope.
 
 **To trigger bootstrap-like setup on an existing deployment:**
 1. Delete all personality `.md` files from the state repo and push
@@ -64,10 +69,7 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 | `SOUL.md` | Persona, tone, boundaries | Agent / manual |
 | `USER.md` | User information and preferences | Agent / manual |
 | `MEMORY.md` | Long-term curated memory | Agent |
-| `TOOLS.md` | Core capability notes and conventions | Template / manual |
-| `HEARTBEAT.md` | Heartbeat checklist (optional) | Template / manual |
 | `BOOT.md` | Startup checklist (optional) | Template / manual |
-| `BOOTSTRAP.md` | One-time setup ritual (optional, user-defined) | Manual |
 | `skills/` | Agent skills (SKILL.md + executables) | Manual |
 | `cron/jobs.json` | Cron job definitions loaded by Hermes | Manual / agent |
 | `memory/` | Daily memory logs (rotated) | Agent |
