@@ -8,7 +8,7 @@ This repository is the public/platform layer. Personal identity, memories, priva
 
 - **Hermes Agent gateway**: self-hosted runtime with dashboard and OpenAI-compatible API.
 - **Telegram channel**: allowlisted Telegram DM access with a single runtime owner.
-- **Independent agent state**: private git-backed workspace for personality files, memory logs, cron jobs, avatars, and user-owned skills.
+- **Independent agent state**: private git-backed workspace for context files, cron jobs, avatars, and user-owned skills.
 - **Two-scope skills model**: repo-owned platform skills in `skills-factory/`, user-owned skills in `agent-state/skills/`.
 - **Obsidian vault infrastructure**: dedicated Docker volume synchronized with Syncthing over a Tailscale sidecar.
 - **Google Drive vault backups**: daily rotating backup slots via rclone.
@@ -55,8 +55,7 @@ flowchart TB
   PublicRepo --> CoreSkills[skills-factory<br/>repo-owned skills]
   PublicRepo --> Compose[docker-compose.yml]
 
-  PrivateRepo[Private Agent State Repo] --> Personality[SOUL.md / USER.md / AGENTS.md]
-  PrivateRepo --> Memory[memory/YYYY-MM-DD.md]
+  PrivateRepo[Private Agent State Repo] --> Personality[SOUL.md / USER.md / MEMORY.md / AGENTS.md]
   PrivateRepo --> UserSkills[skills/*]
   PrivateRepo --> Cron[cron/jobs.json]
   PrivateRepo --> Avatars[avatars/*]
@@ -68,7 +67,7 @@ flowchart TB
   Workspace --> Runtime
 ```
 
-The workspace sync script only versions paths listed in `.sync-manifest`, uses the remote state repo as the blessed conflict winner, rotates memory logs, and can auto-commit/push state changes from the running assistant.
+The workspace sync script only versions paths listed in `.sync-manifest`, uses the remote state repo as the blessed conflict winner, and can auto-commit/push state changes from the running assistant.
 
 ## Obsidian Vault Flow
 
@@ -235,7 +234,6 @@ Important state-sync variables:
 - `WORKSPACE_GIT_BRANCH`
 - `WORKSPACE_SYNC_ON_START`
 - `WORKSPACE_SYNC_INTERVAL`
-- `WORKSPACE_MEMORY_DAYS`
 - `WORKSPACE_GIT_USER_EMAIL`
 - `WORKSPACE_GIT_USER_NAME`
 
