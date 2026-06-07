@@ -1,9 +1,10 @@
 ---
 name: aux-ml
-description: Queue-based auxiliary ML processing via llama.cpp router. Supports long-running OCR jobs and async polling.
+description: Queue-based auxiliary ML processing via llama.cpp router. Supports long-running OCR/transcription jobs and async polling.
 categories:
   - ml
   - ocr
+  - transcription
   - batch
   - llama.cpp
 ---
@@ -21,7 +22,7 @@ Submits and tracks long-running auxiliary ML jobs in the `aux-ml` container.
 ## Important Notes
 
 - **File location:** Input files should use `/opt/data/workspace/` (e.g. `uploads/`).
-- **Processing time:** OCR jobs can take **30+ minutes** depending on page count, column split, and model load. Set `timeout_seconds` accordingly (recommend ≥ 1800).
+- **Processing time:** OCR/transcription jobs can take **30+ minutes** depending on page count, audio length, and model load. Set `timeout_seconds` accordingly (recommend >= 1800).
 - **Queue system:** Jobs are processed sequentially. Use `queue_status` to check depth before submitting. Avoid submitting duplicate or unnecessary jobs to prevent queue buildup.
 
 ## Actions
@@ -59,6 +60,19 @@ echo '{
   "file_path": "/opt/data/workspace/uploads/invoice.pdf"
 }' | aux-ml
 ```
+
+For transcription:
+
+```bash
+echo '{
+  "action": "submit_job",
+  "task": "transcribe",
+  "model": "granite-speech-4.1-2b",
+  "file_path": "/opt/data/workspace/uploads/meeting.mp3"
+}' | aux-ml
+```
+
+Note: Granite Speech support uses pinned llama.cpp `b9045` experimental audio input. Long files are chunked with ffmpeg; validate transcript quality and memory before relying on it for production transcripts.
 
 ### `job_status`
 

@@ -2,6 +2,15 @@ models:
   glm-ocr:
     task: ocr
     model_path: /models/glm-ocr.gguf
+    mmproj_path: /models/mmproj-glm-ocr.gguf
     required_memory_mb: 8192
     default_prompt: "Text Recognition:"
     max_tokens: 8192
+  granite-speech-4.1-2b:
+    task: transcribe
+    model_path: /models/granite-speech-4.1-2b-Q8_0.gguf
+    mmproj_path: /models/mmproj-granite-speech-4.1-2b-f16.gguf
+    required_memory_mb: 8192
+    default_prompt: "transcribe the speech with proper punctuation and capitalization."
+    max_tokens: 4096
+    optional: true

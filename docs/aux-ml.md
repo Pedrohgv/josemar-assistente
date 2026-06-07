@@ -13,7 +13,7 @@ This document describes the optional `aux-ml` container used for long-running, q
 ## Service Layout
 
 - **Container:** `josemar-aux-ml`
-- **Inference backend:** `llama-server` in router mode (local-only inside container)
+- **Inference backend:** pinned llama.cpp `b9045` `llama-server` in router mode (local-only inside container)
 - **Orchestrator API:** FastAPI on `8091`
 - **Network exposure:** internal Docker network only (`http://aux-ml:8091`)
 
@@ -45,19 +45,33 @@ Current expected files:
 
 - `aux-ml/models/glm-ocr.gguf`
 - `aux-ml/models/mmproj-glm-ocr.gguf`
+- `aux-ml/models/granite-speech-4.1-2b-Q8_0.gguf`
+- `aux-ml/models/mmproj-granite-speech-4.1-2b-f16.gguf`
 
 If required model files are missing, `aux-ml` fails fast on startup.
+Granite Speech is optional: if its model or mmproj file is absent, it is not registered and OCR can still run.
 
 Build fallback behavior:
 
+- Compose overlays the verified llama.cpp `b9045` Ubuntu x64 release during build because newer moving Docker tags produced unusable Granite Speech transcripts in testing.
+- `AUX_ML_ENABLE_GRANITE_SPEECH=false` removes copied Granite artifacts from the image and falls back to an OCR-only llama.cpp preset.
 - If local files are absent, compose defaults download and bundle:
   - `GLM-OCR-Q8_0.gguf`
   - `mmproj-GLM-OCR-Q8_0.gguf`
+  - `granite-speech-4.1-2b-Q8_0.gguf`
+  - `mmproj-model-f16.gguf` as `mmproj-granite-speech-4.1-2b-f16.gguf`
 - To override download sources/checksums, set:
+  - `AUX_ML_ENABLE_GRANITE_SPEECH` (`true` by default; set `false` for OCR-only/offline builds)
+  - `AUX_ML_LLAMA_CPP_RELEASE_URL`
+  - `AUX_ML_LLAMA_CPP_RELEASE_SHA256`
   - `AUX_ML_GLM_OCR_URL`
   - `AUX_ML_GLM_OCR_SHA256`
   - `AUX_ML_GLM_OCR_MMPROJ_URL`
   - `AUX_ML_GLM_OCR_MMPROJ_SHA256`
+  - `AUX_ML_GRANITE_SPEECH_URL`
+  - `AUX_ML_GRANITE_SPEECH_SHA256`
+  - `AUX_ML_GRANITE_SPEECH_MMPROJ_URL`
+  - `AUX_ML_GRANITE_SPEECH_MMPROJ_SHA256`
 
 Model metadata lives in `aux-ml/config/models.yaml`.
 
@@ -117,6 +131,48 @@ Successful OCR job result includes:
 - `page_count` - number of processed pages/images
 - `pages` - per-page text chunks
 - `layout` - PDF-only layout metadata (column split settings); image OCR keeps the simpler response shape
+
+## Job Schema (Transcription)
+
+`POST /jobs` request body:
+
+```json
+{
+  "task": "transcribe",
+  "model": "granite-speech-4.1-2b",
+  "file_path": "/opt/data/workspace/uploads/meeting.mp3",
+  "prompt": "transcribe the speech with proper punctuation and capitalization."
+}
+```
+
+Current transcription behavior:
+
+- Uses official `ibm-granite/granite-speech-4.1-2b-GGUF:Q8_0` through llama.cpp native `/v1/audio/transcriptions`.
+- Requires the pinned llama.cpp `b9045` runtime. Current later llama.cpp builds tested with Q4, Q8, BF16, CLI, and server paths produced empty or hallucinated transcripts.
+- The rejected `granite-speech-4.1-2b-plus` GGUF currently fails in llama.cpp server with `unknown model architecture: granite_speech`.
+- Audio input in llama.cpp is experimental; validate quality and latency before relying on it.
+- Audio longer than `AUX_ML_TRANSCRIBE_CHUNK_SECONDS` is split with ffmpeg into 16 kHz mono WAV chunks and processed sequentially.
+- Chunk overlap is controlled by `AUX_ML_TRANSCRIBE_OVERLAP_SECONDS`; chunk text is merged with simple overlap de-duplication.
+- Audio files larger than `AUX_ML_TRANSCRIBE_MAX_BYTES` are rejected before being sent to llama.cpp. Default: `104857600` bytes.
+
+Transcription tuning:
+
+- `AUX_ML_TRANSCRIBE_CHUNK_SECONDS` default: `240`
+- `AUX_ML_TRANSCRIBE_OVERLAP_SECONDS` default: `20`
+- `AUX_ML_TRANSCRIBE_MAX_DURATION_SECONDS` default: `1800`
+- `AUX_ML_TRANSCRIBE_MAX_CHUNKS` default: `16`
+- `AUX_ML_TRANSCRIBE_FFMPEG_TIMEOUT_SECONDS` default: `300`
+- Keep chunks small enough for Granite's llama.cpp audio context. In testing, a 20-minute MP3 exceeded the native 4096-token audio context as a single request.
+
+Successful transcription result includes:
+
+- `text` - extracted transcript
+- `source_file` - resolved input path
+- `source_type` - `audio`
+- `mime_type` - detected MIME type
+- `mode` - `single-shot` or `chunked`
+- `chunk_count` - number of audio chunks processed
+- `chunks` - per-chunk text and timing metadata when chunked
 
 ## Memory Policy
 
