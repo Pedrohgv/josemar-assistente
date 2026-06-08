@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from difflib import SequenceMatcher
 import mimetypes
 from pathlib import Path
+import re
 import tempfile
+import unicodedata
 
 from ..llama_router import LlamaRouterClient
 from ..model_registry import ModelSpec
@@ -17,6 +20,25 @@ SUPPORTED_AUDIO_EXTENSIONS = {
     ".opus",
     ".wav",
 }
+
+BOUNDARY_SCAN_WORDS = 120
+MAX_OVERLAP_WORDS = 100
+MIN_OVERLAP_WORDS = 8
+MAX_OVERLAP_SIZE_DELTA = 12
+MIN_OVERLAP_SIMILARITY = 0.74
+MIN_LOOP_PHRASE_WORDS = 4
+MAX_LOOP_PHRASE_WORDS = 12
+MIN_LOOP_REPETITIONS = 5
+
+
+def _normalize_word(word: str) -> str:
+    normalized = word.lower().replace("’", "'").replace("`", "'")
+    normalized = unicodedata.normalize("NFKD", normalized)
+    return re.sub(r"[^a-z0-9]+", "", normalized)
+
+
+def _normalized_words(words: list[str]) -> list[str]:
+    return [_normalize_word(word) for word in words]
 
 def _resolve_safe_input_path(file_path: str, allowed_roots: tuple[Path, ...]) -> Path:
     candidate = Path(file_path).expanduser().resolve()
@@ -163,21 +185,104 @@ async def _create_chunk(
 def _merge_pair(left: str, right: str) -> str:
     left_words = left.split()
     right_words = right.split()
-    max_overlap = min(80, len(left_words), len(right_words))
-    for size in range(max_overlap, 7, -1):
-        if left_words[-size:] == right_words[:size]:
-            return " ".join(left_words + right_words[size:])
     if not left:
         return right
     if not right:
         return left
+
+    overlap_words = _find_overlap_word_count(left_words, right_words)
+    if overlap_words:
+        right_overlap = right_words[:overlap_words]
+        punctuation = _terminal_punctuation(right_overlap[-1]) if right_overlap else ""
+        if punctuation and left_words and _terminal_punctuation(left_words[-1]) == "":
+            left_words[-1] = f"{left_words[-1]}{punctuation}"
+        return " ".join(left_words + right_words[overlap_words:])
+
     return f"{left.rstrip()} {right.lstrip()}"
+
+
+def _terminal_punctuation(word: str) -> str:
+    stripped = word.rstrip('"\')]}')
+    if stripped.endswith((".", "?", "!", ",", ":", ";")):
+        return stripped[-1]
+    return ""
+
+
+def _find_overlap_word_count(left_words: list[str], right_words: list[str]) -> int:
+    """Return how many prefix words from right are safe to drop as boundary overlap."""
+    if len(left_words) < MIN_OVERLAP_WORDS or len(right_words) < MIN_OVERLAP_WORDS:
+        return 0
+
+    left_norm = _normalized_words(left_words[-BOUNDARY_SCAN_WORDS:])
+    right_norm = _normalized_words(right_words[:BOUNDARY_SCAN_WORDS])
+    max_right_size = min(MAX_OVERLAP_WORDS, len(right_norm))
+    best_left_size = 0
+    best_right_size = 0
+    best_score = 0.0
+
+    for right_size in range(max_right_size, MIN_OVERLAP_WORDS - 1, -1):
+        min_left_size = max(MIN_OVERLAP_WORDS, right_size - MAX_OVERLAP_SIZE_DELTA)
+        max_left_size = min(len(left_norm), right_size + MAX_OVERLAP_SIZE_DELTA)
+        right_slice = right_norm[:right_size]
+        for left_size in range(max_left_size, min_left_size - 1, -1):
+            left_slice = left_norm[-left_size:]
+            if not all(left_slice) or not all(right_slice):
+                continue
+            if left_slice == right_slice:
+                return right_size
+            score = SequenceMatcher(None, left_slice, right_slice, autojunk=False).ratio()
+            if score >= MIN_OVERLAP_SIMILARITY and score > best_score:
+                best_score = score
+                best_left_size = left_size
+                best_right_size = right_size
+
+    if not best_right_size:
+        return 0
+    return min(best_left_size, best_right_size)
+
+
+def _collapse_repeated_phrase_loops(text: str) -> str:
+    """Collapse only obvious model loops: 5+ consecutive repeated phrases."""
+    words = text.split()
+    if len(words) < MIN_LOOP_PHRASE_WORDS * MIN_LOOP_REPETITIONS:
+        return text
+
+    normalized = _normalized_words(words)
+    output: list[str] = []
+    index = 0
+    while index < len(words):
+        collapsed = False
+        max_phrase_words = min(MAX_LOOP_PHRASE_WORDS, (len(words) - index) // MIN_LOOP_REPETITIONS)
+        for phrase_size in range(max_phrase_words, MIN_LOOP_PHRASE_WORDS - 1, -1):
+            phrase = normalized[index:index + phrase_size]
+            if not all(phrase):
+                continue
+
+            repetitions = 1
+            cursor = index + phrase_size
+            while cursor + phrase_size <= len(words):
+                if normalized[cursor:cursor + phrase_size] != phrase:
+                    break
+                repetitions += 1
+                cursor += phrase_size
+
+            if repetitions >= MIN_LOOP_REPETITIONS:
+                output.extend(words[index:index + phrase_size])
+                index = cursor
+                collapsed = True
+                break
+
+        if not collapsed:
+            output.append(words[index])
+            index += 1
+
+    return " ".join(output)
 
 
 def _merge_transcripts(texts: list[str]) -> str:
     merged = ""
     for text in texts:
-        cleaned = text.strip()
+        cleaned = _collapse_repeated_phrase_loops(text.strip())
         if cleaned:
             merged = _merge_pair(merged, cleaned)
     return merged.strip()

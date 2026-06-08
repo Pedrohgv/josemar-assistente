@@ -17,6 +17,88 @@ from app.adapters import transcribe_granite
 from app.model_registry import ModelSpec
 
 
+class TranscriptMergeTests(unittest.TestCase):
+    def test_merge_pair_removes_case_and_punctuation_boundary_overlap(self) -> None:
+        left = "intro yes-yes question, which now i remember what it is that i was going to go over"
+        right = "Question, which now I remember what it is that I was going to go over. So one concept is next"
+
+        merged = transcribe_granite._merge_pair(left, right)
+
+        self.assertEqual(
+            merged,
+            "intro yes-yes question, which now i remember what it is that i was going to go over. So one concept is next",
+        )
+
+    def test_merge_pair_removes_fuzzy_boundary_overlap_with_small_word_differences(self) -> None:
+        left = (
+            "before all right i want to ask everybody a question who does your own sales "
+            "hand up everybody almost who enjoys doing their own sales so for the"
+        )
+        right = (
+            "all right, i want to ask everybody a question. who does your own sales? "
+            "who enjoys doing their own sales? so for the people that you talk to next"
+        )
+
+        merged = transcribe_granite._merge_pair(left, right)
+
+        self.assertEqual(
+            merged,
+            "before all right i want to ask everybody a question who does your own sales "
+            "hand up everybody almost who enjoys doing their own sales so for the people that you talk to next",
+        )
+
+    def test_merge_pair_preserves_unique_right_words_on_asymmetric_fuzzy_match(self) -> None:
+        left = (
+            "before that's really important to understand because it affects everything "
+            "we're going to talk about next"
+        )
+        right = (
+            "that's really important too understand because it affects everything "
+            "were going to talk about next and i want to emphasize"
+        )
+
+        merged = transcribe_granite._merge_pair(left, right)
+
+        self.assertEqual(
+            merged,
+            "before that's really important to understand because it affects everything "
+            "we're going to talk about next and i want to emphasize",
+        )
+
+    def test_merge_pair_preserves_legitimate_non_boundary_repetition(self) -> None:
+        left = "sales are hard who enjoys sales who enjoys sales"
+        right = "the next section starts here"
+
+        merged = transcribe_granite._merge_pair(left, right)
+
+        self.assertEqual(merged.count("who enjoys sales"), 2)
+        self.assertEqual(merged, "sales are hard who enjoys sales who enjoys sales the next section starts here")
+
+    def test_merge_pair_does_not_drop_low_similarity_boundary(self) -> None:
+        left = "we need to discuss customer sales process"
+        right = "we need to discuss product roadmap planning"
+
+        merged = transcribe_granite._merge_pair(left, right)
+
+        self.assertEqual(merged, "we need to discuss customer sales process we need to discuss product roadmap planning")
+
+    def test_repeated_phrase_loop_collapse_is_conservative(self) -> None:
+        phrase = "yes, that's what we're talking about"
+        text = f"before {phrase}. {phrase}. {phrase}. {phrase}. {phrase}. {phrase}. after"
+
+        collapsed = transcribe_granite._collapse_repeated_phrase_loops(text)
+
+        self.assertEqual(collapsed.count(phrase), 1)
+        self.assertEqual(collapsed, f"before {phrase}. after")
+
+    def test_repeated_phrase_loop_collapse_preserves_short_emphasis(self) -> None:
+        text = "no no no this is important"
+
+        collapsed = transcribe_granite._collapse_repeated_phrase_loops(text)
+
+        self.assertEqual(collapsed, text)
+
+
 class FakeRouter:
     def __init__(self, responses: list[str] | None = None) -> None:
         self.requests: list[dict] = []

@@ -152,7 +152,8 @@ Current transcription behavior:
 - The rejected `granite-speech-4.1-2b-plus` GGUF currently fails in llama.cpp server with `unknown model architecture: granite_speech`.
 - Audio input in llama.cpp is experimental; validate quality and latency before relying on it.
 - Audio longer than `AUX_ML_TRANSCRIBE_CHUNK_SECONDS` is split with ffmpeg into 16 kHz mono WAV chunks and processed sequentially.
-- Chunk overlap is controlled by `AUX_ML_TRANSCRIBE_OVERLAP_SECONDS`; chunk text is merged with simple overlap de-duplication.
+- Chunk overlap is controlled by `AUX_ML_TRANSCRIBE_OVERLAP_SECONDS`; chunk text is merged with conservative fuzzy overlap cleanup.
+- Long-form transcripts are draft quality. Spot-check important sections, expect occasional duplicated overlap or model repetition, and do not treat transcripts as authoritative without human review.
 - Audio files larger than `AUX_ML_TRANSCRIBE_MAX_BYTES` are rejected before being sent to llama.cpp. Default: `104857600` bytes.
 
 Transcription tuning:

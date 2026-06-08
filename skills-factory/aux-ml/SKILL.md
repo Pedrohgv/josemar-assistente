@@ -72,7 +72,7 @@ echo '{
 }' | aux-ml
 ```
 
-Note: Granite Speech support uses pinned llama.cpp `b9045` experimental audio input. Long files are chunked with ffmpeg; validate transcript quality and memory before relying on it for production transcripts.
+Note: Granite Speech support uses pinned llama.cpp `b9045` experimental audio input. Long files are chunked with ffmpeg and merged with conservative fuzzy overlap cleanup. Treat long-form transcripts as draft output: spot-check important sections, expect occasional duplicated overlap or model repetition, and do not treat transcripts as authoritative without human review.
 
 ### `job_status`
 
