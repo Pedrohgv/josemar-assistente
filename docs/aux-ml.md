@@ -151,6 +151,8 @@ Current transcription behavior:
 - Requires the pinned llama.cpp `b9045` runtime. Current later llama.cpp builds tested with Q4, Q8, BF16, CLI, and server paths produced empty or hallucinated transcripts.
 - The rejected `granite-speech-4.1-2b-plus` GGUF currently fails in llama.cpp server with `unknown model architecture: granite_speech`.
 - Audio input in llama.cpp is experimental; validate quality and latency before relying on it.
+- Granite Speech currently works best for English. Portuguese and other languages may produce lower-quality or unreliable transcripts; important non-English transcripts should be reviewed by a human.
+- Telegram voice notes commonly arrive as OGG/Opus. If aux-ml rejects them or output quality is poor, convert them to 16 kHz mono WAV before submitting transcription.
 - Audio longer than `AUX_ML_TRANSCRIBE_CHUNK_SECONDS` is split with ffmpeg into 16 kHz mono WAV chunks and processed sequentially.
 - Chunk overlap is controlled by `AUX_ML_TRANSCRIBE_OVERLAP_SECONDS`; chunk text is merged with conservative fuzzy overlap cleanup.
 - Long-form transcripts are draft quality. Spot-check important sections, expect occasional duplicated overlap or model repetition, and do not treat transcripts as authoritative without human review.

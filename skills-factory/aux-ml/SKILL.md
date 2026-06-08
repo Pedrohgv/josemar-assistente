@@ -74,6 +74,10 @@ echo '{
 
 Note: Granite Speech support uses pinned llama.cpp `b9045` experimental audio input. Long files are chunked with ffmpeg and merged with conservative fuzzy overlap cleanup. Treat long-form transcripts as draft output: spot-check important sections, expect occasional duplicated overlap or model repetition, and do not treat transcripts as authoritative without human review.
 
+Language/format caveats:
+- Granite Speech currently works best for English. Portuguese and other languages may produce lower-quality or unreliable transcripts; tell the user when confidence may be low and prefer human review for important content.
+- Telegram voice notes commonly arrive as OGG/Opus. If aux-ml rejects them or output quality is poor, convert them to 16 kHz mono WAV before submitting transcription.
+
 ### `job_status`
 
 Fetch current job state.
