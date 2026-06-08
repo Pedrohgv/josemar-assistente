@@ -14,6 +14,7 @@ from lib.handlers import handle_route  # noqa: E402
 from lib.router import (  # noqa: E402
     extract_route_payload,
     get_route_metadata,
+    heuristic_capture_rules,
     is_known_route,
     load_routes,
     parse_route,
@@ -144,6 +145,7 @@ def main() -> int:
 
     metadata = get_route_metadata(route, routes)
     payload_errors = validate_route_payload(route, route_payload, routes)
+    payload_errors.extend(heuristic_capture_rules(route, route_payload))
     if payload_errors:
         print(
             json.dumps(
@@ -173,7 +175,6 @@ def main() -> int:
                     "executed": False,
                     "error": "route_dormant",
                     "message": message,
-                    "playbook": metadata.get("playbook"),
                 },
                 ensure_ascii=True,
             )
@@ -190,7 +191,6 @@ def main() -> int:
         "success": ok,
         "route": route,
         "status": metadata.get("status", "active"),
-        "playbook": resolved_metadata.get("playbook"),
         "input": route_payload,
         **route_result,
     }

@@ -1327,6 +1327,13 @@ def capture_note(
     if selected_template_path is None and provided_fields:
         raise ValueError("field_values requires a selected template")
 
+    if selected_template_path is None:
+        if title is None or not str(title).strip():
+            raise ValueError(
+                "Field 'title' is required when no template is selected; "
+                "the title becomes the note filename"
+            )
+
     vault_root.mkdir(parents=True, exist_ok=True)
     target_dir = _resolve_capture_target_dir(vault_root, target_folder, selected_template_record)
 
@@ -1669,6 +1676,90 @@ def file_note(
         "context": operation_context,
     }
     _append_log(vault_root, "note.file", result)
+    return result
+
+
+WIKILINK_PATTERN = re.compile(r"\[\[([^\[\]\n]+?)\]\]")
+
+
+def _replace_wikilink_target(content: str, old_stem: str, new_stem: str) -> tuple[str, int]:
+    if not old_stem or old_stem == new_stem:
+        return content, 0
+
+    replacements = 0
+
+    def _sub(match: re.Match[str]) -> str:
+        nonlocal replacements
+        inner = match.group(1)
+        target, separator, alias = inner.partition("|")
+        target = target.strip()
+        if target != old_stem:
+            return match.group(0)
+        replacements += 1
+        if separator and alias:
+            return f"[[{new_stem}|{alias}]]"
+        return f"[[{new_stem}]]"
+
+    updated = WIKILINK_PATTERN.sub(_sub, content)
+    return updated, replacements
+
+
+def rename_note(
+    vault_root: Path,
+    path: str | None = None,
+    new_title: str | None = None,
+    rewrite_wikilinks: bool = True,
+) -> dict:
+    source = _resolve_note_path(vault_root, path=path)
+    old_stem = source.stem
+
+    if new_title is None or not str(new_title).strip():
+        raise ValueError("Field 'new_title' is required")
+    new_title_str = str(new_title).strip()
+
+    new_slug = _slugify(new_title_str)
+    if not new_slug:
+        raise ValueError("new_title produced an empty slug after sanitization")
+    if new_slug == old_stem:
+        raise ValueError(f"new_title slug '{new_slug}' matches the current filename")
+
+    target_dir = source.parent
+    target_path = _unique_path(target_dir / f"{new_slug}.md")
+
+    rewrite_summary: list[dict] = []
+    if rewrite_wikilinks:
+        for candidate in vault_root.rglob("*.md"):
+            if not candidate.is_file():
+                continue
+            if candidate == source or candidate == target_path:
+                continue
+            existing = _safe_read_text(candidate)
+            updated, count = _replace_wikilink_target(existing, old_stem, new_slug)
+            if count > 0:
+                candidate.write_text(updated, encoding="utf-8")
+                rewrite_summary.append(
+                    {
+                        "path": _relative(vault_root, candidate),
+                        "replacements": count,
+                    }
+                )
+
+    shutil.move(str(source), str(target_path))
+    maintenance_updates = _refresh_structure_context(vault_root, [target_dir])
+    operation_context = _build_operation_context(vault_root, target_dir)
+
+    result = {
+        "from": f"{_relative(vault_root, source.parent)}/{old_stem}.md" if source.parent != vault_root else f"{old_stem}.md",
+        "to": _relative(vault_root, target_path),
+        "old_stem": old_stem,
+        "new_stem": new_slug,
+        "new_title": new_title_str,
+        "rewritten_notes": rewrite_summary,
+        "rewritten_count": sum(item["replacements"] for item in rewrite_summary),
+        "maintenance_updates": maintenance_updates,
+        "context": operation_context,
+    }
+    _append_log(vault_root, "note.rename", result)
     return result
 
 
