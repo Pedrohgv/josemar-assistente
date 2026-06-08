@@ -802,6 +802,41 @@ Prefer monthly grouping and explicit totals.
         self.assertEqual(code, 1)
         self.assertEqual(output.get("error"), "validation_error")
 
+    def test_note_update_oserror_surfaces_underlying_details(self) -> None:
+        note_path = self.vault_dir / "00-Inbox" / "readonly-note.md"
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text("# Read Only\n\nOriginal body.\n", encoding="utf-8")
+        note_path.chmod(0o444)
+        try:
+            code, output = run_gateway(
+                {
+                    "route": "note.update",
+                    "payload": {
+                        "path": "00-Inbox/readonly-note.md",
+                        "mode": "append",
+                        "text": "\nShould fail to write.\n",
+                    },
+                },
+                self.env,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(output.get("error"), "execution_error")
+            message = output.get("message", "")
+            self.assertIn("Falha ao acessar arquivos do vault", message)
+            self.assertIn("readonly-note.md", message)
+            self.assertNotEqual(
+                message,
+                "Falha ao acessar arquivos do vault.",
+                "OSError details must not be silently swallowed by the handler",
+            )
+
+            restored = note_path.read_text(encoding="utf-8")
+            self.assertEqual(restored, "# Read Only\n\nOriginal body.\n")
+        finally:
+            if note_path.exists():
+                note_path.chmod(0o644)
+
     def test_note_create_alias_works_same_as_capture(self) -> None:
         code, output = run_gateway(
             {
