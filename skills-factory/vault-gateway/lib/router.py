@@ -174,3 +174,45 @@ def get_route_metadata(route_name: str, routes: dict | None = None) -> dict:
     if routes is None:
         routes = load_routes()
     return routes.get(route_name, {})
+
+
+_NOTE_CAPTURE_TEMPLATE_KEYS = (
+    "template_path",
+    "template_id",
+    "template_hint",
+)
+
+
+def heuristic_capture_rules(route_name: str, route_payload: dict) -> list[str]:
+    """Enforce contextual contract rules that the static schema cannot express.
+
+    Returns a list of human-readable error messages. Empty list means pass.
+    """
+    if route_name not in {"note.capture", "note.create"}:
+        return []
+
+    has_template = any(
+        (key in route_payload) and str(route_payload.get(key) or "").strip()
+        for key in _NOTE_CAPTURE_TEMPLATE_KEYS
+    )
+    if has_template:
+        return []
+
+    errors: list[str] = []
+
+    text = route_payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        errors.append(
+            "Field 'text' is required when no template is selected "
+            "(template_path, template_id, or template_hint)."
+        )
+
+    title = route_payload.get("title")
+    if not isinstance(title, str) or not title.strip():
+        errors.append(
+            "Field 'title' is required when no template is selected "
+            "(template_path, template_id, or template_hint). "
+            "The title becomes the note filename; do not rely on body-text derivation."
+        )
+
+    return errors

@@ -6,14 +6,16 @@ Provide MBIFC vault capabilities to Josemar through one public skill entrypoint,
 
 ## Topology
 
-- Public entrypoint: `vault-gateway`
-- Route contract is explicit (`route` + `payload`) and enforced strictly at runtime.
-- Active operation routes: `template.list`, `template.inspect`, `note.read`, `note.capture`, `note.update`, `note.search`, `note.link`, `note.file`, `inbox.triage`, `vault.defrag`, `vault.audit`, `vault.deep-clean`, `tags.garden`, `onboarding`
-- Internal active playbooks:
-  - workflow playbooks: onboarding, inbox-triage, defrag, vault-audit, deep-clean, tag-garden
-  - note route playbooks: note-read, note-capture, note-update, note-search, note-link, note-file
-  - template route playbooks: template-list, template-inspect
-- Internal dormant playbook: transcribe
+- Public entrypoint: `vault-gateway` (executable at `/opt/josemar/skills/vault-gateway/vault-gateway`)
+- Public surface: `skills-factory/vault-gateway/SKILL.md` is the only file the LLM reads. It contains:
+  - **High-traffic route guidance inlined** as `## note.capture`, `## note.read`, `## note.update`, `## note.file`, `## note.rename`. The full MBIFC orchestration lives here so it is always in context when these routes are used.
+  - **Low-traffic route table** with explicit trigger signals pointing at playbooks. The LLM fetches a playbook only when its trigger matches the user's request.
+- Route contract is explicit (`route` + `payload`) and enforced strictly at runtime by `lib/router.py`.
+- Heuristic capture rules in `lib/router.py:heuristic_capture_rules()` enforce conditional required keys (e.g. `title` is required on `note.capture` when no template is selected).
+- Active operation routes: `note.capture`, `note.create` (alias), `note.read`, `note.update`, `note.file`, `note.rename`, `note.search`, `note.link`, `template.list`, `template.inspect`, `onboarding`, `inbox.triage`, `vault.defrag`, `vault.audit`, `vault.deep-clean`, `tags.garden`
+- Low-traffic playbooks (fetched on demand): `playbooks/{onboarding,inbox-triage,defrag,vault-audit,deep-clean,tag-garden,note-search,note-link,template-list,template-inspect}/PLAYBOOK.md`
+- Dormant playbook: `dormant/transcribe/PLAYBOOK.md`
+- `contracts/routes.json` v2 — payload schema, no longer stores playbook paths.
 
 ## Source of Truth
 
@@ -43,6 +45,7 @@ If destructive mode is selected, workflow shows strong warning and strongly reco
 ## Runtime Safety
 
 - Strict payload validation (required keys, unknown keys, type checks, enum checks).
+- Heuristic capture rules: `title` and `text` are required on `note.capture`/`note.create` when no template is selected. Both the contract layer (`lib/router.py:heuristic_capture_rules`) and the handler layer (`lib/vault_ops.py:capture_note`) enforce this; the handler is ground truth for the `template_hint` case where the contract cannot pre-resolve.
 - Relative-path constraints at contract and filesystem layers.
 - Vault root allowlist guard before route execution.
 - Session-isolated onboarding state via required `state_key`.

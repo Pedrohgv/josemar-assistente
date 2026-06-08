@@ -15,6 +15,7 @@ from lib.vault_ops import (
     list_templates,
     link_notes,
     read_note,
+    rename_note,
     scan_vault,
     search_notes,
     summarize_audit,
@@ -506,6 +507,19 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 "result": result,
             }
 
+        if route == "note.rename":
+            result = rename_note(
+                vault_root=vault_root,
+                path=payload.get("path"),
+                new_title=payload.get("new_title"),
+                rewrite_wikilinks=_as_bool(payload.get("rewrite_wikilinks", True)),
+            )
+            return {
+                "message": "Nota renomeada com sucesso." + _maintenance_suffix(result),
+                "needs_user_input": False,
+                "result": result,
+            }
+
         if route == "inbox.triage":
             summary = summarize_inbox(vault_root)
             return {
@@ -550,7 +564,6 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
             "message": "Configuracao de vault invalida no ambiente.",
             "error": "configuration_error",
             "needs_user_input": False,
-            "playbook": metadata.get("playbook"),
         }
     except ValueError as exc:
         return {
@@ -558,26 +571,22 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
             "error": "validation_error",
             "details": str(exc),
             "needs_user_input": True,
-            "playbook": metadata.get("playbook"),
         }
     except OSError:
         return {
             "message": "Falha ao acessar arquivos do vault.",
             "error": "execution_error",
             "needs_user_input": False,
-            "playbook": metadata.get("playbook"),
         }
     except Exception:
         return {
             "message": "Erro interno ao executar rota.",
             "error": "internal_error",
             "needs_user_input": False,
-            "playbook": metadata.get("playbook"),
         }
 
     return {
         "message": "Rota sem handler implementado.",
         "error": "handler_not_implemented",
         "needs_user_input": False,
-        "playbook": metadata.get("playbook"),
     }

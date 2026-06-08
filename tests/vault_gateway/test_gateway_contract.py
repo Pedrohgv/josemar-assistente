@@ -127,7 +127,10 @@ class VaultGatewayContractTests(unittest.TestCase):
         code, output = run_gateway(
             {
                 "route": "note.capture",
-                "payload": {"text": "conversation with client Claudio"},
+                "payload": {
+                    "text": "conversation with client Claudio",
+                    "title": "Conversation with Claudio",
+                },
             },
             self.env,
         )
@@ -156,6 +159,7 @@ class VaultGatewayContractTests(unittest.TestCase):
                 "route": "note.capture",
                 "payload": {
                     "text": "new health note",
+                    "title": "New Health Note",
                     "target_folder": "02-Areas/Health",
                 },
             },
@@ -802,7 +806,7 @@ Prefer monthly grouping and explicit totals.
         code, output = run_gateway(
             {
                 "route": "note.create",
-                "payload": {"text": "alias test content"},
+                "payload": {"text": "alias test content", "title": "Alias Test"},
             },
             self.env,
         )
@@ -820,7 +824,7 @@ Prefer monthly grouping and explicit totals.
         code, output = run_gateway(
             {
                 "route": "note.capture",
-                "payload": {"text": "direct capture"},
+                "payload": {"text": "direct capture", "title": "Direct Capture"},
             },
             self.env,
         )
@@ -840,6 +844,344 @@ Prefer monthly grouping and explicit totals.
         self.assertEqual(code, 1)
         self.assertEqual(output.get("error"), "route_dormant")
         self.assertFalse(output.get("executed", True))
+
+    def test_note_rename_basic_rename_no_wikilinks(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        note = inbox / "weird-old-name.md"
+        note.write_text("# Weird Old Name\n\nBody content.\n", encoding="utf-8")
+
+        code, output = run_gateway(
+            {
+                "route": "note.rename",
+                "payload": {
+                    "path": "00-Inbox/weird-old-name.md",
+                    "new_title": "A Clear Title",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output.get("result", {})
+        self.assertEqual(result.get("new_stem"), "a-clear-title")
+        self.assertTrue(result.get("rewritten_notes") == [])
+        self.assertEqual(result.get("rewritten_count"), 0)
+
+        self.assertFalse(note.exists())
+        new_path = self.vault_dir / "00-Inbox" / "a-clear-title.md"
+        self.assertTrue(new_path.exists())
+        self.assertIn("Body content.", new_path.read_text(encoding="utf-8"))
+
+    def test_note_rename_rewrites_wikilinks_across_vault(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        target = inbox / "casa-e-decorao-decorao-e-ambientes.md"
+        target.write_text(
+            "---\ntype: note\n---\n# Casa e Decoracao e Ambientes\n\nBody.\n",
+            encoding="utf-8",
+        )
+        referrer = inbox / "ideas.md"
+        referrer.write_text(
+            "# Ideas\n\nSee [[casa-e-decorao-decorao-e-ambientes]] for context.\n"
+            "Also see [[casa-e-decorao-decorao-e-ambientes|ambient notes]].\n"
+            "Unrelated: [[some-other-note]] should stay.\n",
+            encoding="utf-8",
+        )
+        other = self.vault_dir / "01-Projects" / "roadmap.md"
+        other.parent.mkdir(parents=True, exist_ok=True)
+        other.write_text(
+            "# Roadmap\n\n- [ ] link to [[casa-e-decorao-decorao-e-ambientes]]\n",
+            encoding="utf-8",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.rename",
+                "payload": {
+                    "path": "00-Inbox/casa-e-decorao-decorao-e-ambientes.md",
+                    "new_title": "Casa e Decoracao e Ambientes",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output.get("result", {})
+        self.assertEqual(result.get("new_stem"), "casa-e-decoracao-e-ambientes")
+        self.assertEqual(result.get("rewritten_count"), 3)
+
+        new_target = inbox / "casa-e-decoracao-e-ambientes.md"
+        self.assertFalse(target.exists())
+        self.assertTrue(new_target.exists())
+
+        referrer_text = referrer.read_text(encoding="utf-8")
+        self.assertIn("[[casa-e-decoracao-e-ambientes]] for context", referrer_text)
+        self.assertIn("[[casa-e-decoracao-e-ambientes|ambient notes]]", referrer_text)
+        self.assertIn("[[some-other-note]] should stay", referrer_text)
+        self.assertNotIn("casa-e-decorao-decorao-e-ambientes", referrer_text)
+
+        other_text = other.read_text(encoding="utf-8")
+        self.assertIn("[[casa-e-decoracao-e-ambientes]]", other_text)
+        self.assertNotIn("casa-e-decorao-decorao-e-ambientes", other_text)
+
+    def test_note_rename_rewrites_wikilinks_can_be_disabled(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        target = inbox / "old-name.md"
+        target.write_text("# Old\n", encoding="utf-8")
+        referrer = inbox / "ref.md"
+        referrer.write_text("See [[old-name]].\n", encoding="utf-8")
+
+        code, output = run_gateway(
+            {
+                "route": "note.rename",
+                "payload": {
+                    "path": "00-Inbox/old-name.md",
+                    "new_title": "New Name",
+                    "rewrite_wikilinks": False,
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(output.get("result", {}).get("rewritten_count"), 0)
+        self.assertIn("[[old-name]]", referrer.read_text(encoding="utf-8"))
+        self.assertTrue((inbox / "new-name.md").exists())
+
+    def test_note_rename_requires_path(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.rename",
+                "payload": {"new_title": "Whatever"},
+            },
+            self.env,
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "invalid_payload")
+
+    def test_note_rename_requires_new_title(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        (inbox / "stays.md").write_text("# Stays\n", encoding="utf-8")
+
+        code, output = run_gateway(
+            {
+                "route": "note.rename",
+                "payload": {"path": "00-Inbox/stays.md"},
+            },
+            self.env,
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "invalid_payload")
+
+    def test_note_rename_rejects_same_slug(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        (inbox / "same-name.md").write_text("# Same Name\n", encoding="utf-8")
+
+        code, output = run_gateway(
+            {
+                "route": "note.rename",
+                "payload": {
+                    "path": "00-Inbox/same-name.md",
+                    "new_title": "Same Name",
+                },
+            },
+            self.env,
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "validation_error")
+
+    def test_note_rename_rejects_unknown_payload_keys(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        (inbox / "note-x.md").write_text("# X\n", encoding="utf-8")
+
+        code, output = run_gateway(
+            {
+                "route": "note.rename",
+                "payload": {
+                    "path": "00-Inbox/note-x.md",
+                    "new_title": "Note X Renamed",
+                    "unexpected": "value",
+                },
+            },
+            self.env,
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "invalid_payload")
+
+    def test_note_rename_rejects_path_traversal(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.rename",
+                "payload": {
+                    "path": "../escape.md",
+                    "new_title": "Escape",
+                },
+            },
+            self.env,
+        )
+        self.assertEqual(code, 1)
+        details = output.get("details", [])
+        joined = " ".join(str(item) for item in details)
+        self.assertTrue(
+            "relative path" in joined.lower() or "traversal" in joined.lower() or "path" in joined.lower(),
+            f"Expected rejection details mentioning path validation, got: {details!r}",
+        )
+
+    def test_note_capture_requires_title_when_no_template(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {"text": "free-form body without a title"},
+            },
+            self.env,
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "invalid_payload")
+        details = output.get("details", [])
+        joined = " ".join(str(item) for item in details)
+        self.assertIn("'title' is required", joined)
+        inbox = self.vault_dir / "00-Inbox"
+        notes = list(inbox.rglob("*.md")) if inbox.exists() else []
+        self.assertEqual(notes, [])
+
+    def test_note_capture_requires_text_when_no_template(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {"title": "Just a Title"},
+            },
+            self.env,
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "invalid_payload")
+        details = output.get("details", [])
+        joined = " ".join(str(item) for item in details)
+        self.assertIn("'text' is required", joined)
+
+    def test_note_capture_requires_both_title_and_text_when_no_template(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {},
+            },
+            self.env,
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "invalid_payload")
+        details = output.get("details", [])
+        joined = " ".join(str(item) for item in details)
+        self.assertIn("'text' is required", joined)
+        self.assertIn("'title' is required", joined)
+
+    def test_note_capture_blank_title_still_rejected(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {"text": "body", "title": "   "},
+            },
+            self.env,
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "invalid_payload")
+        details = output.get("details", [])
+        joined = " ".join(str(item) for item in details)
+        self.assertIn("'title' is required", joined)
+
+    def test_note_capture_title_optional_when_template_path_supplied(self) -> None:
+        self._write_template(
+            "Templates/Quick.md",
+            "---\nvg_template: true\nvg_default_target_folder: 00-Inbox\n---\n\n# Quick Note\n\n",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {
+                    "text": "captured body",
+                    "template_path": "Templates/Quick.md",
+                },
+            },
+            self.env,
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+
+    def test_note_capture_title_optional_when_template_id_supplied(self) -> None:
+        self._write_template(
+            "Templates/Quick.md",
+            "---\nvg_template: true\nvg_template_id: quick-v1\nvg_default_target_folder: 00-Inbox\n---\n\n# Quick Note\n\n",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {
+                    "template_id": "quick-v1",
+                    "field_values": {"title": "Explicit From Field"},
+                },
+            },
+            self.env,
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+
+    def test_note_capture_title_optional_when_template_hint_resolves(self) -> None:
+        self._write_template(
+            "Templates/Quick.md",
+            "---\nvg_template: true\nvg_default_target_folder: 00-Inbox\n---\n\n# Quick Note\n\n",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {
+                    "text": "body",
+                    "template_hint": "Quick",
+                },
+            },
+            self.env,
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+
+    def test_note_capture_title_optional_when_template_hint_does_not_resolve(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {
+                    "text": "body",
+                    "template_hint": "nonexistent-template",
+                },
+            },
+            self.env,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(output.get("error"), {"invalid_payload", "validation_error"})
+        details = output.get("details", [])
+        details_text = " ".join(str(item) for item in details) if isinstance(details, list) else str(details)
+        joined = details_text + " " + str(output.get("message", ""))
+        self.assertIn("title", joined)
+
+    def test_note_create_alias_inherits_title_requirement(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.create",
+                "payload": {"text": "body only"},
+            },
+            self.env,
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "invalid_payload")
+        details = output.get("details", [])
+        joined = " ".join(str(item) for item in details)
+        self.assertIn("'title' is required", joined)
 
 
 if __name__ == "__main__":
