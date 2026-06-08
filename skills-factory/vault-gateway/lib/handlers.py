@@ -572,9 +572,16 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
             "details": str(exc),
             "needs_user_input": True,
         }
-    except OSError:
+    except OSError as exc:
+        details = exc.strerror or str(exc) or type(exc).__name__
+        filename = getattr(exc, "filename", None)
+        message = "Falha ao acessar arquivos do vault."
+        if filename:
+            message = f"{message} ({type(exc).__name__}: {details}: {filename})"
+        else:
+            message = f"{message} ({type(exc).__name__}: {details})"
         return {
-            "message": "Falha ao acessar arquivos do vault.",
+            "message": message,
             "error": "execution_error",
             "needs_user_input": False,
         }
