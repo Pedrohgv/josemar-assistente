@@ -20,6 +20,16 @@ class LlamaRouterClient:
     async def close(self) -> None:
         await self._client.aclose()
 
+    def _error_text(self, response: httpx.Response) -> str:
+        try:
+            text = response.text
+        except UnicodeDecodeError:
+            text = response.content.decode("utf-8", errors="replace")
+        text = text.replace("\n", " ").strip()
+        if len(text) > 500:
+            return f"{text[:500]}..."
+        return text
+
     async def ping(self) -> bool:
         try:
             await self.list_models()
@@ -30,7 +40,7 @@ class LlamaRouterClient:
     async def list_models(self) -> list[dict]:
         response = await self._client.get("/models")
         if response.status_code >= 400:
-            raise RouterError(f"/models failed ({response.status_code}): {response.text}")
+            raise RouterError(f"/models failed ({response.status_code}): {self._error_text(response)}")
 
         payload = response.json()
         if isinstance(payload, dict):
@@ -59,17 +69,23 @@ class LlamaRouterClient:
             if str(model_id) in {target_stem, target_name, target}:
                 return str(model_id)
 
+            status = model.get("status")
+            if isinstance(status, dict):
+                args = status.get("args")
+                if isinstance(args, list) and target in {str(arg) for arg in args}:
+                    return str(model_id)
+
         raise RouterError(f"Model path '{target}' not found in llama router model list")
 
     async def load_model(self, model_id: str) -> None:
         response = await self._client.post("/models/load", json={"model": model_id})
         if response.status_code >= 400:
-            raise RouterError(f"/models/load failed ({response.status_code}): {response.text}")
+            raise RouterError(f"/models/load failed ({response.status_code}): {self._error_text(response)}")
 
     async def unload_model(self, model_id: str) -> None:
         response = await self._client.post("/models/unload", json={"model": model_id})
         if response.status_code >= 400:
-            raise RouterError(f"/models/unload failed ({response.status_code}): {response.text}")
+            raise RouterError(f"/models/unload failed ({response.status_code}): {self._error_text(response)}")
 
     async def wait_for_status(
         self,
@@ -117,6 +133,46 @@ class LlamaRouterClient:
         )
         if response.status_code >= 400:
             raise RouterError(
-                f"/v1/chat/completions failed ({response.status_code}): {response.text}"
+                f"/v1/chat/completions failed ({response.status_code}): {self._error_text(response)}"
+            )
+        return response.json()
+
+    async def completion(self, payload: dict, timeout_seconds: int) -> dict:
+        response = await self._client.post(
+            "/completion",
+            json=payload,
+            timeout=timeout_seconds,
+        )
+        if response.status_code >= 400:
+            raise RouterError(
+                f"/completion failed ({response.status_code}): {self._error_text(response)}"
+            )
+        return response.json()
+
+    async def audio_transcription(
+        self,
+        *,
+        file_path: Path,
+        model_id: str,
+        prompt: str,
+        mime_type: str,
+        timeout_seconds: int,
+    ) -> dict:
+        data = {
+            "model": model_id,
+            "prompt": prompt,
+        }
+        with file_path.open("rb") as audio_file:
+            files = {"file": (file_path.name, audio_file, mime_type)}
+            response = await self._client.post(
+                "/v1/audio/transcriptions",
+                data=data,
+                files=files,
+                timeout=timeout_seconds,
+            )
+
+        if response.status_code >= 400:
+            raise RouterError(
+                f"/v1/audio/transcriptions failed ({response.status_code}): {self._error_text(response)}"
             )
         return response.json()

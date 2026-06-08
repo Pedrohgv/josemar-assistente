@@ -6,6 +6,7 @@ LLAMA_ROUTER_HOST="${LLAMA_ROUTER_HOST:-127.0.0.1}"
 LLAMA_ROUTER_PORT="${LLAMA_ROUTER_PORT:-8080}"
 LLAMA_MODELS_DIR="${LLAMA_MODELS_DIR:-/models}"
 LLAMA_MODELS_PRESET="${LLAMA_MODELS_PRESET:-/app/config/models-preset.ini}"
+LLAMA_OCR_ONLY_MODELS_PRESET="${LLAMA_OCR_ONLY_MODELS_PRESET:-/app/config/models-preset-ocr.ini}"
 LLAMA_PARALLEL="${LLAMA_PARALLEL:-1}"
 LLAMA_TIMEOUT="${LLAMA_TIMEOUT:-1800}"
 LLAMA_CONT_BATCHING="${LLAMA_CONT_BATCHING:-false}"
@@ -18,6 +19,12 @@ if [ "$LLAMA_CONT_BATCHING" = "true" ]; then
     CONT_BATCHING_FLAG="--cont-batching"
 else
     CONT_BATCHING_FLAG="--no-cont-batching"
+fi
+
+if [ "$LLAMA_MODELS_PRESET" = "/app/config/models-preset.ini" ] \
+    && [ -f "$LLAMA_OCR_ONLY_MODELS_PRESET" ] \
+    && { [ ! -f /models/granite-speech-4.1-2b-Q8_0.gguf ] || [ ! -f /models/mmproj-granite-speech-4.1-2b-f16.gguf ]; }; then
+    LLAMA_MODELS_PRESET="$LLAMA_OCR_ONLY_MODELS_PRESET"
 fi
 
 echo "Starting llama-server router on ${LLAMA_ROUTER_HOST}:${LLAMA_ROUTER_PORT}..."

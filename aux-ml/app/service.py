@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from .adapters import run_ocr_task
+from .adapters import run_ocr_task, run_transcription_task
 from .jobs import JobStore, QueueFullError, QueueManager
 from .llama_router import LlamaRouterClient
 from .model_registry import ModelRegistry, ModelSpec
@@ -169,6 +169,22 @@ class AuxMLService:
                         max_pages=self._settings.ocr_max_pages,
                         column_split=job.column_split,
                         column_split_pages=job.column_split_pages,
+                        allowed_roots=self._settings.allowed_input_dirs,
+                        router=self._router,
+                    )
+                elif job.task == "transcribe":
+                    result = await run_transcription_task(
+                        file_path=job.file_path,
+                        model_spec=model_spec,
+                        model_id=request_model_id,
+                        prompt=job.prompt,
+                        timeout_seconds=self._settings.job_timeout_seconds,
+                        max_audio_bytes=self._settings.transcribe_max_bytes,
+                        max_duration_seconds=self._settings.transcribe_max_duration_seconds,
+                        max_chunks=self._settings.transcribe_max_chunks,
+                        chunk_seconds=self._settings.transcribe_chunk_seconds,
+                        overlap_seconds=self._settings.transcribe_overlap_seconds,
+                        ffmpeg_timeout_seconds=self._settings.transcribe_ffmpeg_timeout_seconds,
                         allowed_roots=self._settings.allowed_input_dirs,
                         router=self._router,
                     )

@@ -66,6 +66,12 @@ class Settings:
     enforce_memory_limit: bool
     memory_limit_mb: int | None
     ocr_max_pages: int
+    transcribe_max_bytes: int
+    transcribe_max_duration_seconds: int
+    transcribe_max_chunks: int
+    transcribe_chunk_seconds: int
+    transcribe_overlap_seconds: int
+    transcribe_ffmpeg_timeout_seconds: int
 
 
 def load_settings() -> Settings:
@@ -91,4 +97,10 @@ def load_settings() -> Settings:
         enforce_memory_limit=_env_bool("AUX_ML_ENFORCE_MEMORY_LIMIT", True),
         memory_limit_mb=memory_limit_mb,
         ocr_max_pages=max(_env_int("AUX_ML_OCR_MAX_PAGES", 50), 1),
+        transcribe_max_bytes=max(_env_int("AUX_ML_TRANSCRIBE_MAX_BYTES", 100 * 1024 * 1024), 1),
+        transcribe_max_duration_seconds=max(_env_int("AUX_ML_TRANSCRIBE_MAX_DURATION_SECONDS", 1800), 1),
+        transcribe_max_chunks=max(_env_int("AUX_ML_TRANSCRIBE_MAX_CHUNKS", 16), 1),
+        transcribe_chunk_seconds=max(_env_int("AUX_ML_TRANSCRIBE_CHUNK_SECONDS", 240), 30),
+        transcribe_overlap_seconds=max(_env_int("AUX_ML_TRANSCRIBE_OVERLAP_SECONDS", 20), 0),
+        transcribe_ffmpeg_timeout_seconds=max(_env_int("AUX_ML_TRANSCRIBE_FFMPEG_TIMEOUT_SECONDS", 300), 1),
     )

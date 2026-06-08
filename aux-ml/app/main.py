@@ -69,8 +69,9 @@ def _validate_memory_policy(settings: Settings, registry: ModelRegistry) -> dict
 def _validate_model_files(registry: ModelRegistry) -> None:
     missing: list[str] = []
     for spec in registry.specs():
-        if not spec.model_path.exists():
-            missing.append(str(spec.model_path))
+        for path in spec.required_paths():
+            if not path.exists():
+                missing.append(str(path))
     if missing:
         joined = ", ".join(missing)
         raise RuntimeError(f"Missing model files in container image: {joined}")
@@ -92,7 +93,7 @@ class RunJobRequest(SubmitJobRequest):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = load_settings()
-    registry = ModelRegistry.from_file(settings.model_registry_path)
+    registry = ModelRegistry.from_file(settings.model_registry_path).with_available_optional_models()
     _validate_model_files(registry)
     memory_policy = _validate_memory_policy(settings, registry)
 

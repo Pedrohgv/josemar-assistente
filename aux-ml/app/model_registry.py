@@ -14,6 +14,13 @@ class ModelSpec:
     required_memory_mb: int
     default_prompt: str
     max_tokens: int
+    mmproj_path: Path | None = None
+    optional: bool = False
+
+    def required_paths(self) -> tuple[Path, ...]:
+        if self.mmproj_path is None:
+            return (self.model_path,)
+        return (self.model_path, self.mmproj_path)
 
 
 class ModelRegistry:
@@ -42,9 +49,11 @@ class ModelRegistry:
 
             task = str(entry.get("task", "")).strip().lower()
             model_path = str(entry.get("model_path", "")).strip()
+            mmproj_path = str(entry.get("mmproj_path", "")).strip()
             required_memory_mb = int(entry.get("required_memory_mb", 0))
             default_prompt = str(entry.get("default_prompt", "")).strip()
             max_tokens = int(entry.get("max_tokens", 2048))
+            optional = bool(entry.get("optional", False))
 
             if not task:
                 raise ValueError(f"Model '{model_key}' is missing task")
@@ -57,12 +66,23 @@ class ModelRegistry:
                 key=model_key,
                 task=task,
                 model_path=Path(model_path),
+                mmproj_path=Path(mmproj_path) if mmproj_path else None,
                 required_memory_mb=required_memory_mb,
                 default_prompt=default_prompt,
                 max_tokens=max_tokens,
+                optional=optional,
             )
 
         return cls(parsed)
+
+    def with_available_optional_models(self) -> "ModelRegistry":
+        models: dict[str, ModelSpec] = {}
+        for key, spec in self._models.items():
+            missing = [path for path in spec.required_paths() if not path.exists()]
+            if missing and spec.optional:
+                continue
+            models[key] = spec
+        return ModelRegistry(models)
 
     def get(self, key: str) -> ModelSpec:
         spec = self._models.get(key)
