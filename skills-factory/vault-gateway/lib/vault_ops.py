@@ -749,6 +749,9 @@ def _normalize_template_fields(raw_fields: object) -> list[dict]:
             "required": _as_bool(item.get("required", False)),
         }
 
+        if "title" in item:
+            field["title"] = _as_bool(item.get("title", False))
+
         if "default" in item:
             field["default"] = item.get("default")
 
@@ -1228,10 +1231,15 @@ def _pick_capture_title(
     if explicit:
         return explicit
 
-    for key in ("title", "name", "client_name", "meeting_title"):
-        value = resolved_fields.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+    if template_record:
+        field_defs = template_record.get("fields")
+        if isinstance(field_defs, list):
+            for field in field_defs:
+                if not isinstance(field, dict) or not field.get("title"):
+                    continue
+                value = resolved_fields.get(str(field.get("name") or ""))
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
 
     inferred = str((template_record or {}).get("title") or "").strip()
     if inferred:

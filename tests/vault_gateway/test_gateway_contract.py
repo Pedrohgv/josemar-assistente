@@ -400,6 +400,47 @@ Email: {{contact_email}}
         self.assertIn("Primeira reuniao comercial", created_text)
         self.assertNotIn("{{client_name}}", created_text)
 
+    def test_note_capture_template_uses_title_field_metadata_for_filename(self) -> None:
+        self._write_template(
+            "Templates/Daily Note.md",
+            """---
+vg_template: true
+vg_template_id: daily-v1
+vg_title: Daily Note
+vg_default_target_folder: 07-Daily
+vg_fields:
+  - name: Date
+    type: string
+    required: true
+    title: true
+---
+
+# {{Date}}
+""",
+        )
+
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {
+                    "template_id": "daily-v1",
+                    "field_values": {"Date": "2026-06-15"},
+                    "template_mode": "strict",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output.get("result", {})
+        self.assertEqual(result.get("title"), "2026-06-15")
+        self.assertEqual(result.get("path"), "07-Daily/2026-06-15.md")
+
+        created = self.vault_dir / "07-Daily" / "2026-06-15.md"
+        self.assertTrue(created.exists())
+        self.assertIn("# 2026-06-15", created.read_text(encoding="utf-8"))
+
     def test_rejects_unknown_payload_keys(self) -> None:
         code, output = run_gateway(
             {
