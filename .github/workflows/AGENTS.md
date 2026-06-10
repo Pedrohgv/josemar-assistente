@@ -30,7 +30,7 @@ All workflows run on a self-hosted runner.
 | `OLLAMA_API_KEY` | No | Optional provider key |
 | `GOG_KEYRING_PASSWORD` | No | Optional gog keyring passphrase |
 | `TS_AUTHKEY` | No | Optional unattended tailscale login |
-| `HERMES_API_SERVER_KEY` | No | Required only when Hermes API auth is enabled |
+| `HERMES_API_SERVER_KEY` | No | Required when `HERMES_API_SERVER_ENABLED=true` |
 
 ## Required Variables
 
@@ -52,8 +52,12 @@ All workflows run on a self-hosted runner.
 | `AUX_ML_OCR_MAX_PAGES` | No | OCR max pages per file |
 | `HERMES_BASE_IMAGE` | No | Override pinned Hermes base image |
 | `GOGCLI_REF` | No | Override pinned gogcli ref |
+| `HERMES_API_SERVER_ENABLED` | No | Enable Hermes API server for clients such as Hermes Desktop (default `false`) |
+| `HERMES_API_SERVER_BIND_IP` | No | Host bind IP for the API server port (default `127.0.0.1`) |
+| `HERMES_API_SERVER_PORT` | No | Host/API server port (default `8642`) |
+| `HERMES_API_SERVER_CORS_ORIGINS` | No | Optional comma-separated CORS origins |
 
-Security note: keep `SYNCTHING_GUI_BIND_IP` on localhost unless explicitly secured.
+Security note: keep `SYNCTHING_GUI_BIND_IP` on localhost unless explicitly secured. Do not set `HERMES_API_SERVER_BIND_IP=0.0.0.0` unless `HERMES_API_SERVER_KEY` is set and the network path is trusted.
 
 ## Deploy Workflow Notes
 
