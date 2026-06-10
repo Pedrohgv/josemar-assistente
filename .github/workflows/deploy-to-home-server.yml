@@ -80,6 +80,8 @@ jobs:
           HERMES_API_SERVER_PORT: ${{ vars.HERMES_API_SERVER_PORT }}
           HERMES_API_SERVER_KEY: ${{ secrets.HERMES_API_SERVER_KEY }}
           HERMES_API_SERVER_CORS_ORIGINS: ${{ vars.HERMES_API_SERVER_CORS_ORIGINS }}
+          HERMES_API_SERVER_MODEL_NAME_INPUT: ${{ vars.HERMES_API_SERVER_MODEL_NAME }}
+          HERMES_DEFAULT_PROFILE_DISPLAY_NAME_INPUT: ${{ vars.HERMES_DEFAULT_PROFILE_DISPLAY_NAME }}
           AUX_ML_ENABLED_INPUT: ${{ vars.AUX_ML_ENABLED }}
           AUX_ML_MEMORY_LIMIT: ${{ vars.AUX_ML_MEMORY_LIMIT }}
           AUX_ML_MEMORY_LIMIT_MB: ${{ vars.AUX_ML_MEMORY_LIMIT_MB }}
@@ -111,6 +113,31 @@ jobs:
 
           if [ -z "$HERMES_API_SERVER_PORT" ]; then
             HERMES_API_SERVER_PORT="8642"
+          fi
+
+          HERMES_API_SERVER_MODEL_NAME="$HERMES_API_SERVER_MODEL_NAME_INPUT"
+          if [ -z "$HERMES_API_SERVER_MODEL_NAME" ]; then
+            HERMES_API_SERVER_MODEL_NAME="Josemar"
+          fi
+
+          HERMES_DEFAULT_PROFILE_DISPLAY_NAME="$HERMES_DEFAULT_PROFILE_DISPLAY_NAME_INPUT"
+          if [ -z "$HERMES_DEFAULT_PROFILE_DISPLAY_NAME" ]; then
+            HERMES_DEFAULT_PROFILE_DISPLAY_NAME="Josemar"
+          fi
+
+          if [[ "$HERMES_DEFAULT_PROFILE_DISPLAY_NAME" == *$'\n'* || "$HERMES_DEFAULT_PROFILE_DISPLAY_NAME" == *$'\r'* ]]; then
+            echo "ERROR: HERMES_DEFAULT_PROFILE_DISPLAY_NAME must be single-line"
+            exit 1
+          fi
+
+          if [ "${#HERMES_DEFAULT_PROFILE_DISPLAY_NAME}" -gt 64 ]; then
+            echo "ERROR: HERMES_DEFAULT_PROFILE_DISPLAY_NAME must be at most 64 characters"
+            exit 1
+          fi
+
+          if [[ ! "$HERMES_DEFAULT_PROFILE_DISPLAY_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+            echo "ERROR: HERMES_DEFAULT_PROFILE_DISPLAY_NAME must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+            exit 1
           fi
 
           if [ "$HERMES_API_SERVER_ENABLED" = "true" ] && [ -z "$HERMES_API_SERVER_KEY" ]; then
@@ -146,6 +173,8 @@ jobs:
           write_env HERMES_API_SERVER_PORT "$HERMES_API_SERVER_PORT"
           write_env HERMES_API_SERVER_KEY "$HERMES_API_SERVER_KEY"
           write_env HERMES_API_SERVER_CORS_ORIGINS "$HERMES_API_SERVER_CORS_ORIGINS"
+          write_env HERMES_API_SERVER_MODEL_NAME "$HERMES_API_SERVER_MODEL_NAME"
+          write_env HERMES_DEFAULT_PROFILE_DISPLAY_NAME "$HERMES_DEFAULT_PROFILE_DISPLAY_NAME"
           write_env TZ "$TZ_VALUE"
           write_env TAILSCALE_HOSTNAME "$TAILSCALE_HOSTNAME"
           write_env TS_EXTRA_ARGS "$TS_EXTRA_ARGS"

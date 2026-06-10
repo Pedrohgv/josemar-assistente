@@ -18,9 +18,20 @@ HERMES_GID_VALUE="${HERMES_GID:-${PGID:-10000}}"
 
 mkdir -p "$HERMES_HOME" "$WORKSPACE_DIR" "$OBSIDIAN_VAULT_DIR" "$CREDENTIALS_DIR"
 
-if [ ! -f "${HERMES_HOME}/config.yaml" ] && [ -f /opt/josemar/hermes/config.yaml ]; then
-    log "Seeding Hermes config.yaml"
-    cp /opt/josemar/hermes/config.yaml "${HERMES_HOME}/config.yaml"
+SOURCE_CONFIG="/opt/josemar/hermes/config.yaml"
+RUNTIME_CONFIG="${HERMES_HOME}/config.yaml"
+
+if [ -f "$SOURCE_CONFIG" ]; then
+    if [ -f "$RUNTIME_CONFIG" ] && ! cmp -s "$SOURCE_CONFIG" "$RUNTIME_CONFIG" 2>/dev/null; then
+        CONFIG_BACKUP="${RUNTIME_CONFIG}.runtime-backup.$(date +%Y%m%d%H%M%S).$$"
+        log "Backing up existing Hermes config.yaml to ${CONFIG_BACKUP}"
+        cp "$RUNTIME_CONFIG" "$CONFIG_BACKUP"
+    fi
+
+    log "Syncing Hermes config.yaml from repo template"
+    CONFIG_TMP="${RUNTIME_CONFIG}.tmp.$$"
+    cp "$SOURCE_CONFIG" "$CONFIG_TMP"
+    mv "$CONFIG_TMP" "$RUNTIME_CONFIG"
 fi
 
 seed_workspace_from_manifest() {
