@@ -75,6 +75,11 @@ jobs:
           TAILSCALE_HOSTNAME: ${{ vars.TAILSCALE_HOSTNAME }}
           TS_EXTRA_ARGS: ${{ vars.TS_EXTRA_ARGS }}
           SYNCTHING_GUI_BIND_IP: ${{ vars.SYNCTHING_GUI_BIND_IP }}
+          HERMES_API_SERVER_ENABLED_INPUT: ${{ vars.HERMES_API_SERVER_ENABLED }}
+          HERMES_API_SERVER_BIND_IP: ${{ vars.HERMES_API_SERVER_BIND_IP }}
+          HERMES_API_SERVER_PORT: ${{ vars.HERMES_API_SERVER_PORT }}
+          HERMES_API_SERVER_KEY: ${{ secrets.HERMES_API_SERVER_KEY }}
+          HERMES_API_SERVER_CORS_ORIGINS: ${{ vars.HERMES_API_SERVER_CORS_ORIGINS }}
           AUX_ML_ENABLED_INPUT: ${{ vars.AUX_ML_ENABLED }}
           AUX_ML_MEMORY_LIMIT: ${{ vars.AUX_ML_MEMORY_LIMIT }}
           AUX_ML_MEMORY_LIMIT_MB: ${{ vars.AUX_ML_MEMORY_LIMIT_MB }}
@@ -93,6 +98,24 @@ jobs:
           COMPOSE_PROFILES_VALUE=""
           if [ "$AUX_ML_ENABLED" = "true" ]; then
             COMPOSE_PROFILES_VALUE="aux-ml"
+          fi
+
+          HERMES_API_SERVER_ENABLED="$HERMES_API_SERVER_ENABLED_INPUT"
+          if [ -z "$HERMES_API_SERVER_ENABLED" ]; then
+            HERMES_API_SERVER_ENABLED="false"
+          fi
+
+          if [ -z "$HERMES_API_SERVER_BIND_IP" ]; then
+            HERMES_API_SERVER_BIND_IP="127.0.0.1"
+          fi
+
+          if [ -z "$HERMES_API_SERVER_PORT" ]; then
+            HERMES_API_SERVER_PORT="8642"
+          fi
+
+          if [ "$HERMES_API_SERVER_ENABLED" = "true" ] && [ -z "$HERMES_API_SERVER_KEY" ]; then
+            echo "ERROR: HERMES_API_SERVER_KEY secret is required when HERMES_API_SERVER_ENABLED=true"
+            exit 1
           fi
 
           umask 077
@@ -118,6 +141,11 @@ jobs:
           write_env HERMES_TELEGRAM_ALLOWED_USERS "$PRIMARY_TELEGRAM_ID"
           write_env HERMES_TELEGRAM_HOME_CHANNEL "$PRIMARY_TELEGRAM_ID"
           write_env HERMES_GATEWAY_ALLOWED_USERS "$PRIMARY_TELEGRAM_ID"
+          write_env HERMES_API_SERVER_ENABLED "$HERMES_API_SERVER_ENABLED"
+          write_env HERMES_API_SERVER_BIND_IP "$HERMES_API_SERVER_BIND_IP"
+          write_env HERMES_API_SERVER_PORT "$HERMES_API_SERVER_PORT"
+          write_env HERMES_API_SERVER_KEY "$HERMES_API_SERVER_KEY"
+          write_env HERMES_API_SERVER_CORS_ORIGINS "$HERMES_API_SERVER_CORS_ORIGINS"
           write_env TZ "$TZ_VALUE"
           write_env TAILSCALE_HOSTNAME "$TAILSCALE_HOSTNAME"
           write_env TS_EXTRA_ARGS "$TS_EXTRA_ARGS"
