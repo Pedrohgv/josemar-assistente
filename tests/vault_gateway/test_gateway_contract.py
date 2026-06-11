@@ -300,6 +300,28 @@ Email: {{contact_email}}
         self.assertTrue(any(field.get("name") == "client_name" for field in fields))
         self.assertIn("client_name", result.get("placeholders", []))
 
+    def test_template_inspect_read_oserror_is_not_treated_as_empty_template(self) -> None:
+        template_path = self._write_template(
+            "Templates/Unreadable.md",
+            "---\nvg_template: true\nvg_template_id: unreadable-v1\n---\n\n# Template\n",
+        )
+        template_path.chmod(0o000)
+        try:
+            code, output = run_gateway(
+                {
+                    "route": "template.inspect",
+                    "payload": {"template_path": "Templates/Unreadable.md"},
+                },
+                self.env,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(output.get("error"), "execution_error")
+            self.assertIn("Unreadable.md", output.get("message", ""))
+        finally:
+            if template_path.exists():
+                template_path.chmod(0o644)
+
     def test_note_capture_template_missing_required_fields_requests_input(self) -> None:
         self._write_template(
             "Templates/Client.md",
@@ -399,6 +421,78 @@ Email: {{contact_email}}
         self.assertIn("ops@acme.example", created_text)
         self.assertIn("Primeira reuniao comercial", created_text)
         self.assertNotIn("{{client_name}}", created_text)
+
+    def test_note_capture_strict_template_read_oserror_is_not_reported_as_metadata_validation(self) -> None:
+        template_path = self._write_template(
+            "Templates/Unreadable.md",
+            """---
+vg_template: true
+vg_template_id: unreadable-v1
+vg_fields:
+  - name: title
+    type: string
+    required: true
+---
+
+# {{title}}
+""",
+        )
+        template_path.chmod(0o000)
+        try:
+            code, output = run_gateway(
+                {
+                    "route": "note.capture",
+                    "payload": {
+                        "template_path": "Templates/Unreadable.md",
+                        "template_mode": "strict",
+                        "field_values": {"title": "Should Not Write"},
+                    },
+                },
+                self.env,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(output.get("error"), "execution_error")
+            self.assertIn("Unreadable.md", output.get("message", ""))
+        finally:
+            if template_path.exists():
+                template_path.chmod(0o644)
+
+    def test_note_capture_template_id_read_oserror_is_not_reported_as_not_found(self) -> None:
+        template_path = self._write_template(
+            "Templates/UnreadableById.md",
+            """---
+vg_template: true
+vg_template_id: unreadable-by-id-v1
+vg_fields:
+  - name: title
+    type: string
+    required: true
+---
+
+# {{title}}
+""",
+        )
+        template_path.chmod(0o000)
+        try:
+            code, output = run_gateway(
+                {
+                    "route": "note.capture",
+                    "payload": {
+                        "template_id": "unreadable-by-id-v1",
+                        "template_mode": "strict",
+                        "field_values": {"title": "Should Not Write"},
+                    },
+                },
+                self.env,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(output.get("error"), "execution_error")
+            self.assertIn("UnreadableById.md", output.get("message", ""))
+        finally:
+            if template_path.exists():
+                template_path.chmod(0o644)
 
     def test_note_capture_template_uses_title_field_metadata_for_filename(self) -> None:
         self._write_template(
@@ -530,6 +624,62 @@ vg_fields:
 
         self.assertEqual(code, 1)
         self.assertEqual(output.get("error"), "invalid_payload")
+
+    def test_note_link_bidirectional_read_oserror_does_not_partially_update_source(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        source = inbox / "source.md"
+        source.write_text("# Source\n", encoding="utf-8")
+        target = inbox / "target.md"
+        target.write_text("# Target\n", encoding="utf-8")
+        target.chmod(0o000)
+        try:
+            code, output = run_gateway(
+                {
+                    "route": "note.link",
+                    "payload": {
+                        "source_path": "00-Inbox/source.md",
+                        "target_path": "00-Inbox/target.md",
+                        "bidirectional": True,
+                    },
+                },
+                self.env,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(output.get("error"), "execution_error")
+            self.assertEqual(source.read_text(encoding="utf-8"), "# Source\n")
+        finally:
+            if target.exists():
+                target.chmod(0o644)
+
+    def test_note_link_bidirectional_write_oserror_rolls_back_source(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        source = inbox / "source.md"
+        source.write_text("# Source\n", encoding="utf-8")
+        target = inbox / "target.md"
+        target.write_text("# Target\n", encoding="utf-8")
+        target.chmod(0o444)
+        try:
+            code, output = run_gateway(
+                {
+                    "route": "note.link",
+                    "payload": {
+                        "source_path": "00-Inbox/source.md",
+                        "target_path": "00-Inbox/target.md",
+                        "bidirectional": True,
+                    },
+                },
+                self.env,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(output.get("error"), "execution_error")
+            self.assertEqual(source.read_text(encoding="utf-8"), "# Source\n")
+        finally:
+            if target.exists():
+                target.chmod(0o644)
 
     def test_onboarding_requires_state_key(self) -> None:
         code, output = run_gateway(
@@ -877,6 +1027,131 @@ Prefer monthly grouping and explicit totals.
         finally:
             if note_path.exists():
                 note_path.chmod(0o644)
+
+    def test_note_update_read_oserror_is_not_treated_as_empty_note(self) -> None:
+        note_path = self.vault_dir / "00-Inbox" / "unreadable-note.md"
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text("# Daily\n\n## Tasks\n- [ ] Existing task\n", encoding="utf-8")
+        note_path.chmod(0o000)
+        try:
+            code, output = run_gateway(
+                {
+                    "route": "note.update",
+                    "payload": {
+                        "path": "00-Inbox/unreadable-note.md",
+                        "mode": "section_append",
+                        "section_heading": "Tasks",
+                        "text": "- [ ] New task",
+                    },
+                },
+                self.env,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(output.get("error"), "execution_error")
+            message = output.get("message", "")
+            self.assertIn("Falha ao acessar arquivos do vault", message)
+            self.assertIn("unreadable-note.md", message)
+        finally:
+            if note_path.exists():
+                note_path.chmod(0o644)
+
+    def test_note_update_maintenance_read_oserror_is_reported_without_failing_update(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        note_path = inbox / "daily.md"
+        note_path.write_text("# Daily\n", encoding="utf-8")
+        index_path = inbox / "_index.md"
+        index_path.write_text("# Inbox Index\n\nManual context.\n", encoding="utf-8")
+        index_path.chmod(0o000)
+        try:
+            code, output = run_gateway(
+                {
+                    "route": "note.update",
+                    "payload": {
+                        "path": "00-Inbox/daily.md",
+                        "mode": "append",
+                        "text": "New entry",
+                    },
+                },
+                self.env,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertTrue(output.get("success"))
+            self.assertIn("New entry", note_path.read_text(encoding="utf-8"))
+            updates = output.get("result", {}).get("maintenance_updates", [])
+            joined = " ".join(str(item) for item in updates)
+            self.assertIn("skipped folder index refresh", joined)
+            self.assertIn("_index.md", joined)
+        finally:
+            if index_path.exists():
+                index_path.chmod(0o644)
+
+    def test_note_rename_read_oserror_in_referrer_fails_instead_of_skipping_rewrite(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        target = inbox / "old-name.md"
+        target.write_text("# Old\n", encoding="utf-8")
+        readable_referrer = inbox / "a-readable-ref.md"
+        readable_referrer.write_text("See [[old-name]].\n", encoding="utf-8")
+        referrer = inbox / "ref.md"
+        referrer.write_text("See [[old-name]].\n", encoding="utf-8")
+        referrer.chmod(0o000)
+        try:
+            code, output = run_gateway(
+                {
+                    "route": "note.rename",
+                    "payload": {
+                        "path": "00-Inbox/old-name.md",
+                        "new_title": "New Name",
+                    },
+                },
+                self.env,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(output.get("error"), "execution_error")
+            message = output.get("message", "")
+            self.assertIn("Falha ao acessar arquivos do vault", message)
+            self.assertIn("ref.md", message)
+            self.assertTrue(target.exists(), "Rename must not proceed after referrer read failure")
+            self.assertFalse((inbox / "new-name.md").exists())
+            self.assertEqual(readable_referrer.read_text(encoding="utf-8"), "See [[old-name]].\n")
+        finally:
+            if referrer.exists():
+                referrer.chmod(0o644)
+
+    def test_note_rename_move_oserror_rolls_back_rewritten_referrers(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        projects = self.vault_dir / "01-Projects"
+        inbox.mkdir(parents=True, exist_ok=True)
+        projects.mkdir(parents=True, exist_ok=True)
+        target = inbox / "old-name.md"
+        target.write_text("# Old\n", encoding="utf-8")
+        referrer = projects / "ref.md"
+        referrer.write_text("See [[old-name]].\n", encoding="utf-8")
+        inbox.chmod(0o555)
+        try:
+            code, output = run_gateway(
+                {
+                    "route": "note.rename",
+                    "payload": {
+                        "path": "00-Inbox/old-name.md",
+                        "new_title": "New Name",
+                    },
+                },
+                self.env,
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(output.get("error"), "execution_error")
+            self.assertTrue(target.exists())
+            self.assertFalse((inbox / "new-name.md").exists())
+            self.assertEqual(referrer.read_text(encoding="utf-8"), "See [[old-name]].\n")
+        finally:
+            if inbox.exists():
+                inbox.chmod(0o755)
 
     def test_note_create_alias_works_same_as_capture(self) -> None:
         code, output = run_gateway(

@@ -94,6 +94,21 @@ def _safe_read_text(path: Path) -> str:
         return ""
 
 
+def _read_text_strict(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="latin-1", errors="ignore")
+
+
+def _maintenance_oserror_message(scope: str, exc: OSError) -> str:
+    details = exc.strerror or str(exc) or type(exc).__name__
+    filename = getattr(exc, "filename", None)
+    if filename:
+        return f"skipped {scope}: {type(exc).__name__}: {details}: {filename}"
+    return f"skipped {scope}: {type(exc).__name__}: {details}"
+
+
 def _append_log(vault_root: Path, action: str, details: dict) -> None:
     meta_dir = vault_root / "Meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
@@ -401,7 +416,7 @@ def _refresh_folder_index(vault_root: Path, folder: Path) -> tuple[list[str], bo
     if not index_path.exists():
         return updates, created
 
-    existing = _safe_read_text(index_path)
+    existing = _read_text_strict(index_path)
     managed_summary = _build_index_managed_summary(vault_root, folder)
     updated, changed = _replace_managed_block(existing, INDEX_MANAGED_BEGIN, INDEX_MANAGED_END, managed_summary)
     if changed:
@@ -456,7 +471,7 @@ def _refresh_vault_structure_file(vault_root: Path) -> list[str]:
     structure_path = meta_dir / "vault-structure.md"
 
     if structure_path.exists():
-        existing = _safe_read_text(structure_path)
+        existing = _read_text_strict(structure_path)
     else:
         existing = "# Vault Structure\n\nThis file tracks the current vault organization.\n"
         updates.append(f"created {_relative(vault_root, structure_path)}")
@@ -480,12 +495,22 @@ def _refresh_structure_context(vault_root: Path, touched_dirs: list[Path]) -> li
     seen: set[str] = set()
 
     for directory in touched_dirs:
-        for message in _refresh_folder_index(vault_root, directory)[0]:
+        try:
+            folder_updates = _refresh_folder_index(vault_root, directory)[0]
+        except OSError as exc:
+            folder_updates = [_maintenance_oserror_message("folder index refresh", exc)]
+
+        for message in folder_updates:
             if message not in seen:
                 seen.add(message)
                 updates.append(message)
 
-    for message in _refresh_vault_structure_file(vault_root):
+    try:
+        structure_updates = _refresh_vault_structure_file(vault_root)
+    except OSError as exc:
+        structure_updates = [_maintenance_oserror_message("vault structure refresh", exc)]
+
+    for message in structure_updates:
         if message not in seen:
             seen.add(message)
             updates.append(message)
@@ -776,8 +801,9 @@ def _template_record(
     include_fields: bool = False,
     include_placeholders: bool = False,
     include_body_preview: bool = False,
+    strict: bool = False,
 ) -> dict:
-    text = _safe_read_text(template_path)
+    text = _read_text_strict(template_path) if strict else _safe_read_text(template_path)
     frontmatter, body = _extract_frontmatter(text)
 
     aliases = _normalize_tags(frontmatter.get("vg_aliases"))
@@ -896,17 +922,22 @@ def inspect_template(
         include_fields=True,
         include_placeholders=include_placeholders,
         include_body_preview=include_body_preview,
+        strict=True,
     )
 
 
-def _find_template_by_id(vault_root: Path, template_id: str) -> tuple[Path | None, dict | None]:
+def _find_template_by_id(
+    vault_root: Path,
+    template_id: str,
+    strict: bool = False,
+) -> tuple[Path | None, dict | None]:
     normalized = (template_id or "").strip().lower()
     if not normalized:
         return None, None
 
     matches: list[tuple[Path, dict]] = []
     for template_path in _iter_template_paths(vault_root, path_prefix="Templates"):
-        record = _template_record(vault_root, template_path, include_fields=True)
+        record = _template_record(vault_root, template_path, include_fields=True, strict=strict)
         current_id = str(record.get("template_id") or "").strip().lower()
         if current_id == normalized:
             matches.append((template_path, record))
@@ -1126,18 +1157,36 @@ def _resolve_capture_template(
             raise ValueError("template_path must point to a markdown file")
         if not resolved.exists() or not resolved.is_file():
             raise ValueError(f"Template not found at path: {template_path}")
-        return resolved, _template_record(vault_root, resolved, include_fields=True, include_placeholders=True)
+        return resolved, _template_record(
+            vault_root,
+            resolved,
+            include_fields=True,
+            include_placeholders=True,
+            strict=True,
+        )
 
     if template_id:
-        by_id = _find_template_by_id(vault_root, template_id)
+        by_id = _find_template_by_id(vault_root, template_id, strict=True)
         if by_id[0] is None:
             raise ValueError(f"Template id not found: {template_id}")
-        return by_id
+        return by_id[0], _template_record(
+            vault_root,
+            by_id[0],
+            include_fields=True,
+            include_placeholders=True,
+            strict=True,
+        )
 
     by_hint = _find_template(vault_root, template_hint or "")
     if by_hint is None:
         return None, None
-    return by_hint, _template_record(vault_root, by_hint, include_fields=True, include_placeholders=True)
+    return by_hint, _template_record(
+        vault_root,
+        by_hint,
+        include_fields=True,
+        include_placeholders=True,
+        strict=True,
+    )
 
 
 def _normalize_field_values_map(raw: object) -> dict[str, object]:
@@ -1271,7 +1320,7 @@ def read_note(
     include_body: bool = True,
 ) -> dict:
     note_path = _resolve_note_path(vault_root, path=path)
-    text = _safe_read_text(note_path)
+    text = _read_text_strict(note_path)
     frontmatter, body = _extract_frontmatter(text)
 
     result: dict[str, object] = {
@@ -1400,7 +1449,7 @@ def capture_note(
     timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if selected_template_path:
-        template_text = _safe_read_text(selected_template_path).rstrip()
+        template_text = _read_text_strict(selected_template_path).rstrip()
         if structured_mode:
             render_values = _builtin_render_values()
             render_values.update(resolved_fields)
@@ -1494,7 +1543,7 @@ def update_note(
         raise ValueError("section_heading is required when mode is section_append or section_prepend")
 
     note_path = _resolve_note_path(vault_root, path=path)
-    existing = _safe_read_text(note_path)
+    existing = _read_text_strict(note_path)
     existing_frontmatter, existing_body = _extract_frontmatter(existing)
 
     warnings: list[str] = []
@@ -1619,19 +1668,16 @@ def search_notes(vault_root: Path, query: str, limit: int = 20, path_prefix: str
     }
 
 
-def _add_link_to_note(note_path: Path, link_text: str) -> bool:
-    content = _safe_read_text(note_path)
+def _build_link_update(content: str, link_text: str) -> tuple[str, bool]:
     if link_text in content:
-        return False
+        return content, False
 
     stripped = content.rstrip()
     if "## Links" in stripped:
         updated = stripped + f"\n- {link_text}\n"
     else:
         updated = stripped + f"\n\n## Links\n- {link_text}\n"
-
-    note_path.write_text(updated, encoding="utf-8")
-    return True
+    return updated, True
 
 
 def link_notes(
@@ -1644,12 +1690,28 @@ def link_notes(
     target = _resolve_note_path(vault_root, path=target_path)
 
     forward_link = f"[[{target.stem}]]"
-    inserted_forward = _add_link_to_note(source, forward_link)
+    source_content = _read_text_strict(source)
+    source_updated, inserted_forward = _build_link_update(source_content, forward_link)
 
     inserted_back = False
-    if bidirectional:
+    target_updated = ""
+    if bidirectional and target != source:
         backward_link = f"[[{source.stem}]]"
-        inserted_back = _add_link_to_note(target, backward_link)
+        target_content = _read_text_strict(target)
+        target_updated, inserted_back = _build_link_update(target_content, backward_link)
+
+    try:
+        if inserted_forward:
+            source.write_text(source_updated, encoding="utf-8")
+        if inserted_back:
+            target.write_text(target_updated, encoding="utf-8")
+    except OSError:
+        if inserted_forward:
+            try:
+                source.write_text(source_content, encoding="utf-8")
+            except OSError:
+                pass
+        raise
 
     result = {
         "source": _relative(vault_root, source),
@@ -1734,25 +1796,40 @@ def rename_note(
     target_dir = source.parent
     target_path = _unique_path(target_dir / f"{new_slug}.md")
 
-    rewrite_summary: list[dict] = []
+    rewrite_plans: list[tuple[Path, str, str, int]] = []
     if rewrite_wikilinks:
-        for candidate in vault_root.rglob("*.md"):
+        candidates = sorted(vault_root.rglob("*.md"), key=lambda item: str(item).lower())
+        for candidate in candidates:
             if not candidate.is_file():
                 continue
             if candidate == source or candidate == target_path:
                 continue
-            existing = _safe_read_text(candidate)
+            existing = _read_text_strict(candidate)
             updated, count = _replace_wikilink_target(existing, old_stem, new_slug)
             if count > 0:
-                candidate.write_text(updated, encoding="utf-8")
-                rewrite_summary.append(
-                    {
-                        "path": _relative(vault_root, candidate),
-                        "replacements": count,
-                    }
-                )
+                rewrite_plans.append((candidate, existing, updated, count))
 
-    shutil.move(str(source), str(target_path))
+    rewrite_summary: list[dict] = []
+    rewritten_originals: list[tuple[Path, str]] = []
+    try:
+        for candidate, existing, updated, count in rewrite_plans:
+            rewritten_originals.append((candidate, existing))
+            candidate.write_text(updated, encoding="utf-8")
+            rewrite_summary.append(
+                {
+                    "path": _relative(vault_root, candidate),
+                    "replacements": count,
+                }
+            )
+
+        shutil.move(str(source), str(target_path))
+    except OSError:
+        for candidate, existing in reversed(rewritten_originals):
+            try:
+                candidate.write_text(existing, encoding="utf-8")
+            except OSError:
+                pass
+        raise
     maintenance_updates = _refresh_structure_context(vault_root, [target_dir])
     operation_context = _build_operation_context(vault_root, target_dir)
 
