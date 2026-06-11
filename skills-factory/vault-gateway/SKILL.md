@@ -5,11 +5,14 @@ description: Single entrypoint for Obsidian vault operations in Josemar. Provide
 
 # Vault Gateway
 
-Use this skill as the only public interface for vault operations.
+Use this skill as the only public interface for vault operations. Josemar must always prioritize vault-gateway routes over direct filesystem access, scripts, imports, or ad hoc programmatic workarounds.
+
+If the gateway fails, rejects the request, or does not cover the intended operation, stop and report the limitation to the user. Do not access `/opt/data/obsidian/` directly, import internal modules, write custom scripts, or use other workarounds unless the user explicitly permits that workaround after being informed of the gap.
 
 ## Scope
 
 - Route vault requests through a single executable.
+- Treat the gateway executable and its routes as the only approved vault tools.
 - Keep external integrations (gmail/calendar/contacts) out of this bundle.
 - Keep transcription capability present but dormant until backend setup is complete.
 - Caller must provide explicit `route` in JSON input.
@@ -22,7 +25,7 @@ The gateway is a standalone executable that reads JSON from stdin. Pipe your req
 echo '{"route":"note.read","payload":{"path":"07-Daily/2026-05-31.md"}}' | /opt/josemar/skills/vault-gateway/vault-gateway
 ```
 
-**Do NOT import internal modules directly** (`lib/handlers.py`, `lib/router.py`, etc.) — always use the executable via stdin. Internal modules are implementation details, not a public API.
+**Do NOT import internal modules directly** (`lib/handlers.py`, `lib/router.py`, etc.) — always use the executable via stdin. Internal modules are implementation details, not a public API. If the executable cannot perform the needed operation, return to the user for explicit permission before using any workaround.
 
 ## Routes at a Glance
 
@@ -291,7 +294,8 @@ The routes below are specialized, run infrequently, or are pure dispatches. Full
 - If target heading is missing or duplicated, do not silently fallback to raw append/prepend; ask one focused clarification before writing.
 - Read/write note routes ingest contextual guidance from nearest folder `_index.md` (including `## Working Rules`) and from managed snapshot in `Meta/vault-structure.md` when present.
 - After vault write routes (`note.capture`, `note.update`, `note.file`, `note.rename`), gateway refreshes managed context blocks in `Meta/vault-structure.md` and folder `_index.md` files while preserving human-authored sections.
-- Never touch `/opt/data/obsidian/` directly. All mutations must go through a gateway route so maintenance, wikilink rewriting, and `Meta/vault-gateway-log.md` stay consistent.
+- Never touch `/opt/data/obsidian/` directly. Vault reads and mutations must go through gateway routes so contextual loading, maintenance, wikilink rewriting, and `Meta/vault-gateway-log.md` stay consistent.
+- If gateway tools fail or lack coverage for a requested vault operation, stop and explain the failure or missing route to the user. Only use direct filesystem access, custom scripts, internal imports, or other non-gateway workarounds after the user explicitly approves that specific workaround.
 
 ## Internal Contract
 
