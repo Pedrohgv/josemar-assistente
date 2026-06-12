@@ -56,7 +56,7 @@ services:
       context: .
       dockerfile: Dockerfile.hermes
       args:
-        HERMES_BASE_IMAGE: ${HERMES_BASE_IMAGE:-nousresearch/hermes-agent@sha256:64d839ecc207c70cec5e7a5d18cf644ec3be4a8ce8b81f11dd3c2ef737dcf433}
+        HERMES_BASE_IMAGE: ${HERMES_BASE_IMAGE:-nousresearch/hermes-agent@sha256:3394ab3bdf072ccb871a830c92307e35aa23a319b353738537dfb38b3d10cd73}
         GOGCLI_REF: ${GOGCLI_REF:-e88964a1b1a46483fbc6a55ecbf2192ff522f2ea}
     container_name: josemar-hermes
     restart: unless-stopped
@@ -77,11 +77,12 @@ services:
       - HERMES_GID=${HERMES_GID:-10000}
       - HERMES_HOME=/opt/data
       - HERMES_TIMEZONE=${JOSEMAR_TIMEZONE:-America/Sao_Paulo}
-      - HERMES_MODEL=${HERMES_MODEL:-kimi-k2.6}
       - HERMES_DASHBOARD=${HERMES_DASHBOARD:-1}
       - HERMES_DASHBOARD_HOST=${HERMES_DASHBOARD_HOST:-0.0.0.0}
       - HERMES_DASHBOARD_PORT=${HERMES_DASHBOARD_PORT:-9119}
       - HERMES_DASHBOARD_INSECURE=${HERMES_DASHBOARD_INSECURE:-1}
+      - HERMES_DASHBOARD_TUI=${HERMES_DASHBOARD_TUI:-1}
+      - HERMES_DASHBOARD_SESSION_TOKEN=${HERMES_DASHBOARD_SESSION_TOKEN:?Set HERMES_DASHBOARD_SESSION_TOKEN for Hermes Desktop REST/WebSocket access}
       - API_SERVER_ENABLED=${HERMES_API_SERVER_ENABLED:-false}
       - API_SERVER_HOST=${HERMES_API_SERVER_HOST:-0.0.0.0}
       - API_SERVER_PORT=${HERMES_API_SERVER_PORT:-8642}

@@ -26,12 +26,13 @@ All workflows run on a self-hosted runner.
 | `PRIMARY_TELEGRAM_ID` | Yes | Primary allowlisted Telegram user |
 | `WORKSPACE_REPO_TOKEN` | Yes | PAT for private state repo sync |
 | `RCLONE_CONFIG_B64` | Yes (for backups) | Base64 `rclone.conf` for backup container |
-| `DEEPSEEK_API_KEY` | No | Optional provider key |
+| `DEEPSEEK_API_KEY` | Yes | DeepSeek provider key for the default model |
 | `OLLAMA_API_KEY` | No | Optional provider key |
 | `TAVILY_API_KEY` | No | Optional Tavily key; enables `web_search` and `web_extract` via auto-detection |
 | `GOG_KEYRING_PASSWORD` | No | Optional gog keyring passphrase |
 | `TS_AUTHKEY` | No | Optional unattended tailscale login |
 | `HERMES_API_SERVER_KEY` | No | Required when `HERMES_API_SERVER_ENABLED=true` |
+| `HERMES_DASHBOARD_SESSION_TOKEN` | Yes | Dashboard session token used by Hermes Desktop for REST/WebSocket access |
 
 ## Required Variables
 
@@ -60,7 +61,7 @@ All workflows run on a self-hosted runner.
 | `HERMES_API_SERVER_MODEL_NAME` | No | Display/model name advertised to clients such as Hermes One (default `Josemar`) |
 | `HERMES_DEFAULT_PROFILE_DISPLAY_NAME` | No | URL-safe dashboard profile label for the base Hermes profile (default `Josemar`) |
 
-Security note: keep `SYNCTHING_GUI_BIND_IP` on localhost unless explicitly secured. Do not set `HERMES_API_SERVER_BIND_IP=0.0.0.0` unless `HERMES_API_SERVER_KEY` is set and the network path is trusted.
+Security note: keep `SYNCTHING_GUI_BIND_IP` on localhost unless explicitly secured. Do not set `HERMES_API_SERVER_BIND_IP=0.0.0.0` unless `HERMES_API_SERVER_KEY` is set and the network path is trusted. `HERMES_DASHBOARD_INSECURE=1` is used for Hermes Desktop session-token mode; keep dashboard network exposure limited to trusted networks.
 
 ## Deploy Workflow Notes
 

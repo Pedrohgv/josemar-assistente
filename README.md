@@ -121,14 +121,15 @@ TELEGRAM_BOT_TOKEN=your-telegram-token
 PRIMARY_TELEGRAM_ID=123456789
 WORKSPACE_STATE_REPO=https://github.com/username/private-agent-state.git
 WORKSPACE_REPO_TOKEN=your-github-pat
+HERMES_DASHBOARD_SESSION_TOKEN=<openssl rand -hex 32>
 ```
 
 Set provider keys used by your configured model strategy:
 
 ```bash
-OLLAMA_API_KEY=your-ollama-cloud-key
-ZAI_API_KEY=your-zai-key
 DEEPSEEK_API_KEY=your-deepseek-key
+ZAI_API_KEY=your-zai-key
+OLLAMA_API_KEY=your-ollama-cloud-key
 ```
 
 Optionally enable web search and extract by setting a Tavily key (auto-detected by Hermes when present):
