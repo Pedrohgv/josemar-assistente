@@ -56,7 +56,7 @@ services:
       context: .
       dockerfile: Dockerfile.hermes
       args:
-        HERMES_BASE_IMAGE: ${HERMES_BASE_IMAGE:-nousresearch/hermes-agent@sha256:64d839ecc207c70cec5e7a5d18cf644ec3be4a8ce8b81f11dd3c2ef737dcf433}
+        HERMES_BASE_IMAGE: ${HERMES_BASE_IMAGE:-nousresearch/hermes-agent@sha256:3394ab3bdf072ccb871a830c92307e35aa23a319b353738537dfb38b3d10cd73}
         GOGCLI_REF: ${GOGCLI_REF:-e88964a1b1a46483fbc6a55ecbf2192ff522f2ea}
     container_name: josemar-hermes
     restart: unless-stopped
