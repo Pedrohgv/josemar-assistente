@@ -131,6 +131,12 @@ ZAI_API_KEY=your-zai-key
 DEEPSEEK_API_KEY=your-deepseek-key
 ```
 
+Optionally enable web search and extract by setting a Tavily key (auto-detected by Hermes when present):
+
+```bash
+TAVILY_API_KEY=your-tavily-api-key
+```
+
 See `.env.example` for the full variable list.
 
 ### 3. Start Locally
