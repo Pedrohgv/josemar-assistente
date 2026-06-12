@@ -49,6 +49,14 @@ def _slugify(value: str) -> str:
     return text.strip("-._")
 
 
+def _filename_stem_from_title(value: str) -> str:
+    text = " ".join((value or "").strip().split())
+    text = re.sub(r"[\\/]+", " - ", text)
+    text = re.sub(r'[\[\]#^<>:"|?*\x00-\x1f]', "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" .")
+
+
 def _resolve_relative_path(vault_root: Path, relative_path: str) -> Path:
     candidate_raw = (relative_path or "").strip().replace("\\", "/")
     if not candidate_raw:
@@ -1443,8 +1451,10 @@ def capture_note(
         resolved_fields,
         selected_template_path,
     )
-    slug = _slugify(selected_title) or datetime.utcnow().strftime("capture-%Y%m%d-%H%M%S")
-    note_path = _unique_path(target_dir / f"{slug}.md")
+    filename_stem = _filename_stem_from_title(selected_title) or datetime.utcnow().strftime(
+        "capture-%Y%m%d-%H%M%S"
+    )
+    note_path = _unique_path(target_dir / f"{filename_stem}.md")
 
     timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1787,14 +1797,15 @@ def rename_note(
         raise ValueError("Field 'new_title' is required")
     new_title_str = str(new_title).strip()
 
-    new_slug = _slugify(new_title_str)
-    if not new_slug:
-        raise ValueError("new_title produced an empty slug after sanitization")
-    if new_slug == old_stem:
-        raise ValueError(f"new_title slug '{new_slug}' matches the current filename")
+    new_stem = _filename_stem_from_title(new_title_str)
+    if not new_stem:
+        raise ValueError("new_title produced an empty filename after sanitization")
+    if new_stem == old_stem:
+        raise ValueError(f"new_title filename '{new_stem}' matches the current filename")
 
     target_dir = source.parent
-    target_path = _unique_path(target_dir / f"{new_slug}.md")
+    target_path = _unique_path(target_dir / f"{new_stem}.md")
+    new_stem = target_path.stem
 
     rewrite_plans: list[tuple[Path, str, str, int]] = []
     if rewrite_wikilinks:
@@ -1805,7 +1816,7 @@ def rename_note(
             if candidate == source or candidate == target_path:
                 continue
             existing = _read_text_strict(candidate)
-            updated, count = _replace_wikilink_target(existing, old_stem, new_slug)
+            updated, count = _replace_wikilink_target(existing, old_stem, new_stem)
             if count > 0:
                 rewrite_plans.append((candidate, existing, updated, count))
 
@@ -1837,7 +1848,7 @@ def rename_note(
         "from": f"{_relative(vault_root, source.parent)}/{old_stem}.md" if source.parent != vault_root else f"{old_stem}.md",
         "to": _relative(vault_root, target_path),
         "old_stem": old_stem,
-        "new_stem": new_slug,
+        "new_stem": new_stem,
         "new_title": new_title_str,
         "rewritten_notes": rewrite_summary,
         "rewritten_count": sum(item["replacements"] for item in rewrite_summary),
