@@ -32,6 +32,7 @@ All workflows run on a self-hosted runner.
 | `GOG_KEYRING_PASSWORD` | No | Optional gog keyring passphrase |
 | `TS_AUTHKEY` | No | Optional unattended tailscale login |
 | `HERMES_API_SERVER_KEY` | No | Required when `HERMES_API_SERVER_ENABLED=true` |
+| `HERMES_DASHBOARD_SESSION_TOKEN` | Yes | Dashboard session token used by Hermes Desktop for REST/WebSocket access |
 
 ## Required Variables
 
@@ -60,7 +61,7 @@ All workflows run on a self-hosted runner.
 | `HERMES_API_SERVER_MODEL_NAME` | No | Display/model name advertised to clients such as Hermes One (default `Josemar`) |
 | `HERMES_DEFAULT_PROFILE_DISPLAY_NAME` | No | URL-safe dashboard profile label for the base Hermes profile (default `Josemar`) |
 
-Security note: keep `SYNCTHING_GUI_BIND_IP` on localhost unless explicitly secured. Do not set `HERMES_API_SERVER_BIND_IP=0.0.0.0` unless `HERMES_API_SERVER_KEY` is set and the network path is trusted.
+Security note: keep `SYNCTHING_GUI_BIND_IP` on localhost unless explicitly secured. Do not set `HERMES_API_SERVER_BIND_IP=0.0.0.0` unless `HERMES_API_SERVER_KEY` is set and the network path is trusted. Keep `HERMES_DASHBOARD_INSECURE=0` unless an external authentication layer protects the dashboard.
 
 ## Deploy Workflow Notes
 

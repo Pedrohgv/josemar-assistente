@@ -83,6 +83,7 @@ jobs:
           HERMES_API_SERVER_CORS_ORIGINS: ${{ vars.HERMES_API_SERVER_CORS_ORIGINS }}
           HERMES_API_SERVER_MODEL_NAME_INPUT: ${{ vars.HERMES_API_SERVER_MODEL_NAME }}
           HERMES_DEFAULT_PROFILE_DISPLAY_NAME_INPUT: ${{ vars.HERMES_DEFAULT_PROFILE_DISPLAY_NAME }}
+          HERMES_DASHBOARD_SESSION_TOKEN: ${{ secrets.HERMES_DASHBOARD_SESSION_TOKEN }}
           AUX_ML_ENABLED_INPUT: ${{ vars.AUX_ML_ENABLED }}
           AUX_ML_MEMORY_LIMIT: ${{ vars.AUX_ML_MEMORY_LIMIT }}
           AUX_ML_MEMORY_LIMIT_MB: ${{ vars.AUX_ML_MEMORY_LIMIT_MB }}
@@ -146,6 +147,16 @@ jobs:
             exit 1
           fi
 
+          if [ -z "$HERMES_DASHBOARD_SESSION_TOKEN" ]; then
+            echo "ERROR: HERMES_DASHBOARD_SESSION_TOKEN secret is required for Hermes Desktop dashboard access"
+            exit 1
+          fi
+
+          if [[ ! "$HERMES_DASHBOARD_SESSION_TOKEN" =~ ^[A-Za-z0-9._~-]{32,}$ ]]; then
+            echo "ERROR: HERMES_DASHBOARD_SESSION_TOKEN must be at least 32 URL-safe characters"
+            exit 1
+          fi
+
           umask 077
           : > .env
           write_env() {
@@ -177,6 +188,9 @@ jobs:
           write_env HERMES_API_SERVER_CORS_ORIGINS "$HERMES_API_SERVER_CORS_ORIGINS"
           write_env HERMES_API_SERVER_MODEL_NAME "$HERMES_API_SERVER_MODEL_NAME"
           write_env HERMES_DEFAULT_PROFILE_DISPLAY_NAME "$HERMES_DEFAULT_PROFILE_DISPLAY_NAME"
+          write_env HERMES_DASHBOARD_INSECURE "0"
+          write_env HERMES_DASHBOARD_TUI "1"
+          write_env HERMES_DASHBOARD_SESSION_TOKEN "$HERMES_DASHBOARD_SESSION_TOKEN"
           write_env TZ "$TZ_VALUE"
           write_env TAILSCALE_HOSTNAME "$TAILSCALE_HOSTNAME"
           write_env TS_EXTRA_ARGS "$TS_EXTRA_ARGS"
