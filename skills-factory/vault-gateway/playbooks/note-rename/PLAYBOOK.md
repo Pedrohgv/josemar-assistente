@@ -29,7 +29,7 @@
 
 ## MBIFC Method Port
 
-- Treat the new title as the source of truth for the filename. The gateway slugifies the title to derive the new file stem.
+- Treat the new title as the source of truth for the filename. The gateway preserves case, spaces, and diacritics while normalizing/removing unsafe filename/link characters.
 - Always prefer to rewrite wikilinks unless the user is doing a one-off rename of an internal scratch note with no inbound links.
 - If the rename is part of a broader reorganization, do it in a single turn before the next move/relink step so structural context stays consistent.
 
@@ -37,8 +37,8 @@
 
 Current deterministic handler behavior:
 - Resolves the source note from `path` (must be a relative markdown path inside vault root).
-- Slugifies `new_title` using the same rules as `note.capture` (so the new filename is predictable).
-- Refuses to no-op: if the slugified new title equals the current stem, returns a validation error.
+- Converts `new_title` to a safe filename using the same rules as `note.capture`.
+- Refuses to no-op: if the sanitized new title equals the current stem, returns a validation error.
 - Generates a unique filename in the same folder if the target name is already taken.
 - When `rewrite_wikilinks` is true (default), scans every other markdown file in the vault and rewrites:
   - `[[old-stem]]` → `[[new-stem]]`
@@ -71,6 +71,6 @@ Return:
 
 - Source path must resolve inside the vault root; absolute paths and `..` traversal are rejected by the gateway.
 - Source must be an existing markdown note.
-- Slugified new title must be non-empty (a title that becomes empty after slugification is rejected).
+- Sanitized new title must be non-empty (a title that becomes empty after filename sanitization is rejected).
 - No-op renames are rejected.
 - The vault-gateway log entry is the audit trail — never rename a note by hand in `/opt/data/obsidian/`, always use this route.

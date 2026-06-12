@@ -82,7 +82,7 @@ Create a new markdown note in the vault. Alias: `note.create`.
 
 **Contract:**
 - `text` (string, the note body) — required when no template is selected
-- `title` (string, becomes the filename after slugification) — required when no template is selected
+- `title` (string, becomes the filename after unsafe filename/link characters are normalized/removed) — required when no template is selected
 - `target_folder` (string, default `00-Inbox`)
 - `template_hint` | `template_path` | `template_id` (any of these makes `text` and `title` optional)
 - `tags` (list[string])
@@ -91,7 +91,7 @@ Create a new markdown note in the vault. Alias: `note.create`.
 - `missing_fields_policy` (`ask` | `fail` | `defaults`, default `ask`)
 - `append_captured_context` (boolean, default `true`)
 
-**The `title` rule is critical.** `title` is the title AND the resulting filename (after slugification). The gateway rejects `note.capture` calls without `title` whenever no template is selected. Do not rely on body-text derivation — it produces broken filenames for non-ASCII input (e.g. `casa e decoração` → `casa-e-decorao-decorao-e-ambientes`). If you ever get a note with a bad filename, use `note.rename` to fix it.
+**The `title` rule is critical.** `title` is the title AND the resulting filename, with case, spaces, and diacritics preserved unless unsafe filename/link characters must be normalized or removed. The gateway rejects `note.capture` calls without `title` whenever no template is selected. Do not rely on body-text derivation; choose a deliberate human-readable title. If you ever get a note with a bad filename, use `note.rename` to fix it.
 
 **Template-based capture example** (no `text` or `title` needed; template's `vg_title` provides the title):
 
@@ -226,9 +226,9 @@ The handler does not update frontmatter `status`/`location` fields, does not upd
 
 ## note.rename
 
-Rename a note in place. Use this when a note's filename is wrong (e.g. caused by `note.capture` without an explicit `title`, resulting in a slugified body like `casa-e-decorao-decorao-e-ambientes`).
+Rename a note in place. Use this when a note's filename is wrong (e.g. caused by `note.capture` without an explicit `title`, resulting in a weak auto-derived filename).
 
-**Contract:** `path` (required), `new_title` (required, becomes the filename after slugification), `rewrite_wikilinks` (boolean, default `true`).
+**Contract:** `path` (required), `new_title` (required, becomes the filename after unsafe filename/link characters are normalized/removed), `rewrite_wikilinks` (boolean, default `true`).
 
 ```json
 {
@@ -242,8 +242,8 @@ Rename a note in place. Use this when a note's filename is wrong (e.g. caused by
 ```
 
 **Behavior:**
-- Slugifies `new_title` using the same rules as `note.capture` (predictable filename).
-- Refuses no-op renames (slug matches current stem).
+- Converts `new_title` to a safe filename using the same rules as `note.capture` while preserving case, spaces, and diacritics.
+- Refuses no-op renames (sanitized filename matches current stem).
 - Auto-uniquifies the target name if it collides.
 - When `rewrite_wikilinks` is `true` (default), walks every other markdown file in the vault and rewrites:
   - `[[old-stem]]` → `[[new-stem]]`

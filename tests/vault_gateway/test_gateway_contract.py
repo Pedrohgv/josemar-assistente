@@ -142,11 +142,48 @@ class VaultGatewayContractTests(unittest.TestCase):
         result = output.get("result", {})
         relative_path = result.get("path", "")
         self.assertIsInstance(relative_path, str)
+        self.assertEqual(relative_path, "00-Inbox/Conversation with Claudio.md")
         self.assertFalse(relative_path.startswith("/"))
         self.assertNotIn("..", relative_path)
         note_path = self.vault_dir / relative_path
         self.assertTrue(note_path.exists())
         self.assertIn("conversation with client Claudio", note_path.read_text(encoding="utf-8"))
+
+    def test_note_capture_preserves_diacritics_in_filename(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {
+                    "text": "nota sobre decoração",
+                    "title": "Casa e Decoração",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output.get("result", {})
+        self.assertEqual(result.get("path"), "00-Inbox/Casa e Decoração.md")
+        self.assertTrue((self.vault_dir / "00-Inbox" / "Casa e Decoração.md").exists())
+
+    def test_note_capture_sanitizes_filename_and_wikilink_unsafe_characters(self) -> None:
+        code, output = run_gateway(
+            {
+                "route": "note.capture",
+                "payload": {
+                    "text": "conference planning",
+                    "title": "ESX/2026: [Draft]? #^",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output.get("result", {})
+        self.assertEqual(result.get("path"), "00-Inbox/ESX - 2026 Draft.md")
+        self.assertTrue((self.vault_dir / "00-Inbox" / "ESX - 2026 Draft.md").exists())
 
     def test_note_capture_maintains_structure_context_files(self) -> None:
         area_dir = self.vault_dir / "02-Areas" / "Health"
@@ -1116,7 +1153,7 @@ Prefer monthly grouping and explicit totals.
             self.assertIn("Falha ao acessar arquivos do vault", message)
             self.assertIn("ref.md", message)
             self.assertTrue(target.exists(), "Rename must not proceed after referrer read failure")
-            self.assertFalse((inbox / "new-name.md").exists())
+            self.assertFalse((inbox / "New Name.md").exists())
             self.assertEqual(readable_referrer.read_text(encoding="utf-8"), "See [[old-name]].\n")
         finally:
             if referrer.exists():
@@ -1147,7 +1184,7 @@ Prefer monthly grouping and explicit totals.
             self.assertEqual(code, 1)
             self.assertEqual(output.get("error"), "execution_error")
             self.assertTrue(target.exists())
-            self.assertFalse((inbox / "new-name.md").exists())
+            self.assertFalse((inbox / "New Name.md").exists())
             self.assertEqual(referrer.read_text(encoding="utf-8"), "See [[old-name]].\n")
         finally:
             if inbox.exists():
@@ -1216,14 +1253,69 @@ Prefer monthly grouping and explicit totals.
         self.assertEqual(code, 0)
         self.assertTrue(output.get("success"))
         result = output.get("result", {})
-        self.assertEqual(result.get("new_stem"), "a-clear-title")
+        self.assertEqual(result.get("new_stem"), "A Clear Title")
         self.assertTrue(result.get("rewritten_notes") == [])
         self.assertEqual(result.get("rewritten_count"), 0)
 
         self.assertFalse(note.exists())
-        new_path = self.vault_dir / "00-Inbox" / "a-clear-title.md"
+        new_path = self.vault_dir / "00-Inbox" / "A Clear Title.md"
         self.assertTrue(new_path.exists())
         self.assertIn("Body content.", new_path.read_text(encoding="utf-8"))
+
+    def test_note_rename_preserves_diacritics_in_filename_and_wikilinks(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        target = inbox / "casa-e-decorao.md"
+        target.write_text("# Casa e Decoração\n\nBody.\n", encoding="utf-8")
+        referrer = inbox / "ref.md"
+        referrer.write_text("See [[casa-e-decorao]].\n", encoding="utf-8")
+
+        code, output = run_gateway(
+            {
+                "route": "note.rename",
+                "payload": {
+                    "path": "00-Inbox/casa-e-decorao.md",
+                    "new_title": "Casa e Decoração",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output.get("result", {})
+        self.assertEqual(result.get("new_stem"), "Casa e Decoração")
+        self.assertTrue((inbox / "Casa e Decoração.md").exists())
+        self.assertIn("[[Casa e Decoração]]", referrer.read_text(encoding="utf-8"))
+
+    def test_note_rename_rewrites_wikilinks_to_uniquified_target_stem(self) -> None:
+        inbox = self.vault_dir / "00-Inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        existing = inbox / "New Name.md"
+        existing.write_text("# Existing\n", encoding="utf-8")
+        target = inbox / "old-name.md"
+        target.write_text("# Old\n", encoding="utf-8")
+        referrer = inbox / "ref.md"
+        referrer.write_text("See [[old-name]].\n", encoding="utf-8")
+
+        code, output = run_gateway(
+            {
+                "route": "note.rename",
+                "payload": {
+                    "path": "00-Inbox/old-name.md",
+                    "new_title": "New Name",
+                },
+            },
+            self.env,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output.get("result", {})
+        self.assertEqual(result.get("new_stem"), "New Name-2")
+        self.assertTrue(existing.exists())
+        self.assertTrue((inbox / "New Name-2.md").exists())
+        self.assertIn("[[New Name-2]]", referrer.read_text(encoding="utf-8"))
 
     def test_note_rename_rewrites_wikilinks_across_vault(self) -> None:
         inbox = self.vault_dir / "00-Inbox"
@@ -1261,21 +1353,21 @@ Prefer monthly grouping and explicit totals.
         self.assertEqual(code, 0)
         self.assertTrue(output.get("success"))
         result = output.get("result", {})
-        self.assertEqual(result.get("new_stem"), "casa-e-decoracao-e-ambientes")
+        self.assertEqual(result.get("new_stem"), "Casa e Decoracao e Ambientes")
         self.assertEqual(result.get("rewritten_count"), 3)
 
-        new_target = inbox / "casa-e-decoracao-e-ambientes.md"
+        new_target = inbox / "Casa e Decoracao e Ambientes.md"
         self.assertFalse(target.exists())
         self.assertTrue(new_target.exists())
 
         referrer_text = referrer.read_text(encoding="utf-8")
-        self.assertIn("[[casa-e-decoracao-e-ambientes]] for context", referrer_text)
-        self.assertIn("[[casa-e-decoracao-e-ambientes|ambient notes]]", referrer_text)
+        self.assertIn("[[Casa e Decoracao e Ambientes]] for context", referrer_text)
+        self.assertIn("[[Casa e Decoracao e Ambientes|ambient notes]]", referrer_text)
         self.assertIn("[[some-other-note]] should stay", referrer_text)
         self.assertNotIn("casa-e-decorao-decorao-e-ambientes", referrer_text)
 
         other_text = other.read_text(encoding="utf-8")
-        self.assertIn("[[casa-e-decoracao-e-ambientes]]", other_text)
+        self.assertIn("[[Casa e Decoracao e Ambientes]]", other_text)
         self.assertNotIn("casa-e-decorao-decorao-e-ambientes", other_text)
 
     def test_note_rename_rewrites_wikilinks_can_be_disabled(self) -> None:
@@ -1301,7 +1393,7 @@ Prefer monthly grouping and explicit totals.
         self.assertEqual(code, 0)
         self.assertEqual(output.get("result", {}).get("rewritten_count"), 0)
         self.assertIn("[[old-name]]", referrer.read_text(encoding="utf-8"))
-        self.assertTrue((inbox / "new-name.md").exists())
+        self.assertTrue((inbox / "New Name.md").exists())
 
     def test_note_rename_requires_path(self) -> None:
         code, output = run_gateway(
@@ -1329,16 +1421,16 @@ Prefer monthly grouping and explicit totals.
         self.assertEqual(code, 1)
         self.assertEqual(output.get("error"), "invalid_payload")
 
-    def test_note_rename_rejects_same_slug(self) -> None:
+    def test_note_rename_rejects_same_filename(self) -> None:
         inbox = self.vault_dir / "00-Inbox"
         inbox.mkdir(parents=True, exist_ok=True)
-        (inbox / "same-name.md").write_text("# Same Name\n", encoding="utf-8")
+        (inbox / "Same Name.md").write_text("# Same Name\n", encoding="utf-8")
 
         code, output = run_gateway(
             {
                 "route": "note.rename",
                 "payload": {
-                    "path": "00-Inbox/same-name.md",
+                    "path": "00-Inbox/Same Name.md",
                     "new_title": "Same Name",
                 },
             },

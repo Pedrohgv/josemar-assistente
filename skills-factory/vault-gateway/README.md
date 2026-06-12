@@ -28,7 +28,7 @@ This directory contains the repo-shipped MBIFC vault bundle for Josemar.
 - `onboarding` supports deterministic new-vault and port-existing flows.
 - `onboarding` requires a `state_key` in payload for multi-turn isolation.
 - Port flow includes destructive confirmation gates with backup warning.
-- `note.capture` requires both `text` and `title` when no template is selected; `title` becomes the filename after slugification.
+- `note.capture` requires both `text` and `title` when no template is selected; `title` becomes the filename after unsafe filename/link characters are normalized/removed.
 - `note.read`, `note.update` (supports append, prepend, replace with frontmatter auto-preserve, surgical frontmatter mode, and section-targeted append/prepend), `note.search`, `note.link`, `note.file`, and `note.rename` provide flexible day-to-day vault manipulation.
 - `note.rename` rewrites `[[old-stem]]` and `[[old-stem|alias]]` wikilinks across the vault (toggleable via `rewrite_wikilinks: false`).
 - Section-intent updates follow a read-first policy (`note.read` before `note.update`) and avoid silent fallback to raw append/prepend when the heading is missing or ambiguous.
