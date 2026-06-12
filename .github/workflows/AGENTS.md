@@ -26,7 +26,7 @@ All workflows run on a self-hosted runner.
 | `PRIMARY_TELEGRAM_ID` | Yes | Primary allowlisted Telegram user |
 | `WORKSPACE_REPO_TOKEN` | Yes | PAT for private state repo sync |
 | `RCLONE_CONFIG_B64` | Yes (for backups) | Base64 `rclone.conf` for backup container |
-| `DEEPSEEK_API_KEY` | No | Optional provider key |
+| `DEEPSEEK_API_KEY` | Yes | DeepSeek provider key for the default model |
 | `OLLAMA_API_KEY` | No | Optional provider key |
 | `TAVILY_API_KEY` | No | Optional Tavily key; enables `web_search` and `web_extract` via auto-detection |
 | `GOG_KEYRING_PASSWORD` | No | Optional gog keyring passphrase |
