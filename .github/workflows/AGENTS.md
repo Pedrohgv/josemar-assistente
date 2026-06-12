@@ -28,6 +28,7 @@ All workflows run on a self-hosted runner.
 | `RCLONE_CONFIG_B64` | Yes (for backups) | Base64 `rclone.conf` for backup container |
 | `DEEPSEEK_API_KEY` | No | Optional provider key |
 | `OLLAMA_API_KEY` | No | Optional provider key |
+| `TAVILY_API_KEY` | No | Optional Tavily key; enables `web_search` and `web_extract` via auto-detection |
 | `GOG_KEYRING_PASSWORD` | No | Optional gog keyring passphrase |
 | `TS_AUTHKEY` | No | Optional unattended tailscale login |
 | `HERMES_API_SERVER_KEY` | No | Required when `HERMES_API_SERVER_ENABLED=true` |

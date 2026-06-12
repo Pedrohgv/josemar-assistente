@@ -63,6 +63,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           PRIMARY_TELEGRAM_ID: ${{ secrets.PRIMARY_TELEGRAM_ID }}
           GOG_KEYRING_PASSWORD: ${{ secrets.GOG_KEYRING_PASSWORD }}
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
@@ -155,6 +156,7 @@ jobs:
           write_env TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
           write_env DEEPSEEK_API_KEY "$DEEPSEEK_API_KEY"
           write_env OLLAMA_API_KEY "$OLLAMA_API_KEY"
+          write_env TAVILY_API_KEY "$TAVILY_API_KEY"
           write_env PRIMARY_TELEGRAM_ID "$PRIMARY_TELEGRAM_ID"
           write_env GOG_KEYRING_PASSWORD "$GOG_KEYRING_PASSWORD"
           write_env TS_AUTHKEY "$TS_AUTHKEY"
