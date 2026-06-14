@@ -46,17 +46,38 @@ stage_manifest_files() {
         return 0
     fi
 
+    validate_manifest_files || return 1
+
     git add -A -- .gitignore .sync-manifest 2>/dev/null || true
 
-    while IFS= read -r pattern; do
+    while IFS= read -r pattern || [ -n "$pattern" ]; do
+        case "$pattern" in
+            \#*|"") continue ;;
+            *) ;;
+        esac
+
+        git add -A -- "$pattern" 2>/dev/null || true
+    done < "$MANIFEST_PATH"
+}
+
+validate_manifest_files() {
+    while IFS= read -r pattern || [ -n "$pattern" ]; do
         case "$pattern" in
             \#*|"") continue ;;
             *) ;;
         esac
 
         assert_manifest_path_safe "$pattern" || return 1
-        git add -A -- "$pattern" 2>/dev/null || true
+        assert_manifest_path_not_ignored "$pattern" || return 1
     done < "$MANIFEST_PATH"
+}
+
+validate_manifest_if_present() {
+    if [ ! -f "$MANIFEST_PATH" ]; then
+        return 0
+    fi
+
+    validate_manifest_files
 }
 
 assert_manifest_path_safe() {
@@ -77,6 +98,28 @@ assert_manifest_path_safe() {
                 ;;
         esac
     done
+
+    case "$candidate" in
+        skills/*\**|skills/*\?*|skills/*\[*)
+            log_error ".sync-manifest must use explicit skills paths: ${candidate}"
+            return 1
+            ;;
+    esac
+}
+
+assert_manifest_path_not_ignored() {
+    candidate="${1#./}"
+
+    case "$candidate" in
+        *\**|*\?*|*\[*)
+            return 0
+            ;;
+    esac
+
+    if git check-ignore -q -- "$candidate" 2>/dev/null; then
+        log_error ".sync-manifest path is ignored by .gitignore: ${candidate}"
+        return 1
+    fi
 }
 
 assert_remote_tree_safe() {
@@ -91,7 +134,7 @@ assert_remote_tree_safe() {
 commit_changes() {
     local msg="$1"
 
-    stage_manifest_files
+    stage_manifest_files || return 1
 
     if git diff --cached --quiet; then
         log_info "No changes to commit"
@@ -156,6 +199,7 @@ do_initial_clone() {
     assert_remote_tree_safe
 
     git reset --hard "origin/$BRANCH"
+    validate_manifest_if_present || return 1
 
     log_info "Workspace files restored from remote ($(git log --oneline -1))"
 
@@ -166,7 +210,7 @@ do_initial_clone() {
         fi
     fi
 
-    commit_changes "Initial commit from container start" || true
+    log_info "Initial clone complete; skipping bootstrap auto-commit"
 }
 
 do_sync_start() {
@@ -174,6 +218,7 @@ do_sync_start() {
 
     configure_git
     configure_remote
+    validate_manifest_if_present || return 1
 
     if enforce_vault_gateway_guardrail; then
         commit_guardrail_cleanup || true
@@ -247,6 +292,7 @@ do_periodic_sync() {
 
     configure_git
     configure_remote
+    validate_manifest_if_present || return 1
 
     committed=0
 

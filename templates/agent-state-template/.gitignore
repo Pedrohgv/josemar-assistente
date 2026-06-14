@@ -23,8 +23,6 @@
 # User-owned skills
 !skills/
 !skills/.gitkeep
-!skills/*/
-!skills/*/**
 
 # Avatar assets
 !avatars/

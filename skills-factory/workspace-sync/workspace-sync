@@ -117,14 +117,28 @@ stage_manifest_files() {
         echo "WARNING: .sync-manifest not found, refusing to stage all files" >&2
         return
     fi
+
+    validate_manifest_files || exit 1
+
     git add -A -- .gitignore .sync-manifest 2>/dev/null || true
-    while IFS= read -r pattern; do
+    while IFS= read -r pattern || [ -n "$pattern" ]; do
         case "$pattern" in
             \#*|"") continue ;;
             *) ;;
         esac
-        assert_manifest_path_safe "$pattern" || exit 1
         git add -A -- "$pattern" 2>/dev/null || true
+    done < "$MANIFEST_PATH"
+}
+
+validate_manifest_files() {
+    while IFS= read -r pattern || [ -n "$pattern" ]; do
+        case "$pattern" in
+            \#*|"") continue ;;
+            *) ;;
+        esac
+
+        assert_manifest_path_safe "$pattern" || return 1
+        assert_manifest_path_not_ignored "$pattern" || return 1
     done < "$MANIFEST_PATH"
 }
 
@@ -146,6 +160,28 @@ assert_manifest_path_safe() {
                 ;;
         esac
     done
+
+    case "$candidate" in
+        skills/*\**|skills/*\?*|skills/*\[*)
+            echo "ERROR: .sync-manifest must use explicit skills paths: ${candidate}" >&2
+            return 1
+            ;;
+    esac
+}
+
+assert_manifest_path_not_ignored() {
+    candidate="${1#./}"
+
+    case "$candidate" in
+        *\**|*\?*|*\[*)
+            return 0
+            ;;
+    esac
+
+    if git check-ignore -q -- "$candidate" 2>/dev/null; then
+        echo "ERROR: .sync-manifest path is ignored by .gitignore: ${candidate}" >&2
+        return 1
+    fi
 }
 
 assert_remote_tree_safe() {
