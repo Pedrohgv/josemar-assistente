@@ -2,9 +2,10 @@
 
 set -e
 
-WORKSPACE_DIR="${WORKSPACE_DIR:-/opt/data/workspace}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/opt/data}"
 MANIFEST_PATH="${WORKSPACE_DIR}/.sync-manifest"
 REPO_TOKEN="${WORKSPACE_REPO_TOKEN:-}"
+PROTECTED_RUNTIME_PATHS="config.yaml credentials .config obsidian sessions logs .env auth.json"
 
 input_data=$(cat)
 
@@ -116,18 +117,45 @@ stage_manifest_files() {
         echo "WARNING: .sync-manifest not found, refusing to stage all files" >&2
         return
     fi
+    git add -A -- .gitignore .sync-manifest 2>/dev/null || true
     while IFS= read -r pattern; do
         case "$pattern" in
             \#*|"") continue ;;
             *) ;;
         esac
-        expanded=$(echo "$pattern" | sed "s|skills|${WORKSPACE_DIR}/skills|; s|memory|${WORKSPACE_DIR}/memory|; s|avatars|${WORKSPACE_DIR}/avatars|")
-        for f in $expanded; do
-            if [ -e "$f" ]; then
-                git add "$f" 2>/dev/null || true
-            fi
-        done
+        assert_manifest_path_safe "$pattern" || exit 1
+        git add -A -- "$pattern" 2>/dev/null || true
     done < "$MANIFEST_PATH"
+}
+
+assert_manifest_path_safe() {
+    candidate="${1#./}"
+
+    case "$candidate" in
+        /*|../*|*/../*|*/..|..|:*)
+            echo "ERROR: .sync-manifest contains unsafe pathspec: ${1}" >&2
+            return 1
+            ;;
+    esac
+
+    for protected_path in $PROTECTED_RUNTIME_PATHS; do
+        case "$candidate" in
+            "$protected_path"|"$protected_path"/*)
+                echo "ERROR: .sync-manifest includes protected runtime path: ${candidate}" >&2
+                return 1
+                ;;
+        esac
+    done
+}
+
+assert_remote_tree_safe() {
+    branch="$1"
+    for protected_path in $PROTECTED_RUNTIME_PATHS; do
+        if git ls-tree -r --name-only "origin/$branch" -- "$protected_path" 2>/dev/null | grep -q .; then
+            echo "ERROR: State repo tracks protected runtime path: ${protected_path}" >&2
+            return 1
+        fi
+    done
 }
 
 has_changes() {
@@ -280,6 +308,7 @@ do_pull() {
     git commit -m "Pre-merge commit" 2>/dev/null || true
 
     if git fetch origin "$branch" 2>&1; then
+        assert_remote_tree_safe "$branch" || exit 1
         if git merge "origin/$branch" -X theirs -m "Merge remote (remote wins)" 2>&1; then
             echo "{\"success\": true, \"action\": \"pull\", \"branch\": \"$branch\"}"
         else

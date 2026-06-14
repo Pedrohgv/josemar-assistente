@@ -8,7 +8,7 @@ log() {
 }
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
-WORKSPACE_DIR="${WORKSPACE_DIR:-${HERMES_HOME}/workspace}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-${HERMES_HOME}}"
 OBSIDIAN_VAULT_DIR="${OBSIDIAN_VAULT_DIR:-${HERMES_HOME}/obsidian}"
 SOURCE_STATE_DIR="${JOSEMAR_SOURCE_STATE_DIR:-/opt/josemar/source-agent-state}"
 CREDENTIALS_SOURCE_DIR="${JOSEMAR_CREDENTIALS_SOURCE_DIR:-/opt/josemar/credentials-source}"
@@ -39,12 +39,10 @@ seed_workspace_from_manifest() {
         return 0
     fi
 
-    if [ -n "$(ls -A "$WORKSPACE_DIR" 2>/dev/null || true)" ]; then
-        return 0
+    log "Seeding missing state files from mounted agent-state manifest"
+    if [ ! -f "${WORKSPACE_DIR}/.sync-manifest" ]; then
+        cp "${SOURCE_STATE_DIR}/.sync-manifest" "${WORKSPACE_DIR}/.sync-manifest"
     fi
-
-    log "Seeding workspace from mounted agent-state manifest"
-    cp "${SOURCE_STATE_DIR}/.sync-manifest" "${WORKSPACE_DIR}/.sync-manifest"
 
     while IFS= read -r pattern; do
         case "$pattern" in
@@ -55,8 +53,10 @@ seed_workspace_from_manifest() {
             [ -e "$src" ] || continue
             rel_path="${src#${SOURCE_STATE_DIR}/}"
             dest_path="${WORKSPACE_DIR}/${rel_path}"
-            mkdir -p "$(dirname "$dest_path")"
-            cp -R "$src" "$dest_path"
+            if [ ! -e "$dest_path" ]; then
+                mkdir -p "$(dirname "$dest_path")"
+                cp -R "$src" "$dest_path"
+            fi
         done
     done < "${SOURCE_STATE_DIR}/.sync-manifest"
 }
@@ -82,38 +82,16 @@ elif [ ! -d "${WORKSPACE_DIR}/.git" ]; then
     seed_workspace_from_manifest
 fi
 
-mkdir -p "${WORKSPACE_DIR}/cron"
+mkdir -p "${HERMES_HOME}/cron"
 
-if [ ! -f "${WORKSPACE_DIR}/cron/jobs.json" ] && [ -f "${HERMES_HOME}/cron/jobs.json" ]; then
-    log "Seeding workspace cron/jobs.json from Hermes home"
-    cp "${HERMES_HOME}/cron/jobs.json" "${WORKSPACE_DIR}/cron/jobs.json"
-fi
-
-if [ ! -f "${WORKSPACE_DIR}/cron/jobs.json" ]; then
-    log "Creating empty workspace cron/jobs.json"
-    cat > "${WORKSPACE_DIR}/cron/jobs.json" <<'EOF'
+if [ ! -f "${HERMES_HOME}/cron/jobs.json" ]; then
+    log "Creating empty Hermes cron/jobs.json"
+    cat > "${HERMES_HOME}/cron/jobs.json" <<'EOF'
 {
   "jobs": [],
   "updated_at": null
 }
 EOF
-fi
-
-if [ -d "${HERMES_HOME}/cron" ] && [ ! -L "${HERMES_HOME}/cron" ]; then
-    if [ -f "${HERMES_HOME}/cron/jobs.json" ] && [ ! -f "${WORKSPACE_DIR}/cron/jobs.json" ]; then
-        log "Seeding workspace cron/jobs.json from legacy Hermes cron directory"
-        cp "${HERMES_HOME}/cron/jobs.json" "${WORKSPACE_DIR}/cron/jobs.json"
-    fi
-    log "Replacing Hermes cron directory with workspace-backed symlink"
-    rm -rf "${HERMES_HOME}/cron"
-fi
-
-if [ ! -L "${HERMES_HOME}/cron" ]; then
-    ln -s "${WORKSPACE_DIR}/cron" "${HERMES_HOME}/cron"
-fi
-
-if [ -f "${WORKSPACE_DIR}/cron/jobs.json" ] && [ ! -f "${HERMES_HOME}/cron/jobs.json" ]; then
-    cp "${WORKSPACE_DIR}/cron/jobs.json" "${HERMES_HOME}/cron/jobs.json"
 fi
 
 if [ -d "$CREDENTIALS_SOURCE_DIR" ]; then
@@ -128,20 +106,7 @@ if [ -d "$CREDENTIALS_SOURCE_DIR" ]; then
     chmod -R go-rwx "$CREDENTIALS_DIR" 2>/dev/null || true
 fi
 
-if [ "${HERMES_SYNC_JOSEMAR_SOUL:-true}" = "true" ] && [ -f "${WORKSPACE_DIR}/SOUL.md" ]; then
-    log "Linking SOUL.md from workspace into Hermes home"
-    rm -f "${HERMES_HOME}/SOUL.md"
-    ln -s "${WORKSPACE_DIR}/SOUL.md" "${HERMES_HOME}/SOUL.md"
-fi
-
-rm -rf "${HERMES_HOME}/memories"
 mkdir -p "${HERMES_HOME}/memories"
-for memory_file in MEMORY.md USER.md; do
-    if [ -f "${WORKSPACE_DIR}/${memory_file}" ]; then
-        log "Linking ${memory_file} from workspace into Hermes home"
-        ln -s "${WORKSPACE_DIR}/${memory_file}" "${HERMES_HOME}/memories/${memory_file}"
-    fi
-done
 
 if [ -x "${WORKSPACE_DIR}/skills/gogcli-tables/bin/gogx" ]; then
     ln -sf "${WORKSPACE_DIR}/skills/gogcli-tables/bin/gogx" /usr/local/bin/gogx

@@ -66,7 +66,7 @@ Security note: keep `SYNCTHING_GUI_BIND_IP` on localhost unless explicitly secur
 
 - Deploy writes `.env` from repository secrets/variables.
 - Deploy uses `docker compose down --remove-orphans` before rebuild/start.
-- `fresh_start=true` removes only the `hermes-workspace` volume.
+- `fresh_start=true` is disabled after moving state into `/opt/data`; use a manual, reviewed cleanup instead.
 - Deploy verifies Hermes container health (`josemar-hermes`).
 - Deploy verifies repo-owned skills under `/opt/josemar/skills`.
 - Deploy removes plaintext `.env` at the end.

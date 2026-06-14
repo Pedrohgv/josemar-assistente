@@ -340,11 +340,8 @@ Normal redeploy preserves:
 - Vault files (`obsidian-vault`)
 - Backup ring pointer (`obsidian-backup-state`)
 
-Workflow `fresh_start=true` removes only:
-
-- `hermes-workspace` (agent state workspace)
-
-It does not remove Obsidian volumes.
+Workflow `fresh_start=true` is disabled after moving private state into `/opt/data`.
+Use a manual, reviewed cleanup instead so runtime state and credentials are not removed accidentally. Obsidian volumes should not be removed during agent-state cleanup.
 
 ## Troubleshooting
 

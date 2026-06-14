@@ -1,9 +1,11 @@
-# Core workspace files
+# Core state files
 AGENTS.md
 SOUL.md
-USER.md
-MEMORY.md
 BOOT.md
+
+# Hermes memory files
+memories/USER.md
+memories/MEMORY.md
 
 # Skills (all files in skill directories)
 skills/*/*

@@ -2,7 +2,7 @@
 
 Template for the [Josemar Assistente](../) agent state repository.
 
-This is a **private** git repo that stores the agent's identity, personality, user-owned skills, cron jobs, and concise memory files. It is synced automatically with the running Docker container.
+This is a **private** git repo that stores the agent's identity, personality, user-owned skills, cron jobs, and concise memory files. At runtime it is checked out directly at Hermes home (`/opt/data`) so tracked files follow Hermes' native structure.
 
 ## Setup
 
@@ -26,7 +26,7 @@ This is a **private** git repo that stores the agent's identity, personality, us
 
 ## First-Time Bootstrap
 
-On the first run, if the workspace has no personality files (`SOUL.md`, `USER.md`, `AGENTS.md`), Hermes will guide initial setup through normal agent interaction.
+On the first run, if the state repo has no personality files (`SOUL.md`, `memories/USER.md`, `AGENTS.md`), Hermes will guide initial setup through normal agent interaction.
 
 **For clean bootstrap behavior, the initial commit to the state repo should NOT include personality `.md` files.** Only include:
 - `.gitignore`
@@ -35,7 +35,7 @@ On the first run, if the workspace has no personality files (`SOUL.md`, `USER.md
 - `cron/jobs.json`
 - `avatars/`
 
-Personality files (`SOUL.md`, `USER.md`, `AGENTS.md`, optionally `MEMORY.md`) are created/maintained by Hermes and automatically versioned by periodic sync.
+Personality and memory files (`SOUL.md`, `memories/USER.md`, `AGENTS.md`, optionally `memories/MEMORY.md`) are created/maintained by Hermes and automatically versioned by periodic sync.
 
 ## Skill Ownership Model
 
@@ -50,7 +50,7 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 
 - Treat repo-owned core skills (`/opt/josemar/skills/*`) as maintained through normal development in the main public repository (branch/commit/PR).
 - In runtime self-improvement flows, prefer writing a patch proposal for repo-owned skills instead of creating sidecar skills (for example `*-pitfalls`).
-- User-owned skills in `/opt/data/workspace/skills/*` can be patched directly and are expected to be versioned through the state repo sync flow.
+- User-owned skills in `/opt/data/skills/*` can be patched directly and are expected to be versioned through the state repo sync flow.
 - Avoid duplicate skill sprawl: patch an existing user-owned skill before creating a new skill with overlapping scope.
 
 **To trigger bootstrap-like setup on an existing deployment:**
@@ -64,8 +64,8 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 |------|---------|------------|
 | `AGENTS.md` | Operating instructions for the agent | Agent / manual |
 | `SOUL.md` | Persona, tone, boundaries | Agent / manual |
-| `USER.md` | User information and preferences | Agent / manual |
-| `MEMORY.md` | Long-term curated memory | Agent |
+| `memories/USER.md` | User information and preferences | Agent / manual |
+| `memories/MEMORY.md` | Long-term curated memory | Agent |
 | `BOOT.md` | Startup checklist (optional) | Template / manual |
 | `skills/` | Agent skills (SKILL.md + executables) | Manual |
 | `cron/jobs.json` | Cron job definitions loaded by Hermes | Manual / agent |
@@ -74,7 +74,7 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 ## Security
 
 - This must be a **private** repository
-- `.gitignore` prevents accidental secret commits
+- `.gitignore` is deny-by-default, so only explicit state paths can be staged normally
 - `.sync-manifest` explicitly lists what gets synced (no wildcards)
 - Never store API keys, tokens, or passwords here
 

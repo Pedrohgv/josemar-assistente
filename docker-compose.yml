@@ -29,7 +29,7 @@ services:
       - AUX_ML_MAX_QUEUE=${AUX_ML_MAX_QUEUE:-50}
       - AUX_ML_JOB_TIMEOUT_SECONDS=${AUX_ML_JOB_TIMEOUT_SECONDS:-1800}
       - AUX_ML_POLL_INTERVAL_SECONDS=${AUX_ML_POLL_INTERVAL_SECONDS:-1}
-      - AUX_ML_ALLOWED_INPUT_DIRS=${AUX_ML_ALLOWED_INPUT_DIRS:-/opt/data/workspace}
+      - AUX_ML_ALLOWED_INPUT_DIRS=${AUX_ML_ALLOWED_INPUT_DIRS:-/shared}
       - AUX_ML_ENFORCE_MEMORY_LIMIT=${AUX_ML_ENFORCE_MEMORY_LIMIT:-true}
       - AUX_ML_MEMORY_LIMIT_MB=${AUX_ML_MEMORY_LIMIT_MB:-8192}
       - AUX_ML_OCR_MAX_PAGES=${AUX_ML_OCR_MAX_PAGES:-50}
@@ -46,7 +46,7 @@ services:
       - LLAMA_TIMEOUT=${AUX_ML_LLAMACPP_TIMEOUT_SECONDS:-1800}
       - LLAMA_CONT_BATCHING=false
     volumes:
-      - hermes-workspace:/opt/data/workspace:ro
+      - aux-ml-shared:/shared:ro
     mem_limit: ${AUX_ML_MEMORY_LIMIT:-8192m}
     networks:
       - josemar-network
@@ -64,8 +64,8 @@ services:
     volumes:
       # Hermes-native persistent state (config, sessions, memories, skills, logs)
       - hermes-data:/opt/data
-      # Workspace is separate so aux-ml can read input files without credential access
-      - hermes-workspace:/opt/data/workspace
+      # Dedicated handoff area for files intentionally shared with aux-ml
+      - aux-ml-shared:/shared
       # Dedicated Obsidian vault volume shared with the current deployment
       - obsidian-vault:/opt/data/obsidian
       # Mounted state repo can seed local development when WORKSPACE_STATE_REPO is absent
@@ -99,10 +99,10 @@ services:
       - TELEGRAM_HOME_CHANNEL=${PRIMARY_TELEGRAM_ID:-}
       - GATEWAY_ALLOWED_USERS=${PRIMARY_TELEGRAM_ID:-}
       - GOG_KEYRING_PASSWORD=${GOG_KEYRING_PASSWORD:-}
-      - XDG_CONFIG_HOME=/opt/data/workspace/.config
-      - WORKSPACE_DIR=/opt/data/workspace
+      - XDG_CONFIG_HOME=/opt/data/.config
+      - WORKSPACE_DIR=/opt/data
       - OBSIDIAN_VAULT_DIR=/opt/data/obsidian
-      - VAULT_GATEWAY_ALLOWED_ROOTS=/opt/data/obsidian:/opt/data/workspace
+      - VAULT_GATEWAY_ALLOWED_ROOTS=/opt/data/obsidian:/shared
       - JOSEMAR_CREDENTIALS_DIR=/opt/data/credentials
       - WORKSPACE_STATE_REPO=${WORKSPACE_STATE_REPO:-}
       - WORKSPACE_REPO_TOKEN=${WORKSPACE_REPO_TOKEN:-}
@@ -200,7 +200,7 @@ networks:
 volumes:
   hermes-data:
     driver: local
-  hermes-workspace:
+  aux-ml-shared:
     driver: local
   obsidian-vault:
     driver: local

@@ -4,7 +4,7 @@
 
 set -e
 
-WORKSPACE_DIR="${WORKSPACE_DIR:-/opt/data/workspace}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/opt/data}"
 REPO_URL="${WORKSPACE_STATE_REPO:-}"
 REPO_TOKEN="${WORKSPACE_REPO_TOKEN:-}"
 BRANCH="${WORKSPACE_GIT_BRANCH:-main}"
@@ -14,6 +14,7 @@ SYNC_ON_START="${WORKSPACE_SYNC_ON_START:-true}"
 SYNC_INTERVAL="${WORKSPACE_SYNC_INTERVAL:-60}"
 MANIFEST_PATH="${WORKSPACE_DIR}/.sync-manifest"
 PROTECTED_SKILL_DIR="skills/vault-gateway"
+PROTECTED_RUNTIME_PATHS="config.yaml credentials .config obsidian sessions logs .env auth.json"
 
 log_info() {
     echo "[workspace-sync] $1"
@@ -45,20 +46,46 @@ stage_manifest_files() {
         return 0
     fi
 
+    git add -A -- .gitignore .sync-manifest 2>/dev/null || true
+
     while IFS= read -r pattern; do
         case "$pattern" in
             \#*|"") continue ;;
             *) ;;
         esac
 
-        expanded=$(echo "$pattern" | sed "s|skills|${WORKSPACE_DIR}/skills|; s|memory|${WORKSPACE_DIR}/memory|; s|avatars|${WORKSPACE_DIR}/avatars|")
-
-        for f in $expanded; do
-            if [ -e "$f" ]; then
-                git add "$f" 2>/dev/null || true
-            fi
-        done
+        assert_manifest_path_safe "$pattern" || return 1
+        git add -A -- "$pattern" 2>/dev/null || true
     done < "$MANIFEST_PATH"
+}
+
+assert_manifest_path_safe() {
+    candidate="${1#./}"
+
+    case "$candidate" in
+        /*|../*|*/../*|*/..|..|:*)
+            log_error ".sync-manifest contains unsafe pathspec: ${1}"
+            return 1
+            ;;
+    esac
+
+    for protected_path in $PROTECTED_RUNTIME_PATHS; do
+        case "$candidate" in
+            "$protected_path"|"$protected_path"/*)
+                log_error ".sync-manifest includes protected runtime path: ${candidate}"
+                return 1
+                ;;
+        esac
+    done
+}
+
+assert_remote_tree_safe() {
+    for protected_path in $PROTECTED_RUNTIME_PATHS; do
+        if git ls-tree -r --name-only "origin/$BRANCH" -- "$protected_path" 2>/dev/null | grep -q .; then
+            log_error "State repo tracks protected runtime path: ${protected_path}"
+            return 1
+        fi
+    done
 }
 
 commit_changes() {
@@ -126,6 +153,7 @@ do_initial_clone() {
     cd "$WORKSPACE_DIR"
     configure_git
     configure_remote
+    assert_remote_tree_safe
 
     git reset --hard "origin/$BRANCH"
 
@@ -159,6 +187,8 @@ do_sync_start() {
         log_warn "Failed to fetch from remote, continuing with local state"
         return
     }
+
+    assert_remote_tree_safe || return
 
     local has_remote
     has_remote=$(git ls-remote --heads origin "$BRANCH" 2>/dev/null | wc -l)

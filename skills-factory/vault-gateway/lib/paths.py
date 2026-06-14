@@ -7,7 +7,7 @@ class ConfigurationError(ValueError):
 
 
 def get_workspace_root() -> Path:
-    return Path(os.getenv("WORKSPACE_DIR", "/opt/data/workspace"))
+    return Path(os.getenv("WORKSPACE_DIR", "/opt/data"))
 
 
 def get_vault_root() -> Path:
@@ -20,7 +20,7 @@ def assert_safe_vault_root(vault_root: Path) -> None:
     if not resolved_text:
         raise ConfigurationError("Unsafe vault root: empty path")
 
-    allowed_raw = os.getenv("VAULT_GATEWAY_ALLOWED_ROOTS", "/opt/data/obsidian:/opt/data/workspace")
+    allowed_raw = os.getenv("VAULT_GATEWAY_ALLOWED_ROOTS", "/opt/data/obsidian:/shared")
     allowed_values = [item.strip() for item in allowed_raw.split(":") if item.strip()]
     allowed_prefixes = [Path(item).resolve(strict=False) for item in allowed_values]
 

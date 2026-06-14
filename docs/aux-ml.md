@@ -108,7 +108,7 @@ from llama-router child requests.
 {
   "task": "ocr",
   "model": "glm-ocr",
-  "file_path": "/opt/data/workspace/uploads/invoice.pdf",
+  "file_path": "/shared/invoice.pdf",
   "prompt": "Text Recognition:",
   "column_split": 1,
   "column_split_pages": [2]
@@ -140,7 +140,7 @@ Successful OCR job result includes:
 {
   "task": "transcribe",
   "model": "granite-speech-4.1-2b",
-  "file_path": "/opt/data/workspace/uploads/meeting.mp3",
+  "file_path": "/shared/meeting.mp3",
   "prompt": "transcribe the speech with proper punctuation and capitalization."
 }
 ```

@@ -4,15 +4,15 @@ Startup checklist for fresh deployments.
 
 ## First Run
 
-1. Complete bootstrap if `SOUL.md`, `USER.md`, and `AGENTS.md` are missing.
+1. Complete bootstrap if `SOUL.md`, `memories/USER.md`, and `AGENTS.md` are missing.
 2. Verify gateway access via Web UI.
 3. Approve device pairing if prompted.
 
 ## Core Capability Sanity Checks
 
 1. Confirm core repo-shipped skills are present at `/opt/josemar/skills/`.
-2. Confirm workspace sync is configured (`WORKSPACE_STATE_REPO`, token/branch settings).
-3. Confirm `.sync-manifest` exists in workspace root.
+2. Confirm state sync is configured (`WORKSPACE_STATE_REPO`, token/branch settings).
+3. Confirm `.sync-manifest` exists in `/opt/data`.
 
 ## Optional Service Checks
 
