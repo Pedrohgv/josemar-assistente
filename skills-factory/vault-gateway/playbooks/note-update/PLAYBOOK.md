@@ -95,9 +95,9 @@ For any user request that implies "add content inside an existing section" (task
    - For section-intent requests, raw `append`/`prepend` is disallowed unless the user explicitly asks for free-form insertion.
 
 Default interpretation examples:
-- "crie X tarefas" in a daily note -> section intent targeting `Tasks`
-- "adicione em decisões" -> section intent targeting `Decisões`
-- "anota isso no final da nota" -> free-form append (not section intent)
+- "create X tasks" in a daily note -> section intent targeting `Tasks`
+- "add this under decisions" -> section intent targeting `Decisions`
+- "note this at the end of the note" -> free-form append (not section intent)
 
 ## Frontmatter Safety (Auto-Preserve)
 

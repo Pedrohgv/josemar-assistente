@@ -4,6 +4,8 @@ Template for the [Josemar Assistente](../) agent state repository.
 
 This is a **private** git repo that stores the agent's identity, personality, user-owned skills, cron jobs, and concise memory files. It is synced automatically with the running Docker container.
 
+LLM-facing prompt and instruction files in this template should be authored in English, even when the assistant is expected to interact with the user in another language.
+
 ## Setup
 
 1. Create a new **private** GitHub repository

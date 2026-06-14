@@ -205,7 +205,7 @@ class VaultGatewayContractTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertTrue(output.get("success"))
-        self.assertIn("Tambem atualizei arquivos de contexto", output.get("message", ""))
+        self.assertIn("I also updated context files", output.get("message", ""))
 
         maintenance = output.get("result", {}).get("maintenance_updates", [])
         self.assertTrue(any("_index.md" in item for item in maintenance))
@@ -255,7 +255,7 @@ old managed content
 
         self.assertEqual(code, 0)
         self.assertTrue(output.get("success"))
-        self.assertIn("Tambem atualizei arquivos de contexto", output.get("message", ""))
+        self.assertIn("I also updated context files", output.get("message", ""))
 
         refreshed_index = (area_dir / "_index.md").read_text(encoding="utf-8")
         self.assertIn("Always include monthly reconciliation details.", refreshed_index)
@@ -309,7 +309,7 @@ vg_fields:
   - name: client_name
     type: string
     required: true
-    prompt: Nome do cliente?
+    prompt: Client name?
   - name: contact_email
     type: string
     required: true
@@ -372,7 +372,7 @@ vg_fields:
   - name: contact_email
     type: string
     required: true
-    prompt: Qual o email de contato?
+    prompt: Contact email?
 ---
 
 # {{client_name}}
@@ -438,7 +438,7 @@ Email: {{contact_email}}
                         "client_name": "Acme Ltd",
                         "contact_email": "ops@acme.example",
                     },
-                    "text": "Primeira reuniao comercial",
+                    "text": "First commercial meeting",
                     "template_mode": "strict",
                 },
             },
@@ -456,7 +456,7 @@ Email: {{contact_email}}
         created_text = created.read_text(encoding="utf-8")
         self.assertIn("Acme Ltd", created_text)
         self.assertIn("ops@acme.example", created_text)
-        self.assertIn("Primeira reuniao comercial", created_text)
+        self.assertIn("First commercial meeting", created_text)
         self.assertNotIn("{{client_name}}", created_text)
 
     def test_note_capture_strict_template_read_oserror_is_not_reported_as_metadata_validation(self) -> None:
@@ -744,13 +744,13 @@ vg_fields:
         code2, output2 = run_gateway(
             {
                 "route": "onboarding",
-                "payload": {"state_key": "sess-1", "input": "sim"},
+                "payload": {"state_key": "sess-1", "input": "yes"},
             },
             self.env,
         )
         self.assertEqual(code2, 0)
         self.assertEqual(output2.get("phase"), "warn_backup")
-        self.assertIn("RECOMENDACAO FORTE", output2.get("message", ""))
+        self.assertIn("STRONG RECOMMENDATION", output2.get("message", ""))
 
     def test_note_read_returns_content_and_frontmatter(self) -> None:
         note_path = self.vault_dir / "00-Inbox" / "test-note.md"
@@ -1051,11 +1051,11 @@ Prefer monthly grouping and explicit totals.
             self.assertEqual(code, 1)
             self.assertEqual(output.get("error"), "execution_error")
             message = output.get("message", "")
-            self.assertIn("Falha ao acessar arquivos do vault", message)
+            self.assertIn("Failed to access vault files", message)
             self.assertIn("readonly-note.md", message)
             self.assertNotEqual(
                 message,
-                "Falha ao acessar arquivos do vault.",
+                "Failed to access vault files.",
                 "OSError details must not be silently swallowed by the handler",
             )
 
@@ -1087,7 +1087,7 @@ Prefer monthly grouping and explicit totals.
             self.assertEqual(code, 1)
             self.assertEqual(output.get("error"), "execution_error")
             message = output.get("message", "")
-            self.assertIn("Falha ao acessar arquivos do vault", message)
+            self.assertIn("Failed to access vault files", message)
             self.assertIn("unreadable-note.md", message)
         finally:
             if note_path.exists():
@@ -1150,7 +1150,7 @@ Prefer monthly grouping and explicit totals.
             self.assertEqual(code, 1)
             self.assertEqual(output.get("error"), "execution_error")
             message = output.get("message", "")
-            self.assertIn("Falha ao acessar arquivos do vault", message)
+            self.assertIn("Failed to access vault files", message)
             self.assertIn("ref.md", message)
             self.assertTrue(target.exists(), "Rename must not proceed after referrer read failure")
             self.assertFalse((inbox / "New Name.md").exists())

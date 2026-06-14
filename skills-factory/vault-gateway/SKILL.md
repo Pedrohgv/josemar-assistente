@@ -58,8 +58,8 @@ Always provide structured input with explicit route:
 {
   "route": "note.capture",
   "payload": {
-    "text": "anote que hj tive uma conversa com o cliente Claudio",
-    "title": "Reuniao com Claudio",
+    "text": "note that today I had a conversation with client Claudio",
+    "title": "Meeting with Claudio",
     "target_folder": "00-Inbox",
     "template_hint": "meeting"
   }
@@ -203,9 +203,9 @@ Update an existing markdown note.
 5. **Never create duplicate headings by default.** For section-intent requests, raw `append`/`prepend` is disallowed unless the user explicitly asks for free-form insertion.
 
 Examples:
-- "crie X tarefas" in a daily note → section intent targeting `Tasks`
-- "adicione em decisões" → section intent targeting `Decisões`
-- "anota isso no final da nota" → free-form append (not section intent)
+- "create X tasks" in a daily note → section intent targeting `Tasks`
+- "add this under decisions" → section intent targeting `Decisions`
+- "note this at the end of the note" → free-form append (not section intent)
 
 ## note.file
 
