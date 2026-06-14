@@ -2,6 +2,12 @@
 
 Purpose: Root guidance for AI assistants working with the Josemar Assistente project.
 
+## Prompt Language Policy
+
+- Author all LLM-facing prompt and instruction files in English, even when the assistant is expected to interact with users in another language.
+- This applies to `AGENTS.md`, `SKILL.md`, playbooks, starter-state templates, harness instructions, and prompt examples committed to this repo.
+- Runtime interactions may still follow the user's preferred language; keep the source prompt files language-neutral by writing them in English.
+
 ## Project Overview
 
 Josemar Assistente is a self-hosted AI assistant built on Hermes, running in Docker with Telegram integration.

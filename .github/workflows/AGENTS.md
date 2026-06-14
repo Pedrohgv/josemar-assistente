@@ -2,6 +2,10 @@
 
 This directory contains GitHub Actions workflows for the Hermes-based Josemar Assistente deployment.
 
+## Prompt Language Policy
+
+All AI-harness-facing instructions in this directory must be written in English, even when the deployed assistant interacts with users in another language.
+
 ## Prerequisites
 
 All workflows run on a self-hosted runner.

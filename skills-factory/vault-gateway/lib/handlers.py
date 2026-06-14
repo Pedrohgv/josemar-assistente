@@ -27,9 +27,12 @@ from lib.vault_ops import (
 )
 
 
-BACKUP_CONFIRMATION = "eu tenho backup e quero continuar"
-NON_DESTRUCTIVE_CONFIRMATION = "aprovar port nao destrutivo"
-DESTRUCTIVE_EXECUTION_CONFIRMATION = "executar port destrutivo"
+BACKUP_CONFIRMATION = "i have a backup and want to continue"
+NON_DESTRUCTIVE_CONFIRMATION = "approve non-destructive port"
+DESTRUCTIVE_EXECUTION_CONFIRMATION = "execute destructive port"
+LEGACY_BACKUP_CONFIRMATION = "eu tenho backup e quero continuar"
+LEGACY_NON_DESTRUCTIVE_CONFIRMATION = "aprovar port nao destrutivo"
+LEGACY_DESTRUCTIVE_EXECUTION_CONFIRMATION = "executar port destrutivo"
 
 
 def _payload_text(payload: dict) -> str:
@@ -65,8 +68,8 @@ def _maintenance_suffix(result: dict) -> str:
         return ""
     first = cleaned[0]
     if len(cleaned) == 1:
-        return f" Tambem atualizei arquivos de contexto ({first})."
-    return f" Tambem atualizei arquivos de contexto ({first} e mais {len(cleaned) - 1})."
+        return f" I also updated context files ({first})."
+    return f" I also updated context files ({first} plus {len(cleaned) - 1} more)."
 
 
 def _is_strict_yes(text: str) -> bool:
@@ -75,6 +78,10 @@ def _is_strict_yes(text: str) -> bool:
 
 def _is_strict_no(text: str) -> bool:
     return normalize_text(text) in {"nao", "n", "no"}
+
+
+def _matches_exact_confirmation(text: str, confirmation: str, legacy_confirmation: str) -> bool:
+    return text in {confirmation, legacy_confirmation}
 
 
 def _state_key(payload: dict) -> str:
@@ -137,12 +144,12 @@ def _clear_onboarding_state(state_key: str) -> None:
 
 def _render_plan(plan: dict) -> str:
     lines = [
-        "Plano de port detectado:",
-        f"- Vault existe: {plan.get('vault_exists')}",
-        f"- Modo: {'destrutivo' if plan.get('destructive') else 'nao destrutivo'}",
-        f"- Pastas padrao faltando: {', '.join(plan.get('missing_standard_dirs', [])) or '(nenhuma)'}",
-        f"- Itens fora do padrao na raiz: {', '.join(plan.get('non_standard_root_entries', [])) or '(nenhum)'}",
-        "- Acoes:",
+        "Detected port plan:",
+        f"- Vault exists: {plan.get('vault_exists')}",
+        f"- Mode: {'destructive' if plan.get('destructive') else 'non-destructive'}",
+        f"- Missing standard folders: {', '.join(plan.get('missing_standard_dirs', [])) or '(none)'}",
+        f"- Non-standard root items: {', '.join(plan.get('non_standard_root_entries', [])) or '(none)'}",
+        "- Actions:",
     ]
     for action in plan.get("actions", []):
         lines.append(f"  - {action}")
@@ -159,7 +166,7 @@ def handle_onboarding(payload: dict) -> dict:
     if contains_any(normalized, ["cancelar onboarding", "cancel onboarding", "cancelar", "cancel"]):
         _clear_onboarding_state(state_key)
         return {
-            "message": "Onboarding cancelado. Quando quiser retomar, diga 'onboarding' ou 'initialize my vault'.",
+            "message": "Onboarding cancelled. When you want to resume, say 'onboarding' or 'initialize my vault'.",
             "needs_user_input": False,
             "phase": "cancelled",
             "timestamp": now,
@@ -173,7 +180,7 @@ def handle_onboarding(payload: dict) -> dict:
         if requested_mode == "port":
             normalized = "port existing vault"
         elif requested_mode == "new":
-            normalized = "novo vault"
+            normalized = "new vault"
 
         if contains_any(normalized, ["port", "migrat", "vault existente", "existing vault"]):
             onboarding = {
@@ -184,10 +191,10 @@ def handle_onboarding(payload: dict) -> dict:
             _save_onboarding_state(state_key, onboarding)
             return {
                 "message": (
-                    "Modo de port selecionado. Deseja executar em modo destrutivo? "
-                    "(sim/nao).\n"
-                    "- sim: pode mover itens fora do padrao para arquivo\n"
-                    "- nao: apenas cria estrutura faltante"
+                    "Port mode selected. Do you want to run destructive mode? "
+                    "(yes/no).\n"
+                    "- yes: can move non-standard root items to the archive\n"
+                    "- no: only creates missing structure"
                 ),
                 "needs_user_input": True,
                 "phase": "ask_destructive",
@@ -202,8 +209,8 @@ def handle_onboarding(payload: dict) -> dict:
             _save_onboarding_state(state_key, onboarding)
             return {
                 "message": (
-                    "Modo novo vault selecionado. Vou criar a estrutura padrao sem sobrescrever arquivos existentes. "
-                    "Posso executar agora? (sim/nao)"
+                    "New vault mode selected. I will create the standard structure without overwriting existing files. "
+                    "Can I execute now? (yes/no)"
                 ),
                 "needs_user_input": True,
                 "phase": "confirm_new",
@@ -217,8 +224,8 @@ def handle_onboarding(payload: dict) -> dict:
         _save_onboarding_state(state_key, onboarding)
         return {
             "message": (
-                "Vamos iniciar o onboarding do vault. Escolha uma opcao:\n"
-                "1) novo vault\n"
+                "Let's start vault onboarding. Choose an option:\n"
+                "1) new vault\n"
                 "2) port existing vault"
             ),
             "needs_user_input": True,
@@ -230,7 +237,7 @@ def handle_onboarding(payload: dict) -> dict:
             result = apply_non_destructive_port(vault_root, "new-vault-onboarding")
             _clear_onboarding_state(state_key)
             return {
-                "message": "Estrutura base criada para novo vault com modo seguro (nao destrutivo).",
+                "message": "Base structure created for the new vault in safe mode (non-destructive).",
                 "needs_user_input": False,
                 "phase": "completed",
                 "result": result,
@@ -238,12 +245,12 @@ def handle_onboarding(payload: dict) -> dict:
         if _is_strict_no(normalized):
             _clear_onboarding_state(state_key)
             return {
-                "message": "Onboarding cancelado sem alteracoes.",
+                "message": "Onboarding cancelled without changes.",
                 "needs_user_input": False,
                 "phase": "cancelled",
             }
         return {
-            "message": "Responda com 'sim' para criar a estrutura base ou 'nao' para cancelar.",
+            "message": "Reply with 'yes' to create the base structure or 'no' to cancel.",
             "needs_user_input": True,
             "phase": "confirm_new",
         }
@@ -255,9 +262,9 @@ def handle_onboarding(payload: dict) -> dict:
             _save_onboarding_state(state_key, onboarding)
             return {
                 "message": (
-                    "ATENCAO: modo destrutivo pode mover conteudo para 04-Archive e alterar a organizacao da raiz.\n"
-                    "RECOMENDACAO FORTE: faca backup completo do vault antes de continuar.\n"
-                    f"Para continuar, digite exatamente: {BACKUP_CONFIRMATION}"
+                    "WARNING: destructive mode can move content to 04-Archive and change root organization.\n"
+                    "STRONG RECOMMENDATION: make a complete vault backup before continuing.\n"
+                    f"To continue, type exactly: {BACKUP_CONFIRMATION}"
                 ),
                 "needs_user_input": True,
                 "phase": "warn_backup",
@@ -271,20 +278,20 @@ def handle_onboarding(payload: dict) -> dict:
             return {
                 "message": (
                     f"{_render_plan(plan)}\n\n"
-                    f"Se estiver de acordo, digite exatamente: {NON_DESTRUCTIVE_CONFIRMATION}"
+                    f"If you agree, type exactly: {NON_DESTRUCTIVE_CONFIRMATION}"
                 ),
                 "needs_user_input": True,
                 "phase": "confirm_non_destructive",
                 "plan": plan,
             }
         return {
-            "message": "Responda com 'sim' ou 'nao' para o modo destrutivo.",
+            "message": "Reply with 'yes' or 'no' for destructive mode.",
             "needs_user_input": True,
             "phase": "ask_destructive",
         }
 
     if phase == "warn_backup":
-        if normalized == BACKUP_CONFIRMATION:
+        if _matches_exact_confirmation(normalized, BACKUP_CONFIRMATION, LEGACY_BACKUP_CONFIRMATION):
             plan = build_port_plan(scan_vault(vault_root), destructive=True)
             onboarding["phase"] = "confirm_destructive"
             onboarding["plan"] = plan
@@ -292,7 +299,7 @@ def handle_onboarding(payload: dict) -> dict:
             return {
                 "message": (
                     f"{_render_plan(plan)}\n\n"
-                    f"Para executar o port destrutivo, digite exatamente: {DESTRUCTIVE_EXECUTION_CONFIRMATION}"
+                    f"To execute the destructive port, type exactly: {DESTRUCTIVE_EXECUTION_CONFIRMATION}"
                 ),
                 "needs_user_input": True,
                 "phase": "confirm_destructive",
@@ -300,19 +307,23 @@ def handle_onboarding(payload: dict) -> dict:
             }
         return {
             "message": (
-                "Ainda aguardando confirmacao de backup.\n"
-                f"Digite exatamente: {BACKUP_CONFIRMATION}"
+                "Still waiting for backup confirmation.\n"
+                f"Type exactly: {BACKUP_CONFIRMATION}"
             ),
             "needs_user_input": True,
             "phase": "warn_backup",
         }
 
     if phase == "confirm_non_destructive":
-        if normalized == NON_DESTRUCTIVE_CONFIRMATION:
+        if _matches_exact_confirmation(
+            normalized,
+            NON_DESTRUCTIVE_CONFIRMATION,
+            LEGACY_NON_DESTRUCTIVE_CONFIRMATION,
+        ):
             result = apply_non_destructive_port(vault_root, "port-existing-non-destructive")
             _clear_onboarding_state(state_key)
             return {
-                "message": "Port nao destrutivo concluido com sucesso.",
+                "message": "Non-destructive port completed successfully.",
                 "needs_user_input": False,
                 "phase": "completed",
                 "result": result,
@@ -320,25 +331,29 @@ def handle_onboarding(payload: dict) -> dict:
         if _is_strict_no(normalized):
             _clear_onboarding_state(state_key)
             return {
-                "message": "Port nao destrutivo cancelado sem execucao.",
+                "message": "Non-destructive port cancelled without execution.",
                 "needs_user_input": False,
                 "phase": "cancelled",
             }
         return {
             "message": (
-                "Aguardando confirmacao. "
-                f"Digite exatamente: {NON_DESTRUCTIVE_CONFIRMATION}"
+                "Waiting for confirmation. "
+                f"Type exactly: {NON_DESTRUCTIVE_CONFIRMATION}"
             ),
             "needs_user_input": True,
             "phase": "confirm_non_destructive",
         }
 
     if phase == "confirm_destructive":
-        if normalized == DESTRUCTIVE_EXECUTION_CONFIRMATION:
+        if _matches_exact_confirmation(
+            normalized,
+            DESTRUCTIVE_EXECUTION_CONFIRMATION,
+            LEGACY_DESTRUCTIVE_EXECUTION_CONFIRMATION,
+        ):
             result = apply_destructive_port(vault_root, "port-existing-destructive")
             _clear_onboarding_state(state_key)
             return {
-                "message": "Port destrutivo concluido. Revise o arquivo de log em Meta/vault-gateway-log.md.",
+                "message": "Destructive port completed. Review the log file at Meta/vault-gateway-log.md.",
                 "needs_user_input": False,
                 "phase": "completed",
                 "result": result,
@@ -346,14 +361,14 @@ def handle_onboarding(payload: dict) -> dict:
         if _is_strict_no(normalized):
             _clear_onboarding_state(state_key)
             return {
-                "message": "Port destrutivo cancelado.",
+                "message": "Destructive port cancelled.",
                 "needs_user_input": False,
                 "phase": "cancelled",
             }
         return {
             "message": (
-                "Aguardando confirmacao final. "
-                f"Digite exatamente: {DESTRUCTIVE_EXECUTION_CONFIRMATION}"
+                "Waiting for final confirmation. "
+                f"Type exactly: {DESTRUCTIVE_EXECUTION_CONFIRMATION}"
             ),
             "needs_user_input": True,
             "phase": "confirm_destructive",
@@ -362,7 +377,7 @@ def handle_onboarding(payload: dict) -> dict:
     onboarding["phase"] = "choose_path"
     _save_onboarding_state(state_key, onboarding)
     return {
-        "message": "Fluxo de onboarding resetado. Escolha 'novo vault' ou 'port existing vault'.",
+        "message": "Onboarding flow reset. Choose 'new vault' or 'port existing vault'.",
         "needs_user_input": True,
         "phase": "choose_path",
     }
@@ -389,7 +404,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 mode=str(payload.get("mode") or "capture"),
             )
             return {
-                "message": "Catalogo de templates carregado.",
+                "message": "Template catalog loaded.",
                 "needs_user_input": False,
                 "result": result,
             }
@@ -402,7 +417,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 include_placeholders=_as_bool(payload.get("include_placeholders", True)),
             )
             return {
-                "message": "Template inspecionado com sucesso.",
+                "message": "Template inspected successfully.",
                 "needs_user_input": False,
                 "result": result,
             }
@@ -429,13 +444,13 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 pending_result = dict(result)
                 pending_result.pop("pending", None)
                 return {
-                    "message": "Campos obrigatorios do template ainda faltam.",
+                    "message": "Required template fields are still missing.",
                     "needs_user_input": True,
                     "phase": result.get("phase"),
                     "result": pending_result,
                 }
             return {
-                "message": "Nota capturada com sucesso." + _maintenance_suffix(result),
+                "message": "Note captured successfully." + _maintenance_suffix(result),
                 "needs_user_input": False,
                 "result": result,
             }
@@ -448,7 +463,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 include_body=_as_bool(payload.get("include_body", True)),
             )
             return {
-                "message": "Nota lida com sucesso.",
+                "message": "Note read successfully.",
                 "needs_user_input": False,
                 "result": result,
             }
@@ -464,7 +479,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 section_heading=payload.get("section_heading"),
             )
             return {
-                "message": "Nota atualizada com sucesso." + _maintenance_suffix(result),
+                "message": "Note updated successfully." + _maintenance_suffix(result),
                 "needs_user_input": False,
                 "result": result,
             }
@@ -477,7 +492,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 path_prefix=payload.get("path_prefix"),
             )
             return {
-                "message": "Busca concluida.",
+                "message": "Search completed.",
                 "needs_user_input": False,
                 "result": result,
             }
@@ -490,7 +505,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 bidirectional=_as_bool(payload.get("bidirectional", False)),
             )
             return {
-                "message": "Link entre notas atualizado.",
+                "message": "Link between notes updated.",
                 "needs_user_input": False,
                 "result": result,
             }
@@ -502,7 +517,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 target_folder=str(payload.get("target_folder") or "01-Projects"),
             )
             return {
-                "message": "Nota movida com sucesso." + _maintenance_suffix(result),
+                "message": "Note moved successfully." + _maintenance_suffix(result),
                 "needs_user_input": False,
                 "result": result,
             }
@@ -515,7 +530,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 rewrite_wikilinks=_as_bool(payload.get("rewrite_wikilinks", True)),
             )
             return {
-                "message": "Nota renomeada com sucesso." + _maintenance_suffix(result),
+                "message": "Note renamed successfully." + _maintenance_suffix(result),
                 "needs_user_input": False,
                 "result": result,
             }
@@ -523,7 +538,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
         if route == "inbox.triage":
             summary = summarize_inbox(vault_root)
             return {
-                "message": "Resumo de inbox triage gerado.",
+                "message": "Inbox triage summary generated.",
                 "needs_user_input": False,
                 "summary": summary,
             }
@@ -531,7 +546,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
         if route == "vault.defrag":
             summary = summarize_defrag(vault_root)
             return {
-                "message": "Resumo de defrag estrutural gerado.",
+                "message": "Structural defrag summary generated.",
                 "needs_user_input": False,
                 "summary": summary,
             }
@@ -539,7 +554,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
         if route == "vault.audit":
             summary = summarize_audit(vault_root)
             return {
-                "message": "Resumo de vault audit gerado.",
+                "message": "Vault audit summary generated.",
                 "needs_user_input": False,
                 "summary": summary,
             }
@@ -547,7 +562,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
         if route == "vault.deep-clean":
             summary = summarize_deep_clean(vault_root)
             return {
-                "message": "Resumo de deep clean gerado.",
+                "message": "Deep clean summary generated.",
                 "needs_user_input": False,
                 "summary": summary,
             }
@@ -555,19 +570,19 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
         if route == "tags.garden":
             summary = summarize_tag_garden(vault_root)
             return {
-                "message": "Resumo de tag garden gerado.",
+                "message": "Tag garden summary generated.",
                 "needs_user_input": False,
                 "summary": summary,
             }
     except ConfigurationError:
         return {
-            "message": "Configuracao de vault invalida no ambiente.",
+            "message": "Invalid vault configuration in the environment.",
             "error": "configuration_error",
             "needs_user_input": False,
         }
     except ValueError as exc:
         return {
-            "message": "Entrada invalida para rota.",
+            "message": "Invalid route input.",
             "error": "validation_error",
             "details": str(exc),
             "needs_user_input": True,
@@ -575,7 +590,7 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
     except OSError as exc:
         details = exc.strerror or str(exc) or type(exc).__name__
         filename = getattr(exc, "filename", None)
-        message = "Falha ao acessar arquivos do vault."
+        message = "Failed to access vault files."
         if filename:
             message = f"{message} ({type(exc).__name__}: {details}: {filename})"
         else:
@@ -587,13 +602,13 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
         }
     except Exception:
         return {
-            "message": "Erro interno ao executar rota.",
+            "message": "Internal error while executing route.",
             "error": "internal_error",
             "needs_user_input": False,
         }
 
     return {
-        "message": "Rota sem handler implementado.",
+        "message": "Route has no implemented handler.",
         "error": "handler_not_implemented",
         "needs_user_input": False,
     }

@@ -27,7 +27,7 @@ The user never manually organizes the vault. Josemar is the sole custodian of va
 ### Phase 1: Choose Path
 
 Ask the user to choose between:
-- `novo vault` — create a fresh vault from scratch
+- `new vault` — create a fresh vault from scratch
 - `port existing vault` — adapt an existing vault to the baseline structure
 
 If `Meta/user-profile.md` already exists, the vault was initialized before. Offer to:
@@ -39,11 +39,11 @@ If `Meta/user-profile.md` already exists, the vault was initialized before. Offe
 
 Before executing any structural change, gather context through conversation. Ask one question at a time:
 
-1. **Preferred name** — "Como quer ser chamado?"
-2. **Primary language** — "Qual idioma prefere para interacoes?"
-3. **Role/occupation** — "O que voce faz? Estudante, profissional, pesquisador, criativo?"
-4. **Motivation** — "O que te trouxe aqui? Qual problema quer resolver?"
-5. **Life areas** — "Quais areas da sua vida quer gerenciar no vault?" Common options:
+1. **Preferred name** — "How would you like to be addressed?"
+2. **Primary language** — "What language do you prefer for interactions?"
+3. **Role/occupation** — "What do you do? Student, professional, researcher, creative?"
+4. **Motivation** — "What brought you here? What problem do you want to solve?"
+5. **Life areas** — "Which areas of your life do you want to manage in the vault?" Common options:
    - Work (job projects, meetings, professional development)
    - Finance (budgets, expenses, investments)
    - Learning (courses, books, certifications, research)
@@ -51,12 +51,12 @@ Before executing any structural change, gather context through conversation. Ask
    - Side Projects (freelance, startups, creative endeavors)
    - Custom — any area the user describes
 6. **Deep-dive per area** — for each selected area, ask one follow-up to shape the sub-structure:
-   - Work: "Quantos cargos/projetos? Um ou multiplos?"
-   - Finance: "Que aspecto quer rastrear? orcamento, investimentos, impostos?"
-   - Learning: "Que tipo? cursos online, faculdade, livros, certificacoes?"
-   - Personal: "O que significa 'pessoal' para voce? hobbies, diario, viagens?"
-   - Side Projects: "Que tipo? freelance, startup, open source, criativo?"
-   - Custom: "Me conte mais sobre [area] — que tipo de notas vai guardar la?"
+   - Work: "How many roles/projects? One or multiple?"
+   - Finance: "What do you want to track? Budget, investments, taxes?"
+   - Learning: "What kind? Online courses, college, books, certifications?"
+   - Personal: "What does 'personal' mean for you? Hobbies, journal, travel?"
+   - Side Projects: "What kind? Freelance, startup, open source, creative?"
+   - Custom: "Tell me more about [area] — what kinds of notes will you store there?"
 
 ### Phase 3: Confirm and Execute
 
@@ -68,9 +68,9 @@ Summarize everything the user told you. Ask them to confirm or correct. Then exe
 
 The gateway handles these deterministically, but Josemar should explain them conversationally:
 
-- **Backup confirmation phrase**: `eu tenho backup e quero continuar` — required before destructive port can proceed
-- **Non-destructive execution phrase**: `aprovar port nao destrutivo`
-- **Destructive execution phrase**: `executar port destrutivo`
+- **Backup confirmation phrase**: `i have a backup and want to continue` — required before destructive port can proceed
+- **Non-destructive execution phrase**: `approve non-destructive port`
+- **Destructive execution phrase**: `execute destructive port`
 
 ### Destructive Flow
 
