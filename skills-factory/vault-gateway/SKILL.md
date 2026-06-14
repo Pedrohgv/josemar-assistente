@@ -189,7 +189,7 @@ Update an existing markdown note.
       "path": "07-Daily/2026-04-26.md",
       "mode": "section_append",
       "section_heading": "Tasks",
-      "text": "- [ ] Confirmar fechamento com cliente"
+      "text": "- [ ] Confirm closing with client"
     }
   }
   ```
