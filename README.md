@@ -231,6 +231,7 @@ sequenceDiagram
   Init->>StateTree: Run workspace-sync.sh
   StateTree->>Remote: Pull/merge remote state
   StateTree->>Remote: Push resulting state
+  Init->>Hermes: Ensure script-only workspace-sync cron job
   Init->>Hermes: Start gateway
 ```
 
@@ -240,7 +241,7 @@ Important state-sync variables:
 - `WORKSPACE_REPO_TOKEN`
 - `WORKSPACE_GIT_BRANCH`
 - `WORKSPACE_SYNC_ON_START`
-- `WORKSPACE_SYNC_INTERVAL`
+- `WORKSPACE_SYNC_INTERVAL` - Hermes script-only cron interval in minutes; set `0` to disable periodic sync.
 - `WORKSPACE_GIT_USER_EMAIL`
 - `WORKSPACE_GIT_USER_NAME`
 

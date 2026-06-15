@@ -10,8 +10,8 @@ REPO_TOKEN="${WORKSPACE_REPO_TOKEN:-}"
 BRANCH="${WORKSPACE_GIT_BRANCH:-main}"
 GIT_EMAIL="${WORKSPACE_GIT_USER_EMAIL:-agent@josemar.local}"
 GIT_NAME="${WORKSPACE_GIT_USER_NAME:-Josemar Agent}"
+SYNC_MODE="${WORKSPACE_SYNC_MODE:-}"
 SYNC_ON_START="${WORKSPACE_SYNC_ON_START:-true}"
-SYNC_INTERVAL="${WORKSPACE_SYNC_INTERVAL:-60}"
 MANIFEST_PATH="${WORKSPACE_DIR}/.sync-manifest"
 PROTECTED_SKILL_DIR="skills/vault-gateway"
 PROTECTED_RUNTIME_PATHS="config.yaml credentials .config obsidian sessions logs .env auth.json"
@@ -307,24 +307,38 @@ do_periodic_sync() {
         committed=1
     fi
 
-    if [ "$committed" -eq 1 ]; then
+    log_info "Fetching from remote..."
+    if git fetch origin "$BRANCH"; then
+        assert_remote_tree_safe || return
+
+        local_commit=$(git rev-parse HEAD 2>/dev/null || echo "none")
+        remote_commit=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "none")
+
+        if [ "$local_commit" != "$remote_commit" ]; then
+            log_info "Merging remote changes (conflicts: remote wins)..."
+            if git merge "origin/$BRANCH" -X theirs -m "Merge remote with conflict resolution"; then
+                log_info "Merge completed successfully"
+            else
+                log_warn "Merge conflicts detected. Logging conflicted files:"
+                git diff --name-only --diff-filter=U 2>/dev/null | while read -r f; do
+                    log_warn "  Conflict resolved (remote won): $f"
+                done
+
+                stage_manifest_files
+                git commit -m "Merge remote: conflict resolution (remote wins)" 2>/dev/null || true
+            fi
+        fi
+    else
+        log_warn "Failed to fetch from remote, pushing local state if needed"
+    fi
+
+    local_commit=$(git rev-parse HEAD 2>/dev/null || echo "none")
+    remote_commit=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "none")
+
+    if [ "$committed" -eq 1 ] || [ "$local_commit" != "$remote_commit" ]; then
         log_info "Pushing to remote..."
         git push origin "HEAD:$BRANCH" || log_warn "Failed to push to remote"
     fi
-}
-
-start_sync_daemon() {
-    if [ -z "$SYNC_INTERVAL" ] || [ "$SYNC_INTERVAL" = "0" ]; then
-        log_info "Periodic sync disabled (WORKSPACE_SYNC_INTERVAL=0)"
-        return
-    fi
-
-    log_info "Starting periodic sync daemon (every ${SYNC_INTERVAL} minutes)"
-
-    while true; do
-        sleep "${SYNC_INTERVAL}m"
-        do_periodic_sync
-    done &
 }
 
 main() {
@@ -337,6 +351,8 @@ main() {
 
     if [ ! -d "$WORKSPACE_DIR/.git" ]; then
         do_initial_clone
+    elif [ "$SYNC_MODE" = "periodic" ]; then
+        do_periodic_sync
     elif [ "$SYNC_ON_START" = "true" ]; then
         do_sync_start
     else
@@ -346,7 +362,7 @@ main() {
         log_info "Sync on start disabled, configuring git only"
     fi
 
-    start_sync_daemon
+    return 0
 }
 
 main "$@"

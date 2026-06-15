@@ -61,6 +61,72 @@ seed_workspace_from_manifest() {
     done < "${SOURCE_STATE_DIR}/.sync-manifest"
 }
 
+install_workspace_sync_cron() {
+    script_source="/opt/josemar/scripts/hermes-workspace-sync-cron.sh"
+    script_dir="${HERMES_HOME}/.hermes/scripts"
+    script_path="${script_dir}/hermes-workspace-sync-cron.sh"
+    sync_interval="${WORKSPACE_SYNC_INTERVAL:-60}"
+
+    if [ ! -x "$script_source" ]; then
+        return 0
+    fi
+
+    mkdir -p "$script_dir"
+    cp "$script_source" "$script_path"
+    chmod 700 "$script_path"
+    chown -R "${HERMES_UID_VALUE}:${HERMES_GID_VALUE}" "${HERMES_HOME}/.hermes" "${HERMES_HOME}/cron" 2>/dev/null || true
+
+    if [ -z "${WORKSPACE_STATE_REPO:-}" ]; then
+        return 0
+    fi
+
+    case "$sync_interval" in
+        ""|0|*[!0-9]*)
+            log "Hermes workspace-sync cron disabled (WORKSPACE_SYNC_INTERVAL=${sync_interval:-unset})"
+            return 0
+            ;;
+    esac
+
+    if python3 - "${HERMES_HOME}/cron/jobs.json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+
+for job in data.get("jobs", []):
+    if job.get("name") == "workspace-sync":
+        sys.exit(0)
+
+sys.exit(1)
+PY
+    then
+        log "Hermes workspace-sync cron job already exists"
+        return 0
+    fi
+
+    log "Creating Hermes workspace-sync cron job"
+    su -s /bin/sh hermes -c '
+        HOME=$1
+        HERMES_HOME=$1
+        WORKSPACE_DIR=$2
+        export HOME HERMES_HOME WORKSPACE_DIR
+        shift 2
+        exec hermes cron create "$@"
+    ' sh \
+        "$HERMES_HOME" \
+        "$WORKSPACE_DIR" \
+        "every ${sync_interval}m" \
+        --no-agent \
+        --script hermes-workspace-sync-cron.sh \
+        --workdir "$WORKSPACE_DIR" \
+        --name workspace-sync \
+        || log "WARNING: failed to create Hermes workspace-sync cron job"
+}
+
 if [ -n "${WORKSPACE_STATE_REPO:-}" ]; then
     log "Running workspace git sync as hermes user"
     chown -R "${HERMES_UID_VALUE}:${HERMES_GID_VALUE}" "$WORKSPACE_DIR" 2>/dev/null || true
@@ -72,10 +138,9 @@ if [ -n "${WORKSPACE_STATE_REPO:-}" ]; then
         WORKSPACE_GIT_USER_EMAIL='${WORKSPACE_GIT_USER_EMAIL:-agent@josemar.local}'
         WORKSPACE_GIT_USER_NAME='${WORKSPACE_GIT_USER_NAME:-Josemar Agent}'
         WORKSPACE_SYNC_ON_START='${WORKSPACE_SYNC_ON_START:-true}'
-        WORKSPACE_SYNC_INTERVAL='${WORKSPACE_SYNC_INTERVAL:-0}'
         export WORKSPACE_DIR WORKSPACE_STATE_REPO WORKSPACE_REPO_TOKEN
         export WORKSPACE_GIT_BRANCH WORKSPACE_GIT_USER_EMAIL WORKSPACE_GIT_USER_NAME
-        export WORKSPACE_SYNC_ON_START WORKSPACE_SYNC_INTERVAL
+        export WORKSPACE_SYNC_ON_START
         /usr/local/bin/workspace-sync.sh
     " || log "WARNING: workspace git sync failed; continuing"
 elif [ ! -d "${WORKSPACE_DIR}/.git" ]; then
@@ -93,6 +158,8 @@ if [ ! -f "${HERMES_HOME}/cron/jobs.json" ]; then
 }
 EOF
 fi
+
+install_workspace_sync_cron
 
 if [ -d "$CREDENTIALS_SOURCE_DIR" ]; then
     log "Copying mounted credentials into Hermes data volume"
