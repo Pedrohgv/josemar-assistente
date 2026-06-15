@@ -26,3 +26,4 @@ Run these only when optional features are enabled:
 - Do not assume user-specific skills exist.
 - Use only verified capabilities.
 - Report missing dependencies with exact next steps.
+- Keep prompt and instruction files in English; use the user's preferred language only in live interaction content.

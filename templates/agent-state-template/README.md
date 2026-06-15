@@ -4,6 +4,8 @@ Template for the [Josemar Assistente](../) agent state repository.
 
 This is a **private** git repo that stores the agent's identity, personality, user-owned skills, cron jobs, and concise memory files. At runtime it is checked out directly at Hermes home (`/opt/data`) so tracked files follow Hermes' native structure.
 
+LLM-facing prompt and instruction files in this template should be authored in English, even when the assistant is expected to interact with the user in another language.
+
 ## Setup
 
 1. Create a new **private** GitHub repository
