@@ -83,7 +83,6 @@ jobs:
           HERMES_API_SERVER_CORS_ORIGINS: ${{ vars.HERMES_API_SERVER_CORS_ORIGINS }}
           HERMES_API_SERVER_MODEL_NAME_INPUT: ${{ vars.HERMES_API_SERVER_MODEL_NAME }}
           HERMES_DEFAULT_PROFILE_DISPLAY_NAME_INPUT: ${{ vars.HERMES_DEFAULT_PROFILE_DISPLAY_NAME }}
-          HERMES_DASHBOARD_TUI: ${{ vars.HERMES_DASHBOARD_TUI }}
           AUX_ML_ENABLED_INPUT: ${{ vars.AUX_ML_ENABLED }}
           AUX_ML_MEMORY_LIMIT: ${{ vars.AUX_ML_MEMORY_LIMIT }}
           AUX_ML_MEMORY_LIMIT_MB: ${{ vars.AUX_ML_MEMORY_LIMIT_MB }}
@@ -126,18 +125,6 @@ jobs:
           if [ -z "$HERMES_DEFAULT_PROFILE_DISPLAY_NAME" ]; then
             HERMES_DEFAULT_PROFILE_DISPLAY_NAME="Josemar"
           fi
-
-          if [ -z "$HERMES_DASHBOARD_TUI" ]; then
-            HERMES_DASHBOARD_TUI="0"
-          fi
-
-          case "$HERMES_DASHBOARD_TUI" in
-            0|1) ;;
-            *)
-              echo "ERROR: HERMES_DASHBOARD_TUI must be 0 or 1 (got '$HERMES_DASHBOARD_TUI')"
-              exit 1
-              ;;
-          esac
 
           if [[ "$HERMES_DEFAULT_PROFILE_DISPLAY_NAME" == *$'\n'* || "$HERMES_DEFAULT_PROFILE_DISPLAY_NAME" == *$'\r'* ]]; then
             echo "ERROR: HERMES_DEFAULT_PROFILE_DISPLAY_NAME must be single-line"
@@ -190,7 +177,6 @@ jobs:
           write_env HERMES_API_SERVER_CORS_ORIGINS "$HERMES_API_SERVER_CORS_ORIGINS"
           write_env HERMES_API_SERVER_MODEL_NAME "$HERMES_API_SERVER_MODEL_NAME"
           write_env HERMES_DEFAULT_PROFILE_DISPLAY_NAME "$HERMES_DEFAULT_PROFILE_DISPLAY_NAME"
-          write_env HERMES_DASHBOARD_TUI "$HERMES_DASHBOARD_TUI"
           write_env TZ "$TZ_VALUE"
           write_env TAILSCALE_HOSTNAME "$TAILSCALE_HOSTNAME"
           write_env TS_EXTRA_ARGS "$TS_EXTRA_ARGS"
