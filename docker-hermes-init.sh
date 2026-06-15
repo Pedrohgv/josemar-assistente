@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/command/with-contenv sh
 # Josemar compatibility setup for the Hermes Agent Docker image.
 
 set -eu
