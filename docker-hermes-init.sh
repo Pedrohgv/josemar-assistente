@@ -61,7 +61,7 @@ seed_workspace_from_manifest() {
     done < "${SOURCE_STATE_DIR}/.sync-manifest"
 }
 
-if [ -n "${WORKSPACE_STATE_REPO:-}" ] && [ ! -d "${WORKSPACE_DIR}/.git" ]; then
+if [ -n "${WORKSPACE_STATE_REPO:-}" ]; then
     log "Running workspace git sync as hermes user"
     chown -R "${HERMES_UID_VALUE}:${HERMES_GID_VALUE}" "$WORKSPACE_DIR" 2>/dev/null || true
     su -s /bin/sh hermes -c "
