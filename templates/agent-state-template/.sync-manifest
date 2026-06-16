@@ -1,12 +1,16 @@
-# Core workspace files
+# Core state files
 AGENTS.md
 SOUL.md
-USER.md
-MEMORY.md
 BOOT.md
 
-# Skills (all files in skill directories)
-skills/*/*
+# Hermes memory files
+memories/USER.md
+memories/MEMORY.md
+
+# User-owned skills. Add explicit skill files here and allow the same paths in
+# .gitignore; do not use broad skills/* patterns because /opt/data/skills can
+# contain runtime-installed skill-hub artifacts.
+skills/.gitkeep
 
 # Avatars
 avatars/*

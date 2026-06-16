@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       fresh_start:
-        description: 'WARNING: This ERASES AGENT WORKSPACE DATA (hermes-workspace volume). This action is IRREVERSIBLE. Obsidian vault volume is NOT removed.'
+        description: 'Disabled for /opt/data state layout. Use a manual, reviewed cleanup instead.'
         required: false
         default: false
         type: boolean
       skip_git_sync:
-        description: 'Skip git sync on this deployment (use local workspace state only)'
+        description: 'Skip git sync on this deployment (use local /opt/data state only)'
         required: false
         default: false
         type: boolean
@@ -204,7 +204,7 @@ jobs:
           write_env AUX_ML_JOB_TIMEOUT_SECONDS "$AUX_ML_JOB_TIMEOUT_SECONDS"
           write_env AUX_ML_POLL_INTERVAL_SECONDS "$AUX_ML_POLL_INTERVAL_SECONDS"
           write_env AUX_ML_LLAMACPP_TIMEOUT_SECONDS "$AUX_ML_LLAMACPP_TIMEOUT_SECONDS"
-          write_env AUX_ML_ALLOWED_INPUT_DIRS "/opt/data/workspace"
+          write_env AUX_ML_ALLOWED_INPUT_DIRS "/shared"
           write_env AUX_ML_ENFORCE_MEMORY_LIMIT "$AUX_ML_ENFORCE_MEMORY_LIMIT"
           write_env AUX_ML_OCR_MAX_PAGES "$AUX_ML_OCR_MAX_PAGES"
 
@@ -252,26 +252,12 @@ jobs:
             echo "WARNING: RCLONE_CONFIG_B64 secret not set. Obsidian backups will fail until configured."
           fi
 
-      - name: FRESH START - Remove workspace volume
+      - name: FRESH START - Remove Hermes data volume
         if: github.event.inputs.fresh_start == 'true'
         run: |
-          echo "=========================================="
-          echo "!!! WARNING: FRESH START REQUESTED !!!"
-          echo "=========================================="
-          echo "This will DELETE ALL agent data:"
-          echo "  - All memory files (SOUL.md, MEMORY.md, AGENTS.md, etc.)"
-          echo "  - All skills (including agent modifications)"
-          echo "  - All session history and conversation data"
-          echo "  - All uploaded files (PDFs, etc.)"
-          echo "  - All workspace configuration"
-          echo "  - Obsidian vault volume is NOT deleted"
-          echo "=========================================="
-          echo "Waiting 10 seconds before proceeding..."
-          echo "Press Cancel on this workflow to abort."
-          sleep 10
-          docker compose down --remove-orphans || true
-          docker volume rm josemar-assistente_hermes-workspace 2>/dev/null || true
-          echo "Workspace volume removed"
+          echo "ERROR: fresh_start is disabled after moving state into /opt/data."
+          echo "Use a manual, reviewed cleanup so runtime credentials, sessions, and vault mounts are not removed accidentally."
+          exit 1
 
       - name: Stop existing services
         run: docker compose down --remove-orphans

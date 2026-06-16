@@ -7,7 +7,7 @@ model:
 
 terminal:
   backend: "local"
-  cwd: "/opt/data/workspace"
+  cwd: "/opt/data"
   timeout: 180
   lifetime_seconds: 300
   container_cpu: 1
@@ -44,7 +44,7 @@ skills:
   creation_nudge_interval: 15
   external_dirs:
     - /opt/josemar/skills
-    - /opt/data/workspace/skills
+    - /opt/data/skills
 
 platform_toolsets:
   cli: [hermes-cli]

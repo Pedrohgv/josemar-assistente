@@ -40,7 +40,7 @@ RUN python3 /tmp/patch-hermes-dashboard-profile-name.py \
 COPY --from=gogcli-builder /build/bin/gog /usr/local/bin/gog
 RUN chmod +x /usr/local/bin/gog
 
-RUN mkdir -p /opt/josemar/skills /opt/josemar/hermes
+RUN mkdir -p /opt/josemar/skills /opt/josemar/hermes /opt/josemar/scripts
 
 COPY skills-factory/vault-gateway /opt/josemar/skills/vault-gateway
 COPY skills-factory/aux-ml /opt/josemar/skills/aux-ml
@@ -51,6 +51,9 @@ RUN chmod +x /opt/josemar/skills/vault-gateway/vault-gateway \
 
 COPY scripts/workspace-sync.sh /usr/local/bin/workspace-sync.sh
 RUN chmod +x /usr/local/bin/workspace-sync.sh
+
+COPY scripts/hermes-workspace-sync-cron.sh /opt/josemar/scripts/hermes-workspace-sync-cron.sh
+RUN chmod +x /opt/josemar/scripts/hermes-workspace-sync-cron.sh
 
 COPY config/hermes-config.yaml /opt/josemar/hermes/config.yaml
 COPY docker-hermes-init.sh /etc/cont-init.d/00-josemar-setup

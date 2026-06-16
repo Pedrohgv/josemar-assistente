@@ -8,7 +8,7 @@ This repository is the public/platform layer. Personal identity, memories, priva
 
 - **Hermes Agent gateway**: self-hosted runtime with dashboard and OpenAI-compatible API.
 - **Telegram channel**: allowlisted Telegram DM access with a single runtime owner.
-- **Independent agent state**: private git-backed workspace for context files, cron jobs, avatars, and user-owned skills.
+- **Independent agent state**: private git-backed Hermes state tree for context files, cron jobs, avatars, and user-owned skills.
 - **Two-scope skills model**: repo-owned platform skills in `skills-factory/`, user-owned skills in `agent-state/skills/`.
 - **Obsidian vault infrastructure**: dedicated Docker volume synchronized with Syncthing over a Tailscale sidecar.
 - **Google Drive vault backups**: daily rotating backup slots via rclone.
@@ -31,14 +31,14 @@ flowchart LR
   Gateway --> Agent[Josemar Agent]
   Agent --> Models[LLM Providers<br/>Ollama Cloud / Z.AI / DeepSeek]
   Agent --> CoreSkills[Repo Core Skills<br/>/opt/josemar/skills]
-  Agent --> StateSkills[User State Skills<br/>workspace/skills]
+  Agent --> StateSkills[User State Skills<br/>/opt/data/skills]
   Agent --> Vault[Obsidian Vault<br/>obsidian-vault volume]
 
   CoreSkills --> AuxML[aux-ml API<br/>optional]
   AuxML --> Llama[llama.cpp Router<br/>OCR models]
 
-  Agent --> Workspace[Hermes Workspace<br/>hermes-workspace volume]
-  Workspace <--> StateRepo[Private Agent State Repo]
+  Agent --> StateTree[Hermes State Tree<br/>hermes-data volume / /opt/data]
+  StateTree <--> StateRepo[Private Agent State Repo]
   Vault <--> Syncthing[Syncthing]
   Syncthing <--> Tailscale[Tailscale Sidecar]
   Vault --> Backup[rclone Backup]
@@ -55,7 +55,7 @@ flowchart TB
   PublicRepo --> CoreSkills[skills-factory<br/>repo-owned skills]
   PublicRepo --> Compose[docker-compose.yml]
 
-  PrivateRepo[Private Agent State Repo] --> Personality[SOUL.md / USER.md / MEMORY.md / AGENTS.md]
+  PrivateRepo[Private Agent State Repo] --> Personality[SOUL.md / memories/USER.md / memories/MEMORY.md / AGENTS.md]
   PrivateRepo --> UserSkills[skills/*]
   PrivateRepo --> Cron[cron/jobs.json]
   PrivateRepo --> Avatars[avatars/*]
@@ -63,11 +63,11 @@ flowchart TB
   Image --> Runtime[Hermes Runtime]
   CoreSkills --> Runtime
   Compose --> Runtime
-  PrivateRepo <--> Workspace[Runtime Workspace Git Repo]
-  Workspace --> Runtime
+  PrivateRepo <--> StateTree[Runtime /opt/data Git Repo]
+  StateTree --> Runtime
 ```
 
-The workspace sync script only versions paths listed in `.sync-manifest`, uses the remote state repo as the blessed conflict winner, and can auto-commit/push state changes from the running assistant.
+The state sync script only versions paths listed in `.sync-manifest`, uses the remote state repo as the blessed conflict winner, and can auto-commit/push state changes from the running assistant.
 
 ## Obsidian Vault Flow
 
@@ -195,8 +195,8 @@ josemar-assistente/
 
 | Volume | Purpose |
 | --- | --- |
-| `hermes-data` | Hermes native runtime state (config, sessions, memories, cron). |
-| `hermes-workspace` | Git-synced workspace state and user-owned skills. |
+| `hermes-data` | Hermes runtime state and the private state git worktree at `/opt/data`. Runtime-private files are ignored by the state repo. |
+| `aux-ml-shared` | Dedicated handoff volume for files intentionally shared with aux-ml. |
 | `obsidian-vault` | Obsidian notes and attachments, not git-versioned. |
 | `syncthing-config` | Syncthing identity and folder/device config. |
 | `tailscale-state` | Tailscale node identity and login state. |
@@ -210,7 +210,7 @@ Skills are intentionally split by ownership:
 | Scope | Location | Owner | Use |
 | --- | --- | --- | --- |
 | Core platform skills | `skills-factory/` copied to `/opt/josemar/skills` | This repo | Stable runtime capabilities shared by all deployments. |
-| User state skills | `agent-state/skills/` synced to workspace | Private state repo | Personal workflows, user-specific automations, domain-specific processors. |
+| User state skills | `agent-state/skills/` synced to `/opt/data/skills` | Private state repo | Personal workflows, user-specific automations, domain-specific processors. |
 
 Current repo-shipped skills:
 
@@ -223,14 +223,15 @@ Current repo-shipped skills:
 ```mermaid
 sequenceDiagram
   participant Init as docker-hermes-init.sh
-  participant Workspace as Runtime Workspace
+  participant StateTree as Runtime /opt/data State Tree
   participant Remote as Private State Repo
   participant Hermes as Hermes
 
-  Init->>Workspace: Ensure workspace repo exists
-  Init->>Workspace: Run workspace-sync.sh
-  Workspace->>Remote: Pull/merge remote state
-  Workspace->>Remote: Push resulting state
+  Init->>StateTree: Ensure state repo exists
+  Init->>StateTree: Run workspace-sync.sh
+  StateTree->>Remote: Pull/merge remote state
+  StateTree->>Remote: Push resulting state
+  Init->>Hermes: Ensure script-only workspace-sync cron job
   Init->>Hermes: Start gateway
 ```
 
@@ -240,7 +241,7 @@ Important state-sync variables:
 - `WORKSPACE_REPO_TOKEN`
 - `WORKSPACE_GIT_BRANCH`
 - `WORKSPACE_SYNC_ON_START`
-- `WORKSPACE_SYNC_INTERVAL`
+- `WORKSPACE_SYNC_INTERVAL` - Hermes script-only cron interval in minutes; set `0` to disable periodic sync.
 - `WORKSPACE_GIT_USER_EMAIL`
 - `WORKSPACE_GIT_USER_NAME`
 

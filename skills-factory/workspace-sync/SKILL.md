@@ -1,6 +1,6 @@
 ---
 name: workspace-sync
-description: Manage workspace git operations - sync, commit, push, pull, status, and GitHub CLI operations
+description: Sync Josemar/Hermes state to the private git repo. Use when the user asks to sync state, save state, push state, commit state changes, check state sync status, pull state, or inspect the workspace state repo.
 user-invocable: true
 command-dispatch: tool
 command-tool: workspace-sync
@@ -11,9 +11,21 @@ categories:
   - sync
 ---
 
-# Workspace Sync Skill
+# State Sync Skill
 
-Manages the git-backed workspace state. Use this skill to manually sync, commit changes, check status, or interact with GitHub.
+Manages the git-backed Hermes state tree. Use this skill whenever the user asks to sync, save, commit, push, pull, inspect, or troubleshoot Josemar/Hermes state.
+
+Common user requests that should invoke this skill:
+
+- "sync state"
+- "sync the state repo"
+- "save my state"
+- "push state changes"
+- "commit state changes"
+- "check state sync"
+- "is the workspace synced?"
+- "pull latest state"
+- "show state repo status"
 
 ## Automatic Authentication
 
@@ -42,7 +54,7 @@ This skill exposes a deterministic slash command: `/workspace_sync`.
 - `/workspace_sync diff`
 - `/workspace_sync log 20`
 - `/workspace_sync sync Manual sync from chat`
-- `/workspace_sync commit Update workspace state`
+- `/workspace_sync commit Update state`
 - `/workspace_sync gh repo view owner/repo`
 
 When called via slash command, execution bypasses the model and dispatches directly to the `workspace-sync` tool.
@@ -123,8 +135,8 @@ echo '{"action": "gh", "command": "pr create --title fix --body desc"}' | worksp
 
 - Only files listed in `.sync-manifest` are staged/committed
 - Merge conflicts use remote-wins strategy
-- The workspace directory is `/opt/data/workspace` inside the container
-- `gh` commands run in the context of the workspace git repo
+- The state worktree directory is `/opt/data` inside the container
+- `gh` commands run in the context of the state git repo
 - Credentials are automatically configured from environment variables
 - Remote URLs are kept clean (no embedded tokens) to prevent duplication issues
 

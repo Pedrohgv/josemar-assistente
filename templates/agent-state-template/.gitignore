@@ -1,30 +1,30 @@
-# NEVER version these - security critical
-.env
-.env.*
-**/*.key
-**/*.pem
-**/secrets*
-**/credentials*
-**/*.db
-**/*.sqlite
-**/*.sqlite3
+# Deny-by-default. /opt/data is both Hermes home and the private
+# agent-state git worktree, so runtime files must never be staged by accident.
+*
 
-# User data files
-**/*.pdf
-**/*.doc
-**/*.docx
-**/*.xls
-**/*.xlsx
+# Repo control files
+!.gitignore
+!.sync-manifest
 
-# Runtime/generated files
-.DS_Store
-Thumbs.db
-workspace-state.json
-.config/gogcli/
-*.pyc
-__pycache__/
-.pytest_cache/
-*.log
+# Root state files
+!AGENTS.md
+!SOUL.md
+!BOOT.md
 
-# Allow specific files even if in ignored patterns
-!.gitkeep
+# Hermes-native memory state
+!memories/
+!memories/MEMORY.md
+!memories/USER.md
+
+# Hermes-native cron state
+!cron/
+!cron/jobs.json
+
+# User-owned skills
+!skills/
+!skills/.gitkeep
+
+# Avatar assets
+!avatars/
+!avatars/.gitkeep
+!avatars/**

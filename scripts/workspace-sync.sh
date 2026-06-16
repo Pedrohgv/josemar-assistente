@@ -4,16 +4,17 @@
 
 set -e
 
-WORKSPACE_DIR="${WORKSPACE_DIR:-/opt/data/workspace}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/opt/data}"
 REPO_URL="${WORKSPACE_STATE_REPO:-}"
 REPO_TOKEN="${WORKSPACE_REPO_TOKEN:-}"
 BRANCH="${WORKSPACE_GIT_BRANCH:-main}"
 GIT_EMAIL="${WORKSPACE_GIT_USER_EMAIL:-agent@josemar.local}"
 GIT_NAME="${WORKSPACE_GIT_USER_NAME:-Josemar Agent}"
+SYNC_MODE="${WORKSPACE_SYNC_MODE:-}"
 SYNC_ON_START="${WORKSPACE_SYNC_ON_START:-true}"
-SYNC_INTERVAL="${WORKSPACE_SYNC_INTERVAL:-60}"
 MANIFEST_PATH="${WORKSPACE_DIR}/.sync-manifest"
 PROTECTED_SKILL_DIR="skills/vault-gateway"
+PROTECTED_RUNTIME_PATHS="config.yaml credentials .config obsidian sessions logs .env auth.json"
 
 log_info() {
     echo "[workspace-sync] $1"
@@ -45,26 +46,95 @@ stage_manifest_files() {
         return 0
     fi
 
-    while IFS= read -r pattern; do
+    validate_manifest_files || return 1
+
+    git add -A -- .gitignore .sync-manifest 2>/dev/null || true
+
+    while IFS= read -r pattern || [ -n "$pattern" ]; do
         case "$pattern" in
             \#*|"") continue ;;
             *) ;;
         esac
 
-        expanded=$(echo "$pattern" | sed "s|skills|${WORKSPACE_DIR}/skills|; s|memory|${WORKSPACE_DIR}/memory|; s|avatars|${WORKSPACE_DIR}/avatars|")
-
-        for f in $expanded; do
-            if [ -e "$f" ]; then
-                git add "$f" 2>/dev/null || true
-            fi
-        done
+        git add -A -- "$pattern" 2>/dev/null || true
     done < "$MANIFEST_PATH"
+}
+
+validate_manifest_files() {
+    while IFS= read -r pattern || [ -n "$pattern" ]; do
+        case "$pattern" in
+            \#*|"") continue ;;
+            *) ;;
+        esac
+
+        assert_manifest_path_safe "$pattern" || return 1
+        assert_manifest_path_not_ignored "$pattern" || return 1
+    done < "$MANIFEST_PATH"
+}
+
+validate_manifest_if_present() {
+    if [ ! -f "$MANIFEST_PATH" ]; then
+        return 0
+    fi
+
+    validate_manifest_files
+}
+
+assert_manifest_path_safe() {
+    candidate="${1#./}"
+
+    case "$candidate" in
+        /*|../*|*/../*|*/..|..|:*)
+            log_error ".sync-manifest contains unsafe pathspec: ${1}"
+            return 1
+            ;;
+    esac
+
+    for protected_path in $PROTECTED_RUNTIME_PATHS; do
+        case "$candidate" in
+            "$protected_path"|"$protected_path"/*)
+                log_error ".sync-manifest includes protected runtime path: ${candidate}"
+                return 1
+                ;;
+        esac
+    done
+
+    case "$candidate" in
+        skills/*\**|skills/*\?*|skills/*\[*)
+            log_error ".sync-manifest must use explicit skills paths: ${candidate}"
+            return 1
+            ;;
+    esac
+}
+
+assert_manifest_path_not_ignored() {
+    candidate="${1#./}"
+
+    case "$candidate" in
+        *\**|*\?*|*\[*)
+            return 0
+            ;;
+    esac
+
+    if git check-ignore -q -- "$candidate" 2>/dev/null; then
+        log_error ".sync-manifest path is ignored by .gitignore: ${candidate}"
+        return 1
+    fi
+}
+
+assert_remote_tree_safe() {
+    for protected_path in $PROTECTED_RUNTIME_PATHS; do
+        if git ls-tree -r --name-only "origin/$BRANCH" -- "$protected_path" 2>/dev/null | grep -q .; then
+            log_error "State repo tracks protected runtime path: ${protected_path}"
+            return 1
+        fi
+    done
 }
 
 commit_changes() {
     local msg="$1"
 
-    stage_manifest_files
+    stage_manifest_files || return 1
 
     if git diff --cached --quiet; then
         log_info "No changes to commit"
@@ -126,8 +196,10 @@ do_initial_clone() {
     cd "$WORKSPACE_DIR"
     configure_git
     configure_remote
+    assert_remote_tree_safe
 
     git reset --hard "origin/$BRANCH"
+    validate_manifest_if_present || return 1
 
     log_info "Workspace files restored from remote ($(git log --oneline -1))"
 
@@ -138,7 +210,7 @@ do_initial_clone() {
         fi
     fi
 
-    commit_changes "Initial commit from container start" || true
+    log_info "Initial clone complete; skipping bootstrap auto-commit"
 }
 
 do_sync_start() {
@@ -146,6 +218,7 @@ do_sync_start() {
 
     configure_git
     configure_remote
+    validate_manifest_if_present || return 1
 
     if enforce_vault_gateway_guardrail; then
         commit_guardrail_cleanup || true
@@ -159,6 +232,8 @@ do_sync_start() {
         log_warn "Failed to fetch from remote, continuing with local state"
         return
     }
+
+    assert_remote_tree_safe || return
 
     local has_remote
     has_remote=$(git ls-remote --heads origin "$BRANCH" 2>/dev/null | wc -l)
@@ -217,6 +292,7 @@ do_periodic_sync() {
 
     configure_git
     configure_remote
+    validate_manifest_if_present || return 1
 
     committed=0
 
@@ -231,24 +307,38 @@ do_periodic_sync() {
         committed=1
     fi
 
-    if [ "$committed" -eq 1 ]; then
+    log_info "Fetching from remote..."
+    if git fetch origin "$BRANCH"; then
+        assert_remote_tree_safe || return
+
+        local_commit=$(git rev-parse HEAD 2>/dev/null || echo "none")
+        remote_commit=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "none")
+
+        if [ "$local_commit" != "$remote_commit" ]; then
+            log_info "Merging remote changes (conflicts: remote wins)..."
+            if git merge "origin/$BRANCH" -X theirs -m "Merge remote with conflict resolution"; then
+                log_info "Merge completed successfully"
+            else
+                log_warn "Merge conflicts detected. Logging conflicted files:"
+                git diff --name-only --diff-filter=U 2>/dev/null | while read -r f; do
+                    log_warn "  Conflict resolved (remote won): $f"
+                done
+
+                stage_manifest_files
+                git commit -m "Merge remote: conflict resolution (remote wins)" 2>/dev/null || true
+            fi
+        fi
+    else
+        log_warn "Failed to fetch from remote, pushing local state if needed"
+    fi
+
+    local_commit=$(git rev-parse HEAD 2>/dev/null || echo "none")
+    remote_commit=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "none")
+
+    if [ "$committed" -eq 1 ] || [ "$local_commit" != "$remote_commit" ]; then
         log_info "Pushing to remote..."
         git push origin "HEAD:$BRANCH" || log_warn "Failed to push to remote"
     fi
-}
-
-start_sync_daemon() {
-    if [ -z "$SYNC_INTERVAL" ] || [ "$SYNC_INTERVAL" = "0" ]; then
-        log_info "Periodic sync disabled (WORKSPACE_SYNC_INTERVAL=0)"
-        return
-    fi
-
-    log_info "Starting periodic sync daemon (every ${SYNC_INTERVAL} minutes)"
-
-    while true; do
-        sleep "${SYNC_INTERVAL}m"
-        do_periodic_sync
-    done &
 }
 
 main() {
@@ -261,6 +351,8 @@ main() {
 
     if [ ! -d "$WORKSPACE_DIR/.git" ]; then
         do_initial_clone
+    elif [ "$SYNC_MODE" = "periodic" ]; then
+        do_periodic_sync
     elif [ "$SYNC_ON_START" = "true" ]; then
         do_sync_start
     else
@@ -270,7 +362,7 @@ main() {
         log_info "Sync on start disabled, configuring git only"
     fi
 
-    start_sync_daemon
+    return 0
 }
 
 main "$@"

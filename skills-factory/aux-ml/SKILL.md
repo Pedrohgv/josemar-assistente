@@ -21,7 +21,7 @@ Submits and tracks long-running auxiliary ML jobs in the `aux-ml` container.
 
 ## Important Notes
 
-- **File location:** Input files should use `/opt/data/workspace/` (e.g. `uploads/`).
+- **File location:** Input files should be staged into the aux-ml shared handoff path mounted at `/shared/` in both Hermes and aux-ml.
 - **Processing time:** OCR/transcription jobs can take **30+ minutes** depending on page count, audio length, and model load. Set `timeout_seconds` accordingly (recommend >= 1800).
 - **Queue system:** Jobs are processed sequentially. Use `queue_status` to check depth before submitting. Avoid submitting duplicate or unnecessary jobs to prevent queue buildup.
 
@@ -34,7 +34,7 @@ Submit an OCR job and optionally wait for completion.
 ```bash
 echo '{
   "action": "ocr_file",
-  "file_path": "/opt/data/workspace/uploads/invoice.pdf",
+  "file_path": "/shared/invoice.pdf",
   "model": "glm-ocr",
   "wait": true
 }' | aux-ml
@@ -57,7 +57,7 @@ echo '{
   "action": "submit_job",
   "task": "ocr",
   "model": "glm-ocr",
-  "file_path": "/opt/data/workspace/uploads/invoice.pdf"
+  "file_path": "/shared/invoice.pdf"
 }' | aux-ml
 ```
 
@@ -68,7 +68,7 @@ echo '{
   "action": "submit_job",
   "task": "transcribe",
   "model": "granite-speech-4.1-2b",
-  "file_path": "/opt/data/workspace/uploads/meeting.mp3"
+  "file_path": "/shared/meeting.mp3"
 }' | aux-ml
 ```
 
