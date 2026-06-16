@@ -1,6 +1,6 @@
 ---
 name: workspace-sync
-description: Manage Hermes state git operations - sync, commit, push, pull, status, and GitHub CLI operations
+description: Sync Josemar/Hermes state to the private git repo. Use when the user asks to sync state, save state, push state, commit state changes, check state sync status, pull state, or inspect the workspace state repo.
 user-invocable: true
 command-dispatch: tool
 command-tool: workspace-sync
@@ -13,7 +13,19 @@ categories:
 
 # State Sync Skill
 
-Manages the git-backed Hermes state tree. Use this skill to manually sync, commit changes, check status, or interact with GitHub.
+Manages the git-backed Hermes state tree. Use this skill whenever the user asks to sync, save, commit, push, pull, inspect, or troubleshoot Josemar/Hermes state.
+
+Common user requests that should invoke this skill:
+
+- "sync state"
+- "sync the state repo"
+- "save my state"
+- "push state changes"
+- "commit state changes"
+- "check state sync"
+- "is the workspace synced?"
+- "pull latest state"
+- "show state repo status"
 
 ## Automatic Authentication
 
