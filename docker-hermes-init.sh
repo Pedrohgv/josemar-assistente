@@ -63,7 +63,7 @@ seed_workspace_from_manifest() {
 
 install_workspace_sync_cron() {
     script_source="/opt/josemar/scripts/hermes-workspace-sync-cron.sh"
-    script_dir="${HERMES_HOME}/.hermes/scripts"
+    script_dir="${HERMES_HOME}/scripts"
     script_path="${script_dir}/hermes-workspace-sync-cron.sh"
     sync_interval="${WORKSPACE_SYNC_INTERVAL:-60}"
 
@@ -74,7 +74,7 @@ install_workspace_sync_cron() {
     mkdir -p "$script_dir"
     cp "$script_source" "$script_path"
     chmod 700 "$script_path"
-    chown -R "${HERMES_UID_VALUE}:${HERMES_GID_VALUE}" "${HERMES_HOME}/.hermes" "${HERMES_HOME}/cron" 2>/dev/null || true
+    chown -R "${HERMES_UID_VALUE}:${HERMES_GID_VALUE}" "${HERMES_HOME}/scripts" "${HERMES_HOME}/cron" 2>/dev/null || true
 
     if [ -z "${WORKSPACE_STATE_REPO:-}" ]; then
         return 0
