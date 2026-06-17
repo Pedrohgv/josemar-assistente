@@ -41,6 +41,19 @@ Notes:
 
 - Server-side Tailscale runs as a Docker sidecar (`tailscale` service), not as a host package.
 - If `TS_AUTHKEY` is set in GitHub secrets, sidecar login is unattended during deploy.
+- Server-side Syncthing runs as the same UID/GID as Hermes (`HERMES_UID`/`HERMES_GID`, default `10000`) so synced vault files remain writable by `vault-gateway`.
+
+Existing deployments that previously ran Syncthing as root need a one-time volume ownership migration before restarting Syncthing with the non-root user:
+
+```bash
+docker run --rm \
+  -v josemar-assistente_obsidian-vault:/vault \
+  -v josemar-assistente_syncthing-config:/syncthing-config \
+  alpine:3.20 \
+  chown -R 10000:10000 /vault /syncthing-config
+```
+
+Fresh deployments do not need this migration.
 
 Backup behavior defaults are defined in `docker-compose.yml`:
 
