@@ -60,8 +60,12 @@ jobs:
 
           DASHBOARD_BIND_IP="$HERMES_DASHBOARD_BIND_IP"
           if [ -n "$DASHBOARD_BIND_IP" ]; then
-            if [ "$DASHBOARD_BIND_IP" != "127.0.0.1" ]; then
-              echo "ERROR: HERMES_DASHBOARD_BIND_IP must be 127.0.0.1"
+            if [ "$DASHBOARD_BIND_IP" = "0.0.0.0" ]; then
+              echo "ERROR: HERMES_DASHBOARD_BIND_IP cannot be 0.0.0.0"
+              exit 1
+            fi
+            if ! echo "$DASHBOARD_BIND_IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "ERROR: HERMES_DASHBOARD_BIND_IP must be an IPv4 address when set"
               exit 1
             fi
           fi

@@ -164,6 +164,10 @@ Cloudflare Tunnel, keep the tunnel origin pointed at `http://localhost:9119`.
 Cloudflare Access can be added as defense-in-depth after verifying Hermes
 Desktop compatibility with the extra access layer.
 
+If the Cloudflare tunnel runs on a different host and must reach the Docker VM
+over the LAN, set `HERMES_DASHBOARD_BIND_IP` to the VM LAN address instead of
+`127.0.0.1`. Do not use `0.0.0.0`.
+
 ### 4. Optional Aux-ML
 
 Enable auxiliary ML only when needed:

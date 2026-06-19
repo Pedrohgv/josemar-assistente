@@ -66,10 +66,10 @@ All workflows run on a self-hosted runner.
 | `HERMES_API_SERVER_CORS_ORIGINS` | No | Optional comma-separated CORS origins |
 | `HERMES_API_SERVER_MODEL_NAME` | No | Display/model name advertised to clients such as Hermes One (default `Josemar`) |
 | `HERMES_DEFAULT_PROFILE_DISPLAY_NAME` | No | URL-safe dashboard profile label for the base Hermes profile (default `Josemar`) |
-| `HERMES_DASHBOARD_BIND_IP` | No | Host bind IP for the dashboard port (default `127.0.0.1`; deploy only allows `127.0.0.1`) |
+| `HERMES_DASHBOARD_BIND_IP` | No | Host bind IP for the dashboard port (default `127.0.0.1`; `0.0.0.0` is rejected) |
 | `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` | No | Browser dashboard Basic Auth username (default `admin`) |
 
-Security note: keep `SYNCTHING_GUI_BIND_IP` and `HERMES_DASHBOARD_BIND_IP` on localhost unless explicitly secured. Do not set `HERMES_API_SERVER_BIND_IP=0.0.0.0` unless `HERMES_API_SERVER_KEY` is set and the network path is trusted. Keep `HERMES_DASHBOARD_INSECURE=0`; if publishing the dashboard through Cloudflare Tunnel, protect the hostname with Cloudflare Access.
+Security note: keep `SYNCTHING_GUI_BIND_IP` on localhost unless explicitly secured. Keep `HERMES_DASHBOARD_INSECURE=0`; if `HERMES_DASHBOARD_BIND_IP` is set beyond localhost for a Cloudflare Tunnel running on another host, ensure the dashboard Basic Auth secrets are configured and avoid binding to `0.0.0.0`. Do not set `HERMES_API_SERVER_BIND_IP=0.0.0.0` unless `HERMES_API_SERVER_KEY` is set and the network path is trusted.
 
 ## Deploy Workflow Notes
 
