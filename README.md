@@ -122,7 +122,13 @@ PRIMARY_TELEGRAM_ID=123456789
 WORKSPACE_STATE_REPO=https://github.com/username/private-agent-state.git
 WORKSPACE_REPO_TOKEN=your-github-pat
 HERMES_DASHBOARD_SESSION_TOKEN=<openssl rand -hex 32>
+HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin
+HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=<openssl rand -hex 24>
+HERMES_DASHBOARD_BASIC_AUTH_SECRET=<openssl rand -hex 32>
 ```
+
+Use a username other than `admin` if this dashboard is reachable through any
+remote access path.
 
 Set provider keys used by your configured model strategy:
 
@@ -150,8 +156,17 @@ docker compose logs -f hermes
 
 Access:
 
-- Dashboard: `http://localhost:9119`
+- Dashboard: `http://localhost:9119` with Basic Auth
 - API server (if enabled): `http://127.0.0.1:8642`
+
+The dashboard host port binds to `127.0.0.1` by default. If publishing it through
+Cloudflare Tunnel, keep the tunnel origin pointed at `http://localhost:9119`.
+Cloudflare Access can be added as defense-in-depth after verifying Hermes
+Desktop compatibility with the extra access layer.
+
+If the Cloudflare tunnel runs on a different host and must reach the Docker VM
+over the LAN, set `HERMES_DASHBOARD_BIND_IP` to the VM LAN address instead of
+`127.0.0.1`. Do not use `0.0.0.0`.
 
 ### 4. Optional Aux-ML
 
