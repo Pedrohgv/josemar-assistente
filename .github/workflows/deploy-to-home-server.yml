@@ -39,6 +39,7 @@ jobs:
         env:
           WORKSPACE_STATE_REPO: ${{ vars.WORKSPACE_STATE_REPO }}
           SYNCTHING_GUI_BIND_IP: ${{ vars.SYNCTHING_GUI_BIND_IP }}
+          HERMES_DASHBOARD_BIND_IP: ${{ vars.HERMES_DASHBOARD_BIND_IP }}
         run: |
           if [ -z "$WORKSPACE_STATE_REPO" ]; then
             echo "ERROR: Repository variable WORKSPACE_STATE_REPO is required"
@@ -53,6 +54,14 @@ jobs:
             fi
             if ! echo "$GUI_BIND_IP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
               echo "ERROR: SYNCTHING_GUI_BIND_IP must be an IPv4 address when set"
+              exit 1
+            fi
+          fi
+
+          DASHBOARD_BIND_IP="$HERMES_DASHBOARD_BIND_IP"
+          if [ -n "$DASHBOARD_BIND_IP" ]; then
+            if [ "$DASHBOARD_BIND_IP" != "127.0.0.1" ]; then
+              echo "ERROR: HERMES_DASHBOARD_BIND_IP must be 127.0.0.1"
               exit 1
             fi
           fi
@@ -83,7 +92,11 @@ jobs:
           HERMES_API_SERVER_CORS_ORIGINS: ${{ vars.HERMES_API_SERVER_CORS_ORIGINS }}
           HERMES_API_SERVER_MODEL_NAME_INPUT: ${{ vars.HERMES_API_SERVER_MODEL_NAME }}
           HERMES_DEFAULT_PROFILE_DISPLAY_NAME_INPUT: ${{ vars.HERMES_DEFAULT_PROFILE_DISPLAY_NAME }}
+          HERMES_DASHBOARD_BIND_IP: ${{ vars.HERMES_DASHBOARD_BIND_IP }}
           HERMES_DASHBOARD_SESSION_TOKEN: ${{ secrets.HERMES_DASHBOARD_SESSION_TOKEN }}
+          HERMES_DASHBOARD_BASIC_AUTH_USERNAME_INPUT: ${{ vars.HERMES_DASHBOARD_BASIC_AUTH_USERNAME }}
+          HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${{ secrets.HERMES_DASHBOARD_BASIC_AUTH_PASSWORD }}
+          HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${{ secrets.HERMES_DASHBOARD_BASIC_AUTH_SECRET }}
           AUX_ML_ENABLED_INPUT: ${{ vars.AUX_ML_ENABLED }}
           AUX_ML_MEMORY_LIMIT: ${{ vars.AUX_ML_MEMORY_LIMIT }}
           AUX_ML_MEMORY_LIMIT_MB: ${{ vars.AUX_ML_MEMORY_LIMIT_MB }}
@@ -157,6 +170,50 @@ jobs:
             exit 1
           fi
 
+          if [ -z "$HERMES_DASHBOARD_BIND_IP" ]; then
+            HERMES_DASHBOARD_BIND_IP="127.0.0.1"
+          fi
+
+          HERMES_DASHBOARD_BASIC_AUTH_USERNAME="$HERMES_DASHBOARD_BASIC_AUTH_USERNAME_INPUT"
+          if [ -z "$HERMES_DASHBOARD_BASIC_AUTH_USERNAME" ]; then
+            HERMES_DASHBOARD_BASIC_AUTH_USERNAME="admin"
+          fi
+
+          if [[ "$HERMES_DASHBOARD_BASIC_AUTH_USERNAME" == *$'\n'* || "$HERMES_DASHBOARD_BASIC_AUTH_USERNAME" == *$'\r'* ]]; then
+            echo "ERROR: HERMES_DASHBOARD_BASIC_AUTH_USERNAME must be single-line"
+            exit 1
+          fi
+
+          if [ -z "$HERMES_DASHBOARD_BASIC_AUTH_PASSWORD" ]; then
+            echo "ERROR: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD secret is required for browser dashboard login"
+            exit 1
+          fi
+
+          if [[ "$HERMES_DASHBOARD_BASIC_AUTH_PASSWORD" == *$'\n'* || "$HERMES_DASHBOARD_BASIC_AUTH_PASSWORD" == *$'\r'* ]]; then
+            echo "ERROR: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD must be single-line"
+            exit 1
+          fi
+
+          if [ "${#HERMES_DASHBOARD_BASIC_AUTH_PASSWORD}" -lt 16 ]; then
+            echo "ERROR: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD must be at least 16 characters"
+            exit 1
+          fi
+
+          if [ -z "$HERMES_DASHBOARD_BASIC_AUTH_SECRET" ]; then
+            echo "ERROR: HERMES_DASHBOARD_BASIC_AUTH_SECRET secret is required for browser dashboard sessions"
+            exit 1
+          fi
+
+          if [[ "$HERMES_DASHBOARD_BASIC_AUTH_SECRET" == *$'\n'* || "$HERMES_DASHBOARD_BASIC_AUTH_SECRET" == *$'\r'* ]]; then
+            echo "ERROR: HERMES_DASHBOARD_BASIC_AUTH_SECRET must be single-line"
+            exit 1
+          fi
+
+          if [ "${#HERMES_DASHBOARD_BASIC_AUTH_SECRET}" -lt 32 ]; then
+            echo "ERROR: HERMES_DASHBOARD_BASIC_AUTH_SECRET must be at least 32 characters"
+            exit 1
+          fi
+
           umask 077
           : > .env
           write_env() {
@@ -188,9 +245,13 @@ jobs:
           write_env HERMES_API_SERVER_CORS_ORIGINS "$HERMES_API_SERVER_CORS_ORIGINS"
           write_env HERMES_API_SERVER_MODEL_NAME "$HERMES_API_SERVER_MODEL_NAME"
           write_env HERMES_DEFAULT_PROFILE_DISPLAY_NAME "$HERMES_DEFAULT_PROFILE_DISPLAY_NAME"
-          write_env HERMES_DASHBOARD_INSECURE "1"
+          write_env HERMES_DASHBOARD_BIND_IP "$HERMES_DASHBOARD_BIND_IP"
+          write_env HERMES_DASHBOARD_INSECURE "0"
           write_env HERMES_DASHBOARD_TUI "1"
           write_env HERMES_DASHBOARD_SESSION_TOKEN "$HERMES_DASHBOARD_SESSION_TOKEN"
+          write_env HERMES_DASHBOARD_BASIC_AUTH_USERNAME "$HERMES_DASHBOARD_BASIC_AUTH_USERNAME"
+          write_env HERMES_DASHBOARD_BASIC_AUTH_PASSWORD "$HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"
+          write_env HERMES_DASHBOARD_BASIC_AUTH_SECRET "$HERMES_DASHBOARD_BASIC_AUTH_SECRET"
           write_env TZ "$TZ_VALUE"
           write_env TAILSCALE_HOSTNAME "$TAILSCALE_HOSTNAME"
           write_env TS_EXTRA_ARGS "$TS_EXTRA_ARGS"
