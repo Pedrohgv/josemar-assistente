@@ -8,8 +8,9 @@ Josemar. This build-time patch keeps the runtime profile mapped to
 HERMES_HOME while exposing a configurable display name to dashboard clients.
 
 It also preserves Hermes Desktop compatibility when the browser dashboard
-auth gate is enabled: older Desktop builds authenticate API requests with
-HERMES_DASHBOARD_SESSION_TOKEN instead of a browser session cookie.
+auth gate is enabled: older Desktop builds authenticate API and WebSocket
+requests with HERMES_DASHBOARD_SESSION_TOKEN instead of a browser session
+cookie plus short-lived WebSocket ticket.
 """
 
 from __future__ import annotations
@@ -157,6 +158,21 @@ replace_once(
     '        return await call_next(request)\n'
     '    from hermes_cli.dashboard_auth.middleware import gated_auth_middleware\n'
     '    return await gated_auth_middleware(request, call_next)\n',
+)
+
+replace_once(
+    WEB_SERVER_PATH,
+    '        # Server-spawned children (PTY child → /api/ws, /api/pub) present the\n'
+    '        # multi-use internal credential rather than a single-use ticket, so\n'
+    '        # they survive reconnects and slow cold boots.\n'
+    '        internal = ws.query_params.get("internal", "")\n',
+    '        token = ws.query_params.get("token", "")\n'
+    '        if token and hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):\n'
+    '            return None, "token"\n\n'
+    '        # Server-spawned children (PTY child → /api/ws, /api/pub) present the\n'
+    '        # multi-use internal credential rather than a single-use ticket, so\n'
+    '        # they survive reconnects and slow cold boots.\n'
+    '        internal = ws.query_params.get("internal", "")\n',
 )
 
 print("Patched Hermes dashboard behavior")
