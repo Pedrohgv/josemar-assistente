@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Patch Hermes dashboard profile metadata for Josemar deployments.
+"""Patch Hermes dashboard behavior for Josemar deployments.
 
 Hermes exposes the base HERMES_HOME profile as the hardcoded name
 "default". Hermes One uses /api/profiles for its employee cards, so the
 base profile appears as "default" even when the assistant identity is
 Josemar. This build-time patch keeps the runtime profile mapped to
 HERMES_HOME while exposing a configurable display name to dashboard clients.
+
+It also preserves Hermes Desktop compatibility when the browser dashboard
+auth gate is enabled: older Desktop builds authenticate API requests with
+HERMES_DASHBOARD_SESSION_TOKEN instead of a browser session cookie.
 """
 
 from __future__ import annotations
@@ -123,4 +127,36 @@ replace_once(
     '    return "hermes setup" if canon == "default" else f"{canon} setup"\n',
 )
 
-print("Patched Hermes dashboard default profile display name")
+replace_once(
+    WEB_SERVER_PATH,
+    '@app.middleware("http")\n'
+    'async def _dashboard_auth_gate(request: Request, call_next):\n'
+    '    from hermes_cli.dashboard_auth.middleware import gated_auth_middleware\n'
+    '    return await gated_auth_middleware(request, call_next)\n',
+    '@app.middleware("http")\n'
+    'async def _dashboard_auth_gate(request: Request, call_next):\n'
+    '    path = request.url.path\n'
+    '    if (\n'
+    '        getattr(request.app.state, "auth_required", False)\n'
+    '        and path.startswith("/api/")\n'
+    '        and path not in _PUBLIC_API_PATHS\n'
+    '        and _has_valid_session_token(request)\n'
+    '    ):\n'
+    '        request.state.session = type(\n'
+    '            "HermesDesktopTokenSession",\n'
+    '            (),\n'
+    '            {\n'
+    '                "user_id": "hermes-desktop",\n'
+    '                "email": "",\n'
+    '                "display_name": "Hermes Desktop",\n'
+    '                "org_id": "",\n'
+    '                "provider": "session-token",\n'
+    '                "expires_at": int(__import__("time").time()) + 3600,\n'
+    '            },\n'
+    '        )()\n'
+    '        return await call_next(request)\n'
+    '    from hermes_cli.dashboard_auth.middleware import gated_auth_middleware\n'
+    '    return await gated_auth_middleware(request, call_next)\n',
+)
+
+print("Patched Hermes dashboard behavior")
