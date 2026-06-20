@@ -75,6 +75,49 @@ if [ -f "$SOURCE_CONFIG" ]; then
     CONFIG_TMP="${RUNTIME_CONFIG}.tmp.$$"
     cp "$SOURCE_CONFIG" "$CONFIG_TMP"
     mv "$CONFIG_TMP" "$RUNTIME_CONFIG"
+
+    if [ -n "${APOLLO_IO_API_KEY:-}" ]; then
+        APOLLO_MCP_ENABLED="true"
+    else
+        APOLLO_MCP_ENABLED="false"
+    fi
+
+    python3 - "$RUNTIME_CONFIG" "$APOLLO_MCP_ENABLED" <<'PY'
+from pathlib import Path
+import sys
+
+config_path = Path(sys.argv[1])
+enabled = sys.argv[2]
+lines = config_path.read_text().splitlines(keepends=True)
+in_mcp_servers = False
+in_apollo = False
+updated = False
+
+for index, line in enumerate(lines):
+    stripped = line.strip()
+    if line.startswith("mcp_servers:"):
+        in_mcp_servers = True
+        in_apollo = False
+        continue
+    if in_mcp_servers and line and not line.startswith(" "):
+        in_mcp_servers = False
+        in_apollo = False
+    if in_mcp_servers and line.startswith("  apollo:"):
+        in_apollo = True
+        continue
+    if in_apollo and line.startswith("  ") and not line.startswith("    "):
+        in_apollo = False
+    if in_apollo and stripped.startswith("enabled:"):
+        newline = "\n" if line.endswith("\n") else ""
+        lines[index] = f"    enabled: {enabled}{newline}"
+        updated = True
+        break
+
+if not updated:
+    print("WARNING: Apollo MCP enabled field not found; leaving config unchanged", file=sys.stderr)
+else:
+    config_path.write_text("".join(lines))
+PY
 fi
 
 seed_workspace_from_manifest() {

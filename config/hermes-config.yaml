@@ -46,6 +46,15 @@ skills:
     - /opt/josemar/skills
     - /opt/data/skills
 
+mcp_servers:
+  apollo:
+    enabled: false
+    command: "npx"
+    args: ["-y", "@rockship/apollo-io-mcp@1.0.12"]
+    env:
+      APOLLO_IO_API_KEY: "${APOLLO_IO_API_KEY}"
+    timeout: 120
+
 platform_toolsets:
   cli: [hermes-cli]
   telegram: [hermes-telegram]

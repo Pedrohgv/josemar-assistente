@@ -77,6 +77,7 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          APOLLO_IO_API_KEY: ${{ secrets.APOLLO_IO_API_KEY }}
           PRIMARY_TELEGRAM_ID: ${{ secrets.PRIMARY_TELEGRAM_ID }}
           GOG_KEYRING_PASSWORD: ${{ secrets.GOG_KEYRING_PASSWORD }}
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
@@ -164,6 +165,11 @@ jobs:
             exit 1
           fi
 
+          if [[ "$APOLLO_IO_API_KEY" == *$'\n'* || "$APOLLO_IO_API_KEY" == *$'\r'* ]]; then
+            echo "ERROR: APOLLO_IO_API_KEY must be single-line"
+            exit 1
+          fi
+
           if [ -z "$HERMES_DASHBOARD_SESSION_TOKEN" ]; then
             echo "ERROR: HERMES_DASHBOARD_SESSION_TOKEN secret is required for Hermes Desktop dashboard access"
             exit 1
@@ -229,6 +235,7 @@ jobs:
           write_env DEEPSEEK_API_KEY "$DEEPSEEK_API_KEY"
           write_env OLLAMA_API_KEY "$OLLAMA_API_KEY"
           write_env TAVILY_API_KEY "$TAVILY_API_KEY"
+          write_env APOLLO_IO_API_KEY "$APOLLO_IO_API_KEY"
           write_env PRIMARY_TELEGRAM_ID "$PRIMARY_TELEGRAM_ID"
           write_env GOG_KEYRING_PASSWORD "$GOG_KEYRING_PASSWORD"
           write_env TS_AUTHKEY "$TS_AUTHKEY"

@@ -33,6 +33,7 @@ All workflows run on a self-hosted runner.
 | `DEEPSEEK_API_KEY` | Yes | DeepSeek provider key for the default model |
 | `OLLAMA_API_KEY` | No | Optional provider key |
 | `TAVILY_API_KEY` | No | Optional Tavily key; enables `web_search` and `web_extract` via auto-detection |
+| `APOLLO_IO_API_KEY` | No | Optional Apollo.io API key; enables Apollo MCP lead/prospecting tools when set |
 | `GOG_KEYRING_PASSWORD` | No | Optional gog keyring passphrase |
 | `TS_AUTHKEY` | No | Optional unattended tailscale login |
 | `HERMES_API_SERVER_KEY` | No | Required when `HERMES_API_SERVER_ENABLED=true` |
