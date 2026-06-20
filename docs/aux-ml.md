@@ -12,7 +12,7 @@ This document describes the optional `aux-ml` container used for long-running, q
 
 ## Service Layout
 
-- **Container:** `josemar-aux-ml`
+- **Container:** `${JOSEMAR_CONTAINER_PREFIX:-josemar}-aux-ml`
 - **Inference backend:** pinned llama.cpp `b9045` `llama-server` in router mode (local-only inside container)
 - **Orchestrator API:** FastAPI on `8091`
 - **Network exposure:** internal Docker network only (`http://aux-ml:8091`)

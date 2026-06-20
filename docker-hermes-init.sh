@@ -4,7 +4,7 @@
 set -eu
 
 log() {
-    echo "[josemar-hermes] $1"
+    echo "[${JOSEMAR_CONTAINER_PREFIX:-josemar}-hermes] $1"
 }
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
