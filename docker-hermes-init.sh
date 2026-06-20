@@ -24,7 +24,7 @@ mkdir -p "$HERMES_HOME" "$WORKSPACE_DIR" "$OBSIDIAN_VAULT_DIR" "$CREDENTIALS_DIR
 # cross-service volumes (obsidian-vault, syncthing-config, etc.) are
 # excluded to avoid host-side ownership changes and conflicts with
 # other containers that manage their own perms.
-HERMES_WRITABLE_VOLUMES="$HERMES_HOME /shared"
+HERMES_WRITABLE_VOLUMES="${HERMES_HOME} /shared"
 
 for vol in $HERMES_WRITABLE_VOLUMES; do
     mkdir -p "$vol"
@@ -37,7 +37,17 @@ done
 # Log a warning (not fatal) so permission issues surface at startup instead
 # of failing mid-conversation.
 for vol in $HERMES_WRITABLE_VOLUMES; do
-    if su -s /bin/sh "${HERMES_UID_VALUE}" -c "touch \"${vol}/.perm-test\" 2>/dev/null" 2>/dev/null; then
+    perm_ok=0
+    if command -v runuser >/dev/null 2>&1; then
+        if runuser -u "${HERMES_UID_VALUE}" -- touch "${vol}/.perm-test" 2>/dev/null; then
+            perm_ok=1
+        fi
+    else
+        if su -s /bin/sh "${HERMES_UID_VALUE}" -c "touch \"${vol}/.perm-test\"" 2>/dev/null; then
+            perm_ok=1
+        fi
+    fi
+    if [ "$perm_ok" = "1" ]; then
         rm -f "${vol}/.perm-test" 2>/dev/null || true
     else
         log "WARNING: runtime user ${HERMES_UID_VALUE} cannot write to ${vol}"

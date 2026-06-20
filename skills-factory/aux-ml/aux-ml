@@ -23,17 +23,26 @@ def _stage_file_for_aux_ml(file_path: str) -> str:
 
     aux-ml only sees the /shared volume, so files elsewhere in the Hermes
     container (e.g. /opt/data/image_cache/) must be staged first. Files
-    already inside the shared dir are returned unchanged.
+    already inside the shared dir are returned unchanged. Symlinks are
+    not followed — a symlink inside /shared/ that points outside is
+    rejected to avoid exposing unintended files to aux-ml.
     """
     source = Path(file_path)
     if not source.is_absolute():
         source = Path.cwd() / source
-    source = source.resolve()
 
     shared_root = Path(AUX_ML_SHARED_DIR).resolve()
 
-    if shared_root == source or shared_root in source.parents:
-        return str(source)
+    # For files already under /shared/, return the path without copying.
+    # Reject symlinks that escape the shared root.
+    try:
+        resolved_source = source.resolve(strict=False)
+    except (OSError, ValueError):
+        resolved_source = source
+    if shared_root == resolved_source or shared_root in resolved_source.parents:
+        if source.is_symlink() and not (shared_root in resolved_source.parents or shared_root == resolved_source):
+            raise ValueError(f"Symlink inside /shared/ escapes shared root: {source}")
+        return str(resolved_source)
 
     if not source.exists():
         raise FileNotFoundError(f"Input file does not exist: {source}")
@@ -43,14 +52,19 @@ def _stage_file_for_aux_ml(file_path: str) -> str:
     dest = staged_dir / source.name
 
     # Avoid collisions: append a short suffix if the name already exists
-    # and points to a different file.
+    # and points to a different file. Retry to handle unlikely collisions.
     if dest.exists() and not _same_file(source, dest):
         import uuid
 
-        suffix = uuid.uuid4().hex[:8]
-        dest = staged_dir / f"{source.stem}_{suffix}{source.suffix}"
+        for _ in range(5):
+            suffix = uuid.uuid4().hex[:8]
+            dest = staged_dir / f"{source.stem}_{suffix}{source.suffix}"
+            if not dest.exists():
+                break
+        else:
+            raise RuntimeError(f"Could not find a non-colliding staged path for {source}")
 
-    shutil.copy2(source, dest)
+    shutil.copy(source, dest)
     return str(dest)
 
 
@@ -58,7 +72,7 @@ def _same_file(a: Path, b: Path) -> bool:
     try:
         return a.resolve() == b.resolve()
     except (OSError, ValueError):
-        return a.name == b.name
+        return False
 
 
 def _http_json(method, path, payload=None, timeout=30):
