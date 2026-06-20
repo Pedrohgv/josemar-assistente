@@ -60,6 +60,16 @@ display:
       tool_progress: off
       cleanup_progress: true
 
+auxiliary:
+  vision:
+    provider: "ollama-cloud"
+    model: "kimi-k2.7-code"
+    base_url: ""
+    api_key: ""
+    timeout: 120
+    extra_body: {}
+    download_timeout: 30
+
 agent:
   max_turns: 60
   reasoning_effort: "medium"

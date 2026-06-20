@@ -100,6 +100,14 @@ from llama-router child requests.
 - `GET /jobs/{job_id}` - fetch job status/result
 - `POST /run` - submit job and wait until terminal state
 
+## File Handoff
+
+aux-ml only mounts the `aux-ml-shared` volume at `/shared` (read-only). Files elsewhere in the Hermes container (e.g. `/opt/data/image_cache/`) are not visible to aux-ml.
+
+The `aux-ml` skill handles this transparently: it copies any file outside `/shared/` into `/shared/staged/` before submitting the job. You can pass any path visible to the Hermes container; no manual copying is needed. Files already under `/shared/` are submitted as-is.
+
+When calling the API directly (not through the skill), you must stage files into `/shared/` yourself.
+
 ## Job Schema (OCR)
 
 `POST /jobs` request body:
