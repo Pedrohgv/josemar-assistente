@@ -45,6 +45,7 @@ All workflows run on a self-hosted runner.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `WORKSPACE_STATE_REPO` | Yes | Private state repo URL |
+| `JOSEMAR_CONTAINER_PREFIX` | No | Docker container name prefix (default `josemar`) |
 | `TZ` | No | Timezone (default `America/Sao_Paulo`) |
 | `SYNCTHING_GUI_BIND_IP` | No | Syncthing GUI bind IP (default `127.0.0.1`) |
 | `TAILSCALE_HOSTNAME` | No | Tailscale node name |
@@ -76,7 +77,7 @@ Security note: keep `SYNCTHING_GUI_BIND_IP` on localhost unless explicitly secur
 - Deploy writes `.env` from repository secrets/variables.
 - Deploy uses `docker compose down --remove-orphans` before rebuild/start.
 - `fresh_start=true` is disabled after moving state into `/opt/data`; use a manual, reviewed cleanup instead.
-- Deploy verifies Hermes container health (`josemar-hermes`).
+- Deploy verifies Hermes container health (`${JOSEMAR_CONTAINER_PREFIX:-josemar}-hermes`).
 - Deploy verifies repo-owned skills under `/opt/josemar/skills`.
 - Deploy removes plaintext `.env` at the end.
 

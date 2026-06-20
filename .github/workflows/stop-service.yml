@@ -13,13 +13,27 @@ jobs:
           clean: false
 
       - name: Stop services
-        run: docker compose down
+        env:
+          JOSEMAR_CONTAINER_PREFIX_INPUT: ${{ vars.JOSEMAR_CONTAINER_PREFIX }}
+        run: |
+          export JOSEMAR_CONTAINER_PREFIX="${JOSEMAR_CONTAINER_PREFIX_INPUT:-josemar}"
+          docker compose down
 
       - name: Verify services stopped
+        env:
+          JOSEMAR_CONTAINER_PREFIX_INPUT: ${{ vars.JOSEMAR_CONTAINER_PREFIX }}
         run: |
-          if docker ps | grep -Eq 'josemar-hermes|josemar-aux-ml|josemar-syncthing|josemar-tailscale|josemar-obsidian-backup'; then
-            echo "ERROR: One or more services are still running!"
-            exit 1
-          else
-            echo "SUCCESS: Services stopped successfully"
+          PREFIX="${JOSEMAR_CONTAINER_PREFIX_INPUT:-}"
+          if [ -z "$PREFIX" ]; then
+            PREFIX="$(sed -n 's/^JOSEMAR_CONTAINER_PREFIX=//p' .env 2>/dev/null | tail -n 1)"
           fi
+          PREFIX="${PREFIX:-josemar}"
+          RUNNING_CONTAINERS="$(docker ps --format '{{.Names}}')"
+          for service in hermes aux-ml syncthing tailscale obsidian-backup; do
+            if printf '%s\n' "$RUNNING_CONTAINERS" | grep -Fxq "${PREFIX}-${service}"; then
+              echo "ERROR: ${PREFIX}-${service} is still running!"
+              exit 1
+            fi
+          done
+
+          echo "SUCCESS: Services stopped successfully"

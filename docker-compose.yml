@@ -17,7 +17,7 @@ services:
         GRANITE_SPEECH_MODEL_SHA256: ${AUX_ML_GRANITE_SPEECH_SHA256:-87320ee80cc6e638837bd2e9b7920252a87148613930bcdc11fcafad0b00beea}
         GRANITE_SPEECH_MMPROJ_URL: ${AUX_ML_GRANITE_SPEECH_MMPROJ_URL:-https://huggingface.co/ibm-granite/granite-speech-4.1-2b-GGUF/resolve/main/mmproj-model-f16.gguf}
         GRANITE_SPEECH_MMPROJ_SHA256: ${AUX_ML_GRANITE_SPEECH_MMPROJ_SHA256:-0d3615076cbe1d35c3f60c43a60a4047b3e2eeee1b2c233580be60186faab5c5}
-    container_name: josemar-aux-ml
+    container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-aux-ml
     restart: unless-stopped
     expose:
       - "8091"
@@ -58,7 +58,7 @@ services:
       args:
         HERMES_BASE_IMAGE: ${HERMES_BASE_IMAGE:-nousresearch/hermes-agent:v2026.6.5}
         GOGCLI_REF: ${GOGCLI_REF:-e88964a1b1a46483fbc6a55ecbf2192ff522f2ea}
-    container_name: josemar-hermes
+    container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-hermes
     restart: unless-stopped
     command: ["gateway", "run"]
     volumes:
@@ -137,7 +137,7 @@ services:
 
   syncthing:
     image: syncthing/syncthing:latest
-    container_name: josemar-syncthing
+    container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-syncthing
     restart: unless-stopped
     depends_on:
       - tailscale
@@ -153,7 +153,7 @@ services:
 
   tailscale:
     image: tailscale/tailscale:latest
-    container_name: josemar-tailscale
+    container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-tailscale
     restart: unless-stopped
     hostname: ${TAILSCALE_HOSTNAME:-josemar-server}
     environment:
@@ -176,7 +176,7 @@ services:
 
   obsidian-backup:
     image: rclone/rclone:latest
-    container_name: josemar-obsidian-backup
+    container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-obsidian-backup
     restart: unless-stopped
     depends_on:
       - syncthing

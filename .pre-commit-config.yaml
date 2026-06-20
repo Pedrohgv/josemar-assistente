@@ -6,8 +6,15 @@ repos:
 
   - repo: local
     hooks:
+      # When adding/removing hook IDs, update scripts/setup-pre-commit.sh skip guidance.
       - id: pii-guard
         name: pii-guard
         entry: python3 scripts/pii_guard.py --staged --fail-on medium
+        language: system
+        pass_filenames: false
+
+      - id: josemar-fast-tests
+        name: josemar-fast-tests
+        entry: python3 -m unittest discover -s tests -v
         language: system
         pass_filenames: false

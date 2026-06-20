@@ -83,6 +83,7 @@ jobs:
           WORKSPACE_STATE_REPO: ${{ vars.WORKSPACE_STATE_REPO }}
           WORKSPACE_REPO_TOKEN: ${{ secrets.WORKSPACE_REPO_TOKEN }}
           WORKSPACE_SYNC_ON_START_VALUE: ${{ github.event.inputs.skip_git_sync == 'false' && 'true' || 'false' }}
+          JOSEMAR_CONTAINER_PREFIX_INPUT: ${{ vars.JOSEMAR_CONTAINER_PREFIX }}
           HERMES_BASE_IMAGE: ${{ vars.HERMES_BASE_IMAGE }}
           GOGCLI_REF: ${{ vars.GOGCLI_REF }}
           TZ_VALUE: ${{ vars.TZ }}
@@ -119,6 +120,21 @@ jobs:
           COMPOSE_PROFILES_VALUE=""
           if [ "$AUX_ML_ENABLED" = "true" ]; then
             COMPOSE_PROFILES_VALUE="aux-ml"
+          fi
+
+          JOSEMAR_CONTAINER_PREFIX="$JOSEMAR_CONTAINER_PREFIX_INPUT"
+          if [ -z "$JOSEMAR_CONTAINER_PREFIX" ]; then
+            JOSEMAR_CONTAINER_PREFIX="josemar"
+          fi
+
+          if [[ "$JOSEMAR_CONTAINER_PREFIX" == *$'\n'* || "$JOSEMAR_CONTAINER_PREFIX" == *$'\r'* ]]; then
+            echo "ERROR: JOSEMAR_CONTAINER_PREFIX must be single-line"
+            exit 1
+          fi
+
+          if [[ ! "$JOSEMAR_CONTAINER_PREFIX" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]; then
+            echo "ERROR: JOSEMAR_CONTAINER_PREFIX must match ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+            exit 1
           fi
 
           HERMES_API_SERVER_ENABLED="$HERMES_API_SERVER_ENABLED_INPUT"
@@ -236,6 +252,7 @@ jobs:
           write_env WORKSPACE_REPO_TOKEN "$WORKSPACE_REPO_TOKEN"
           write_env WORKSPACE_SYNC_ON_START "$WORKSPACE_SYNC_ON_START_VALUE"
           write_env WORKSPACE_SYNC_INTERVAL "60"
+          write_env JOSEMAR_CONTAINER_PREFIX "$JOSEMAR_CONTAINER_PREFIX"
           write_env HERMES_BASE_IMAGE "$HERMES_BASE_IMAGE"
           write_env GOGCLI_REF "$GOGCLI_REF"
           write_env HERMES_TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
@@ -275,6 +292,7 @@ jobs:
 
           chmod 600 .env
           echo "COMPOSE_PROFILES=$COMPOSE_PROFILES_VALUE" >> "$GITHUB_ENV"
+          echo "JOSEMAR_CONTAINER_PREFIX=$JOSEMAR_CONTAINER_PREFIX" >> "$GITHUB_ENV"
 
       - name: Set compose profiles
         run: |
@@ -379,7 +397,9 @@ jobs:
           done
 
       - name: Verify deployment
-        run: docker ps | grep josemar-hermes
+        run: |
+          PREFIX="${JOSEMAR_CONTAINER_PREFIX:-josemar}"
+          docker ps --format '{{.Names}}' | grep -Fx "${PREFIX}-hermes"
 
       - name: Verify skill deployment
         run: |

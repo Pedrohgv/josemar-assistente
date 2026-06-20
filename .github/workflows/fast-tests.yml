@@ -1,0 +1,19 @@
+name: fast-tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Project workflows use the self-hosted deployment runner by design.
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run verification
+        run: make verify

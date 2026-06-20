@@ -8,6 +8,7 @@ import time
 import traceback
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 
@@ -37,11 +38,15 @@ def _stage_file_for_aux_ml(file_path: str) -> str:
     # Reject symlinks that escape the shared root.
     try:
         resolved_source = source.resolve(strict=False)
+        resolved_parent = source.parent.resolve(strict=False)
     except (OSError, ValueError):
         resolved_source = source
-    if shared_root == resolved_source or shared_root in resolved_source.parents:
-        if source.is_symlink() and not (shared_root in resolved_source.parents or shared_root == resolved_source):
+        resolved_parent = source.parent
+    source_is_in_shared = shared_root == resolved_parent or shared_root in resolved_parent.parents
+    if source.is_symlink() and source_is_in_shared:
+        if shared_root != resolved_source and shared_root not in resolved_source.parents:
             raise ValueError(f"Symlink inside /shared/ escapes shared root: {source}")
+    if shared_root == resolved_source or shared_root in resolved_source.parents:
         return str(resolved_source)
 
     if not source.exists():
@@ -54,8 +59,6 @@ def _stage_file_for_aux_ml(file_path: str) -> str:
     # Avoid collisions: append a short suffix if the name already exists
     # and points to a different file. Retry to handle unlikely collisions.
     if dest.exists() and not _same_file(source, dest):
-        import uuid
-
         for _ in range(5):
             suffix = uuid.uuid4().hex[:8]
             dest = staged_dir / f"{source.stem}_{suffix}{source.suffix}"
@@ -124,7 +127,7 @@ def _submit_job(data):
         return {"success": False, "error": "Missing required field: file_path"}
     try:
         payload["file_path"] = _stage_file_for_aux_ml(payload["file_path"])
-    except (OSError, FileNotFoundError) as exc:
+    except (OSError, FileNotFoundError, ValueError) as exc:
         return {"success": False, "error": f"Failed to stage input file: {exc}"}
     return _http_json("POST", "/jobs", payload=payload, timeout=30)
 
@@ -178,7 +181,7 @@ def action_ocr_file(data):
 
     try:
         payload["file_path"] = _stage_file_for_aux_ml(payload["file_path"])
-    except (OSError, FileNotFoundError) as exc:
+    except (OSError, FileNotFoundError, ValueError) as exc:
         return {"success": False, "error": f"Failed to stage input file: {exc}"}
 
     submitted = _http_json("POST", "/jobs", payload=payload, timeout=30)
