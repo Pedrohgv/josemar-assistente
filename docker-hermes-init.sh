@@ -36,21 +36,28 @@ done
 # Verify that the runtime user can actually write to each writable volume.
 # Log a warning (not fatal) so permission issues surface at startup instead
 # of failing mid-conversation.
+# Resolve UID to username — runuser/su in this image reject numeric UIDs
+# even when the user exists in /etc/passwd.
+HERMES_USER=$(getent passwd "${HERMES_UID_VALUE}" | cut -d: -f1 || true)
+if [ -z "$HERMES_USER" ]; then
+    HERMES_USER="hermes"
+fi
+
 for vol in $HERMES_WRITABLE_VOLUMES; do
     perm_ok=0
     if command -v runuser >/dev/null 2>&1; then
-        if runuser -u "${HERMES_UID_VALUE}" -- touch "${vol}/.perm-test" 2>/dev/null; then
+        if runuser -u "${HERMES_USER}" -- touch "${vol}/.perm-test" 2>/dev/null; then
             perm_ok=1
         fi
     else
-        if su -s /bin/sh "${HERMES_UID_VALUE}" -c "touch \"${vol}/.perm-test\"" 2>/dev/null; then
+        if su -s /bin/sh "${HERMES_USER}" -c "touch \"${vol}/.perm-test\"" 2>/dev/null; then
             perm_ok=1
         fi
     fi
     if [ "$perm_ok" = "1" ]; then
         rm -f "${vol}/.perm-test" 2>/dev/null || true
     else
-        log "WARNING: runtime user ${HERMES_UID_VALUE} cannot write to ${vol}"
+        log "WARNING: runtime user ${HERMES_USER} (uid ${HERMES_UID_VALUE}) cannot write to ${vol}"
     fi
 done
 
