@@ -42,6 +42,8 @@ josemar-assistente/
 - `obsidian-vault`: notes/attachments (not git-versioned)
 - `syncthing-config`, `tailscale-state`, `obsidian-rclone-config`, `obsidian-backup-state`
 
+Docker named volumes default to `root:root 0755`, but the Hermes gateway runs as `HERMES_UID` (default 10000). `docker-hermes-init.sh` chowns an explicit allowlist of Hermes-writable volumes (`HERMES_HOME` and `/shared`) at startup and verifies write access. When adding a new Hermes-writable volume, add its mount path to `HERMES_WRITABLE_VOLUMES` in `docker-hermes-init.sh`. Do not chown bind mounts, read-only mounts, or cross-service volumes (e.g. `obsidian-vault`).
+
 ## Local Development
 
 Use local Docker compose in this repo by default.

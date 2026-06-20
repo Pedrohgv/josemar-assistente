@@ -21,7 +21,7 @@ Submits and tracks long-running auxiliary ML jobs in the `aux-ml` container.
 
 ## Important Notes
 
-- **File location:** Input files should be staged into the aux-ml shared handoff path mounted at `/shared/` in both Hermes and aux-ml.
+- **File location:** Input files should be staged into the aux-ml shared handoff path mounted at `/shared/` in both Hermes and aux-ml. The skill automatically copies files outside `/shared/` into `/shared/staged/` before submitting, so you can pass any path visible to the Hermes container (e.g. `/opt/data/image_cache/photo.jpg`). Files already inside `/shared/` are submitted as-is.
 - **Processing time:** OCR/transcription jobs can take **30+ minutes** depending on page count, audio length, and model load. Set `timeout_seconds` accordingly (recommend >= 1800).
 - **Queue system:** Jobs are processed sequentially. Use `queue_status` to check depth before submitting. Avoid submitting duplicate or unnecessary jobs to prevent queue buildup.
 
@@ -34,11 +34,13 @@ Submit an OCR job and optionally wait for completion.
 ```bash
 echo '{
   "action": "ocr_file",
-  "file_path": "/shared/invoice.pdf",
+  "file_path": "/opt/data/image_cache/invoice.jpg",
   "model": "glm-ocr",
   "wait": true
 }' | aux-ml
 ```
+
+The skill stages the file into `/shared/staged/` automatically. You can also pass a path already under `/shared/` directly.
 
 Optional fields:
 - `prompt` (string, default `Text Recognition:`; for table layouts you can pass `Table Recognition:`)
