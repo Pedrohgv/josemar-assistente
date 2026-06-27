@@ -227,6 +227,11 @@ Skills are intentionally split by ownership:
 | Core platform skills | `skills-factory/` copied to `/opt/josemar/skills` | This repo | Stable runtime capabilities shared by all deployments. |
 | User state skills | `agent-state/skills/` synced to `/opt/data/skills` | Private state repo | Personal workflows, user-specific automations, domain-specific processors. |
 
+Hermes discovers both scopes through `config/hermes-config.yaml` (`skills.external_dirs`).
+Runtime-created user skills should be written under `/opt/data/skills/<skill>/` with a
+`SKILL.md`; `workspace-sync` auto-registers those files in `.sync-manifest` so the
+private state repo versions them on the next sync.
+
 Current repo-shipped skills:
 
 - `vault-gateway`: entrypoint for vault routing and operations.

@@ -46,6 +46,7 @@ stage_manifest_files() {
         return 0
     fi
 
+    register_user_skill_files
     validate_manifest_files || return 1
 
     git add -A -- .gitignore .sync-manifest 2>/dev/null || true
@@ -58,6 +59,68 @@ stage_manifest_files() {
 
         git add -A -- "$pattern" 2>/dev/null || true
     done < "$MANIFEST_PATH"
+}
+
+ensure_skills_gitignore_allows_files() {
+    if [ ! -f .gitignore ]; then
+        return 0
+    fi
+
+    if grep -Fxq '!skills/**' .gitignore 2>/dev/null; then
+        return 0
+    fi
+
+    cat >> .gitignore <<'EOF'
+
+# Allow explicit user-owned skill files to be tracked via .sync-manifest.
+!skills/**
+EOF
+}
+
+manifest_contains_path() {
+    grep -Fxq "$1" "$MANIFEST_PATH" 2>/dev/null
+}
+
+append_manifest_path() {
+    if manifest_contains_path "$1"; then
+        return 0
+    fi
+
+    printf '%s\n' "$1" >> "$MANIFEST_PATH"
+    log_info "Registered user-owned skill path in .sync-manifest: $1"
+}
+
+register_user_skill_files() {
+    local skills_dir skill_dir file relative_path
+    skills_dir="${WORKSPACE_DIR}/skills"
+
+    if [ ! -d "$skills_dir" ]; then
+        return 0
+    fi
+
+    for skill_dir in "$skills_dir"/*; do
+        if [ ! -d "$skill_dir" ]; then
+            continue
+        fi
+
+        relative_skill_dir="skills/${skill_dir##*/}"
+        if [ "$relative_skill_dir" = "$PROTECTED_SKILL_DIR" ]; then
+            continue
+        fi
+
+        if [ ! -f "$skill_dir/SKILL.md" ]; then
+            continue
+        fi
+
+        ensure_skills_gitignore_allows_files
+
+        while IFS= read -r file; do
+            relative_path="${file#"$WORKSPACE_DIR"/}"
+            append_manifest_path "$relative_path"
+        done <<EOF
+$(find "$skill_dir" -type f | sort)
+EOF
+    done
 }
 
 validate_manifest_files() {

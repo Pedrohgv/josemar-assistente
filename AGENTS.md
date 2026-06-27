@@ -91,6 +91,8 @@ When modifying user state, commit/push inside `agent-state` repo when requested.
 
 ## Testing
 
+- New and changed behavior must include new or updated tests, and relevant tests should pass during development cycles before work is considered complete. If a change is not practically testable, surface that limitation to the user before proceeding.
+
 ```bash
 python3 -m unittest discover -s tests -v
 python3 -m unittest tests.vault_gateway.test_gateway_contract -v

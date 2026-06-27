@@ -7,9 +7,9 @@ BOOT.md
 memories/USER.md
 memories/MEMORY.md
 
-# User-owned skills. Add explicit skill files here and allow the same paths in
-# .gitignore; do not use broad skills/* patterns because /opt/data/skills can
-# contain runtime-installed skill-hub artifacts.
+# User-owned skills. workspace-sync auto-registers files for skill directories
+# containing SKILL.md. Do not use broad skills/* patterns because /opt/data/skills
+# can contain runtime-installed skill-hub artifacts.
 skills/.gitkeep
 
 # Avatars
