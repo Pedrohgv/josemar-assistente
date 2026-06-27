@@ -53,6 +53,7 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 - Treat repo-owned core skills (`/opt/josemar/skills/*`) as maintained through normal development in the main public repository (branch/commit/PR).
 - In runtime self-improvement flows, prefer writing a patch proposal for repo-owned skills instead of creating sidecar skills (for example `*-pitfalls`).
 - User-owned skills in `/opt/data/skills/*` can be patched directly and are expected to be versioned through the state repo sync flow.
+- Runtime-created user skills are auto-registered for sync when their directory contains `SKILL.md`.
 - Avoid duplicate skill sprawl: patch an existing user-owned skill before creating a new skill with overlapping scope.
 
 **To trigger bootstrap-like setup on an existing deployment:**
@@ -69,7 +70,7 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 | `memories/USER.md` | User information and preferences | Agent / manual |
 | `memories/MEMORY.md` | Long-term curated memory | Agent |
 | `BOOT.md` | Startup checklist (optional) | Template / manual |
-| `skills/` | Agent skills (SKILL.md + executables) | Manual |
+| `skills/` | Agent skills (SKILL.md + executables) | Agent / manual |
 | `cron/jobs.json` | Cron job definitions loaded by Hermes | Manual / agent |
 | `avatars/` | Agent avatar images | Manual |
 
