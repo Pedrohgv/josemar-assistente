@@ -8,6 +8,10 @@ model:
   default: "deepseek-v4-pro"
   provider: "deepseek"
 
+fallback_providers:
+  - provider: "ollama-cloud"
+    model: "glm-5.2:cloud"
+
 terminal:
   backend: "local"
   cwd: "/opt/data"
