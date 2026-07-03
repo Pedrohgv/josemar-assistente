@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 from .helpers import FakeVault, GATEWAY_ROOT
 
@@ -126,6 +127,89 @@ class VaultOpsUnitTests(unittest.TestCase):
 
         self.assertIn("Café", result["body"])
         self.assertIn("conteúdo", result["body"])
+
+    def test_read_note_succeeds_after_transient_missing(self) -> None:
+        note = self.fake.write_note("00-Inbox/Transient.md", "# Transient\n\nbody")
+        original_exists = Path.exists
+        original_is_file = Path.is_file
+        calls = {"count": 0}
+
+        def fake_exists(self, *args, **kwargs):
+            if self == note:
+                calls["count"] += 1
+                # First two checks report missing (simulating Syncthing race),
+                # then the file reappears.
+                if calls["count"] <= 2:
+                    return False
+            return original_exists(self, *args, **kwargs)
+
+        def fake_is_file(self, *args, **kwargs):
+            if self == note and calls["count"] <= 2:
+                return False
+            return original_is_file(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "exists", fake_exists), \
+             mock.patch.object(Path, "is_file", fake_is_file):
+            result = vault_ops.read_note(self.fake.vault_dir, path="00-Inbox/Transient.md")
+
+        self.assertEqual(result["path"], "00-Inbox/Transient.md")
+        self.assertIn("Transient", result["body"])
+        self.assertGreater(calls["count"], 2)
+
+    def test_read_note_raises_when_persistently_missing(self) -> None:
+        # Note is never created; resolution must keep raising the same ValueError.
+        with self.assertRaisesRegex(ValueError, "Note not found at path: 00-Inbox/Gone.md"):
+            vault_ops.read_note(self.fake.vault_dir, path="00-Inbox/Gone.md")
+
+    def test_resolve_note_path_retries_then_raises_on_persistent_absence(self) -> None:
+        note = self.fake.vault_dir / "00-Inbox" / "Flaky.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        # File never appears despite retries.
+        original_exists = Path.exists
+        original_is_file = Path.is_file
+
+        def fake_exists(self, *args, **kwargs):
+            if self == note:
+                return False
+            return original_exists(self, *args, **kwargs)
+
+        def fake_is_file(self, *args, **kwargs):
+            if self == note:
+                return False
+            return original_is_file(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "exists", fake_exists), \
+             mock.patch.object(Path, "is_file", fake_is_file):
+            with self.assertRaisesRegex(ValueError, "Note not found at path: 00-Inbox/Flaky.md"):
+                vault_ops._resolve_note_path(self.fake.vault_dir, path="00-Inbox/Flaky.md")
+
+    def test_resolve_capture_template_retries_transient_missing(self) -> None:
+        template = self.fake.write_note("Templates/Tpl.md", "# Tpl\n\nbody")
+        original_exists = Path.exists
+        original_is_file = Path.is_file
+        calls = {"count": 0}
+
+        def fake_exists(self, *args, **kwargs):
+            if self == template:
+                calls["count"] += 1
+                if calls["count"] <= 1:
+                    return False
+            return original_exists(self, *args, **kwargs)
+
+        def fake_is_file(self, *args, **kwargs):
+            if self == template and calls["count"] <= 1:
+                return False
+            return original_is_file(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "exists", fake_exists), \
+             mock.patch.object(Path, "is_file", fake_is_file):
+            resolved, record = vault_ops._resolve_capture_template(
+                self.fake.vault_dir, template_path="Templates/Tpl.md"
+            )
+
+        self.assertEqual(resolved, template)
+        self.assertIsNotNone(record)
+        self.assertGreater(calls["count"], 1)
 
 
 if __name__ == "__main__":

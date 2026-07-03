@@ -6,8 +6,15 @@ import json
 from pathlib import Path
 import re
 import shutil
+import time
 
 from lib.common import TAG_PATTERN
+
+# Bounded retry for transient filesystem races (e.g. Syncthing temporarily
+# making a note path disappear/reappear). Kept small to avoid masking real
+# missing-file errors while tolerating brief visibility gaps.
+_RESOLVE_RETRY_ATTEMPTS = 3
+_RESOLVE_RETRY_SLEEP_SECONDS = 0.05
 
 try:
     import yaml  # type: ignore
@@ -1140,6 +1147,36 @@ def _default_capture_title(text: str) -> str:
     return " ".join(words[:8])
 
 
+def _path_is_present_file(path: Path) -> bool:
+    """Return True if path exists and is a regular file.
+
+    Wrapped in a helper so callers can be retried as a unit against transient
+    filesystem races (e.g. Syncthing briefly removing/re-adding a file).
+    """
+    return path.exists() and path.is_file()
+
+
+def _resolve_existing_file(
+    path: Path,
+    *,
+    attempts: int = _RESOLVE_RETRY_ATTEMPTS,
+    sleep_seconds: float = _RESOLVE_RETRY_SLEEP_SECONDS,
+) -> bool:
+    """Bounded retry for resolving an existing regular file.
+
+    Returns True once the path exists and is a file, False if it remains
+    absent after the configured number of attempts. Validation semantics
+    (raising the appropriate ValueError) remain the caller's responsibility;
+    this helper only smooths over transient visibility gaps.
+    """
+    for attempt in range(max(1, attempts)):
+        if _path_is_present_file(path):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(sleep_seconds)
+    return False
+
+
 def _resolve_note_path(vault_root: Path, path: str | None = None) -> Path:
     if not path:
         raise ValueError("Field 'path' is required")
@@ -1147,7 +1184,7 @@ def _resolve_note_path(vault_root: Path, path: str | None = None) -> Path:
     note_path = _resolve_relative_path(vault_root, path)
     if note_path.suffix.lower() != ".md":
         raise ValueError("Only markdown notes (.md) are supported")
-    if not note_path.exists() or not note_path.is_file():
+    if not _resolve_existing_file(note_path):
         raise ValueError(f"Note not found at path: {path}")
 
     return note_path
@@ -1163,7 +1200,7 @@ def _resolve_capture_template(
         resolved = _resolve_relative_path(vault_root, template_path)
         if resolved.suffix.lower() != ".md":
             raise ValueError("template_path must point to a markdown file")
-        if not resolved.exists() or not resolved.is_file():
+        if not _resolve_existing_file(resolved):
             raise ValueError(f"Template not found at path: {template_path}")
         return resolved, _template_record(
             vault_root,
