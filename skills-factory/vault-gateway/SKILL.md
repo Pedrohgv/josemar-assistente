@@ -31,7 +31,9 @@ echo '{"route":"note.read","payload":{"path":"07-Daily/2026-05-31.md"}}' | /opt/
 
 | Route | Purpose | Frequency |
 |---|---|---|
-| `note.capture` | Create a new note | High |
+| `note.capture` | Create a new note (plain capture; alias `note.create`) | High |
+| `note.instantiate` | Deterministically render a structured template into a note | Medium |
+| `note.write` | Write raw markdown to a vault note exactly as supplied | Medium |
 | `note.read` | Read full note content and frontmatter | High |
 | `note.update` | Update an existing note | High |
 | `note.file` | Move note to a different folder | Medium |
@@ -50,6 +52,14 @@ echo '{"route":"note.read","payload":{"path":"07-Daily/2026-05-31.md"}}' | /opt/
 
 `note.create` is an alias for `note.capture`.
 
+### Choosing a note-creation route
+
+Three routes create notes; pick by intent:
+
+- **`note.capture`** — plain capture. Turns conversational text into a titled note. Defaults to `00-Inbox`. Auto-injects `type`/`created` frontmatter and a `# title` heading when no template is used. Best for fast, rough input. Use `note.create` as an alias.
+- **`note.instantiate`** — deterministic template rendering. Strictly requires a selected template (no plain-capture fallback). Renders the template verbatim, strips `vg_*` control frontmatter, and preserves the template's own note frontmatter (`type`, `date`, `tags`, ...). Does **not** inject `created` or a `# title` heading unless the template includes them. Use when the template is the source of truth (daily notes, meeting notes, structured forms). Supports an explicit `path` that is never uniquified; honors `if_exists` (`fail` | `skip`, default `fail`).
+- **`note.write`** — raw markdown write. Writes content exactly as supplied. No frontmatter injection, no heading injection, no `vg_*` stripping, no template resolution. Never overwrites; honors `if_exists` (`fail` | `skip`, default `fail`). Use for imports, migrations, or any case where the caller already has the final markdown.
+
 ## Input Contract
 
 Always provide structured input with explicit route:
@@ -60,8 +70,7 @@ Always provide structured input with explicit route:
   "payload": {
     "text": "note that today I had a conversation with client Claudio",
     "title": "Meeting with Claudio",
-    "target_folder": "00-Inbox",
-    "template_hint": "meeting"
+    "target_folder": "00-Inbox"
   }
 }
 ```
@@ -87,7 +96,7 @@ Create a new markdown note in the vault. Alias: `note.create`.
 - `text` (string, the note body) — required when no template is selected
 - `title` (string, becomes the filename after unsafe filename/link characters are normalized/removed) — required when no template is selected
 - `target_folder` (string, default `00-Inbox`)
-- `template_hint` | `template_path` | `template_id` (any of these makes `text` and `title` optional)
+- `template_hint` | `template_path` | `template_id` (legacy compatibility; prefer `note.instantiate` for template-driven notes)
 - `tags` (list[string])
 - `field_values` (object, requires a template)
 - `template_mode` (`legacy` | `auto` | `strict` | `off`, default `legacy`)
@@ -96,7 +105,7 @@ Create a new markdown note in the vault. Alias: `note.create`.
 
 **The `title` rule is critical.** `title` is the title AND the resulting filename, with case, spaces, and diacritics preserved unless unsafe filename/link characters must be normalized or removed. The gateway rejects `note.capture` calls without `title` whenever no template is selected. Do not rely on body-text derivation; choose a deliberate human-readable title. If you ever get a note with a bad filename, use `note.rename` to fix it.
 
-**Template-based capture example** (no `text` or `title` needed; template's `vg_title` provides the title):
+**Legacy template-based capture:** still supported for compatibility, but prefer `note.instantiate` for new template-driven flows.
 
 ```json
 {
@@ -135,6 +144,79 @@ Create a new markdown note in the vault. Alias: `note.create`.
 - `template_path`/`template_id`/`template_hint` resolution order: explicit path → id → hint (fuzzy match against template stems).
 - If required template fields are missing and `policy=ask`, returns `needs_user_input: true` with `phase: awaiting_template_fields` and does **not** write the note. Collect the missing values in the next turn and call again.
 - After successful capture, gateway refreshes `Meta/vault-structure.md` and folder `_index.md` managed blocks.
+
+## note.instantiate
+
+Deterministically render a structured template into a vault note. There is **no plain-capture fallback** — a template must be selected.
+
+**Contract:**
+- `template_path` | `template_id` | `template_hint` (template selector; resolution order: path → id → hint) — at least one must resolve to a template
+- `field_values` (object) — template field values
+- `path` (optional relative path) — explicit note path; wins over derived title/target_folder; **never uniquified**; must end with `.md`
+- `target_folder` (string, used only when `path` is absent; defaults to template `vg_default_target_folder` or `00-Inbox`)
+- `title` (string, used only when `path` is absent; becomes the filename)
+- `text` (string, captured context; appended under `## Captured Context` when the template has no `{{captured_context}}` placeholder and `append_captured_context` is true)
+- `append_captured_context` (boolean, default `true`)
+- `missing_fields_policy` (`ask` | `fail` | `defaults`, **default `fail`** for this route)
+- `if_exists` (`fail` | `skip`, default `fail`) — only meaningful with an explicit `path`; derived paths use `_unique_path` collision suffixing for compatibility with `note.capture`
+
+**Behavior:**
+- Renders the selected template via `_render_template` using `_builtin_render_values` (`today`, `now_iso`, `year`, `month`) merged with `field_values` (and `captured_context` when `text` is supplied).
+- Strips `vg_*` template-control frontmatter keys from the final rendered output.
+- Preserves the template's own note frontmatter fields (`type`, `date`, `tags`, ...).
+- Does **not** inject `created` or a `# title` heading unless the template itself includes them.
+- Missing required fields: default `fail` (raises a validation error). `ask` returns `needs_user_input` with `phase: awaiting_template_fields` and does **not** write.
+- Explicit `path` + existing target: `if_exists=fail` raises `Note already exists at path: ...`; `if_exists=skip` returns `action: already_exists`, `created: false`, and does **not** write or refresh maintenance context.
+- After a successful write, refreshes `Meta/vault-structure.md` and folder `_index.md` managed blocks.
+
+**Result shape:** `path`, `template_used`, `action` (`created` | `already_exists`), `created` (boolean), `if_exists`, `warnings`, `unresolved_placeholders`, `maintenance_updates`, `context` (when created).
+
+**Example (daily note):**
+
+```json
+{
+  "route": "note.instantiate",
+  "payload": {
+    "template_path": "Templates/Daily Note.md",
+    "path": "07-Daily/2026-07-03.md",
+    "field_values": {"Date": "2026-07-03"},
+    "missing_fields_policy": "fail",
+    "if_exists": "skip"
+  }
+}
+```
+
+**Compatibility note:** `note.capture` remains the plain-capture route and still supports structured templates via `template_mode=strict`. `note.instantiate` is the strict, deterministic alternative when the template is the source of truth and you do not want gateway-injected `created`/`# title`.
+
+## note.write
+
+Write raw markdown content to a vault note exactly as supplied. No template resolution, no frontmatter injection, no heading injection, no `vg_*` stripping.
+
+**Contract:**
+- `path` (required relative path; must end with `.md`; parent directories are created as needed)
+- `content` (required string; raw markdown written verbatim; a trailing newline is normalized when missing)
+- `if_exists` (`fail` | `skip`, default `fail`) — **never overwrites**
+
+**Behavior:**
+- `if_exists=fail` (default) + existing target: raises `Note already exists at path: ...`.
+- `if_exists=skip` + existing target: returns `action: already_exists`, `created: false`, does **not** write or refresh maintenance context.
+- After a successful write, refreshes `Meta/vault-structure.md` and folder `_index.md` managed blocks.
+
+**Result shape:** `path`, `action` (`created` | `already_exists`), `created` (boolean), `if_exists`, `maintenance_updates`, `context` (when created).
+
+**Example:**
+
+```json
+{
+  "route": "note.write",
+  "payload": {
+    "path": "03-Resources/Imported.md",
+    "content": "# Imported\n\nMigrated content verbatim.\n"
+  }
+}
+```
+
+**Compatibility note:** use `note.write` for imports, migrations, or any case where the caller already holds the final markdown. For conversational capture use `note.capture`; for template-driven notes use `note.instantiate`.
 
 ## note.read
 
@@ -270,7 +352,7 @@ The routes below are specialized, run infrequently, or are pure dispatches. Full
 |---|---|---|
 | `note.search` | `playbooks/note-search/PLAYBOOK.md` | User asks to find a note by content, lookup, recall, or follow-up search. Scoring: title stem > path > content. |
 | `note.link` | `playbooks/note-link/PLAYBOOK.md` | User asks to connect two notes, build a relationship, or insert a wikilink. Use bidirectional when the relationship is symmetrical. |
-| `template.list` | `playbooks/template-list/PLAYBOOK.md` | Before any template-based capture; to discover candidates. |
+| `template.list` | `playbooks/template-list/PLAYBOOK.md` | Before any template-based instantiation; to discover candidates. |
 | `template.inspect` | `playbooks/template-inspect/PLAYBOOK.md` | After `template.list`; to fetch the field schema of a chosen template before filling it. |
 | `onboarding` | `playbooks/onboarding/PLAYBOOK.md` | First-run setup, vault initialization, or porting an existing vault. Multi-turn; requires `state_key` per session. |
 | `inbox.triage` | `playbooks/inbox-triage/PLAYBOOK.md` | Daily housekeeping: process `00-Inbox`, classify by content type, file to canonical locations, update MOCs. |
@@ -293,7 +375,7 @@ The routes below are specialized, run infrequently, or are pure dispatches. Full
 - For section-intent writes, run a mandatory read-first flow: `note.read` → verify heading → `note.update` with `section_append/section_prepend`.
 - If target heading is missing or duplicated, do not silently fallback to raw append/prepend; ask one focused clarification before writing.
 - Read/write note routes ingest contextual guidance from nearest folder `_index.md` (including `## Working Rules`) and from managed snapshot in `Meta/vault-structure.md` when present.
-- After vault write routes (`note.capture`, `note.update`, `note.file`, `note.rename`), gateway refreshes managed context blocks in `Meta/vault-structure.md` and folder `_index.md` files while preserving human-authored sections.
+- After vault write routes (`note.capture`, `note.instantiate`, `note.write`, `note.update`, `note.file`, `note.rename`), gateway refreshes managed context blocks in `Meta/vault-structure.md` and folder `_index.md` files while preserving human-authored sections.
 - Never touch `/opt/data/obsidian/` directly. Vault reads and mutations must go through gateway routes so contextual loading, maintenance, wikilink rewriting, and `Meta/vault-gateway-log.md` stay consistent.
 - If gateway tools fail or lack coverage for a requested vault operation, stop and explain the failure or missing route to the user. Only use direct filesystem access, custom scripts, internal imports, or other non-gateway workarounds after the user explicitly approves that specific workaround.
 

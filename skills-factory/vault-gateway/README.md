@@ -28,12 +28,14 @@ This directory contains the repo-shipped MBIFC vault bundle for Josemar.
 - `onboarding` supports deterministic new-vault and port-existing flows.
 - `onboarding` requires a `state_key` in payload for multi-turn isolation.
 - Port flow includes destructive confirmation gates with backup warning.
-- `note.capture` requires both `text` and `title` when no template is selected; `title` becomes the filename after unsafe filename/link characters are normalized/removed.
+- `note.capture` is the plain conversational capture route; it requires `text` and `title` when no template is selected, and `title` becomes the filename after unsafe filename/link characters are normalized/removed.
+- `note.instantiate` deterministically renders templates (for example `Templates/Daily Note.md` to `07-Daily/YYYY-MM-DD.md`) and strips `vg_*` template-control frontmatter from the created note.
+- `note.write` writes raw markdown content exactly as supplied and never overwrites existing notes.
 - `note.read`, `note.update` (supports append, prepend, replace with frontmatter auto-preserve, surgical frontmatter mode, and section-targeted append/prepend), `note.search`, `note.link`, `note.file`, and `note.rename` provide flexible day-to-day vault manipulation.
 - `note.rename` rewrites `[[old-stem]]` and `[[old-stem|alias]]` wikilinks across the vault (toggleable via `rewrite_wikilinks: false`).
 - Section-intent updates follow a read-first policy (`note.read` before `note.update`) and avoid silent fallback to raw append/prepend when the heading is missing or ambiguous.
 - Read/write note routes ingest folder context from nearest `_index.md` (including `## Working Rules`) plus `Meta/vault-structure.md` managed snapshot when available.
-- After write routes (`note.capture`, `note.update`, `note.file`, `note.rename`), managed context blocks are refreshed in `Meta/vault-structure.md` and folder `_index.md`; human-authored sections remain untouched.
+- After write routes (`note.capture`, `note.instantiate`, `note.write`, `note.update`, `note.file`, `note.rename`), managed context blocks are refreshed in `Meta/vault-structure.md` and folder `_index.md`; human-authored sections remain untouched.
 - `inbox.triage`, `vault.defrag`, `vault.audit`, `vault.deep-clean`, and `tags.garden` return structured maintenance summaries.
 - `transcribe` remains dormant.
 
@@ -45,6 +47,8 @@ Playbook files are kept for low-traffic routes and the dormant transcription rou
 
 - `playbooks/note-search/PLAYBOOK.md` — `note.search` retrieval guidance (search modes, scoring, presentation)
 - `playbooks/note-link/PLAYBOOK.md` — `note.link` wikilink discipline and bidirectional rules
+- `playbooks/note-instantiate/PLAYBOOK.md` — `note.instantiate` template rendering guidance
+- `playbooks/note-write/PLAYBOOK.md` — `note.write` raw markdown creation guidance
 - `playbooks/template-list/PLAYBOOK.md` — `template.list` template discovery
 - `playbooks/template-inspect/PLAYBOOK.md` — `template.inspect` template schema inspection
 

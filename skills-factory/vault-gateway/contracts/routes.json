@@ -61,7 +61,7 @@
     "note.capture": {
       "status": "active",
       "source": "agents/scribe.md",
-      "summary": "Create a new markdown note in the vault",
+      "summary": "Create a new markdown note in the vault (plain capture)",
       "payload": {
         "text": "string (the note body). Required when no template is selected.",
         "title": "string (becomes the filename after slugification). Required when no template is selected (see heuristic_capture_rules).",
@@ -74,6 +74,34 @@
         "template_mode": "optional: legacy|auto|strict|off (default legacy)",
         "missing_fields_policy": "optional: ask|fail|defaults (default ask)",
         "append_captured_context": "optional boolean"
+      }
+    },
+    "note.instantiate": {
+      "status": "active",
+      "source": "agents/scribe.md",
+      "summary": "Deterministically render a structured template into a vault note (no plain-capture fallback)",
+      "payload": {
+        "template_path": "optional relative path (template selector; resolution order: path -> id -> hint)",
+        "template_id": "optional string (template selector)",
+        "template_hint": "optional string (fuzzy template selector)",
+        "field_values": "optional object (template field values)",
+        "path": "optional relative path (explicit note path; wins over derived title/target_folder; never uniquified)",
+        "target_folder": "optional string (used only when path is absent; defaults to template vg_default_target_folder or 00-Inbox)",
+        "title": "optional string (used only when path is absent; becomes the filename)",
+        "text": "optional string (captured context; appended when template has no captured_context placeholder and append_captured_context is true)",
+        "append_captured_context": "optional boolean (default true)",
+        "missing_fields_policy": "optional: ask|fail|defaults (default fail for this route)",
+        "if_exists": "optional: fail|skip (default fail; explicit path is never uniquified)"
+      }
+    },
+    "note.write": {
+      "status": "active",
+      "source": "agents/scribe.md",
+      "summary": "Write raw markdown content to a vault note exactly as supplied (no frontmatter/heading injection, never overwrite)",
+      "payload": {
+        "path": "required relative path (must end with .md; parent directories are created)",
+        "content": "required string (raw markdown written verbatim; trailing newline normalized)",
+        "if_exists": "optional: fail|skip (default fail; never overwrites)"
       }
     },
     "note.read": {

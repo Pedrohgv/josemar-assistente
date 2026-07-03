@@ -14,7 +14,7 @@
 ## Purpose
 
 - Provide deterministic discovery of templates available in the vault.
-- Let Josemar inspect what can be used before calling `note.capture`.
+- Let Josemar inspect what can be used before calling `note.instantiate`.
 - Keep MBIFC spirit: flexible templates with strict execution rails.
 
 ## MBIFC Method Port
@@ -39,7 +39,7 @@ Return templates with:
 
 1. Call `template.list` to discover candidates.
 2. Call `template.inspect` for the selected template.
-3. Call `note.capture` with `template_id` or `template_path` and `field_values`.
+3. Call `note.instantiate` with `template_id` or `template_path` and `field_values`.
 
 ## Safety
 

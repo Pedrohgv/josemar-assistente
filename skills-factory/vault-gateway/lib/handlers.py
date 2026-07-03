@@ -12,6 +12,7 @@ from lib.vault_ops import (
     capture_note,
     file_note,
     inspect_template,
+    instantiate_note,
     list_templates,
     link_notes,
     read_note,
@@ -24,6 +25,7 @@ from lib.vault_ops import (
     summarize_inbox,
     summarize_tag_garden,
     update_note,
+    write_note,
 )
 
 
@@ -451,6 +453,61 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 }
             return {
                 "message": "Note captured successfully." + _maintenance_suffix(result),
+                "needs_user_input": False,
+                "result": result,
+            }
+
+        if route == "note.instantiate":
+            result = instantiate_note(
+                vault_root=vault_root,
+                field_values=payload.get("field_values"),
+                template_path=payload.get("template_path"),
+                template_id=payload.get("template_id"),
+                template_hint=payload.get("template_hint"),
+                path=payload.get("path"),
+                target_folder=payload.get("target_folder"),
+                title=payload.get("title"),
+                text=payload.get("text"),
+                append_captured_context=_as_bool(payload.get("append_captured_context", True)),
+                missing_fields_policy=str(payload.get("missing_fields_policy") or "fail"),
+                if_exists=str(payload.get("if_exists") or "fail"),
+            )
+            if result.get("pending"):
+                pending_result = dict(result)
+                pending_result.pop("pending", None)
+                return {
+                    "message": "Required template fields are still missing.",
+                    "needs_user_input": True,
+                    "phase": result.get("phase"),
+                    "result": pending_result,
+                }
+            if result.get("action") == "already_exists":
+                return {
+                    "message": "Note already exists; skipped without writing.",
+                    "needs_user_input": False,
+                    "result": result,
+                }
+            return {
+                "message": "Note instantiated from template." + _maintenance_suffix(result),
+                "needs_user_input": False,
+                "result": result,
+            }
+
+        if route == "note.write":
+            result = write_note(
+                vault_root=vault_root,
+                path=payload.get("path"),
+                content=payload.get("content"),
+                if_exists=str(payload.get("if_exists") or "fail"),
+            )
+            if result.get("action") == "already_exists":
+                return {
+                    "message": "Note already exists; skipped without writing.",
+                    "needs_user_input": False,
+                    "result": result,
+                }
+            return {
+                "message": "Note written successfully." + _maintenance_suffix(result),
                 "needs_user_input": False,
                 "result": result,
             }

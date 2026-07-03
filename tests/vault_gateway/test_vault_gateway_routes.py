@@ -194,6 +194,218 @@ class VaultGatewayRouteTests(unittest.TestCase):
                 self.assertTrue(output.get("success"))
                 self.assertIn("summary", output)
 
+    def _write_daily_template(self) -> None:
+        self.fake.write_note(
+            "Templates/Daily Note.md",
+            "---\n"
+            "type: daily\n"
+            "date: \"\"\n"
+            "tags: [daily]\n"
+            "vg_template: true\n"
+            "vg_template_id: daily-v1\n"
+            "vg_title: Daily Note\n"
+            "vg_default_target_folder: 07-Daily\n"
+            "vg_fields:\n"
+            "  - name: Date\n"
+            "    type: string\n"
+            "    required: true\n"
+            "    title: true\n"
+            "---\n\n"
+            "# {{Date}}\n\n"
+            "## Morning Intention\n",
+        )
+
+    def test_note_instantiate_daily_template_creates_dated_note(self) -> None:
+        self._write_daily_template()
+
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.instantiate",
+                "payload": {
+                    "template_id": "daily-v1",
+                    "field_values": {"Date": "2026-07-03"},
+                },
+            }
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output["result"]
+        self.assertEqual(result["action"], "created")
+        self.assertTrue(result["created"])
+        self.assertEqual(result["path"], "07-Daily/2026-07-03.md")
+
+        content = (self.fake.vault_dir / "07-Daily" / "2026-07-03.md").read_text(encoding="utf-8")
+        self.assertIn("# 2026-07-03", content)
+        self.assertNotIn("vg_fields", content)
+        self.assertNotIn("vg_template", content)
+        self.assertIn("type: daily", content)
+        self.assertIn("tags: [daily]", content)
+
+    def test_note_instantiate_explicit_path_skip_returns_not_created(self) -> None:
+        self._write_daily_template()
+        self.fake.write_note(
+            "07-Daily/2026-07-03.md",
+            "---\ntype: daily\ndate: 2026-07-03\n---\n\n# Existing\n",
+        )
+
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.instantiate",
+                "payload": {
+                    "template_id": "daily-v1",
+                    "field_values": {"Date": "2026-07-03"},
+                    "path": "07-Daily/2026-07-03.md",
+                    "if_exists": "skip",
+                },
+            }
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output["result"]
+        self.assertEqual(result["action"], "already_exists")
+        self.assertFalse(result["created"])
+        self.assertEqual(
+            (self.fake.vault_dir / "07-Daily" / "2026-07-03.md").read_text(encoding="utf-8"),
+            "---\ntype: daily\ndate: 2026-07-03\n---\n\n# Existing\n",
+        )
+
+    def test_note_instantiate_explicit_path_default_fail(self) -> None:
+        self._write_daily_template()
+        self.fake.write_note("07-Daily/2026-07-03.md", "# Existing\n")
+
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.instantiate",
+                "payload": {
+                    "template_id": "daily-v1",
+                    "field_values": {"Date": "2026-07-03"},
+                    "path": "07-Daily/2026-07-03.md",
+                },
+            }
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "validation_error")
+        self.assertIn("Note already exists at path", output.get("details", ""))
+
+    def test_note_instantiate_missing_required_field_default_fail(self) -> None:
+        self._write_daily_template()
+
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.instantiate",
+                "payload": {
+                    "template_id": "daily-v1",
+                    "field_values": {},
+                },
+            }
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "validation_error")
+        self.assertIn("Missing required template fields", output.get("details", ""))
+
+    def test_note_instantiate_rejects_unsafe_path(self) -> None:
+        self._write_daily_template()
+
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.instantiate",
+                "payload": {
+                    "template_id": "daily-v1",
+                    "field_values": {"Date": "2026-07-03"},
+                    "path": "../outside.md",
+                },
+            }
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn(output.get("error"), {"invalid_payload", "validation_error"})
+
+    def test_note_write_writes_exact_markdown_without_mutation(self) -> None:
+        content = "# Raw Note\n\nThis is **verbatim** markdown.\n"
+
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.write",
+                "payload": {
+                    "path": "00-Inbox/Raw.md",
+                    "content": content,
+                },
+            }
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output["result"]
+        self.assertEqual(result["action"], "created")
+        self.assertTrue(result["created"])
+
+        written = (self.fake.vault_dir / "00-Inbox" / "Raw.md").read_text(encoding="utf-8")
+        self.assertEqual(written, content)
+        self.assertFalse(written.startswith("---\n"))
+
+    def test_note_write_existing_default_fail(self) -> None:
+        self.fake.write_note("00-Inbox/Existing.md", "# Existing\n")
+
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.write",
+                "payload": {
+                    "path": "00-Inbox/Existing.md",
+                    "content": "# Should Not Write\n",
+                },
+            }
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "validation_error")
+        self.assertIn("Note already exists at path", output.get("details", ""))
+        self.assertEqual(
+            (self.fake.vault_dir / "00-Inbox" / "Existing.md").read_text(encoding="utf-8"),
+            "# Existing\n",
+        )
+
+    def test_note_write_existing_skip_does_not_overwrite(self) -> None:
+        self.fake.write_note("00-Inbox/Existing.md", "# Existing\n")
+
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.write",
+                "payload": {
+                    "path": "00-Inbox/Existing.md",
+                    "content": "# Should Not Write\n",
+                    "if_exists": "skip",
+                },
+            }
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(output.get("success"))
+        result = output["result"]
+        self.assertEqual(result["action"], "already_exists")
+        self.assertFalse(result["created"])
+        self.assertEqual(
+            (self.fake.vault_dir / "00-Inbox" / "Existing.md").read_text(encoding="utf-8"),
+            "# Existing\n",
+        )
+
+    def test_note_write_rejects_unsafe_path(self) -> None:
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.write",
+                "payload": {
+                    "path": "../outside.md",
+                    "content": "# Outside\n",
+                },
+            }
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn(output.get("error"), {"invalid_payload", "validation_error"})
+
 
 if __name__ == "__main__":
     unittest.main()
