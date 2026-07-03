@@ -45,8 +45,8 @@
       "alias_of": "note.capture",
       "summary": "Create a new markdown note in the vault (alias for note.capture)",
       "payload": {
-        "text": "string (the note body). Required when no template is selected.",
-        "title": "string (becomes the filename after slugification). Required when no template is selected (see heuristic_capture_rules).",
+        "text": "string (the note body below the generated title heading; do not include the title/header here). Required when no template is selected.",
+        "title": "string (becomes the filename after slugification and is inserted as the note heading for non-template captures). Required when no template is selected (see heuristic_capture_rules).",
         "target_folder": "optional string, defaults to 00-Inbox",
         "template_hint": "optional string (presence of any template selector makes text and title optional)",
         "tags": "optional list[string]",
@@ -63,8 +63,8 @@
       "source": "agents/scribe.md",
       "summary": "Create a new markdown note in the vault (plain capture)",
       "payload": {
-        "text": "string (the note body). Required when no template is selected.",
-        "title": "string (becomes the filename after slugification). Required when no template is selected (see heuristic_capture_rules).",
+        "text": "string (the note body below the generated title heading; do not include the title/header here). Required when no template is selected.",
+        "title": "string (becomes the filename after slugification and is inserted as the note heading for non-template captures). Required when no template is selected (see heuristic_capture_rules).",
         "target_folder": "optional string, defaults to 00-Inbox",
         "template_hint": "optional string (presence of any template selector makes text and title optional)",
         "tags": "optional list[string]",

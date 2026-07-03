@@ -93,7 +93,7 @@ These routes are the ones the LLM uses most often. Their full MBIFC orchestratio
 Create a new markdown note in the vault. Alias: `note.create`.
 
 **Contract:**
-- `text` (string, the note body) — required when no template is selected
+- `text` (string, the note body below the generated title heading; do **not** include the title/header here) — required when no template is selected
 - `title` (string, becomes the filename after unsafe filename/link characters are normalized/removed) — required when no template is selected
 - `target_folder` (string, default `00-Inbox`)
 - `template_hint` | `template_path` | `template_id` (legacy compatibility; prefer `note.instantiate` for template-driven notes)
@@ -103,7 +103,7 @@ Create a new markdown note in the vault. Alias: `note.create`.
 - `missing_fields_policy` (`ask` | `fail` | `defaults`, default `ask`)
 - `append_captured_context` (boolean, default `true`)
 
-**The `title` rule is critical.** `title` is the title AND the resulting filename, with case, spaces, and diacritics preserved unless unsafe filename/link characters must be normalized or removed. The gateway rejects `note.capture` calls without `title` whenever no template is selected. Do not rely on body-text derivation; choose a deliberate human-readable title. If you ever get a note with a bad filename, use `note.rename` to fix it.
+**The `title` rule is critical.** `title` is the title AND the resulting filename, with case, spaces, and diacritics preserved unless unsafe filename/link characters must be normalized or removed. For non-template captures, the gateway also inserts `# {title}` as the note heading. Do **not** repeat the title or a markdown heading inside `text`; `text` should contain only the body below the generated heading. The gateway rejects `note.capture` calls without `title` whenever no template is selected. Do not rely on body-text derivation; choose a deliberate human-readable title. If you ever get a note with a bad filename, use `note.rename` to fix it.
 
 **Legacy template-based capture:** still supported for compatibility, but prefer `note.instantiate` for new template-driven flows.
 

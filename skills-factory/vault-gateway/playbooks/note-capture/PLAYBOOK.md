@@ -34,7 +34,7 @@ The route follows Scribe principles from MBIFC:
 - Use a short, descriptive title if user did not provide one.
 - Keep the body close to original wording and intent.
 
-**Always pass `payload.title` explicitly — it is the title AND the filename.** The gateway preserves case, spaces, and diacritics, normalizing/removing only unsafe filename/link characters. Do not rely on the body-derivation fallback; treat the title as your responsibility. If a note was already captured with a bad filename, use `note.rename` rather than touching the filesystem directly.
+**Always pass `payload.title` explicitly — it is the title AND the filename.** For non-template captures, the gateway also inserts `# {payload.title}` as the note heading. Do **not** include the title or markdown heading inside `payload.text`; `payload.text` should contain only the body below the generated heading. The gateway preserves case, spaces, and diacritics, normalizing/removing only unsafe filename/link characters. Do not rely on the body-derivation fallback; treat the title as your responsibility. If a note was already captured with a bad filename, use `note.rename` rather than touching the filesystem directly.
 
 ### Mode 2: Voice-to-Note
 
