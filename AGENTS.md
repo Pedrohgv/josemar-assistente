@@ -48,6 +48,11 @@ Docker named volumes default to `root:root 0755`, but the Hermes gateway runs as
 
 Use local Docker compose in this repo by default.
 
+When starting the Hermes service locally for validation, explicitly disable Telegram
+so the local container cannot contend with the production Telegram bot deployment.
+Set `TELEGRAM_BOT_TOKEN=`, `PRIMARY_TELEGRAM_ID=`, and the `HERMES_TELEGRAM_*`
+/ `HERMES_GATEWAY_ALLOWED_USERS` variants to empty values for the local run.
+
 ```bash
 docker compose up -d
 docker compose logs -f hermes
