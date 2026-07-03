@@ -44,6 +44,8 @@ INDEX_MANAGED_END = "<!-- VG:END managed-summary -->"
 STRUCTURE_MANAGED_BEGIN = "<!-- VG:BEGIN managed-structure -->"
 STRUCTURE_MANAGED_END = "<!-- VG:END managed-structure -->"
 
+TEMPLATE_CONTROL_FRONTMATTER_PREFIX = "vg_"
+
 
 PLACEHOLDER_PATTERN = re.compile(r"\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}")
 
@@ -1519,15 +1521,35 @@ def capture_note(
                 f"{body}\n"
             )
     else:
-        frontmatter = ["---", "type: note", f"created: {timestamp}"]
-        if normalized_tags:
-            frontmatter.append(
-                "tags: [" + ", ".join(tag.strip().replace("'", "") for tag in normalized_tags) + "]"
-            )
-        frontmatter.append("---")
-        frontmatter_text = "\n".join(frontmatter)
-        content = f"{frontmatter_text}\n\n# {selected_title}\n\n{body}\n"
+        # Non-template capture: detect leading YAML frontmatter supplied by the
+        # caller in `text`, parse it, strip it from the body, and merge it with
+        # gateway defaults. User-provided note metadata (e.g. `type: daily`,
+        # `date`, `tags`) is preserved; gateway defaults only fill missing
+        # fields, explicit payload tags override embedded tags, and template
+        # control fields (`vg_*`) are stripped before writing. Without this, a
+        # second frontmatter block would be stacked on top of the user's block
+        # and leak into the body.
+        capture_body = body
+        user_frontmatter: dict = {}
+        if body.startswith("---\n"):
+            parsed_fm, parsed_body = _extract_frontmatter(body)
+            if parsed_fm:
+                user_frontmatter = parsed_fm
+                capture_body = parsed_body.strip()
 
+        merged_frontmatter: dict[str, object] = dict(user_frontmatter)
+        merged_frontmatter.setdefault("type", "note")
+        merged_frontmatter.setdefault("created", timestamp)
+        if normalized_tags:
+            merged_frontmatter["tags"] = list(normalized_tags)
+        elif "tags" in user_frontmatter:
+            # No explicit tags argument: preserve user-provided tags.
+            merged_frontmatter["tags"] = user_frontmatter["tags"]
+
+        frontmatter_text = _serialize_frontmatter(merged_frontmatter)
+        content = f"{frontmatter_text}\n\n# {selected_title}\n\n{capture_body}\n"
+
+    content = _strip_template_control_frontmatter(content)
     note_path.write_text(content, encoding="utf-8")
     maintenance_updates = _refresh_structure_context(vault_root, [target_dir])
     operation_context = _build_operation_context(vault_root, target_dir)
@@ -1557,10 +1579,29 @@ def _serialize_frontmatter(fields: dict) -> str:
             lines.append(f"{key}: {'true' if value else 'false'}")
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
             lines.append(f"{key}: {value}")
+        elif value == "":
+            lines.append(f'{key}: ""')
         else:
             lines.append(f"{key}: {value}")
     lines.append("---")
     return "\n".join(lines)
+
+
+def _strip_template_control_frontmatter(content: str) -> str:
+    frontmatter, body = _extract_frontmatter(content)
+    if not frontmatter:
+        return content
+
+    cleaned = {
+        key: value
+        for key, value in frontmatter.items()
+        if not str(key).startswith(TEMPLATE_CONTROL_FRONTMATTER_PREFIX)
+    }
+    if cleaned == frontmatter:
+        return content
+    if not cleaned:
+        return body.lstrip() + ("\n" if body and not body.endswith("\n") else "")
+    return f"{_serialize_frontmatter(cleaned)}\n\n{body.lstrip()}"
 
 
 def update_note(

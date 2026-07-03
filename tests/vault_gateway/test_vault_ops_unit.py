@@ -211,6 +211,154 @@ class VaultOpsUnitTests(unittest.TestCase):
         self.assertIsNotNone(record)
         self.assertGreater(calls["count"], 1)
 
+    def test_capture_note_with_user_frontmatter_creates_single_block(self) -> None:
+        text = "---\ndate: 2026-07-03\nvg_fields:\n  - summary\n---\nCaptured body text."
+        result = vault_ops.capture_note(
+            self.fake.vault_dir, text, title="With Frontmatter"
+        )
+
+        note_path = self.fake.vault_dir / result["path"]
+        content = note_path.read_text(encoding="utf-8")
+
+        # Only one frontmatter block should be present (two `---` fences).
+        self.assertEqual(content.count("\n---\n"), 1)
+        self.assertTrue(content.startswith("---\n"))
+
+        # The user's second block must not leak into the body.
+        body = content.split("---\n", 2)[2]
+        self.assertNotIn("---", body)
+        self.assertIn("Captured body text.", body)
+
+    def test_capture_note_preserves_user_metadata_in_frontmatter(self) -> None:
+        from datetime import date as date_type
+
+        text = "---\ndate: 2026-07-03\ncustom_fields:\n  - summary\npriority: high\n---\nBody."
+        result = vault_ops.capture_note(self.fake.vault_dir, text, title="Meta Preserved")
+
+        note_path = self.fake.vault_dir / result["path"]
+        fm, body = vault_ops._extract_frontmatter(note_path.read_text(encoding="utf-8"))
+
+        # YAML parses `date: 2026-07-03` as a date object; round-trips through
+        # serialization back to the same value.
+        self.assertEqual(fm.get("date"), date_type(2026, 7, 3))
+        self.assertEqual(fm.get("priority"), "high")
+        self.assertEqual(fm.get("custom_fields"), ["summary"])
+        # Gateway-controlled fields still present.
+        self.assertEqual(fm.get("type"), "note")
+        self.assertIn("created", fm)
+
+    def test_capture_note_strips_template_control_fields_from_rendered_daily_text(self) -> None:
+        text = """---
+type: daily
+date: ""
+tags: [daily]
+vg_fields:
+  - name: Date
+    type: date
+    required: true
+    title: true
+---
+# 2026-07-04
+
+## Morning Intention
+"""
+
+        result = vault_ops.capture_note(self.fake.vault_dir, text, title="2026-07-04")
+
+        note_path = self.fake.vault_dir / result["path"]
+        content = note_path.read_text(encoding="utf-8")
+        fm, body = vault_ops._extract_frontmatter(content)
+
+        self.assertEqual(content.count("\n---\n"), 1)
+        self.assertEqual(fm.get("type"), "daily")
+        self.assertEqual(fm.get("date"), "")
+        self.assertEqual(fm.get("tags"), ["daily"])
+        self.assertNotIn("vg_fields", fm)
+        self.assertNotIn("---", body)
+        self.assertIn("# 2026-07-04", body)
+
+    def test_capture_note_strips_template_control_fields_from_template_output(self) -> None:
+        self.fake.write_note(
+            "dump_folder/Daily Note.md",
+            """---
+type: daily
+date: ""
+tags: [daily]
+vg_fields:
+  - name: Date
+    type: date
+    required: true
+    title: true
+---
+
+# {{Date}}
+""",
+        )
+
+        result = vault_ops.capture_note(
+            self.fake.vault_dir,
+            "",
+            template_path="dump_folder/Daily Note.md",
+            template_mode="strict",
+            field_values={"Date": "2026-07-04"},
+            target_folder="dump_folder",
+        )
+
+        note_path = self.fake.vault_dir / result["path"]
+        content = note_path.read_text(encoding="utf-8")
+        fm, body = vault_ops._extract_frontmatter(content)
+
+        self.assertEqual(fm.get("type"), "daily")
+        self.assertEqual(fm.get("date"), "")
+        self.assertEqual(fm.get("tags"), ["daily"])
+        self.assertNotIn("vg_fields", fm)
+        self.assertIn("# 2026-07-04", body)
+
+    def test_capture_note_preserves_user_type(self) -> None:
+        text = "---\ntype: meeting\n---\nBody."
+        result = vault_ops.capture_note(self.fake.vault_dir, text, title="Type Preserved")
+
+        note_path = self.fake.vault_dir / result["path"]
+        fm, _ = vault_ops._extract_frontmatter(note_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(fm.get("type"), "meeting")
+
+    def test_capture_note_explicit_tags_override_user_tags(self) -> None:
+        text = "---\ntags: [user-tag-1, user-tag-2]\n---\nBody."
+        result = vault_ops.capture_note(
+            self.fake.vault_dir, text, title="Tags Override", tags=["gateway-tag"]
+        )
+
+        note_path = self.fake.vault_dir / result["path"]
+        fm, _ = vault_ops._extract_frontmatter(note_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(fm.get("tags"), ["gateway-tag"])
+
+    def test_capture_note_absent_tags_preserves_user_tags(self) -> None:
+        text = "---\ntags: [user-tag-1, user-tag-2]\n---\nBody."
+        result = vault_ops.capture_note(self.fake.vault_dir, text, title="Tags Preserved")
+
+        note_path = self.fake.vault_dir / result["path"]
+        fm, _ = vault_ops._extract_frontmatter(note_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(fm.get("tags"), ["user-tag-1", "user-tag-2"])
+
+    def test_capture_note_without_frontmatter_unchanged(self) -> None:
+        # Regression guard: plain text (no leading frontmatter) must behave as
+        # before, with a single generated frontmatter block.
+        result = vault_ops.capture_note(
+            self.fake.vault_dir, "plain body", title="No Frontmatter"
+        )
+
+        note_path = self.fake.vault_dir / result["path"]
+        content = note_path.read_text(encoding="utf-8")
+
+        self.assertEqual(content.count("\n---\n"), 1)
+        self.assertTrue(content.startswith("---\n"))
+        fm, body = vault_ops._extract_frontmatter(content)
+        self.assertEqual(fm.get("type"), "note")
+        self.assertIn("plain body", body)
+
 
 if __name__ == "__main__":
     unittest.main()
