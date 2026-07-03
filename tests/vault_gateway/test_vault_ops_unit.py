@@ -359,6 +359,218 @@ vg_fields:
         self.assertEqual(fm.get("type"), "note")
         self.assertIn("plain body", body)
 
+    def _write_daily_template(self) -> Path:
+        return self.fake.write_note(
+            "Templates/Daily Note.md",
+            "---\n"
+            "type: daily\n"
+            "date: \"\"\n"
+            "tags: [daily]\n"
+            "vg_template: true\n"
+            "vg_template_id: daily-v1\n"
+            "vg_title: Daily Note\n"
+            "vg_default_target_folder: 07-Daily\n"
+            "vg_fields:\n"
+            "  - name: Date\n"
+            "    type: string\n"
+            "    required: true\n"
+            "    title: true\n"
+            "---\n\n"
+            "# {{Date}}\n\n"
+            "## Morning Intention\n",
+        )
+
+    def test_instantiate_note_daily_template_creates_dated_note(self) -> None:
+        self._write_daily_template()
+
+        result = vault_ops.instantiate_note(
+            self.fake.vault_dir,
+            field_values={"Date": "2026-07-03"},
+            template_id="daily-v1",
+        )
+
+        self.assertEqual(result["action"], "created")
+        self.assertTrue(result["created"])
+        self.assertEqual(result["path"], "07-Daily/2026-07-03.md")
+        self.assertEqual(result["template_used"], "Templates/Daily Note.md")
+
+        note_path = self.fake.vault_dir / result["path"]
+        self.assertTrue(note_path.exists())
+        content = note_path.read_text(encoding="utf-8")
+        fm, body = vault_ops._extract_frontmatter(content)
+
+        # vg_* control fields stripped from final output.
+        self.assertNotIn("vg_fields", fm)
+        self.assertNotIn("vg_template", fm)
+        self.assertNotIn("vg_template_id", fm)
+        # Note frontmatter fields preserved.
+        self.assertEqual(fm.get("type"), "daily")
+        self.assertEqual(fm.get("date"), "")
+        self.assertEqual(fm.get("tags"), ["daily"])
+        # Heading rendered from template, not injected by gateway.
+        self.assertIn("# 2026-07-03", body)
+        # Gateway must not inject `created` for instantiate.
+        self.assertNotIn("created", fm)
+
+    def test_instantiate_note_explicit_path_skip_does_not_overwrite(self) -> None:
+        self._write_daily_template()
+        existing_path = self.fake.write_note(
+            "07-Daily/2026-07-03.md",
+            "---\ntype: daily\ndate: 2026-07-03\n---\n\n# Existing\n",
+        )
+        original_content = existing_path.read_text(encoding="utf-8")
+
+        result = vault_ops.instantiate_note(
+            self.fake.vault_dir,
+            field_values={"Date": "2026-07-03"},
+            template_id="daily-v1",
+            path="07-Daily/2026-07-03.md",
+            if_exists="skip",
+        )
+
+        self.assertEqual(result["action"], "already_exists")
+        self.assertFalse(result["created"])
+        self.assertEqual(result["path"], "07-Daily/2026-07-03.md")
+        self.assertEqual(existing_path.read_text(encoding="utf-8"), original_content)
+
+    def test_instantiate_note_explicit_path_default_fail_raises(self) -> None:
+        self._write_daily_template()
+        self.fake.write_note(
+            "07-Daily/2026-07-03.md",
+            "---\ntype: daily\n---\n\n# Existing\n",
+        )
+
+        with self.assertRaisesRegex(ValueError, "Note already exists at path: 07-Daily/2026-07-03.md"):
+            vault_ops.instantiate_note(
+                self.fake.vault_dir,
+                field_values={"Date": "2026-07-03"},
+                template_id="daily-v1",
+                path="07-Daily/2026-07-03.md",
+            )
+
+    def test_instantiate_note_missing_required_field_default_fail(self) -> None:
+        self._write_daily_template()
+
+        with self.assertRaisesRegex(ValueError, "Missing required template fields: Date"):
+            vault_ops.instantiate_note(
+                self.fake.vault_dir,
+                field_values={},
+                template_id="daily-v1",
+            )
+
+    def test_instantiate_note_requires_template(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires a selected template"):
+            vault_ops.instantiate_note(
+                self.fake.vault_dir,
+                field_values={"Date": "2026-07-03"},
+            )
+
+    def test_instantiate_note_rejects_unsafe_path(self) -> None:
+        self._write_daily_template()
+        with self.assertRaisesRegex(ValueError, "escapes vault root"):
+            vault_ops.instantiate_note(
+                self.fake.vault_dir,
+                field_values={"Date": "2026-07-03"},
+                template_id="daily-v1",
+                path="../outside.md",
+            )
+
+    def test_instantiate_note_rejects_non_markdown_path(self) -> None:
+        self._write_daily_template()
+        with self.assertRaisesRegex(ValueError, "Only markdown notes"):
+            vault_ops.instantiate_note(
+                self.fake.vault_dir,
+                field_values={"Date": "2026-07-03"},
+                template_id="daily-v1",
+                path="07-Daily/2026-07-03.txt",
+            )
+
+    def test_write_note_writes_exact_markdown_without_mutation(self) -> None:
+        content = "# Raw Note\n\nThis is **verbatim** markdown.\n- item one\n- item two\n"
+
+        result = vault_ops.write_note(
+            self.fake.vault_dir,
+            path="00-Inbox/Raw.md",
+            content=content,
+        )
+
+        self.assertEqual(result["action"], "created")
+        self.assertTrue(result["created"])
+        self.assertEqual(result["path"], "00-Inbox/Raw.md")
+
+        written = (self.fake.vault_dir / "00-Inbox" / "Raw.md").read_text(encoding="utf-8")
+        # No frontmatter injected, no heading added, content preserved verbatim
+        # (with trailing newline normalization).
+        self.assertEqual(written, content)
+        self.assertFalse(written.startswith("---\n"))
+
+    def test_write_note_creates_parent_directories(self) -> None:
+        result = vault_ops.write_note(
+            self.fake.vault_dir,
+            path="02-Areas/Health/Nested/Note.md",
+            content="# Nested\n",
+        )
+        self.assertTrue(result["created"])
+        self.assertTrue((self.fake.vault_dir / "02-Areas" / "Health" / "Nested" / "Note.md").exists())
+
+    def test_write_note_existing_default_fail_raises(self) -> None:
+        self.fake.write_note("00-Inbox/Existing.md", "# Existing\n")
+
+        with self.assertRaisesRegex(ValueError, "Note already exists at path: 00-Inbox/Existing.md"):
+            vault_ops.write_note(
+                self.fake.vault_dir,
+                path="00-Inbox/Existing.md",
+                content="# Should Not Write\n",
+            )
+
+        # Confirm no overwrite occurred.
+        self.assertEqual(
+            (self.fake.vault_dir / "00-Inbox" / "Existing.md").read_text(encoding="utf-8"),
+            "# Existing\n",
+        )
+
+    def test_write_note_existing_skip_does_not_overwrite(self) -> None:
+        self.fake.write_note("00-Inbox/Existing.md", "# Existing\n")
+        original = (self.fake.vault_dir / "00-Inbox" / "Existing.md").read_text(encoding="utf-8")
+
+        result = vault_ops.write_note(
+            self.fake.vault_dir,
+            path="00-Inbox/Existing.md",
+            content="# Should Not Write\n",
+            if_exists="skip",
+        )
+
+        self.assertEqual(result["action"], "already_exists")
+        self.assertFalse(result["created"])
+        self.assertEqual(
+            (self.fake.vault_dir / "00-Inbox" / "Existing.md").read_text(encoding="utf-8"),
+            original,
+        )
+
+    def test_write_note_rejects_unsafe_path(self) -> None:
+        with self.assertRaisesRegex(ValueError, "escapes vault root"):
+            vault_ops.write_note(
+                self.fake.vault_dir,
+                path="../outside.md",
+                content="# Outside\n",
+            )
+
+    def test_write_note_rejects_non_markdown_path(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Only markdown notes"):
+            vault_ops.write_note(
+                self.fake.vault_dir,
+                path="00-Inbox/Raw.txt",
+                content="# Raw\n",
+            )
+
+    def test_write_note_rejects_empty_content(self) -> None:
+        with self.assertRaisesRegex(ValueError, "content' must not be empty"):
+            vault_ops.write_note(
+                self.fake.vault_dir,
+                path="00-Inbox/Empty.md",
+                content="   ",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

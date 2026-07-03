@@ -1569,6 +1569,236 @@ def capture_note(
     return result
 
 
+def _resolve_safe_markdown_path(vault_root: Path, path: str) -> Path:
+    """Resolve a caller-supplied relative markdown path with strict safety checks.
+
+    Used by note.instantiate / note.write where the path is explicit and must
+    never be uniquified or silently relocated.
+    """
+    resolved = _resolve_relative_path(vault_root, path)
+    if resolved.suffix.lower() != ".md":
+        raise ValueError("Only markdown notes (.md) are supported")
+    return resolved
+
+
+def instantiate_note(
+    vault_root: Path,
+    field_values: object = None,
+    template_path: str | None = None,
+    template_id: str | None = None,
+    template_hint: str | None = None,
+    path: str | None = None,
+    target_folder: str | None = None,
+    title: str | None = None,
+    text: str | None = None,
+    append_captured_context: bool = True,
+    missing_fields_policy: str = "fail",
+    if_exists: str = "fail",
+) -> dict:
+    """Deterministic template rendering into a vault note.
+
+    Unlike note.capture, this route strictly requires a selected template and
+    never falls back to plain capture. It does not inject `created` or a
+    `# title` heading unless the template itself includes them. Template
+    control frontmatter keys (`vg_*`) are stripped from the rendered output.
+
+    Path resolution:
+    - Explicit `path` wins over derived title/target_folder. It is never
+      uniquified; if the target exists the route honors `if_exists` (fail/skip).
+    - No explicit `path`: derive from selected title + target_folder using the
+      existing title logic and `_unique_path` collision behavior (compatibility
+      with note.capture's derived-path behavior).
+    """
+    body = (text or "").strip()
+    provided_fields = _normalize_field_values_map(field_values)
+    missing_policy = (missing_fields_policy or "fail").strip().lower()
+    if missing_policy not in {"ask", "fail", "defaults"}:
+        raise ValueError("Invalid missing_fields_policy")
+    exists_policy = (if_exists or "fail").strip().lower()
+    if exists_policy not in {"fail", "skip"}:
+        raise ValueError("Invalid if_exists; expected one of: fail, skip")
+
+    selected_template_path, selected_template_record = _resolve_capture_template(
+        vault_root,
+        template_hint=template_hint,
+        template_path=template_path,
+        template_id=template_id,
+    )
+    if selected_template_path is None:
+        raise ValueError(
+            "note.instantiate requires a selected template "
+            "(template_path, template_id, or resolvable template_hint); "
+            "no fallback to plain capture"
+        )
+
+    field_defs: list[dict] = []
+    raw_defs = selected_template_record.get("fields") if isinstance(selected_template_record, dict) else None
+    if isinstance(raw_defs, list):
+        field_defs = raw_defs
+
+    resolved_fields, missing_fields, warnings = _prepare_template_field_values(
+        field_defs,
+        provided_fields,
+        missing_policy,
+    )
+
+    if missing_fields and missing_policy == "ask":
+        target_dir = _resolve_capture_target_dir(vault_root, target_folder, selected_template_record)
+        pending_result = {
+            "pending": True,
+            "phase": "awaiting_template_fields",
+            "template_used": _relative(vault_root, selected_template_path),
+            "missing_fields": missing_fields,
+            "provided_fields": sorted([key for key in provided_fields.keys() if key]),
+            "warnings": warnings,
+            "will_write_note": False,
+            "target_folder": _relative(vault_root, target_dir),
+            "if_exists": exists_policy,
+        }
+        _append_log(vault_root, "note.instantiate.pending", pending_result)
+        return pending_result
+
+    vault_root.mkdir(parents=True, exist_ok=True)
+
+    explicit_path = (path or "").strip()
+    if explicit_path:
+        note_path = _resolve_safe_markdown_path(vault_root, explicit_path)
+        target_dir = note_path.parent
+        if _resolve_existing_file(note_path):
+            if exists_policy == "skip":
+                result = {
+                    "path": _relative(vault_root, note_path),
+                    "template_used": _relative(vault_root, selected_template_path),
+                    "action": "already_exists",
+                    "created": False,
+                    "if_exists": exists_policy,
+                    "warnings": warnings,
+                    "unresolved_placeholders": [],
+                    "maintenance_updates": [],
+                }
+                _append_log(vault_root, "note.instantiate.skip", result)
+                return result
+            raise ValueError(f"Note already exists at path: {_relative(vault_root, note_path)}")
+    else:
+        target_dir = _resolve_capture_target_dir(vault_root, target_folder, selected_template_record)
+        selected_title = _pick_capture_title(
+            body,
+            title,
+            selected_template_record,
+            resolved_fields,
+            selected_template_path,
+        )
+        filename_stem = _filename_stem_from_title(selected_title) or datetime.utcnow().strftime(
+            "note-%Y%m%d-%H%M%S"
+        )
+        note_path = _unique_path(target_dir / f"{filename_stem}.md")
+        if _resolve_existing_file(note_path) and exists_policy == "skip":
+            result = {
+                "path": _relative(vault_root, note_path),
+                "template_used": _relative(vault_root, selected_template_path),
+                "action": "already_exists",
+                "created": False,
+                "if_exists": exists_policy,
+                "warnings": warnings,
+                "unresolved_placeholders": [],
+                "maintenance_updates": [],
+            }
+            _append_log(vault_root, "note.instantiate.skip", result)
+            return result
+
+    template_text = _read_text_strict(selected_template_path).rstrip()
+    render_values = _builtin_render_values()
+    render_values.update(resolved_fields)
+    if body:
+        render_values.setdefault("captured_context", body)
+
+    rendered, unresolved_placeholders = _render_template(template_text, render_values)
+    content = rendered.rstrip() + "\n"
+
+    if body and append_captured_context and "captured_context" not in _extract_placeholders(template_text):
+        content = f"{content.rstrip()}\n\n## Captured Context\n\n{body}\n"
+    if unresolved_placeholders:
+        warnings.append(
+            "Unresolved placeholders kept as-is: " + ", ".join(unresolved_placeholders)
+        )
+
+    content = _strip_template_control_frontmatter(content)
+
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(content, encoding="utf-8")
+    maintenance_updates = _refresh_structure_context(vault_root, [target_dir])
+    operation_context = _build_operation_context(vault_root, target_dir)
+
+    result = {
+        "path": _relative(vault_root, note_path),
+        "template_used": _relative(vault_root, selected_template_path),
+        "action": "created",
+        "created": True,
+        "if_exists": exists_policy,
+        "warnings": warnings,
+        "unresolved_placeholders": unresolved_placeholders,
+        "maintenance_updates": maintenance_updates,
+        "context": operation_context,
+    }
+    _append_log(vault_root, "note.instantiate", result)
+    return result
+
+
+def write_note(
+    vault_root: Path,
+    path: str,
+    content: str,
+    if_exists: str = "fail",
+) -> dict:
+    """Write raw markdown content to a vault note exactly as supplied.
+
+    Never overwrites an existing note. Does not add frontmatter, headings,
+    `created`, or strip template-control fields. Parent directories are
+    created as needed. A trailing newline is normalized when the supplied
+    content is non-empty and does not already end with one.
+    """
+    exists_policy = (if_exists or "fail").strip().lower()
+    if exists_policy not in {"fail", "skip"}:
+        raise ValueError("Invalid if_exists; expected one of: fail, skip")
+
+    if not isinstance(content, str):
+        raise ValueError("Field 'content' is required and must be a string")
+    if not content.strip():
+        raise ValueError("Field 'content' must not be empty")
+
+    note_path = _resolve_safe_markdown_path(vault_root, path)
+
+    if _resolve_existing_file(note_path):
+        if exists_policy == "skip":
+            result = {
+                "path": _relative(vault_root, note_path),
+                "action": "already_exists",
+                "created": False,
+                "if_exists": exists_policy,
+                "maintenance_updates": [],
+            }
+            _append_log(vault_root, "note.write.skip", result)
+            return result
+        raise ValueError(f"Note already exists at path: {_relative(vault_root, note_path)}")
+
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    written_content = content if content.endswith("\n") else content + "\n"
+    note_path.write_text(written_content, encoding="utf-8")
+    maintenance_updates = _refresh_structure_context(vault_root, [note_path.parent])
+    operation_context = _build_operation_context(vault_root, note_path.parent)
+
+    result = {
+        "path": _relative(vault_root, note_path),
+        "action": "created",
+        "created": True,
+        "if_exists": exists_policy,
+        "maintenance_updates": maintenance_updates,
+        "context": operation_context,
+    }
+    _append_log(vault_root, "note.write", result)
+    return result
+
+
 def _serialize_frontmatter(fields: dict) -> str:
     lines = ["---"]
     for key, value in fields.items():
