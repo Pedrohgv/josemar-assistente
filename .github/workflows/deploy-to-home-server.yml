@@ -406,6 +406,23 @@ jobs:
           echo "Checking deployed skills..."
           docker compose exec -T hermes ls -la /opt/josemar/skills/ 2>/dev/null || echo "No skills deployed yet"
 
+      - name: Verify Hermes Python dependencies
+        run: |
+          docker compose exec -T hermes python3 - <<'PY'
+          import importlib.util
+          import sys
+
+          missing = [
+              module
+              for module in ("markdown", "pymupdf")
+              if importlib.util.find_spec(module) is None
+          ]
+          print(f"python={sys.executable}")
+          if missing:
+              raise SystemExit(f"Missing Hermes Python dependencies: {', '.join(missing)}")
+          print("Hermes Python dependencies OK")
+          PY
+
       - name: Cleanup sensitive files
         if: always()
         run: rm -f .env
