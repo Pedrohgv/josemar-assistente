@@ -1799,6 +1799,178 @@ def write_note(
     return result
 
 
+# PDF rendering backend. Kept as module-level seams so tests can stub them
+# without installing PyMuPDF or Python-Markdown. The real implementation
+# lazily imports markdown (Python-Markdown) and pymupdf (a.k.a. fitz),
+# converts the markdown body to a styled HTML document, then renders it to
+# a multi-page PDF via PyMuPDF Story + DocumentWriter. If either dependency
+# is unavailable, the route surfaces a clear validation error instead of
+# crashing.
+
+_PDF_CSS = """
+body { font-family: Helvetica, Arial, sans-serif; font-size: 11pt; line-height: 1.45; color: #1a1a1a; }
+h1 { font-size: 20pt; margin-top: 18pt; margin-bottom: 8pt; color: #111; }
+h2 { font-size: 16pt; margin-top: 14pt; margin-bottom: 6pt; color: #222; }
+h3 { font-size: 13pt; margin-top: 12pt; margin-bottom: 5pt; color: #222; }
+h4, h5, h6 { font-size: 11pt; margin-top: 10pt; margin-bottom: 4pt; color: #333; }
+p { margin: 4pt 0; }
+a { color: #1a5fb4; text-decoration: underline; }
+ul, ol { margin: 4pt 0 4pt 18pt; }
+li { margin: 2pt 0; }
+code { font-family: "Courier New", monospace; font-size: 10pt; background: #f4f4f4; padding: 0 2pt; }
+pre { font-family: "Courier New", monospace; font-size: 9.5pt; background: #f4f4f4; padding: 6pt; white-space: pre-wrap; word-wrap: break-word; }
+pre code { background: transparent; padding: 0; }
+blockquote { margin: 6pt 0 6pt 12pt; padding-left: 8pt; border-left: 3pt solid #ccc; color: #444; }
+table { border-collapse: collapse; margin: 6pt 0; font-size: 10pt; }
+th, td { border: 0.5pt solid #999; padding: 3pt 5pt; text-align: left; }
+th { background: #eee; font-weight: bold; }
+hr { border: none; border-top: 0.5pt solid #ccc; margin: 10pt 0; }
+"""
+
+
+def _markdown_to_html(markdown_text: str) -> str:
+    """Convert a markdown body to a full HTML document with simple CSS.
+
+    Uses Python-Markdown with viewer-like extensions (extra, tables,
+    fenced_code, sane_lists) when available. Raises RuntimeError if
+    Python-Markdown is not installed.
+    """
+    try:
+        import markdown  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "PDF export requires Python-Markdown (markdown), which is not installed"
+        ) from exc
+
+    extensions = ["extra", "tables", "fenced_code", "sane_lists"]
+    try:
+        html_body = markdown.markdown(markdown_text, extensions=extensions)
+    except Exception:
+        # Fall back to a no-extension conversion if an extension is missing
+        # in an older Python-Markdown release.
+        html_body = markdown.markdown(markdown_text)
+
+    return (
+        "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+        f"<style>{_PDF_CSS}</style>\n</head>\n<body>\n{html_body}\n</body>\n</html>\n"
+    )
+
+
+def _render_pdf_bytes(markdown_text: str) -> bytes:
+    """Render a markdown body into a multi-page PDF using PyMuPDF.
+
+    Converts markdown to styled HTML via `_markdown_to_html`, then renders
+    the HTML to PDF using PyMuPDF Story + DocumentWriter. Returns the raw
+    PDF bytes. Raises RuntimeError if PyMuPDF is unavailable or the
+    Story/DocumentWriter API is missing in the installed version.
+    """
+    html = _markdown_to_html(markdown_text)
+
+    try:
+        import fitz  # type: ignore  # PyMuPDF
+    except ImportError:
+        try:
+            import pymupdf as fitz  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "PDF export requires PyMuPDF (pymupdf/fitz), which is not installed"
+            ) from exc
+
+    Story = getattr(fitz, "Story", None)
+    DocumentWriter = getattr(fitz, "DocumentWriter", None)
+    if Story is None or DocumentWriter is None:
+        raise RuntimeError(
+            "PDF export requires PyMuPDF Story + DocumentWriter API, "
+            "which is unavailable in the installed PyMuPDF version"
+        )
+
+    import tempfile
+
+    story = Story(html)
+    # A4 page size with 36pt margins on all sides.
+    page_width, page_height = 595.0, 842.0
+    margin = 36.0
+    media_box = fitz.Rect(0, 0, page_width, page_height)
+    content_box = fitz.Rect(margin, margin, page_width - margin, page_height - margin)
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        out_path = tmp.name
+
+    try:
+        writer = DocumentWriter(out_path)
+        more = True
+        while more:
+            device = writer.begin_page(media_box)
+            more, _ = story.place(content_box)
+            story.draw(device)
+            writer.end_page()
+        writer.close()
+
+        with open(out_path, "rb") as handle:
+            return handle.read()
+    finally:
+        try:
+            import os as _os
+            _os.unlink(out_path)
+        except OSError:
+            pass
+
+
+def export_note_pdf(
+    vault_root: Path,
+    path: str,
+    output_path: str | None = None,
+    pdf_renderer=None,
+) -> dict:
+    """Convert a markdown note to a PDF file inside the vault.
+
+    Strips YAML frontmatter from the rendered content. The output PDF is
+    written next to the source (same stem, `.pdf` suffix) when `output_path`
+    is omitted, or to the explicit safe relative `output_path` when provided.
+    """
+    source_path = _resolve_safe_markdown_path(vault_root, path)
+    if not _resolve_existing_file(source_path):
+        raise ValueError(f"Note not found at path: {path}")
+
+    text = _read_text_strict(source_path)
+    _, body = _extract_frontmatter(text)
+    rendered_body = body.strip()
+
+    if output_path is None or not str(output_path).strip():
+        target_path = source_path.with_suffix(".pdf")
+    else:
+        raw_output = str(output_path).strip().replace("\\", "/")
+        if raw_output.startswith("/"):
+            raise ValueError("Absolute output paths are not allowed")
+        if ".." in raw_output.split("/"):
+            raise ValueError("output_path must not contain parent traversal segments")
+        target_path = _resolve_relative_path(vault_root, raw_output)
+        if target_path.suffix.lower() != ".pdf":
+            raise ValueError("output_path must end with .pdf")
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    renderer = pdf_renderer if pdf_renderer is not None else _render_pdf_bytes
+    try:
+        pdf_bytes = renderer(rendered_body)
+    except RuntimeError:
+        raise
+    if not isinstance(pdf_bytes, (bytes, bytearray)):
+        raise RuntimeError("PDF renderer returned no bytes")
+
+    target_path.write_bytes(bytes(pdf_bytes))
+    bytes_written = target_path.stat().st_size
+
+    result = {
+        "path": _relative(vault_root, source_path),
+        "output_path": _relative(vault_root, target_path),
+        "bytes_written": bytes_written,
+        "summary": f"Exported {path} to PDF ({bytes_written} bytes).",
+    }
+    _append_log(vault_root, "note.export_pdf", result)
+    return result
+
+
 def _serialize_frontmatter(fields: dict) -> str:
     lines = ["---"]
     for key, value in fields.items():
