@@ -48,7 +48,7 @@ After execution, return:
 - Reject absolute or traversal paths for both source and output.
 - Reject non-`.md` source and non-`.pdf` output.
 - Reject missing source files.
-- Do not install dependencies at runtime; surface a clear error if PyMuPDF is unavailable.
+- Do not install dependencies at runtime; surface a clear error if Python-Markdown or PyMuPDF is unavailable.
 
 ## Compatibility
 
