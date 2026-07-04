@@ -26,8 +26,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Skill entrypoints use `#!/usr/bin/env python3`, which resolves to the system
-# Python in the Hermes base image. Install Josemar skill dependencies there.
-RUN python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore \
+# Python at runtime. During Docker build, `python3` may resolve differently, so
+# target `/usr/bin/python3` explicitly for Josemar skill dependencies.
+RUN /usr/bin/python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore \
     pymupdf \
     Markdown==3.7
 
