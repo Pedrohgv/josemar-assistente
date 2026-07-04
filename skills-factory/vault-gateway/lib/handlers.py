@@ -10,6 +10,7 @@ from lib.vault_ops import (
     apply_non_destructive_port,
     build_port_plan,
     capture_note,
+    export_note_pdf,
     file_note,
     inspect_template,
     instantiate_note,
@@ -592,6 +593,18 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
                 "result": result,
             }
 
+        if route == "note.export_pdf":
+            result = export_note_pdf(
+                vault_root=vault_root,
+                path=payload.get("path"),
+                output_path=payload.get("output_path"),
+            )
+            return {
+                "message": result.get("summary", "Note exported to PDF."),
+                "needs_user_input": False,
+                "result": result,
+            }
+
         if route == "inbox.triage":
             summary = summarize_inbox(vault_root)
             return {
@@ -643,6 +656,12 @@ def handle_route(route: str, payload: dict, metadata: dict) -> dict:
             "error": "validation_error",
             "details": str(exc),
             "needs_user_input": True,
+        }
+    except RuntimeError as exc:
+        return {
+            "message": str(exc) or "Runtime error while executing route.",
+            "error": "validation_error",
+            "needs_user_input": False,
         }
     except OSError as exc:
         details = exc.strerror or str(exc) or type(exc).__name__

@@ -40,6 +40,7 @@ echo '{"route":"note.read","payload":{"path":"07-Daily/2026-05-31.md"}}' | /opt/
 | `note.rename` | Rename note in place (and optionally rewrite wikilinks) | Medium |
 | `note.search` | Search notes by text | Medium |
 | `note.link` | Insert a wikilink between two notes | Medium |
+| `note.export_pdf` | Convert a markdown note to a PDF in the vault | Low |
 | `template.list` | Discover available templates | Low |
 | `template.inspect` | Inspect one template schema | Low |
 | `onboarding` | Initialize/port a vault (multi-turn) | Low (one-time) |
@@ -352,6 +353,7 @@ The routes below are specialized, run infrequently, or are pure dispatches. Full
 |---|---|---|
 | `note.search` | `playbooks/note-search/PLAYBOOK.md` | User asks to find a note by content, lookup, recall, or follow-up search. Scoring: title stem > path > content. |
 | `note.link` | `playbooks/note-link/PLAYBOOK.md` | User asks to connect two notes, build a relationship, or insert a wikilink. Use bidirectional when the relationship is symmetrical. |
+| `note.export_pdf` | `playbooks/note-export-pdf/PLAYBOOK.md` | User asks to export, render, or convert a note to PDF. Strips YAML frontmatter; renders Markdown structures (headings, tables, code, lists) to a multi-page PDF. Requires Python-Markdown and PyMuPDF at runtime. |
 | `template.list` | `playbooks/template-list/PLAYBOOK.md` | Before any template-based instantiation; to discover candidates. |
 | `template.inspect` | `playbooks/template-inspect/PLAYBOOK.md` | After `template.list`; to fetch the field schema of a chosen template before filling it. |
 | `onboarding` | `playbooks/onboarding/PLAYBOOK.md` | First-run setup, vault initialization, or porting an existing vault. Multi-turn; requires `state_key` per session. |

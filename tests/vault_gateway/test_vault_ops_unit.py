@@ -571,6 +571,251 @@ vg_fields:
                 content="   ",
             )
 
+    def _stub_pdf_renderer(self, captured: dict) -> object:
+        def _renderer(text: str) -> bytes:
+            captured["text"] = text
+            return b"%PDF-1.4\n%stub-pdf-bytes\n"
+        return _renderer
+
+    def test_export_note_pdf_default_output_next_to_source(self) -> None:
+        self.fake.write_note(
+            "01-Projects/Alpha.md",
+            "---\ntype: project\n---\n\n# Alpha\n\nbody text\n",
+        )
+        captured: dict = {}
+
+        result = vault_ops.export_note_pdf(
+            self.fake.vault_dir,
+            path="01-Projects/Alpha.md",
+            pdf_renderer=self._stub_pdf_renderer(captured),
+        )
+
+        self.assertEqual(result["path"], "01-Projects/Alpha.md")
+        self.assertEqual(result["output_path"], "01-Projects/Alpha.pdf")
+        self.assertGreater(result["bytes_written"], 0)
+        self.assertIn("Alpha", result["summary"])
+
+        pdf_path = self.fake.vault_dir / "01-Projects" / "Alpha.pdf"
+        self.assertTrue(pdf_path.exists())
+        self.assertEqual(pdf_path.read_bytes(), b"%PDF-1.4\n%stub-pdf-bytes\n")
+        # Frontmatter must be stripped from rendered content.
+        self.assertNotIn("type: project", captured["text"])
+        self.assertIn("Alpha", captured["text"])
+
+    def test_export_note_pdf_explicit_output_path(self) -> None:
+        self.fake.write_note("00-Inbox/Note.md", "# Note\n\nbody\n")
+        captured: dict = {}
+
+        result = vault_ops.export_note_pdf(
+            self.fake.vault_dir,
+            path="00-Inbox/Note.md",
+            output_path="03-Resources/Note.pdf",
+            pdf_renderer=self._stub_pdf_renderer(captured),
+        )
+
+        self.assertEqual(result["output_path"], "03-Resources/Note.pdf")
+        self.assertTrue((self.fake.vault_dir / "03-Resources" / "Note.pdf").exists())
+
+    def test_export_note_pdf_rejects_non_markdown_source(self) -> None:
+        self.fake.write_note("00-Inbox/Doc.txt", "text\n")
+        with self.assertRaisesRegex(ValueError, "Only markdown notes"):
+            vault_ops.export_note_pdf(
+                self.fake.vault_dir,
+                path="00-Inbox/Doc.txt",
+                pdf_renderer=self._stub_pdf_renderer({}),
+            )
+
+    def test_export_note_pdf_rejects_missing_source(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Note not found at path"):
+            vault_ops.export_note_pdf(
+                self.fake.vault_dir,
+                path="00-Inbox/Missing.md",
+                pdf_renderer=self._stub_pdf_renderer({}),
+            )
+
+    def test_export_note_pdf_rejects_traversal_source(self) -> None:
+        with self.assertRaisesRegex(ValueError, "escapes vault root"):
+            vault_ops.export_note_pdf(
+                self.fake.vault_dir,
+                path="../outside.md",
+                pdf_renderer=self._stub_pdf_renderer({}),
+            )
+
+    def test_export_note_pdf_rejects_non_pdf_output(self) -> None:
+        self.fake.write_note("00-Inbox/Note.md", "# Note\n")
+        with self.assertRaisesRegex(ValueError, "output_path must end with .pdf"):
+            vault_ops.export_note_pdf(
+                self.fake.vault_dir,
+                path="00-Inbox/Note.md",
+                output_path="00-Inbox/Note.txt",
+                pdf_renderer=self._stub_pdf_renderer({}),
+            )
+
+    def test_export_note_pdf_rejects_traversal_output(self) -> None:
+        self.fake.write_note("00-Inbox/Note.md", "# Note\n")
+        with self.assertRaisesRegex(ValueError, "parent traversal"):
+            vault_ops.export_note_pdf(
+                self.fake.vault_dir,
+                path="00-Inbox/Note.md",
+                output_path="../outside.pdf",
+                pdf_renderer=self._stub_pdf_renderer({}),
+            )
+
+    def test_export_note_pdf_rejects_absolute_output(self) -> None:
+        self.fake.write_note("00-Inbox/Note.md", "# Note\n")
+        with self.assertRaisesRegex(ValueError, "Absolute output paths"):
+            vault_ops.export_note_pdf(
+                self.fake.vault_dir,
+                path="00-Inbox/Note.md",
+                output_path="/tmp/out.pdf",
+                pdf_renderer=self._stub_pdf_renderer({}),
+            )
+
+    def test_export_note_pdf_surfaces_missing_pymupdf_as_runtime_error(self) -> None:
+        self.fake.write_note("00-Inbox/Note.md", "# Note\n")
+
+        def _failing_renderer(_text: str) -> bytes:
+            raise RuntimeError("PDF export requires PyMuPDF")
+
+        with self.assertRaisesRegex(RuntimeError, "PyMuPDF"):
+            vault_ops.export_note_pdf(
+                self.fake.vault_dir,
+                path="00-Inbox/Note.md",
+                pdf_renderer=_failing_renderer,
+            )
+
+    def test_markdown_to_html_converts_headings(self) -> None:
+        html = vault_ops._markdown_to_html("# Title\n\n## Subsection\n\nbody\n")
+        self.assertIn("<h1>", html)
+        self.assertIn("Title", html)
+        self.assertIn("<h2>", html)
+        self.assertIn("Subsection", html)
+        self.assertIn("<p>", html)
+        self.assertIn("body", html)
+        self.assertTrue(html.startswith("<!DOCTYPE html>"))
+
+    def test_markdown_to_html_converts_tables(self) -> None:
+        md = "| Col A | Col B |\n|---|---|\n| 1 | 2 |\n"
+        html = vault_ops._markdown_to_html(md)
+        self.assertIn("<table>", html)
+        self.assertIn("<th>", html)
+        self.assertIn("Col A", html)
+        self.assertIn("<td>", html)
+
+    def test_markdown_to_html_converts_emphasis_and_code(self) -> None:
+        md = "Use **bold** and *italic* and `code`.\n\n```\nfenced\n```\n"
+        html = vault_ops._markdown_to_html(md)
+        self.assertIn("<strong>", html)
+        self.assertIn("<em>", html)
+        self.assertIn("<code>", html)
+        self.assertIn("fenced", html)
+
+    def test_markdown_to_html_converts_lists_and_blockquote(self) -> None:
+        md = "- one\n- two\n\n> quoted\n"
+        html = vault_ops._markdown_to_html(md)
+        self.assertIn("<ul>", html)
+        self.assertIn("<li>", html)
+        self.assertIn("<blockquote>", html)
+        self.assertIn("quoted", html)
+
+    def test_markdown_to_html_includes_css(self) -> None:
+        html = vault_ops._markdown_to_html("# H\n")
+        self.assertIn("<style>", html)
+        self.assertIn("font-family", html)
+
+    def test_markdown_to_html_surfaces_missing_markdown_as_runtime_error(self) -> None:
+        # Simulate Python-Markdown being unavailable by hiding the module
+        # from the import system inside the helper.
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "markdown":
+                raise ImportError("simulated: markdown not installed")
+            return real_import(name, globals, locals, fromlist, level)
+
+        with mock.patch.object(builtins, "__import__", side_effect=_fake_import):
+            with self.assertRaisesRegex(RuntimeError, "Python-Markdown"):
+                vault_ops._markdown_to_html("# x\n")
+
+    def test_render_pdf_bytes_uses_story_document_writer_flow(self) -> None:
+        events: list[str] = []
+
+        class FakeRect:
+            def __init__(self, *args) -> None:
+                self.args = args
+
+        class FakeStory:
+            def __init__(self, html: str) -> None:
+                events.append(f"story:{'<h1>Title</h1>' in html}")
+
+            def place(self, _rect) -> tuple[bool, object]:
+                events.append("place")
+                return False, None
+
+            def draw(self, device) -> None:
+                events.append(f"draw:{device}")
+
+        class FakeDocumentWriter:
+            def __init__(self, path: str) -> None:
+                self.path = path
+                events.append("writer")
+
+            def begin_page(self, _media_box):
+                events.append("begin_page")
+                return "device"
+
+            def end_page(self) -> None:
+                events.append("end_page")
+
+            def close(self) -> None:
+                events.append("close")
+                Path(self.path).write_bytes(b"%PDF-1.4\n%fake\n")
+
+        fake_fitz = type(
+            "FakeFitz",
+            (),
+            {
+                "Rect": FakeRect,
+                "Story": FakeStory,
+                "DocumentWriter": FakeDocumentWriter,
+            },
+        )()
+
+        original_fitz = sys.modules.get("fitz")
+        sys.modules["fitz"] = fake_fitz  # type: ignore[assignment]
+        try:
+            pdf_bytes = vault_ops._render_pdf_bytes("# Title\n")
+        finally:
+            if original_fitz is None:
+                sys.modules.pop("fitz", None)
+            else:
+                sys.modules["fitz"] = original_fitz
+
+        self.assertEqual(pdf_bytes, b"%PDF-1.4\n%fake\n")
+        self.assertEqual(
+            events,
+            ["story:True", "writer", "begin_page", "place", "draw:device", "end_page", "close"],
+        )
+
+    def test_render_pdf_bytes_surfaces_missing_pymupdf_as_runtime_error(self) -> None:
+        # Markdown is available locally; only PyMuPDF is missing. Patch the
+        # fitz/pymupdf imports to simulate absence.
+        original_fitz = sys.modules.get("fitz")
+        original_pymupdf = sys.modules.get("pymupdf")
+        sys.modules["fitz"] = None  # type: ignore[assignment]
+        sys.modules["pymupdf"] = None  # type: ignore[assignment]
+        try:
+            with self.assertRaisesRegex(RuntimeError, "PyMuPDF"):
+                vault_ops._render_pdf_bytes("# Title\n\nbody\n")
+        finally:
+            for name, value in (("fitz", original_fitz), ("pymupdf", original_pymupdf)):
+                if value is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = value
+
 
 if __name__ == "__main__":
     unittest.main()

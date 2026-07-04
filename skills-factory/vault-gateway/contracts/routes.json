@@ -164,6 +164,14 @@
         "rewrite_wikilinks": "optional boolean (default true)"
       }
     },
+    "note.export_pdf": {
+      "status": "active",
+      "summary": "Convert a markdown note to a PDF file in the vault (strips YAML frontmatter)",
+      "payload": {
+        "path": "required relative path (must end with .md)",
+        "output_path": "optional relative path (must end with .pdf; defaults to source stem .pdf next to source)"
+      }
+    },
     "inbox.triage": {
       "status": "active",
       "source": "skills/inbox-triage/SKILL.md",

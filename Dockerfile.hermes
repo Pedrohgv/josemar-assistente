@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The Hermes image uses a venv as default python3; ensure pip exists there
 # and install Josemar dependencies into the venv so skills can import them.
 RUN /opt/hermes/.venv/bin/python3 -m ensurepip --upgrade \
-    && /opt/hermes/.venv/bin/python3 -m pip install --no-cache-dir pymupdf
+    && /opt/hermes/.venv/bin/python3 -m pip install --no-cache-dir pymupdf Markdown==3.7
 
 COPY scripts/patch-hermes-dashboard-profile-name.py /tmp/patch-hermes-dashboard-profile-name.py
 RUN python3 /tmp/patch-hermes-dashboard-profile-name.py \

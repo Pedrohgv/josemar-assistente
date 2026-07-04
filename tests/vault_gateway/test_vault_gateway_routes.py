@@ -406,6 +406,98 @@ class VaultGatewayRouteTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn(output.get("error"), {"invalid_payload", "validation_error"})
 
+    def test_note_export_pdf_rejects_non_markdown_source(self) -> None:
+        self.fake.write_note("00-Inbox/Doc.txt", "text\n")
+
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.export_pdf",
+                "payload": {"path": "00-Inbox/Doc.txt"},
+            }
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "validation_error")
+
+    def test_note_export_pdf_rejects_missing_source(self) -> None:
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.export_pdf",
+                "payload": {"path": "00-Inbox/Missing.md"},
+            }
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "validation_error")
+        self.assertIn("not found", output.get("details", "").lower())
+
+    def test_note_export_pdf_rejects_traversal_source(self) -> None:
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.export_pdf",
+                "payload": {"path": "../outside.md"},
+            }
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn(output.get("error"), {"invalid_payload", "validation_error"})
+
+    def test_note_export_pdf_rejects_non_pdf_output(self) -> None:
+        self.fake.write_note("00-Inbox/Note.md", "# Note\n")
+
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.export_pdf",
+                "payload": {
+                    "path": "00-Inbox/Note.md",
+                    "output_path": "00-Inbox/Note.txt",
+                },
+            }
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "validation_error")
+
+    def test_note_export_pdf_rejects_traversal_output(self) -> None:
+        self.fake.write_note("00-Inbox/Note.md", "# Note\n")
+
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.export_pdf",
+                "payload": {
+                    "path": "00-Inbox/Note.md",
+                    "output_path": "../outside.pdf",
+                },
+            }
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn(output.get("error"), {"invalid_payload", "validation_error"})
+
+    def test_note_export_pdf_rejects_unknown_payload_keys(self) -> None:
+        self.fake.write_note("00-Inbox/Note.md", "# Note\n")
+
+        code, output = self.fake.run_gateway(
+            {
+                "route": "note.export_pdf",
+                "payload": {
+                    "path": "00-Inbox/Note.md",
+                    "unexpected": "value",
+                },
+            }
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "invalid_payload")
+
+    def test_note_export_pdf_requires_path(self) -> None:
+        code, output = self.fake.run_gateway(
+            {"route": "note.export_pdf", "payload": {}}
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(output.get("error"), "invalid_payload")
+
 
 if __name__ == "__main__":
     unittest.main()
