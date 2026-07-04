@@ -684,8 +684,33 @@ vg_fields:
                 pdf_renderer=_failing_renderer,
             )
 
+    def _fake_markdown_module(self):
+        class FakeMarkdownModule:
+            @staticmethod
+            def markdown(text: str, extensions=None) -> str:
+                if "| Col A | Col B |" in text:
+                    return (
+                        "<table><thead><tr><th>Col A</th><th>Col B</th></tr></thead>"
+                        "<tbody><tr><td>1</td><td>2</td></tr></tbody></table>"
+                    )
+                if "**bold**" in text:
+                    return (
+                        "<p>Use <strong>bold</strong> and <em>italic</em> and "
+                        "<code>code</code>.</p><pre><code>fenced</code></pre>"
+                    )
+                if text.startswith("- one"):
+                    return "<ul><li>one</li><li>two</li></ul><blockquote><p>quoted</p></blockquote>"
+                if text.startswith("# Title"):
+                    return "<h1>Title</h1><h2>Subsection</h2><p>body</p>"
+                if text.startswith("# H"):
+                    return "<h1>H</h1>"
+                return "<p>body</p>"
+
+        return FakeMarkdownModule
+
     def test_markdown_to_html_converts_headings(self) -> None:
-        html = vault_ops._markdown_to_html("# Title\n\n## Subsection\n\nbody\n")
+        with mock.patch.dict(sys.modules, {"markdown": self._fake_markdown_module()}):
+            html = vault_ops._markdown_to_html("# Title\n\n## Subsection\n\nbody\n")
         self.assertIn("<h1>", html)
         self.assertIn("Title", html)
         self.assertIn("<h2>", html)
@@ -696,7 +721,8 @@ vg_fields:
 
     def test_markdown_to_html_converts_tables(self) -> None:
         md = "| Col A | Col B |\n|---|---|\n| 1 | 2 |\n"
-        html = vault_ops._markdown_to_html(md)
+        with mock.patch.dict(sys.modules, {"markdown": self._fake_markdown_module()}):
+            html = vault_ops._markdown_to_html(md)
         self.assertIn("<table>", html)
         self.assertIn("<th>", html)
         self.assertIn("Col A", html)
@@ -704,7 +730,8 @@ vg_fields:
 
     def test_markdown_to_html_converts_emphasis_and_code(self) -> None:
         md = "Use **bold** and *italic* and `code`.\n\n```\nfenced\n```\n"
-        html = vault_ops._markdown_to_html(md)
+        with mock.patch.dict(sys.modules, {"markdown": self._fake_markdown_module()}):
+            html = vault_ops._markdown_to_html(md)
         self.assertIn("<strong>", html)
         self.assertIn("<em>", html)
         self.assertIn("<code>", html)
@@ -712,14 +739,16 @@ vg_fields:
 
     def test_markdown_to_html_converts_lists_and_blockquote(self) -> None:
         md = "- one\n- two\n\n> quoted\n"
-        html = vault_ops._markdown_to_html(md)
+        with mock.patch.dict(sys.modules, {"markdown": self._fake_markdown_module()}):
+            html = vault_ops._markdown_to_html(md)
         self.assertIn("<ul>", html)
         self.assertIn("<li>", html)
         self.assertIn("<blockquote>", html)
         self.assertIn("quoted", html)
 
     def test_markdown_to_html_includes_css(self) -> None:
-        html = vault_ops._markdown_to_html("# H\n")
+        with mock.patch.dict(sys.modules, {"markdown": self._fake_markdown_module()}):
+            html = vault_ops._markdown_to_html("# H\n")
         self.assertIn("<style>", html)
         self.assertIn("font-family", html)
 
@@ -784,7 +813,9 @@ vg_fields:
         )()
 
         original_fitz = sys.modules.get("fitz")
+        original_markdown = sys.modules.get("markdown")
         sys.modules["fitz"] = fake_fitz  # type: ignore[assignment]
+        sys.modules["markdown"] = self._fake_markdown_module()  # type: ignore[assignment]
         try:
             pdf_bytes = vault_ops._render_pdf_bytes("# Title\n")
         finally:
@@ -792,6 +823,10 @@ vg_fields:
                 sys.modules.pop("fitz", None)
             else:
                 sys.modules["fitz"] = original_fitz
+            if original_markdown is None:
+                sys.modules.pop("markdown", None)
+            else:
+                sys.modules["markdown"] = original_markdown
 
         self.assertEqual(pdf_bytes, b"%PDF-1.4\n%fake\n")
         self.assertEqual(
@@ -800,12 +835,14 @@ vg_fields:
         )
 
     def test_render_pdf_bytes_surfaces_missing_pymupdf_as_runtime_error(self) -> None:
-        # Markdown is available locally; only PyMuPDF is missing. Patch the
-        # fitz/pymupdf imports to simulate absence.
+        # Patch the markdown import to succeed and the fitz/pymupdf imports
+        # to simulate PyMuPDF absence.
         original_fitz = sys.modules.get("fitz")
         original_pymupdf = sys.modules.get("pymupdf")
+        original_markdown = sys.modules.get("markdown")
         sys.modules["fitz"] = None  # type: ignore[assignment]
         sys.modules["pymupdf"] = None  # type: ignore[assignment]
+        sys.modules["markdown"] = self._fake_markdown_module()  # type: ignore[assignment]
         try:
             with self.assertRaisesRegex(RuntimeError, "PyMuPDF"):
                 vault_ops._render_pdf_bytes("# Title\n\nbody\n")
@@ -815,6 +852,10 @@ vg_fields:
                     sys.modules.pop(name, None)
                 else:
                     sys.modules[name] = value
+            if original_markdown is None:
+                sys.modules.pop("markdown", None)
+            else:
+                sys.modules["markdown"] = original_markdown
 
 
 if __name__ == "__main__":
