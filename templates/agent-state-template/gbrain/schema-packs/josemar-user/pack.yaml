@@ -1,0 +1,38 @@
+# Josemar user schema pack.
+#
+# This is the source-of-truth schema pack for the Josemar deployment. It lives
+# in the private agent-state repo and is installed into gbrain's native user-pack
+# directory ($GBRAIN_HOME/.gbrain/schema-packs/josemar-user/pack.yaml) during
+# operator activation (josemar-gbrain reindex).
+#
+# Schema editing is source-first and approval-gated:
+#   1. Josemar proposes an exact source-pack diff and impact.
+#   2. User explicitly approves.
+#   3. Source pack is updated and committed to agent-state.
+#   4. Operator runs `josemar-gbrain reindex` to validate, install, and activate.
+#
+# Never edit the installed copy under $GBRAIN_HOME/.gbrain/ directly; always
+# edit this source file and reindex.
+#
+# This pack extends gbrain-base-v2 (the bundled canonical taxonomy). It starts
+# minimal — add page_types, link_types, filing_rules, etc. as needed.
+
+api_version: "gbrain-schema-pack-v1"
+name: josemar-user
+version: "0.1.0"
+description: >
+  Josemar user-owned schema pack. Extends gbrain-base-v2 with
+  deployment-specific types and rules. Source-first: edit this file,
+  commit to agent-state, then reindex to activate.
+extends: gbrain-base-v2
+gbrain_min_version: "0.42.0"
+page_types: []
+link_types: []
+frontmatter_links: []
+takes_kinds:
+  - fact
+  - take
+  - bet
+  - hunch
+enrichable_types: []
+filing_rules: []

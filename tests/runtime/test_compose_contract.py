@@ -41,7 +41,7 @@ class ComposeContractTests(unittest.TestCase):
         self.assertIn("- hermes-data:/opt/data", block)
         self.assertIn("- aux-ml-shared:/shared", block)
         self.assertIn("- obsidian-vault:/opt/data/obsidian", block)
-        self.assertIn("- VAULT_GATEWAY_ALLOWED_ROOTS=/opt/data/obsidian:/shared", block)
+        self.assertNotIn("VAULT_GATEWAY", block)
 
     def test_aux_ml_shared_volume_is_read_only(self) -> None:
         block = service_block(self.text, "aux-ml")
@@ -68,6 +68,27 @@ class ComposeContractTests(unittest.TestCase):
         self.assertTrue(runtime.project.startswith("josemar-test-"))
         self.assertEqual(runtime.env["JOSEMAR_CONTAINER_PREFIX"], runtime.project)
         self.assertEqual(runtime.env["TAILSCALE_HOSTNAME"], f"{runtime.project}-server")
+
+    def test_gbrain_env_defaults_are_present_and_enabled(self) -> None:
+        block = service_block(self.text, "hermes")
+        self.assertIn("- GBRAIN_ENABLED=${GBRAIN_ENABLED:-true}", block)
+        self.assertIn("- GBRAIN_HOME=${GBRAIN_HOME:-/opt/data}", block)
+        self.assertIn("- GBRAIN_BRAIN_REPO=${GBRAIN_BRAIN_REPO:-/opt/data/obsidian}", block)
+        self.assertIn("- GBRAIN_SCHEMA_PACK=${GBRAIN_SCHEMA_PACK:-gbrain-base-v2}", block)
+        self.assertIn("- GBRAIN_SCHEMA_SOURCE_ROOT=${GBRAIN_SCHEMA_SOURCE_ROOT:-/opt/data/gbrain/schema-packs}", block)
+        self.assertIn("- GBRAIN_QUERY_TIMEOUT_SECONDS=${GBRAIN_QUERY_TIMEOUT_SECONDS:-30}", block)
+        self.assertIn("- GBRAIN_QUERY_MAX_INPUT_CHARS=${GBRAIN_QUERY_MAX_INPUT_CHARS:-2000}", block)
+        self.assertIn("- GBRAIN_QUERY_MAX_OUTPUT_CHARS=${GBRAIN_QUERY_MAX_OUTPUT_CHARS:-20000}", block)
+        self.assertIn("- GBRAIN_QUERY_MAX_LIMIT=${GBRAIN_QUERY_MAX_LIMIT:-20}", block)
+        self.assertIn("- GBRAIN_CONTENT_MAX_CHARS=${GBRAIN_CONTENT_MAX_CHARS:-50000}", block)
+
+    def test_gbrain_does_not_add_sidecar_or_volume(self) -> None:
+        # No new volume and no new service should be introduced for gbrain.
+        self.assertNotIn("gbrain-data:", self.text)
+        self.assertNotIn("gbrain:", self.text.split("services:")[1].split("networks:")[0])
+        # HERMES_WRITABLE_VOLUMES lives in docker-hermes-init.sh, not compose;
+        # ensure .gbrain is not added to any compose writable-volume list.
+        self.assertNotIn("HERMES_WRITABLE_VOLUMES", self.text)
 
 
 if __name__ == "__main__":

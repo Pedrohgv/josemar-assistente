@@ -5,7 +5,7 @@ set -e
 WORKSPACE_DIR="${WORKSPACE_DIR:-/opt/data}"
 MANIFEST_PATH="${WORKSPACE_DIR}/.sync-manifest"
 REPO_TOKEN="${WORKSPACE_REPO_TOKEN:-}"
-PROTECTED_RUNTIME_PATHS="config.yaml credentials .config obsidian sessions logs .env auth.json"
+PROTECTED_RUNTIME_PATHS="config.yaml credentials .config obsidian sessions logs .env auth.json .gbrain"
 
 input_data=$(cat)
 
@@ -172,9 +172,6 @@ register_user_skill_files() {
         fi
 
         relative_skill_dir="skills/${skill_dir##*/}"
-        if [ "$relative_skill_dir" = "skills/vault-gateway" ]; then
-            continue
-        fi
 
         if [ ! -f "$skill_dir/SKILL.md" ]; then
             continue

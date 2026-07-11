@@ -32,7 +32,8 @@ flowchart LR
   Agent --> Models[LLM Providers<br/>Ollama Cloud / Z.AI / DeepSeek]
   Agent --> CoreSkills[Repo Core Skills<br/>/opt/josemar/skills]
   Agent --> StateSkills[User State Skills<br/>/opt/data/skills]
-  Agent --> Vault[Obsidian Vault<br/>obsidian-vault volume]
+  Agent --> GBrain[gbrain Skill<br/>gbrain-skill CLI]
+  GBrain --> Vault[Obsidian Vault<br/>obsidian-vault volume]
 
   CoreSkills --> AuxML[aux-ml API<br/>optional]
   AuxML --> Llama[llama.cpp Router<br/>OCR models]
@@ -73,7 +74,8 @@ The state sync script only versions paths listed in `.sync-manifest`, uses the r
 
 ```mermaid
 flowchart LR
-  Hermes[Hermes Container<br/>/opt/data/obsidian] <--> Vault[(obsidian-vault volume)]
+  Hermes[Hermes Container<br/>/opt/data/obsidian] <--> GBrain[gbrain Skill<br/>gbrain-skill CLI]
+  GBrain <--> Vault[(obsidian-vault volume)]
   Vault <--> Syncthing[Syncthing Container]
   Syncthing <--> Tailscale[Tailscale Sidecar<br/>private network]
   Tailscale <--> Devices[Laptop / Mobile Devices]
@@ -210,7 +212,7 @@ josemar-assistente/
 
 | Volume | Purpose |
 | --- | --- |
-| `hermes-data` | Hermes runtime state and the private state git worktree at `/opt/data`. Runtime-private files are ignored by the state repo. |
+| `hermes-data` | Hermes runtime state and the private state git worktree at `/opt/data`. Includes gbrain state at `/opt/data/.gbrain` (PGLite database, config, readiness marker). Runtime-private files are ignored by the state repo. |
 | `aux-ml-shared` | Dedicated handoff volume for files intentionally shared with aux-ml. |
 | `obsidian-vault` | Obsidian notes and attachments, not git-versioned. |
 | `syncthing-config` | Syncthing identity and folder/device config. |
@@ -234,7 +236,7 @@ private state repo versions them on the next sync.
 
 Current repo-shipped skills:
 
-- `vault-gateway`: entrypoint for vault routing and operations.
+- `gbrain`: gated native gbrain vault interface (search, get, capture, put, link, backlinks). Exposed as `gbrain-skill` CLI in the container. Keyword-only search, no embeddings. Operator activation via `josemar-gbrain reindex`.
 - `aux-ml`: skill interface for queue-based auxiliary ML jobs.
 - `workspace-sync`: skill interface for workspace git sync, status, commit, and push flows.
 
@@ -276,7 +278,7 @@ python3 -m unittest discover -s tests -v
 Run scoped contract tests:
 
 ```bash
-python3 -m unittest tests.vault_gateway.test_gateway_contract -v
+python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract tests.gbrain.test_gbrain_skill_gate -v
 ```
 
 Set up optional pre-commit hooks:
@@ -301,6 +303,7 @@ Credentials go under `credentials/<service>/` and are mounted read-only into Her
 - `credentials/README.md`: credential setup and storage rules.
 - `docs/aux-ml.md`: auxiliary ML API, queue, model lifecycle, and OCR operations.
 - `docs/obsidian-operations.md`: Syncthing, Tailscale, rclone backup, and restore runbook.
+- `docs/gbrain-operations.md`: gbrain activation, reindex, vault swap, schema pack workflow, and troubleshooting.
 - `.github/workflows/AGENTS.md`: deployment, stop, privacy scan, and runner workflow documentation.
 - `templates/agent-state-template/README.md`: starting point for a private state repo.
 

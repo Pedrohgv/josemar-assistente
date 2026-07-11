@@ -16,7 +16,7 @@ Core architecture:
 - Hermes gateway runtime (dashboard/API/Telegram/cron/skills)
 - Two-scope skills (repo-owned `skills-factory/` + user-owned `agent-state/skills/`)
 - Git-backed state sync (`scripts/workspace-sync.sh`)
-- Obsidian vault operations (`vault-gateway` + Syncthing + backup)
+- Obsidian vault operations (native gbrain + Syncthing + backup)
 - Optional `aux-ml` queue service for long OCR jobs
 
 ## Directory Structure
@@ -25,10 +25,12 @@ Core architecture:
 josemar-assistente/
 ├── agent-state/            # Nested private repo: user state (memory/persona/skills)
 ├── credentials/            # Service credentials (not versioned)
-├── scripts/                # Workspace sync, backup, privacy tooling
+├── docs/                   # Operations runbooks (gbrain, obsidian, aux-ml)
+├── scripts/                # Workspace sync, backup, privacy tooling, gbrain wrapper
 ├── aux-ml/                 # Auxiliary ML service
 ├── skills-factory/         # Repo-owned core skills
 ├── templates/              # Bootstrap template for private state repo
+├── tests/                  # Python unit and contract tests
 ├── .github/workflows/      # CI/CD automation
 ├── docker-compose.yml      # Runtime stack
 ├── Dockerfile.hermes       # Hermes runtime image
@@ -37,7 +39,7 @@ josemar-assistente/
 
 ## Runtime Storage
 
-- `hermes-data`: Hermes runtime state plus private state git worktree (`/opt/data`)
+- `hermes-data`: Hermes runtime state plus private state git worktree (`/opt/data`). Includes gbrain state at `/opt/data/.gbrain` (PGLite database, config, readiness marker).
 - `aux-ml-shared`: explicit file handoff area for aux-ml (`/shared` in both Hermes and aux-ml)
 - `obsidian-vault`: notes/attachments (not git-versioned)
 - `syncthing-config`, `tailscale-state`, `obsidian-rclone-config`, `obsidian-backup-state`
@@ -84,7 +86,7 @@ When modifying user state, commit/push inside `agent-state` repo when requested.
 
 - Repo-owned skills: `skills-factory/*` -> copied to `/opt/josemar/skills`.
 - User-owned skills: `agent-state/skills/*` -> synced into `/opt/data/skills`.
-- Keep `vault-gateway` as the canonical vault mutation entrypoint.
+- Keep native gbrain (`skills-factory/gbrain` + `scripts/josemar-gbrain`) as the canonical vault interface.
 
 ## Security Rules
 
@@ -100,7 +102,7 @@ When modifying user state, commit/push inside `agent-state` repo when requested.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m unittest tests.vault_gateway.test_gateway_contract -v
+python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract tests.gbrain.test_gbrain_skill_gate -v
 ```
 
 ## Key References
@@ -109,4 +111,5 @@ python3 -m unittest tests.vault_gateway.test_gateway_contract -v
 - `.github/workflows/AGENTS.md` - deploy/stop/privacy workflow documentation
 - `credentials/README.md` - credential setup
 - `docs/aux-ml.md` - aux-ml operations
+- `docs/gbrain-operations.md` - gbrain activation, reindex, vault swap, and schema workflow
 - `docs/obsidian-operations.md` - Obsidian sync/backup runbook

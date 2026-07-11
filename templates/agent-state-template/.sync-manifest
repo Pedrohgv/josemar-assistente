@@ -17,3 +17,9 @@ avatars/*
 
 # Hermes cron jobs
 cron/jobs.json
+
+# User-owned gbrain schema pack source (narrow explicit paths only).
+# Do NOT use broad gbrain/** — runtime .gbrain is protected and must
+# never be versioned.
+gbrain/schema-packs/josemar-user/pack.yaml
+gbrain/schema-packs/josemar-user/README.md

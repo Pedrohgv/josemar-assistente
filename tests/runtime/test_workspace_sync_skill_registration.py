@@ -65,10 +65,7 @@ class WorkspaceSyncSkillRegistrationTests(unittest.TestCase):
         self.assertIn("skills/auto-skill/SKILL.md", tracked_files)
         self.assertIn("skills/auto-skill/auto-skill", tracked_files)
 
-    def test_commit_skips_vault_gateway_and_non_skill_dirs(self) -> None:
-        vault_gateway_dir = self.workspace / "skills" / "vault-gateway"
-        vault_gateway_dir.mkdir(parents=True)
-        (vault_gateway_dir / "SKILL.md").write_text("# Override\n", encoding="utf-8")
+    def test_commit_skips_non_skill_dirs(self) -> None:
         scratch_dir = self.workspace / "skills" / "scratch"
         scratch_dir.mkdir(parents=True)
         (scratch_dir / "notes.txt").write_text("not a skill\n", encoding="utf-8")
@@ -79,9 +76,7 @@ class WorkspaceSyncSkillRegistrationTests(unittest.TestCase):
         manifest = (self.workspace / ".sync-manifest").read_text(encoding="utf-8")
         tracked_files = self._tracked_files()
 
-        self.assertNotIn("skills/vault-gateway/SKILL.md", manifest)
         self.assertNotIn("skills/scratch/notes.txt", manifest)
-        self.assertNotIn("skills/vault-gateway/SKILL.md", tracked_files)
         self.assertNotIn("skills/scratch/notes.txt", tracked_files)
 
     def test_commit_registration_is_idempotent(self) -> None:
@@ -135,6 +130,18 @@ class WorkspaceSyncSkillRegistrationTests(unittest.TestCase):
                 self.assertNotEqual(0, process.returncode)
                 self.assertIn("protected runtime path", process.stderr)
 
+    def test_manifest_rejects_gbrain_runtime_path(self) -> None:
+        # .gbrain holds PGLite DB, config, and readiness marker; it must never
+        # be versioned by workspace state sync.
+        for path in [".gbrain", ".gbrain/readiness.json", ".gbrain/brain.pglite"]:
+            with self.subTest(path=path):
+                (self.workspace / ".sync-manifest").write_text(f"{path}\n", encoding="utf-8")
+
+                process = self._run_workspace_sync_raw({"action": "commit", "message": "bad manifest"})
+
+                self.assertNotEqual(0, process.returncode)
+                self.assertIn("protected runtime path", process.stderr)
+
     def test_manifest_rejects_unsafe_pathspecs(self) -> None:
         for path in ["../escape.md", "/etc/passwd", "foo/../bar", ":bad"]:
             with self.subTest(path=path):
@@ -164,6 +171,38 @@ class WorkspaceSyncSkillRegistrationTests(unittest.TestCase):
         result = self._run_git("check-ignore", "skills/example/SKILL.md", check=False)
 
         self.assertNotEqual(0, result.returncode)
+
+    def test_template_gitignore_allows_schema_pack_source(self) -> None:
+        """The template .gitignore must allow the narrow schema pack source path."""
+        (self.workspace / ".gitignore").write_text(TEMPLATE_GITIGNORE.read_text(encoding="utf-8"), encoding="utf-8")
+
+        result = self._run_git("check-ignore", "gbrain/schema-packs/josemar-user/pack.yaml", check=False)
+
+        self.assertNotEqual(0, result.returncode, "schema pack source path should NOT be ignored")
+
+    def test_template_gitignore_rejects_broad_gbrain(self) -> None:
+        """The template .gitignore must NOT allow broad gbrain/** (only narrow pack paths)."""
+        (self.workspace / ".gitignore").write_text(TEMPLATE_GITIGNORE.read_text(encoding="utf-8"), encoding="utf-8")
+
+        # .gbrain runtime path must be ignored (protected).
+        result = self._run_git("check-ignore", ".gbrain/brain.pglite", check=False)
+        self.assertEqual(0, result.returncode, ".gbrain runtime path should be ignored")
+
+        # Broad gbrain/** must NOT be allowed — only the narrow pack paths.
+        result = self._run_git("check-ignore", "gbrain/schema-packs/other-pack/pack.yaml", check=False)
+        self.assertEqual(0, result.returncode, "unlisted gbrain paths should be ignored")
+
+    def test_template_manifest_includes_schema_pack(self) -> None:
+        """The template .sync-manifest must include the schema pack source path."""
+        manifest = (TEMPLATE_GITIGNORE.parent / ".sync-manifest").read_text(encoding="utf-8")
+        self.assertIn("gbrain/schema-packs/josemar-user/pack.yaml", manifest)
+
+    def test_template_pack_yaml_has_correct_api_version(self) -> None:
+        """Fix 4: template pack.yaml must use gbrain-schema-pack-v1 api_version."""
+        pack_path = TEMPLATE_GITIGNORE.parent / "gbrain" / "schema-packs" / "josemar-user" / "pack.yaml"
+        content = pack_path.read_text(encoding="utf-8")
+        self.assertIn("api_version: \"gbrain-schema-pack-v1\"", content,
+                      "pack.yaml must use exact api_version: gbrain-schema-pack-v1")
 
     def test_manifest_rejects_skill_wildcards(self) -> None:
         (self.workspace / ".sync-manifest").write_text("skills/**\n", encoding="utf-8")

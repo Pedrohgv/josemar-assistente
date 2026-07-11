@@ -41,7 +41,7 @@ Notes:
 
 - Server-side Tailscale runs as a Docker sidecar (`tailscale` service), not as a host package.
 - If `TS_AUTHKEY` is set in GitHub secrets, sidecar login is unattended during deploy.
-- Server-side Syncthing runs as the same UID/GID as Hermes (`HERMES_UID`/`HERMES_GID`, default `10000`) so synced vault files remain writable by `vault-gateway`.
+- Server-side Syncthing runs as the same UID/GID as Hermes (`HERMES_UID`/`HERMES_GID`, default `10000`) so synced vault files remain writable by the Hermes runtime and native gbrain.
 
 Existing deployments that previously ran Syncthing as root need a one-time volume ownership migration before restarting Syncthing with the non-root user:
 

@@ -33,35 +33,18 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
             td.cleanup()
 
     # ------------------------------------------------------------------
-    # workspace-sync.sh guardrail cleanup
+    # workspace-sync.sh protected runtime path
     # ------------------------------------------------------------------
 
-    def test_guardrail_removes_tracked_vault_gateway_override(self) -> None:
-        self._add_tracked_vault_gateway_override()
+    def test_workspace_sync_script_protects_gbrain_runtime_path(self) -> None:
+        # The workspace-sync.sh script must reject .gbrain in .sync-manifest
+        # so PGLite DB/config/marker are never versioned.
+        (Path(self.workspace) / ".sync-manifest").write_text(".gbrain\n", encoding="utf-8")
 
         result = self._run_workspace_sync_script()
 
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertFalse(
-            (Path(self.workspace) / "skills" / "vault-gateway").exists(),
-            "vault-gateway override directory should be removed from workspace",
-        )
-        tracked = self._git_ls_files()
-        self.assertNotIn("skills/vault-gateway/SKILL.md", tracked)
-        self.assertNotIn("skills/vault-gateway", tracked)
-        log = self._git_log_oneline(limit=5)
-        self.assertIn("Guardrail: remove workspace vault-gateway override", log)
-
-    def test_guardrail_noop_when_no_override_present(self) -> None:
-        head_before = self._git_rev_parse_head()
-
-        result = self._run_workspace_sync_script()
-
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertFalse((Path(self.workspace) / "skills" / "vault-gateway").exists())
-        log = self._git_log_oneline(limit=10)
-        self.assertNotIn("Guardrail: remove workspace vault-gateway override", log)
-        self.assertEqual(head_before, self._git_rev_parse_head())
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("protected runtime path", result.stderr)
 
     # ------------------------------------------------------------------
     # workspace-sync.sh initial clone path
@@ -87,10 +70,6 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
         self.assertEqual(memory_content, restored, "manifest-tracked file should be restored from remote")
         self.assertTrue((Path(empty_workspace) / ".sync-manifest").exists())
         self.assertTrue((Path(empty_workspace) / "skills" / ".gitkeep").exists())
-        self.assertFalse(
-            (Path(empty_workspace) / "skills" / "vault-gateway").exists(),
-            "no vault-gateway override should exist after clone",
-        )
         log = self._git_log_oneline_for(empty_workspace, limit=5)
         self.assertIn(initial_commit_subject, log)
         self.assertNotIn("Auto-commit", log)
@@ -171,15 +150,6 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
         self._git(["commit", "-qm", "initial state"])
         self._git(["remote", "add", "origin", self.remote])
         self._git(["push", "-q", "-u", "origin", "main"])
-
-    def _add_tracked_vault_gateway_override(self) -> None:
-        vg = Path(self.workspace) / "skills" / "vault-gateway"
-        vg.mkdir(parents=True)
-        (vg / "SKILL.md").write_text("# override\n", encoding="utf-8")
-        # .gitignore ignores everything under skills/ except .gitkeep, so force-add.
-        self._git(["add", "-f", "skills/vault-gateway/SKILL.md"])
-        self._git(["commit", "-qm", "add vault-gateway override"])
-        self._git(["push", "-q", "origin", "main"])
 
     def _run_workspace_sync_script(self) -> subprocess.CompletedProcess[str]:
         return self._run_workspace_sync_script_with(workspace=self.workspace, remote=self.remote)
