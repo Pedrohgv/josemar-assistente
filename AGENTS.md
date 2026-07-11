@@ -16,7 +16,7 @@ Core architecture:
 - Hermes gateway runtime (dashboard/API/Telegram/cron/skills)
 - Two-scope skills (repo-owned `skills-factory/` + user-owned `agent-state/skills/`)
 - Git-backed state sync (`scripts/workspace-sync.sh`)
-- Obsidian vault operations (`vault-gateway` + Syncthing + backup)
+- Obsidian vault operations (native gbrain + Syncthing + backup)
 - Optional `aux-ml` queue service for long OCR jobs
 
 ## Directory Structure
@@ -84,7 +84,7 @@ When modifying user state, commit/push inside `agent-state` repo when requested.
 
 - Repo-owned skills: `skills-factory/*` -> copied to `/opt/josemar/skills`.
 - User-owned skills: `agent-state/skills/*` -> synced into `/opt/data/skills`.
-- Keep `vault-gateway` as the canonical vault mutation entrypoint.
+- Keep native gbrain (`skills-factory/gbrain` + `scripts/josemar-gbrain`) as the canonical vault interface.
 
 ## Security Rules
 
@@ -100,7 +100,7 @@ When modifying user state, commit/push inside `agent-state` repo when requested.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m unittest tests.vault_gateway.test_gateway_contract -v
+python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract tests.gbrain.test_gbrain_skill_gate -v
 ```
 
 ## Key References

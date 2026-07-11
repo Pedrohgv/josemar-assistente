@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+"""gbrain skill - thin, gated chat-facing wrapper around josemar-gbrain.
+
+Reads a JSON action from stdin. Supports bounded native gbrain actions:
+  - status:    safe gate status (no gbrain invocation)
+  - search:    bounded keyword-only native gbrain search (requires gate open)
+  - get:       read a page by slug (requires gate open)
+  - capture:   native capture: write content as a new page (requires gate open)
+  - put:       whole-page upsert by slug (requires gate open)
+  - link:      create a manual link between two pages (requires gate open)
+  - backlinks: list incoming links to a page (requires gate open)
+
+reindex is intentionally NOT exposed from chat. Operators run
+`josemar-gbrain reindex` manually on the host/container shell.
+
+Old note.* route names (dotted or underscored) and `query` are explicitly
+rejected.
+
+Design:
+  - Uses argv-array subprocess invocation to /usr/local/bin/josemar-gbrain.
+  - Passes a single JSON payload string per action to the wrapper (no sparse
+    positional arguments).
+  - Imposes a timeout and an output-size cap.
+  - Returns a JSON envelope.
+  - Keyword-only native gbrain search: the wrapper sets
+    search.mcp_keyword_only=true and dispatches via `gbrain call search`.
+    Provider env stripping is defense-in-depth.
+  - put is a whole-page replacement (upsert). Rename, template instantiation,
+    surgical section/frontmatter patching, and physical move are NOT offered.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+import traceback
+
+
+WRAPPER = os.environ.get("JOSEMAR_GBRAIN_WRAPPER", "/usr/local/bin/josemar-gbrain")
+DEFAULT_TIMEOUT = int(os.environ.get("GBRAIN_SKILL_TIMEOUT_SECONDS", "60"))
+MAX_OUTPUT_BYTES = int(os.environ.get("GBRAIN_SKILL_MAX_OUTPUT_BYTES", str(1024 * 1024)))
+MAX_QUERY_CHARS = int(os.environ.get("GBRAIN_QUERY_MAX_INPUT_CHARS", "2000"))
+MAX_LIMIT = int(os.environ.get("GBRAIN_QUERY_MAX_LIMIT", "20"))
+MAX_CONTENT_CHARS = int(os.environ.get("GBRAIN_CONTENT_MAX_CHARS", "50000"))
+MAX_CONTEXT_CHARS = 500
+MAX_SLUG_LEN = 512
+
+# Bidi/RTL override and control characters to reject in slugs.
+_UNSAFE_CHARS = re.compile(
+    r"[\u202a-\u202e\u2066-\u2069\x00-\x1f\x7f]"
+)
+
+# Actions that are explicitly rejected (old vault-gateway route names).
+# Includes both underscored (note_capture) and dotted (note.capture) forms.
+REJECTED_ACTIONS = frozenset({
+    "note", "note_capture", "note_create", "note_read", "note_write",
+    "note_update", "note_rename", "note_link", "note_search", "note_file",
+    "note_instantiate", "note_summary", "onboarding", "transcribe",
+    "query",
+    # Dotted variants
+    "note.capture", "note.create", "note.read", "note.write",
+    "note.update", "note.rename", "note.search", "note.link",
+    "note.file", "note.instantiate", "note.summary",
+})
+
+
+def _envelope(success: bool, **fields) -> dict:
+    payload = {"success": success}
+    payload.update(fields)
+    return payload
+
+
+def _emit(payload: dict, exit_code: int = 0) -> int:
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return exit_code
+
+
+def _run_wrapper(args: list[str], timeout: int, stdin: str | None = None) -> tuple[int, str]:
+    """Run the wrapper with an argv array (no shell), capped output."""
+    try:
+        proc = subprocess.run(
+            [WRAPPER, *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            input=stdin,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, json.dumps(
+            _envelope(
+                False,
+                error="timeout",
+                message=f"Wrapper exceeded {timeout}s timeout.",
+            ),
+            ensure_ascii=False,
+        )
+    except FileNotFoundError:
+        return 127, json.dumps(
+            _envelope(
+                False,
+                error="wrapper_missing",
+                message=f"Wrapper not found at {WRAPPER}.",
+            ),
+            ensure_ascii=False,
+        )
+
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    combined = stdout
+    if not combined.strip() and stderr.strip():
+        combined = stderr
+
+    if len(combined.encode("utf-8")) > MAX_OUTPUT_BYTES:
+        combined = combined[:MAX_OUTPUT_BYTES]
+
+    return proc.returncode, combined
+
+
+def _parse_wrapper_json(raw: str) -> dict | None:
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    return None
+
+
+def _check_write_through(data: dict, action: str) -> dict | None:
+    """Inspect a wrapper JSON result for write-through failure indicators.
+
+    Returns a degraded envelope if write-through failure is detected, or
+    None if the result is OK (or not a write action).
+    """
+    if action not in ("capture", "put"):
+        return None
+
+    degraded = False
+    msg = ""
+
+    if isinstance(data.get("written"), bool) and not data["written"]:
+        degraded = True
+        msg = "write-through did not write to disk"
+
+    wt = data.get("write_through")
+    if isinstance(wt, dict):
+        if isinstance(wt.get("written"), bool) and not wt["written"]:
+            degraded = True
+            msg = str(wt.get("error") or "write-through did not write to disk")
+        elif wt.get("error"):
+            degraded = True
+            msg = str(wt["error"])
+        elif wt.get("skipped"):
+            degraded = True
+            msg = "write-through was skipped"
+
+    if degraded:
+        return _envelope(
+            False,
+            error="write_through_degraded",
+            action=action,
+            message=msg,
+        )
+    return None
+
+
+def _wrapper_result(rc: int, raw: str, action: str = "") -> dict:
+    parsed = _parse_wrapper_json(raw)
+    if parsed is not None:
+        # Check for write-through failure in capture/put results.
+        if action in ("capture", "put"):
+            wt = _check_write_through(parsed, action)
+            if wt is not None:
+                return wt
+        return parsed
+    return _envelope(
+        False,
+        error="wrapper_unparseable",
+        exit_code=rc,
+        message=raw[:4000],
+    )
+
+
+def _validate_slug(slug) -> str | None:
+    """Validate a slug. Returns an error message string or None if valid."""
+    if not isinstance(slug, str):
+        return "slug must be a string."
+    if not slug.strip():
+        return "slug must be non-empty."
+    if len(slug) > MAX_SLUG_LEN:
+        return f"slug too long (max {MAX_SLUG_LEN} chars)."
+    if ".." in slug:
+        return "slug must not contain '..'."
+    if slug.startswith("/"):
+        return "slug must not start with '/'."
+    if "\\" in slug:
+        return "slug must not contain backslashes."
+    if _UNSAFE_CHARS.search(slug):
+        return "slug must not contain control or bidi/RTL override characters."
+    lower = slug.lower()
+    if "%2e" in lower or "%2f" in lower or "%5c" in lower:
+        return "slug must not contain URL-encoded traversal sequences."
+    return None
+
+
+def _validate_bounded_string(val, field: str, max_chars: int) -> str | None:
+    """Validate a bounded optional string. Returns error message or None."""
+    if val is None:
+        return None
+    if not isinstance(val, str):
+        return f"{field} must be a string."
+    if len(val) > max_chars:
+        return f"{field} exceeds max chars ({max_chars})."
+    return None
+
+
+def _validate_kebab(val, field: str) -> str | None:
+    """Validate a kebab-case identifier (lowercase alphanumeric, hyphens, underscores)."""
+    if val is None or val == "":
+        return None
+    if not isinstance(val, str):
+        return f"{field} must be a string."
+    if not re.fullmatch(r"[a-z0-9_-]+", val):
+        return f"{field} must be lowercase alphanumeric, hyphens, or underscores."
+    return None
+
+
+def _is_rejected_action(action: str) -> bool:
+    """Check if an action name is a rejected old route name.
+
+    Rejects exact matches in REJECTED_ACTIONS, plus any name starting with
+    'note.' (dotted) or 'note_' (underscored).
+    """
+    if action in REJECTED_ACTIONS:
+        return True
+    if action.startswith("note.") or action.startswith("note_"):
+        return True
+    return False
+
+
+def action_status(data: dict) -> dict:
+    rc, raw = _run_wrapper(["status"], timeout=DEFAULT_TIMEOUT)
+    return _wrapper_result(rc, raw, "status")
+
+
+def action_schema_status(data: dict) -> dict:
+    rc, raw = _run_wrapper(["schema-status"], timeout=DEFAULT_TIMEOUT)
+    return _wrapper_result(rc, raw, "schema_status")
+
+
+def action_search(data: dict) -> dict:
+    query = data.get("query")
+    if not isinstance(query, str):
+        return _envelope(False, error="missing_query", message="Field 'query' is required and must be a string.")
+    if not query.strip():
+        return _envelope(False, error="empty_query", message="Query text must be non-empty.")
+    if len(query) > MAX_QUERY_CHARS:
+        return _envelope(False, error="query_too_long", message=f"Query exceeds max input chars ({MAX_QUERY_CHARS}).")
+
+    raw_limit = data.get("limit", 10)
+    if not isinstance(raw_limit, int) or isinstance(raw_limit, bool):
+        return _envelope(False, error="invalid_limit", message="Field 'limit' must be an integer.")
+    if raw_limit < 1 or raw_limit > MAX_LIMIT:
+        return _envelope(False, error="limit_out_of_range", message=f"limit must be between 1 and {MAX_LIMIT}.")
+
+    raw_offset = data.get("offset", 0)
+    if not isinstance(raw_offset, int) or isinstance(raw_offset, bool):
+        return _envelope(False, error="invalid_offset", message="Field 'offset' must be an integer.")
+    if raw_offset < 0:
+        return _envelope(False, error="invalid_offset", message="offset must be non-negative.")
+
+    payload = json.dumps({"query": query, "limit": raw_limit, "offset": raw_offset}, ensure_ascii=False)
+    rc, raw = _run_wrapper(["search", payload], timeout=DEFAULT_TIMEOUT)
+    return _wrapper_result(rc, raw, "search")
+
+
+def action_get(data: dict) -> dict:
+    slug = data.get("slug")
+    if err := _validate_slug(slug):
+        return _envelope(False, error="invalid_slug", message=err)
+
+    payload = json.dumps({"slug": slug}, ensure_ascii=False)
+    rc, raw = _run_wrapper(["get", payload], timeout=DEFAULT_TIMEOUT)
+    return _wrapper_result(rc, raw, "get")
+
+
+def action_capture(data: dict) -> dict:
+    content = data.get("content")
+    if not isinstance(content, str):
+        return _envelope(False, error="missing_content", message="Field 'content' is required and must be a string.")
+    if not content.strip():
+        return _envelope(False, error="empty_content", message="content must be non-empty.")
+    if len(content) > MAX_CONTENT_CHARS:
+        return _envelope(False, error="content_too_long", message=f"content exceeds max chars ({MAX_CONTENT_CHARS}).")
+
+    slug = data.get("slug")
+    if slug is not None:
+        if err := _validate_slug(slug):
+            return _envelope(False, error="invalid_slug", message=err)
+
+    page_type = data.get("type")
+    if page_type is not None:
+        if err := _validate_kebab(page_type, "type"):
+            return _envelope(False, error="invalid_type", message=err)
+
+    payload_data: dict = {"content": content}
+    if slug:
+        payload_data["slug"] = slug
+    if page_type:
+        payload_data["type"] = page_type
+    payload = json.dumps(payload_data, ensure_ascii=False)
+    rc, raw = _run_wrapper(["capture", payload], timeout=DEFAULT_TIMEOUT)
+    return _wrapper_result(rc, raw, "capture")
+
+
+def action_put(data: dict) -> dict:
+    slug = data.get("slug")
+    if err := _validate_slug(slug):
+        return _envelope(False, error="invalid_slug", message=err)
+
+    content = data.get("content")
+    if not isinstance(content, str):
+        return _envelope(False, error="missing_content", message="Field 'content' is required and must be a string.")
+    if not content.strip():
+        return _envelope(False, error="empty_content", message="content must be non-empty.")
+    if len(content) > MAX_CONTENT_CHARS:
+        return _envelope(False, error="content_too_long", message=f"content exceeds max chars ({MAX_CONTENT_CHARS}).")
+
+    payload = json.dumps({"slug": slug, "content": content}, ensure_ascii=False)
+    rc, raw = _run_wrapper(["put", payload], timeout=DEFAULT_TIMEOUT)
+    return _wrapper_result(rc, raw, "put")
+
+
+def action_link(data: dict) -> dict:
+    from_slug = data.get("from")
+    if err := _validate_slug(from_slug):
+        return _envelope(False, error="invalid_from_slug", message=err)
+
+    to_slug = data.get("to")
+    if err := _validate_slug(to_slug):
+        return _envelope(False, error="invalid_to_slug", message=err)
+
+    link_type = data.get("link_type")
+    if link_type is not None:
+        if err := _validate_kebab(link_type, "link_type"):
+            return _envelope(False, error="invalid_link_type", message=err)
+
+    context = data.get("context")
+    if err := _validate_bounded_string(context, "context", MAX_CONTEXT_CHARS):
+        return _envelope(False, error="context_too_long", message=err)
+
+    link_source = data.get("link_source")
+    if link_source is not None:
+        if err := _validate_kebab(link_source, "link_source"):
+            return _envelope(False, error="invalid_link_source", message=err)
+        managed = {"markdown", "frontmatter", "mentions", "wikilink-resolved"}
+        if link_source in managed:
+            return _envelope(
+                False,
+                error="managed_link_source",
+                message=f"link_source '{link_source}' is reconciliation-managed and cannot be set manually. Use 'manual' (the default) or a custom kebab tag.",
+            )
+
+    payload_data: dict = {"from": from_slug, "to": to_slug}
+    if link_type:
+        payload_data["link_type"] = link_type
+    if context:
+        payload_data["context"] = context
+    if link_source:
+        payload_data["link_source"] = link_source
+    payload = json.dumps(payload_data, ensure_ascii=False)
+    rc, raw = _run_wrapper(["link", payload], timeout=DEFAULT_TIMEOUT)
+    return _wrapper_result(rc, raw, "link")
+
+
+def action_backlinks(data: dict) -> dict:
+    slug = data.get("slug")
+    if err := _validate_slug(slug):
+        return _envelope(False, error="invalid_slug", message=err)
+
+    payload = json.dumps({"slug": slug}, ensure_ascii=False)
+    rc, raw = _run_wrapper(["backlinks", payload], timeout=DEFAULT_TIMEOUT)
+    return _wrapper_result(rc, raw, "backlinks")
+
+
+ACTIONS = {
+    "status": action_status,
+    "schema_status": action_schema_status,
+    "search": action_search,
+    "get": action_get,
+    "capture": action_capture,
+    "put": action_put,
+    "link": action_link,
+    "backlinks": action_backlinks,
+}
+
+
+def main() -> int:
+    try:
+        raw_input = sys.stdin.read().strip()
+        if not raw_input:
+            return _emit(
+                _envelope(
+                    False,
+                    error="no_input",
+                    usage={"actions": list(ACTIONS.keys())},
+                ),
+                exit_code=1,
+            )
+
+        try:
+            data = json.loads(raw_input)
+        except json.JSONDecodeError as exc:
+            return _emit(
+                _envelope(False, error="invalid_json", message=f"Invalid JSON: {exc}"),
+                exit_code=1,
+            )
+
+        if not isinstance(data, dict):
+            return _emit(
+                _envelope(False, error="invalid_input", message="Input must be a JSON object."),
+                exit_code=1,
+            )
+
+        action = data.get("action")
+        if not isinstance(action, str):
+            return _emit(
+                _envelope(False, error="unknown_action", valid_actions=list(ACTIONS.keys()),
+                          message="Field 'action' is required and must be a string."),
+                exit_code=1,
+            )
+
+        if _is_rejected_action(action):
+            return _emit(
+                _envelope(
+                    False,
+                    error="rejected_action",
+                    valid_actions=list(ACTIONS.keys()),
+                    message=f"Action '{action}' is not supported. Use native gbrain actions: {', '.join(ACTIONS.keys())}.",
+                ),
+                exit_code=1,
+            )
+
+        if action not in ACTIONS:
+            return _emit(
+                _envelope(
+                    False,
+                    error="unknown_action",
+                    valid_actions=list(ACTIONS.keys()),
+                    message=f"Unknown action: {action!r}. Supported: {', '.join(ACTIONS.keys())}.",
+                ),
+                exit_code=1,
+            )
+
+        result = ACTIONS[action](data)
+        return _emit(result, exit_code=0 if result.get("success") else 1)
+
+    except Exception as exc:
+        return _emit(
+            _envelope(
+                False,
+                error="internal_error",
+                message=str(exc),
+                traceback=traceback.format_exc(),
+            ),
+            exit_code=1,
+        )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

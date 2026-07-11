@@ -1,6 +1,6 @@
 # Tests
 
-Josemar tests are split into fast fake-vault tests and opt-in Docker runtime tests.
+Josemar tests are split into fast unit/contract tests and opt-in Docker runtime tests.
 
 ## Fast Tests
 
@@ -14,20 +14,6 @@ Or use the repository target:
 
 ```bash
 make test
-```
-
-Vault gateway tests never use the real Obsidian vault. They create temporary fake vaults under the system temp directory and set `OBSIDIAN_VAULT_DIR` plus `VAULT_GATEWAY_ALLOWED_ROOTS` to that fake path.
-
-Run only vault tests with:
-
-```bash
-python3 -m unittest discover -s tests/vault_gateway -v
-```
-
-Or:
-
-```bash
-make test-vault
 ```
 
 ## Development Cycle

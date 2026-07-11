@@ -1,10 +1,7 @@
-.PHONY: test test-vault test-runtime test-aux-runtime verify
+.PHONY: test test-runtime test-aux-runtime verify
 
 test:
 	python3 -m unittest discover -s tests -v
-
-test-vault:
-	python3 -m unittest discover -s tests/vault_gateway -v
 
 test-runtime:
 	RUN_DOCKER_TESTS=1 python3 -m unittest discover -s tests/runtime -v

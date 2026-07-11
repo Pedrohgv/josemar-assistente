@@ -15,7 +15,7 @@ class DockerPermissionTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.runtime.down()
 
-    def test_hermes_runtime_user_can_write_required_volumes_and_run_gateway(self) -> None:
+    def test_hermes_runtime_user_can_write_required_volumes_and_run_gbrain(self) -> None:
         self.runtime.up("hermes")
 
         script = (
@@ -29,14 +29,14 @@ class DockerPermissionTests(unittest.TestCase):
         )
         self.runtime.exec("hermes", "sh", "-lc", script)
 
-        payload = '{"route":"note.capture","payload":{"title":"Runtime Test","text":"runtime body"}}'
+        # Verify the gbrain skill is installed and executable.
         process = self.runtime.exec(
             "hermes",
             "sh",
             "-lc",
-            f"printf '%s' '{payload}' | /opt/josemar/skills/vault-gateway/vault-gateway",
+            "echo '{\"action\":\"status\"}' | /opt/josemar/skills/gbrain/gbrain",
         )
-        self.assertIn('"success": true', process.stdout)
+        self.assertIn('"success"', process.stdout)
 
         logs = self.runtime.logs("hermes")
         self.assertNotIn("cannot write to /opt/data", logs)

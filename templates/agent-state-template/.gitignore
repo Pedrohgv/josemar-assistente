@@ -29,3 +29,10 @@
 !avatars/
 !avatars/.gitkeep
 !avatars/**
+
+# User-owned gbrain schema pack source (narrow allowlist, not broad gbrain/**)
+!gbrain/
+!gbrain/schema-packs/
+!gbrain/schema-packs/josemar-user/
+!gbrain/schema-packs/josemar-user/pack.yaml
+!gbrain/schema-packs/josemar-user/README.md

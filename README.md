@@ -234,7 +234,7 @@ private state repo versions them on the next sync.
 
 Current repo-shipped skills:
 
-- `vault-gateway`: entrypoint for vault routing and operations.
+- `gbrain`: native gbrain vault interface (authoring, retrieval, linking).
 - `aux-ml`: skill interface for queue-based auxiliary ML jobs.
 - `workspace-sync`: skill interface for workspace git sync, status, commit, and push flows.
 
@@ -276,7 +276,7 @@ python3 -m unittest discover -s tests -v
 Run scoped contract tests:
 
 ```bash
-python3 -m unittest tests.vault_gateway.test_gateway_contract -v
+python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract tests.gbrain.test_gbrain_skill_gate -v
 ```
 
 Set up optional pre-commit hooks:
