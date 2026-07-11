@@ -329,7 +329,10 @@ except Exception:
 val = data.get(sys.argv[2], "")
 if val is None:
     val = ""
-print(val)
+if isinstance(val, bool):
+    print(str(val).lower())
+else:
+    print(val)
 PY
 }
 
@@ -338,12 +341,23 @@ marker_is_valid() {
         return 1
     fi
     # Core activation fields must always be present and non-empty.
-    for field in gbrain_ref gbrain_version schema_pack gbrain_home_realpath brain_repo_realpath sync_repo_path keyword_only schema_source_pack schema_source_path schema_installed_path completed_at; do
+    for field in gbrain_ref gbrain_version schema_pack gbrain_home_realpath brain_repo_realpath sync_repo_path keyword_only completed_at; do
         val=$(marker_field "$field")
         if [ -z "$val" ]; then
             return 1
         fi
     done
+    # Schema source/installed path fields: required for custom packs,
+    # allowed to be empty for bundled packs (sentinel hash "bundled" is used).
+    marker_schema_name=$(marker_field "schema_pack")
+    if ! is_bundled_pack "$marker_schema_name"; then
+        for field in schema_source_pack schema_source_path schema_installed_path; do
+            val=$(marker_field "$field")
+            if [ -z "$val" ]; then
+                return 1
+            fi
+        done
+    fi
     # Schema hash fields: must be present (key exists in marker JSON).
     # For bundled packs the value is the sentinel "bundled" (non-empty).
     # For custom packs the value is a sha256 hex string (non-empty).
@@ -421,24 +435,13 @@ marker_matches_current() {
     marker_schema_installed_sha256=$(marker_field "schema_installed_sha256")
     marker_schema_installed_path=$(marker_field "schema_installed_path")
 
-    # The selected pack must match the marker's source pack name.
-    if [ "$marker_schema_source_pack" != "$GBRAIN_SCHEMA_PACK" ]; then
-        return 1
-    fi
-
     if is_bundled_pack "$GBRAIN_SCHEMA_PACK"; then
-        # Bundled pack: no source hash to verify. Marker must record the
-        # "bundled" sentinel for source/installed paths and hashes.
+        # Bundled pack: no source pack to verify. Marker must record the
+        # "bundled" sentinel for hashes. Path/source_pack fields are empty.
         if [ "$marker_schema_source_sha256" != "bundled" ]; then
             return 1
         fi
         if [ "$marker_schema_installed_sha256" != "bundled" ]; then
-            return 1
-        fi
-        if [ "$marker_schema_source_path" != "bundled" ]; then
-            return 1
-        fi
-        if [ "$marker_schema_installed_path" != "bundled" ]; then
             return 1
         fi
     else
@@ -1650,7 +1653,7 @@ PY
 )"
         return 1
     }
-    if echo "$init_output" | grep -iE "partial|blocked|fail|error|fatal" | grep -viE "no embedding|embedding disabled|warn" >/dev/null 2>&1; then
+    if echo "$init_output" | grep -iE "\b(error|fatal|blocked|aborted|panic)\b" | grep -viE "no embedding|embedding disabled|warn|error_|_error|errors_|migration" >/dev/null 2>&1; then
         emit_json "$(python3 - "$init_output" <<'PY'
 import json, sys
 out = sys.argv[1]
@@ -1705,7 +1708,7 @@ PY
 )"
         return 1
     }
-    if echo "$sync_output" | grep -iE "\"status\"[: ]*\"(partial|blocked|failed|error)\"|partial|blocked|fail|fatal" | grep -viE "no embedding|embedding disabled|warn|no_embed" >/dev/null 2>&1; then
+    if echo "$sync_output" | grep -iE "\"status\"[: ]*\"(partial|blocked|failed|error)\"|\b(fatal|blocked|aborted|panic)\b" | grep -viE "no embedding|embedding disabled|warn|no_embed" >/dev/null 2>&1; then
         emit_json "$(python3 - "$sync_output" <<'PY'
 import json, sys
 out = sys.argv[1]
