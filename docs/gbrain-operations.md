@@ -10,8 +10,8 @@ The Josemar gbrain integration is intentionally minimal and gated:
 - The pinned `gbrain` CLI is installed in the Hermes image under `/opt/gbrain`
   with a `/usr/local/bin/gbrain` wrapper.
 - A thin chat-facing skill (`skills-factory/gbrain`) exposes bounded native
-  actions: `status`, `search`, `get`, `capture`, `put`, `link`, and
-  `backlinks`.
+  actions: `status`, `schema_status`, `search`, `get`, `capture`, `put`,
+  `link`, and `backlinks`.
 - Retrieval is **enabled by default** (`GBRAIN_ENABLED=true`), but all actions
   except `status` are blocked by the activation/config readiness marker until
   a valid reindex has been run. Set `GBRAIN_ENABLED=false` to force-close the
@@ -113,10 +113,10 @@ protected workspace runtime path (never versioned by workspace sync).
 
 6. **Verify from chat:**
    ```bash
-   echo '{"action":"status"}' | /opt/josemar/skills/gbrain/gbrain
-   echo '{"action":"search","query":"test query","limit":5}' | /opt/josemar/skills/gbrain/gbrain
-   echo '{"action":"capture","content":"test capture","slug":"inbox/smoke-test"}' | /opt/josemar/skills/gbrain/gbrain
-   echo '{"action":"get","slug":"inbox/smoke-test"}' | /opt/josemar/skills/gbrain/gbrain
+   gbrain-skill status
+   gbrain-skill search "test query" --limit 5
+   gbrain-skill capture --slug inbox/smoke-test --content "test capture"
+   gbrain-skill get inbox/smoke-test
    ```
 
 ## Later Vault Swaps
@@ -225,7 +225,7 @@ run reindex.
 Use `schema_status` from chat to inspect the current schema state:
 
 ```bash
-echo '{"action":"schema_status"}' | /opt/josemar/skills/gbrain/gbrain
+gbrain-skill schema-status
 ```
 
 This reports the selected pack, whether it is bundled or custom, source and

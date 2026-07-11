@@ -34,7 +34,7 @@ class DockerPermissionTests(unittest.TestCase):
             "hermes",
             "sh",
             "-lc",
-            "echo '{\"action\":\"status\"}' | /opt/josemar/skills/gbrain/gbrain",
+            "gbrain-skill status",
         )
         self.assertIn('"success"', process.stdout)
 
