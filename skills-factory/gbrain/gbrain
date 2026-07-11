@@ -1,14 +1,37 @@
 #!/usr/bin/env python3
 """gbrain skill - thin, gated chat-facing wrapper around josemar-gbrain.
 
-Reads a JSON action from stdin. Supports bounded native gbrain actions:
-  - status:    safe gate status (no gbrain invocation)
-  - search:    bounded keyword-only native gbrain search (requires gate open)
-  - get:       read a page by slug (requires gate open)
-  - capture:   native capture: write content as a new page (requires gate open)
-  - put:       whole-page upsert by slug (requires gate open)
-  - link:      create a manual link between two pages (requires gate open)
-  - backlinks: list incoming links to a page (requires gate open)
+Supports two input modes:
+
+1. CLI argv mode (short, for shell invocation):
+   ```bash
+   gbrain-skill search "rodrigo green wall" --limit 3
+   gbrain-skill get people/rodrigo
+   gbrain-skill capture --slug inbox/my-note --type note --content "remember this"
+   gbrain-skill put people/some-person --content "full markdown here"
+   gbrain-skill link people/a people/b --link-type mentions --context "meeting notes"
+   gbrain-skill backlinks people/elton-bora
+   gbrain-skill status
+   gbrain-skill schema-status
+   ```
+
+2. JSON stdin mode (existing, for programmatic invocation):
+   ```bash
+   echo '{"action":"search","query":"rodrigo green wall","limit":3}' | gbrain-skill
+   ```
+
+If argv has arguments, CLI mode is used. If stdin has data and no argv,
+JSON stdin mode is used. If neither, usage is shown.
+
+Supports bounded native gbrain actions:
+  - status:       safe gate status (no gbrain invocation)
+  - schema_status: read-only schema pack introspection
+  - search:       bounded keyword-only native gbrain search (requires gate open)
+  - get:          read a page by slug (requires gate open)
+  - capture:      native capture: write content as a new page (requires gate open)
+  - put:          whole-page upsert by slug (requires gate open)
+  - link:         create a manual link between two pages (requires gate open)
+  - backlinks:    list incoming links to a page (requires gate open)
 
 reindex is intentionally NOT exposed from chat. Operators run
 `josemar-gbrain reindex` manually on the host/container shell.
@@ -399,8 +422,180 @@ ACTIONS = {
 }
 
 
+def _parse_cli_flags(argv: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Split argv into positional args and --flag value pairs.
+
+    Returns (positionals, flags). Flags use --key value or --key=value.
+    """
+    positionals: list[str] = []
+    flags: dict[str, str] = {}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg.startswith("--"):
+            key = arg[2:]
+            if "=" in key:
+                key, val = key.split("=", 1)
+                flags[key.replace("-", "_")] = val
+                i += 1
+            elif i + 1 < len(argv):
+                flags[key.replace("-", "_")] = argv[i + 1]
+                i += 2
+            else:
+                flags[key.replace("-", "_")] = ""
+                i += 1
+        else:
+            positionals.append(arg)
+            i += 1
+    return positionals, flags
+
+
+def _parse_cli(argv: list[str]) -> dict:
+    """Parse CLI argv into the internal action data dict.
+
+    Returns a dict with an "action" key and action-specific fields.
+    Raises ValueError with a helpful message on parse failure.
+    """
+    if not argv:
+        raise ValueError("No action specified.")
+
+    action_raw = argv[0]
+    # Map hyphenated CLI action names to underscored action keys.
+    action = action_raw.replace("-", "_")
+    rest = argv[1:]
+
+    if action in ("status", "schema_status"):
+        if rest:
+            raise ValueError(f"Action '{action_raw}' takes no arguments.")
+        return {"action": action}
+
+    if action == "search":
+        positionals, flags = _parse_cli_flags(rest)
+        if not positionals:
+            raise ValueError("search requires a query string as the first positional argument.")
+        data: dict = {"action": "search", "query": positionals[0]}
+        if "limit" in flags:
+            try:
+                data["limit"] = int(flags["limit"])
+            except ValueError:
+                raise ValueError(f"--limit must be an integer, got: {flags['limit']}")
+        if "offset" in flags:
+            try:
+                data["offset"] = int(flags["offset"])
+            except ValueError:
+                raise ValueError(f"--offset must be an integer, got: {flags['offset']}")
+        return data
+
+    if action == "get":
+        positionals, flags = _parse_cli_flags(rest)
+        if not positionals:
+            raise ValueError("get requires a slug as the first positional argument.")
+        return {"action": "get", "slug": positionals[0]}
+
+    if action == "backlinks":
+        positionals, flags = _parse_cli_flags(rest)
+        if not positionals:
+            raise ValueError("backlinks requires a slug as the first positional argument.")
+        return {"action": "backlinks", "slug": positionals[0]}
+
+    if action == "capture":
+        positionals, flags = _parse_cli_flags(rest)
+        data = {"action": "capture"}
+        if "slug" in flags:
+            data["slug"] = flags["slug"]
+        if "type" in flags:
+            data["type"] = flags["type"]
+        if "content" in flags:
+            data["content"] = flags["content"]
+        elif not sys.stdin.isatty():
+            stdin_content = sys.stdin.read()
+            if stdin_content.strip():
+                data["content"] = stdin_content
+        if "content" not in data:
+            raise ValueError("capture requires --content or stdin input.")
+        return data
+
+    if action == "put":
+        positionals, flags = _parse_cli_flags(rest)
+        if not positionals:
+            raise ValueError("put requires a slug as the first positional argument.")
+        data = {"action": "put", "slug": positionals[0]}
+        if "content" in flags:
+            data["content"] = flags["content"]
+        elif not sys.stdin.isatty():
+            stdin_content = sys.stdin.read()
+            if stdin_content.strip():
+                data["content"] = stdin_content
+        if "content" not in data:
+            raise ValueError("put requires --content or stdin input.")
+        return data
+
+    if action == "link":
+        positionals, flags = _parse_cli_flags(rest)
+        if len(positionals) < 2:
+            raise ValueError("link requires two positional arguments: from and to slugs.")
+        data = {"action": "link", "from": positionals[0], "to": positionals[1]}
+        if "link_type" in flags:
+            data["link_type"] = flags["link_type"]
+        if "context" in flags:
+            data["context"] = flags["context"]
+        if "link_source" in flags:
+            data["link_source"] = flags["link_source"]
+        return data
+
+    # Unknown or rejected action: return the data dict and let _dispatch
+    # produce the appropriate error envelope (unknown_action / rejected_action).
+    return {"action": action}
+
+
+def _dispatch(data: dict) -> dict:
+    """Validate action and dispatch through the ACTIONS map."""
+    action = data.get("action")
+    if not isinstance(action, str):
+        return _envelope(
+            False, error="unknown_action", valid_actions=list(ACTIONS.keys()),
+            message="Field 'action' is required and must be a string.",
+        )
+
+    if _is_rejected_action(action):
+        return _envelope(
+            False,
+            error="rejected_action",
+            valid_actions=list(ACTIONS.keys()),
+            message=f"Action '{action}' is not supported. Use native gbrain actions: {', '.join(ACTIONS.keys())}.",
+        )
+
+    if action not in ACTIONS:
+        return _envelope(
+            False,
+            error="unknown_action",
+            valid_actions=list(ACTIONS.keys()),
+            message=f"Unknown action: {action!r}. Supported: {', '.join(ACTIONS.keys())}.",
+        )
+
+    return ACTIONS[action](data)
+
+
 def main() -> int:
     try:
+        # CLI argv mode: if arguments are provided, parse them.
+        if len(sys.argv) > 1:
+            try:
+                data = _parse_cli(sys.argv[1:])
+            except ValueError as exc:
+                return _emit(
+                    _envelope(
+                        False,
+                        error="invalid_args",
+                        message=str(exc),
+                        valid_actions=list(ACTIONS.keys()),
+                    ),
+                    exit_code=1,
+                )
+            result = _dispatch(data)
+            return _emit(result, exit_code=0 if result.get("success") else 1)
+
+        # JSON stdin mode: read from stdin if data is available.
         raw_input = sys.stdin.read().strip()
         if not raw_input:
             return _emit(
@@ -426,37 +621,7 @@ def main() -> int:
                 exit_code=1,
             )
 
-        action = data.get("action")
-        if not isinstance(action, str):
-            return _emit(
-                _envelope(False, error="unknown_action", valid_actions=list(ACTIONS.keys()),
-                          message="Field 'action' is required and must be a string."),
-                exit_code=1,
-            )
-
-        if _is_rejected_action(action):
-            return _emit(
-                _envelope(
-                    False,
-                    error="rejected_action",
-                    valid_actions=list(ACTIONS.keys()),
-                    message=f"Action '{action}' is not supported. Use native gbrain actions: {', '.join(ACTIONS.keys())}.",
-                ),
-                exit_code=1,
-            )
-
-        if action not in ACTIONS:
-            return _emit(
-                _envelope(
-                    False,
-                    error="unknown_action",
-                    valid_actions=list(ACTIONS.keys()),
-                    message=f"Unknown action: {action!r}. Supported: {', '.join(ACTIONS.keys())}.",
-                ),
-                exit_code=1,
-            )
-
-        result = ACTIONS[action](data)
+        result = _dispatch(data)
         return _emit(result, exit_code=0 if result.get("success") else 1)
 
     except Exception as exc:

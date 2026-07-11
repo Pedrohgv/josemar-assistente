@@ -942,6 +942,10 @@ class GbrainDockerWrapperCwdContractTests(unittest.TestCase):
         wrapper_line = match.group(0)
         self.assertIn("src/cli.ts", wrapper_line)
 
+    def test_chat_skill_has_unambiguous_short_alias(self) -> None:
+        self.assertIn("/usr/local/bin/gbrain-skill", self.src)
+        self.assertIn("/opt/josemar/skills/gbrain/gbrain", self.src)
+
 
 class GbrainBunInstallerCurlContractTests(unittest.TestCase):
     """Bun installer stage must apt-install curl."""

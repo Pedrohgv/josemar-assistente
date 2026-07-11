@@ -14,6 +14,9 @@ Thin, gated chat-facing wrapper around the pinned native `gbrain` CLI. Exposes
 bounded native authoring, retrieval, and linking actions. `reindex` (initial
 activation) is intentionally not exposed from chat.
 
+Prefer the short `gbrain-skill ...` CLI form for shell use. JSON-over-stdin
+remains supported for programmatic use and backward compatibility.
+
 ## Important Notes
 
 - **Gate defaults to enabled, marker-gated.** The gate (`GBRAIN_ENABLED`)
@@ -50,7 +53,7 @@ Return machine-readable gate status. Safe to call at any time (no gate
 required). Status may read live gbrain config to verify the activation marker.
 
 ```bash
-echo '{"action":"status"}' | gbrain
+gbrain-skill status
 ```
 
 ### `schema_status`
@@ -60,7 +63,7 @@ required). Reports the selected pack, whether it is bundled or custom, source
 and installed paths/hashes, marker match status, and validation state.
 
 ```bash
-echo '{"action":"schema_status"}' | gbrain
+gbrain-skill schema-status
 ```
 
 Schema mutation is NOT exposed from chat. To change the schema pack, follow
@@ -74,7 +77,7 @@ update the source pack in agent-state, commit, then run
 Bounded keyword-only native gbrain search. Requires the gate to be open.
 
 ```bash
-echo '{"action":"search","query":"notes on obsidian sync","limit":10,"offset":0}' | gbrain
+gbrain-skill search "notes on obsidian sync" --limit 10 --offset 0
 ```
 
 Fields:
@@ -87,7 +90,7 @@ Fields:
 Read a page by slug. Requires the gate to be open.
 
 ```bash
-echo '{"action":"get","slug":"inbox/my-note"}' | gbrain
+gbrain-skill get inbox/my-note
 ```
 
 Fields:
@@ -99,7 +102,7 @@ Native gbrain capture: write content as a new page. Requires the gate to be
 open.
 
 ```bash
-echo '{"action":"capture","content":"remember to follow up on X","slug":"inbox/custom","type":"note"}' | gbrain
+gbrain-skill capture --slug inbox/custom --type note --content "remember to follow up on X"
 ```
 
 Fields:
@@ -114,7 +117,13 @@ Does not expose `--file` or arbitrary `--source`.
 Whole-page upsert by slug. Requires the gate to be open.
 
 ```bash
-echo '{"action":"put","slug":"inbox/my-note","content":"---\\ntitle: My Note\\n---\\nFull content here"}' | gbrain
+gbrain-skill put inbox/my-note --content "---\ntitle: My Note\n---\nFull content here"
+```
+
+For longer content, pipe stdin instead of shell-quoting the whole page:
+
+```bash
+printf '%s' "$FULL_MARKDOWN" | gbrain-skill put inbox/my-note
 ```
 
 Fields:
@@ -129,7 +138,7 @@ frontmatter-surgical API. Rename and physical move are not offered.
 Create a manual link between two pages. Requires the gate to be open.
 
 ```bash
-echo '{"action":"link","from":"inbox/a","to":"people/b","link_type":"mentions","context":"meeting notes","link_source":"manual"}' | gbrain
+gbrain-skill link inbox/a people/b --link-type mentions --context "meeting notes" --link-source manual
 ```
 
 Fields:
@@ -147,7 +156,15 @@ Reconciliation-managed sources (`markdown`, `frontmatter`, `mentions`,
 List incoming links to a page. Requires the gate to be open.
 
 ```bash
-echo '{"action":"backlinks","slug":"people/b"}' | gbrain
+gbrain-skill backlinks people/b
+```
+
+## JSON stdin compatibility
+
+JSON-over-stdin is still accepted when no CLI arguments are provided:
+
+```bash
+echo '{"action":"search","query":"notes on obsidian sync","limit":10}' | gbrain-skill
 ```
 
 Fields:

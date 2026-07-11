@@ -86,12 +86,46 @@ def run_skill(module, payload: dict | str, *, env: dict | None = None) -> tuple[
         "spec = importlib.util.spec_from_loader(loader.name, loader)\n"
         "mod = importlib.util.module_from_spec(spec)\n"
         "loader.exec_module(mod)\n"
+        "sys.argv = ['gbrain']\n"
         "sys.exit(mod.main())\n"
     )
 
     proc = subprocess.run(
         [sys.executable, "-c", driver, str(SKILL_PATH)],
         input=stdin_text,
+        capture_output=True,
+        text=True,
+        env=full_env,
+        check=False,
+    )
+    return proc.returncode, proc.stdout
+
+
+def run_skill_cli(
+    cli_args: list[str],
+    *,
+    env: dict | None = None,
+    stdin: str = "",
+) -> tuple[int, str]:
+    """Run the skill's main() in a subprocess with CLI argv (not JSON stdin)."""
+    full_env = os.environ.copy()
+    full_env["PYTHONPATH"] = str(REPO_ROOT)
+    if env:
+        full_env.update(env)
+
+    driver = (
+        "import importlib.util, importlib.machinery, sys\n"
+        "loader = importlib.machinery.SourceFileLoader('gbrain_skill_under_test', sys.argv[1])\n"
+        "spec = importlib.util.spec_from_loader(loader.name, loader)\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "loader.exec_module(mod)\n"
+        "sys.argv = ['gbrain'] + sys.argv[2:]\n"
+        "sys.exit(mod.main())\n"
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-c", driver, str(SKILL_PATH), *cli_args],
+        input=stdin,
         capture_output=True,
         text=True,
         env=full_env,
@@ -1389,6 +1423,339 @@ class GbrainSkillGateTests(unittest.TestCase):
         self.assertIn("put", actions)
         self.assertIn("link", actions)
         self.assertIn("backlinks", actions)
+
+
+class GbrainSkillCLITests(unittest.TestCase):
+    """Tests for CLI argv mode (alternative to JSON stdin)."""
+
+    def setUp(self) -> None:
+        self._tempfiles: list[Path] = []
+        self.module = load_skill_module()
+
+    def tearDown(self) -> None:
+        for p in self._tempfiles:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _fake_wrapper(
+        self,
+        *,
+        exit_code: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+        record: bool = False,
+    ) -> Path:
+        record_path = None
+        if record:
+            tf = tempfile.NamedTemporaryFile(suffix=".calls", delete=False)
+            tf.close()
+            record_path = Path(tf.name)
+            self._tempfiles.append(record_path)
+        return make_fake_wrapper(
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            record_path=record_path,
+        )
+
+    def _ok_wrapper(self, action: str, **extra) -> Path:
+        return self._fake_wrapper(stdout=json.dumps({"success": True, "action": action, **extra}))
+
+    def _record_wrapper(self, action: str, **extra) -> tuple[Path, Path]:
+        record = tempfile.NamedTemporaryFile(suffix=".calls", delete=False)
+        record.close()
+        record_path = Path(record.name)
+        self._tempfiles.append(record_path)
+        wrapper = make_fake_wrapper(
+            stdout=json.dumps({"success": True, "action": action, **extra}),
+            record_path=record_path,
+        )
+        return wrapper, record_path
+
+    # ------------------------------------------------------------------
+    # CLI mode: basic actions
+    # ------------------------------------------------------------------
+
+    def test_cli_status(self) -> None:
+        wrapper = self._fake_wrapper(
+            stdout=json.dumps({"success": True, "action": "status", "gate_open": True})
+        )
+        rc, out = run_skill_cli(["status"], env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)})
+        self.assertEqual(0, rc, out)
+        data = parse_json(out)
+        self.assertTrue(data["success"])
+        self.assertEqual("status", data["action"])
+
+    def test_cli_schema_status_hyphen_mapping(self) -> None:
+        """schema-status (hyphen) must map to schema_status (underscore)."""
+        wrapper = self._fake_wrapper(
+            stdout=json.dumps({"success": True, "action": "schema_status", "selected_pack": "josemar-user"})
+        )
+        rc, out = run_skill_cli(["schema-status"], env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)})
+        self.assertEqual(0, rc, out)
+        data = parse_json(out)
+        self.assertTrue(data["success"])
+        self.assertEqual("schema_status", data["action"])
+
+    def test_cli_search(self) -> None:
+        wrapper, record_path = self._record_wrapper("search", result="ok")
+        rc, out = run_skill_cli(
+            ["search", "rodrigo green wall", "--limit", "3"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertEqual(0, rc, out)
+        data = parse_json(out)
+        self.assertTrue(data["success"])
+        self.assertEqual("search", data["action"])
+        # Verify the wrapper received the JSON payload with correct fields.
+        calls = record_path.read_text(encoding="utf-8").splitlines()
+        payload = json.loads(calls[1])
+        self.assertEqual(payload["query"], "rodrigo green wall")
+        self.assertEqual(payload["limit"], 3)
+
+    def test_cli_search_with_offset(self) -> None:
+        wrapper = self._ok_wrapper("search")
+        rc, out = run_skill_cli(
+            ["search", "test query", "--limit", "5", "--offset", "10"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertEqual(0, rc, out)
+
+    def test_cli_get(self) -> None:
+        wrapper, record_path = self._record_wrapper("get", result="page content")
+        rc, out = run_skill_cli(
+            ["get", "people/rodrigo-green-wall-cerrado"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertEqual(0, rc, out)
+        data = parse_json(out)
+        self.assertTrue(data["success"])
+        calls = record_path.read_text(encoding="utf-8").splitlines()
+        payload = json.loads(calls[1])
+        self.assertEqual(payload["slug"], "people/rodrigo-green-wall-cerrado")
+
+    def test_cli_capture(self) -> None:
+        wrapper, record_path = self._record_wrapper("capture", result="ok")
+        rc, out = run_skill_cli(
+            ["capture", "--slug", "inbox/my-note", "--type", "note", "--content", "remember to follow up"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertEqual(0, rc, out)
+        data = parse_json(out)
+        self.assertTrue(data["success"])
+        calls = record_path.read_text(encoding="utf-8").splitlines()
+        payload = json.loads(calls[1])
+        self.assertEqual(payload["content"], "remember to follow up")
+        self.assertEqual(payload["slug"], "inbox/my-note")
+        self.assertEqual(payload["type"], "note")
+
+    def test_cli_capture_content_via_stdin(self) -> None:
+        """capture can read content from stdin when --content is not provided."""
+        wrapper, record_path = self._record_wrapper("capture", result="ok")
+        rc, out = run_skill_cli(
+            ["capture", "--slug", "inbox/my-note"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+            stdin="content from stdin",
+        )
+        self.assertEqual(0, rc, out)
+        calls = record_path.read_text(encoding="utf-8").splitlines()
+        payload = json.loads(calls[1])
+        self.assertEqual(payload["content"], "content from stdin")
+
+    def test_cli_capture_prefers_content_flag_over_stdin(self) -> None:
+        """If both --content and stdin are present, --content wins."""
+        wrapper, record_path = self._record_wrapper("capture", result="ok")
+        rc, out = run_skill_cli(
+            ["capture", "--content", "from flag"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+            stdin="from stdin",
+        )
+        self.assertEqual(0, rc, out)
+        calls = record_path.read_text(encoding="utf-8").splitlines()
+        payload = json.loads(calls[1])
+        self.assertEqual(payload["content"], "from flag")
+
+    def test_cli_capture_missing_content_error(self) -> None:
+        """capture without --content or stdin must return invalid_args."""
+        wrapper = self._ok_wrapper("capture")
+        rc, out = run_skill_cli(
+            ["capture", "--slug", "inbox/test"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertNotEqual(0, rc)
+        data = parse_json(out)
+        self.assertFalse(data["success"])
+        self.assertEqual("invalid_args", data["error"])
+
+    def test_cli_put(self) -> None:
+        wrapper, record_path = self._record_wrapper("put", result="ok")
+        rc, out = run_skill_cli(
+            ["put", "people/some-person", "--content", "full markdown here"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertEqual(0, rc, out)
+        data = parse_json(out)
+        self.assertTrue(data["success"])
+        calls = record_path.read_text(encoding="utf-8").splitlines()
+        payload = json.loads(calls[1])
+        self.assertEqual(payload["slug"], "people/some-person")
+        self.assertEqual(payload["content"], "full markdown here")
+
+    def test_cli_put_content_via_stdin(self) -> None:
+        """put can read content from stdin when --content is not provided."""
+        wrapper, record_path = self._record_wrapper("put", result="ok")
+        rc, out = run_skill_cli(
+            ["put", "people/some-person"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+            stdin="content via stdin",
+        )
+        self.assertEqual(0, rc, out)
+        calls = record_path.read_text(encoding="utf-8").splitlines()
+        payload = json.loads(calls[1])
+        self.assertEqual(payload["content"], "content via stdin")
+
+    def test_cli_put_missing_slug_error(self) -> None:
+        wrapper = self._ok_wrapper("put")
+        rc, out = run_skill_cli(
+            ["put", "--content", "test"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertNotEqual(0, rc)
+        data = parse_json(out)
+        self.assertFalse(data["success"])
+        self.assertEqual("invalid_args", data["error"])
+
+    def test_cli_link(self) -> None:
+        wrapper, record_path = self._record_wrapper("link", result="ok")
+        rc, out = run_skill_cli(
+            ["link", "people/a", "people/b", "--link-type", "mentions", "--context", "meeting notes"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertEqual(0, rc, out)
+        data = parse_json(out)
+        self.assertTrue(data["success"])
+        calls = record_path.read_text(encoding="utf-8").splitlines()
+        payload = json.loads(calls[1])
+        self.assertEqual(payload["from"], "people/a")
+        self.assertEqual(payload["to"], "people/b")
+        self.assertEqual(payload["link_type"], "mentions")
+        self.assertEqual(payload["context"], "meeting notes")
+
+    def test_cli_link_with_source(self) -> None:
+        wrapper = self._ok_wrapper("link")
+        rc, out = run_skill_cli(
+            ["link", "a", "b", "--link-source", "manual"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertEqual(0, rc, out)
+
+    def test_cli_link_missing_args_error(self) -> None:
+        wrapper = self._ok_wrapper("link")
+        rc, out = run_skill_cli(
+            ["link", "a"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertNotEqual(0, rc)
+        data = parse_json(out)
+        self.assertFalse(data["success"])
+        self.assertEqual("invalid_args", data["error"])
+
+    def test_cli_backlinks(self) -> None:
+        wrapper, record_path = self._record_wrapper("backlinks", result=[])
+        rc, out = run_skill_cli(
+            ["backlinks", "people/elton-bora"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertEqual(0, rc, out)
+        data = parse_json(out)
+        self.assertTrue(data["success"])
+        calls = record_path.read_text(encoding="utf-8").splitlines()
+        payload = json.loads(calls[1])
+        self.assertEqual(payload["slug"], "people/elton-bora")
+
+    # ------------------------------------------------------------------
+    # CLI mode: error handling
+    # ------------------------------------------------------------------
+
+    def test_cli_unknown_action_error(self) -> None:
+        wrapper = self._ok_wrapper("status")
+        rc, out = run_skill_cli(
+            ["frobnicate"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertNotEqual(0, rc)
+        data = parse_json(out)
+        self.assertFalse(data["success"])
+        # Unknown action from CLI goes through _dispatch which returns unknown_action.
+        self.assertEqual("unknown_action", data["error"])
+
+    def test_cli_invalid_args_envelope(self) -> None:
+        """Missing required positional must return invalid_args error."""
+        wrapper = self._ok_wrapper("search")
+        rc, out = run_skill_cli(
+            ["search"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertNotEqual(0, rc)
+        data = parse_json(out)
+        self.assertFalse(data["success"])
+        self.assertEqual("invalid_args", data["error"])
+
+    def test_cli_rejected_action(self) -> None:
+        """Old note.* route names must be rejected in CLI mode too."""
+        wrapper = self._ok_wrapper("capture")
+        rc, out = run_skill_cli(
+            ["note.capture", "--content", "test"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertNotEqual(0, rc)
+        data = parse_json(out)
+        self.assertFalse(data["success"])
+        self.assertEqual("rejected_action", data["error"])
+
+    def test_cli_reindex_not_exposed(self) -> None:
+        """reindex must not be exposed from CLI mode."""
+        wrapper = self._ok_wrapper("reindex")
+        rc, out = run_skill_cli(
+            ["reindex"],
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertNotEqual(0, rc)
+        data = parse_json(out)
+        self.assertFalse(data["success"])
+        self.assertEqual("unknown_action", data["error"])
+
+    # ------------------------------------------------------------------
+    # JSON stdin mode regression
+    # ------------------------------------------------------------------
+
+    def test_json_stdin_mode_still_works(self) -> None:
+        """JSON stdin mode must remain 100% backward-compatible."""
+        wrapper = self._ok_wrapper("search", result="ok")
+        rc, out = run_skill(
+            self.module,
+            {"action": "search", "query": "test query", "limit": 5},
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertEqual(0, rc, out)
+        data = parse_json(out)
+        self.assertTrue(data["success"])
+        self.assertEqual("search", data["action"])
+
+    def test_json_stdin_no_input_shows_usage(self) -> None:
+        """No argv + no stdin must show usage (existing behavior)."""
+        wrapper = self._ok_wrapper("status")
+        rc, out = run_skill(
+            self.module,
+            "",
+            env={"JOSEMAR_GBRAIN_WRAPPER": str(wrapper)},
+        )
+        self.assertNotEqual(0, rc)
+        data = parse_json(out)
+        self.assertFalse(data["success"])
+        self.assertEqual("no_input", data["error"])
 
 
 if __name__ == "__main__":
