@@ -44,6 +44,12 @@ remains supported for programmatic use and backward compatibility.
   manually for those).
 - **Old note.* routes are rejected.** This skill does not support the legacy
   vault-gateway `note.*` route API. Use the native gbrain actions below.
+- **Wikilinks and backlinks.** Obsidian `[[wikilinks]]` in page content are
+  resolved automatically when a page is written via `put` or `capture` (basename
+  resolution is enabled). `backlinks` returns all incoming links, including
+  wikilink-resolved edges. Cross-page link extraction for pre-existing pages
+  is an operator action (`josemar-gbrain reindex` or `gbrain extract links
+  --source db`); see `docs/gbrain-operations.md`.
 
 ## Actions
 
