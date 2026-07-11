@@ -1736,6 +1736,22 @@ PY
         return 1
     }
 
+    # Extract the link graph (wikilinks → backlinks) from the DB so the
+    # backlinks action returns populated results after reindex.
+    extract_links_output=$("$GBRAIN_BIN" extract links --source db --json 2>&1) || {
+        emit_json "$(python3 - "$extract_links_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_extract_links_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+        return 1
+    }
+
     keyword_config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
         emit_json "$(python3 - "$keyword_config_output" <<'PY'
 import json, sys

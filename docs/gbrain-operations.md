@@ -85,11 +85,13 @@ protected workspace runtime path (never versioned by workspace sync).
     This validates and installs the schema source pack (if a custom pack is
     selected), runs `gbrain init --pglite --no-embedding`, configures global
     basename resolution, configures `sync.repo_path`, runs a full sync with
-    `--no-embed`, runs stale extraction, runs native `gbrain schema sync --apply`
-    to backfill page.type for rows matching pack prefixes, sets
-    `search.mcp_keyword_only=true` to force the native keyword-only operation,
-    and atomically writes the activation/config marker with source/installed
-    schema pack hashes. If any step fails, the marker is not written.
+    `--no-embed`, runs stale content extraction, runs link extraction
+    (`extract links --source db`) to populate the wikilink/backlink graph,
+    runs native `gbrain schema sync --apply` to backfill page.type for rows
+    matching pack prefixes, sets `search.mcp_keyword_only=true` to force the
+    native keyword-only operation, and atomically writes the activation/config
+    marker with source/installed schema pack hashes. If any step fails, the
+    marker is not written.
 
 4. **Check status:**
    ```bash

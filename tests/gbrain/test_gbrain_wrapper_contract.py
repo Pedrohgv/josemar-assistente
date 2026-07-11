@@ -408,6 +408,33 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         body = _extract_function(self.src, "do_reindex")
         self.assertIn("extract --stale", body)
 
+    def test_reindex_runs_extract_links(self) -> None:
+        """reindex must run `extract links --source db` to populate the link graph."""
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn("extract links", body)
+        self.assertIn("--source db", body)
+
+    def test_reindex_extract_links_after_extract_stale(self) -> None:
+        """extract links must run AFTER extract --stale."""
+        body = _extract_function(self.src, "do_reindex")
+        stale_pos = body.find("extract --stale")
+        links_pos = body.find("extract links")
+        self.assertLess(stale_pos, links_pos,
+                        "extract links must follow extract --stale")
+
+    def test_reindex_extract_links_before_keyword_config(self) -> None:
+        """extract links must run BEFORE config set search.mcp_keyword_only."""
+        body = _extract_function(self.src, "do_reindex")
+        links_pos = body.find("extract links")
+        keyword_pos = body.find("search.mcp_keyword_only")
+        self.assertLess(links_pos, keyword_pos,
+                        "extract links must precede keyword-only config")
+
+    def test_reindex_extract_links_failure_blocks_readiness(self) -> None:
+        """extract links failure must emit gbrain_extract_links_failed and return 1."""
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn("gbrain_extract_links_failed", body)
+
     def test_reindex_writes_activation_marker(self) -> None:
         body = _extract_function(self.src, "do_reindex")
         self.assertIn("write_marker", body)
