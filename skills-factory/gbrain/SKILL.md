@@ -173,9 +173,6 @@ JSON-over-stdin is still accepted when no CLI arguments are provided:
 echo '{"action":"search","query":"notes on obsidian sync","limit":10}' | gbrain-skill
 ```
 
-Fields:
-- `slug` (string, required, validated)
-
 ## Excluded Actions
 
 `reindex` is not exposed from chat. It is a manual operator action run on the
