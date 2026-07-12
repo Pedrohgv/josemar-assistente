@@ -62,7 +62,8 @@ When called via slash command, execution bypasses the model and dispatches direc
 ## Available Actions
 
 ### status
-Show git status, branch, remote URL, and list tracked files from `.sync-manifest`.
+Refresh user-owned skill registration, then show git status, branch, remote URL,
+and list tracked files from `.sync-manifest`.
 
 ```bash
 echo '{"action": "status"}' | workspace-sync
@@ -76,7 +77,7 @@ Returns:
 - `status`: list of changed/untracked files
 
 ### diff
-Show pending changes (unstaged and staged).
+Refresh user-owned skill registration, then show pending changes (unstaged and staged).
 
 ```bash
 echo '{"action": "diff"}' | workspace-sync
@@ -134,6 +135,9 @@ echo '{"action": "gh", "command": "pr create --title fix --body desc"}' | worksp
 ## Notes
 
 - Only files listed in `.sync-manifest` are staged/committed
+- User-owned skill files under `skills/<name>/` are auto-registered in
+  `.sync-manifest` when the skill directory contains `SKILL.md`; `status`,
+  `diff`, `commit`, `pull`, and `sync` all refresh this registration.
 - Merge conflicts use remote-wins strategy
 - The state worktree directory is `/opt/data` inside the container
 - `gh` commands run in the context of the state git repo
