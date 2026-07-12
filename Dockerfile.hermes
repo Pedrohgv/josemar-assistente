@@ -100,9 +100,7 @@ COPY skills-factory/aux-ml /opt/josemar/skills/aux-ml
 COPY skills-factory/workspace-sync /opt/josemar/skills/workspace-sync
 COPY skills-factory/gbrain /opt/josemar/skills/gbrain
 RUN chmod +x /opt/josemar/skills/aux-ml/aux-ml \
-    /opt/josemar/skills/workspace-sync/workspace-sync \
-    /opt/josemar/skills/gbrain/gbrain \
-    && ln -sf /opt/josemar/skills/gbrain/gbrain /usr/local/bin/gbrain-skill
+    /opt/josemar/skills/workspace-sync/workspace-sync
 
 COPY scripts/workspace-sync.sh /usr/local/bin/workspace-sync.sh
 RUN chmod +x /usr/local/bin/workspace-sync.sh

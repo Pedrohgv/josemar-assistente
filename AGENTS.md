@@ -39,7 +39,7 @@ josemar-assistente/
 
 ## Runtime Storage
 
-- `hermes-data`: Hermes runtime state plus private state git worktree (`/opt/data`). Includes gbrain state at `/opt/data/.gbrain` (PGLite database, config, readiness marker).
+- `hermes-data`: Hermes runtime state plus private state git worktree (`/opt/data`). Includes gbrain state at `/opt/data/.gbrain` (PGLite database, config, cache).
 - `aux-ml-shared`: explicit file handoff area for aux-ml (`/shared` in both Hermes and aux-ml)
 - `obsidian-vault`: notes/attachments (not git-versioned)
 - `syncthing-config`, `tailscale-state`, `obsidian-rclone-config`, `obsidian-backup-state`
@@ -86,7 +86,7 @@ When modifying user state, commit/push inside `agent-state` repo when requested.
 
 - Repo-owned skills: `skills-factory/*` -> copied to `/opt/josemar/skills`.
 - User-owned skills: `agent-state/skills/*` -> synced into `/opt/data/skills`.
-- Keep native gbrain (`skills-factory/gbrain` + `scripts/josemar-gbrain`) as the canonical vault interface.
+- Keep native gbrain (`skills-factory/gbrain` + `scripts/josemar-gbrain`) as the canonical vault interface. Josemar uses the pinned `gbrain` CLI directly; `josemar-gbrain` is an operator-only reindex/activation convenience.
 
 ## Security Rules
 
@@ -102,7 +102,7 @@ When modifying user state, commit/push inside `agent-state` repo when requested.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract tests.gbrain.test_gbrain_skill_gate -v
+python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
 ```
 
 ## Key References

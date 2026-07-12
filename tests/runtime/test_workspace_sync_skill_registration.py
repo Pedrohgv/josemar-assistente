@@ -131,9 +131,9 @@ class WorkspaceSyncSkillRegistrationTests(unittest.TestCase):
                 self.assertIn("protected runtime path", process.stderr)
 
     def test_manifest_rejects_gbrain_runtime_path(self) -> None:
-        # .gbrain holds PGLite DB, config, and readiness marker; it must never
+        # .gbrain holds PGLite DB, config, and cache; it must never
         # be versioned by workspace state sync.
-        for path in [".gbrain", ".gbrain/readiness.json", ".gbrain/brain.pglite"]:
+        for path in [".gbrain", ".gbrain/config.json", ".gbrain/brain.pglite"]:
             with self.subTest(path=path):
                 (self.workspace / ".sync-manifest").write_text(f"{path}\n", encoding="utf-8")
 

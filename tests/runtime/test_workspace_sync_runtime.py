@@ -38,7 +38,7 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
 
     def test_workspace_sync_script_protects_gbrain_runtime_path(self) -> None:
         # The workspace-sync.sh script must reject .gbrain in .sync-manifest
-        # so PGLite DB/config/marker are never versioned.
+        # so PGLite DB/config/cache are never versioned.
         (Path(self.workspace) / ".sync-manifest").write_text(".gbrain\n", encoding="utf-8")
 
         result = self._run_workspace_sync_script()

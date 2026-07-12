@@ -1,70 +1,34 @@
 #!/bin/sh
-# josemar-gbrain - bounded, gated wrapper around the pinned native gbrain CLI.
+# josemar-gbrain - operator-only reindex/activation wrapper around the pinned
+# native gbrain CLI.
 #
-# Subcommands (all action subcommands except status/reindex take a single
-# JSON payload string as their first argument):
-#   status    - machine-readable gate status (no gbrain invocation)
-#   search    - bounded keyword-only native gbrain search (requires gate open)
-#   get       - read a page by slug (requires gate open)
-#   capture   - native capture: write content as a new page (requires gate open)
-#   put       - whole-page upsert by slug (requires gate open)
-#   link      - create a manual link between two pages (requires gate open)
-#   backlinks - list incoming links to a page (requires gate open)
-#   reindex   - operator-only initial activation; writes readiness marker
+# Subcommands:
+#   reindex - operator-only initial activation: init, config, sync, extract,
+#             extract links, schema sync (if custom pack), git safe.directory.
 #
-# Design constraints:
+# Design:
 #   - Native gbrain CLI only; no custom indexing/retrieval/ranking/authoring.
-#   - Keyword-only native gbrain search: before every chat search the wrapper
-#     sets `search.mcp_keyword_only=true` and dispatches via
-#     `gbrain call search <json>`.
-#   - Provider credentials are explicitly unset before every gbrain invocation
-#     as defense-in-depth.
+#   - Chat-facing actions (search, get, capture, put, link, backlinks, status)
+#     are invoked directly via the `gbrain` CLI; this wrapper no longer gates,
+#     bounds, or re-implements them.
+#   - reindex is manual only; nothing in startup/deploy calls it.
 #   - GBRAIN_SKIP_STARTUP_HOOKS=1 is exported for every wrapper-invoked gbrain
 #     command to prevent gbrain's detached update-check network call.
-#   - Every action except status and reindex requires GBRAIN_ENABLED=true AND
-#     a valid activation/config readiness marker that matches the current
-#     pinned gbrain ref/version, schema pack, GBRAIN_HOME realpath,
-#     GBRAIN_BRAIN_REPO realpath, configured sync.repo_path (verified against
-#     live gbrain config), and search.mcp_keyword_only=true (verified against
-#     live gbrain config).
-#   - Readiness is an activation/config invariant, NOT a vault Git snapshot.
-#   - reindex is manual only; nothing in startup/deploy calls it.
-#   - All gbrain invocations use argv arrays, timeouts where appropriate, and
-#     output caps. Results are returned in JSON envelopes.
-#   - No generic `call`, `query`, `sync`, admin, or raw upload surface is
-#     exposed from chat. Old note.* route names (dotted or underscored) are
-#     explicitly rejected.
-#   - Skill-to-wrapper communication uses a single JSON payload string per
-#     action (no sparse positional arguments).
-#   - capture and put parse native JSON output to detect write-through
-#     failure/degraded status and surface it rather than unconditional success.
+#   - Results are returned in JSON envelopes.
 
 set -eu
 
-GBRAIN_ENABLED="${GBRAIN_ENABLED:-true}"
 GBRAIN_HOME="${GBRAIN_HOME:-/opt/data}"
 GBRAIN_BRAIN_REPO="${GBRAIN_BRAIN_REPO:-/opt/data/obsidian}"
 GBRAIN_SCHEMA_PACK="${GBRAIN_SCHEMA_PACK:-gbrain-base-v2}"
 GBRAIN_SCHEMA_SOURCE_ROOT="${GBRAIN_SCHEMA_SOURCE_ROOT:-/opt/data/gbrain/schema-packs}"
-GBRAIN_QUERY_TIMEOUT_SECONDS="${GBRAIN_QUERY_TIMEOUT_SECONDS:-30}"
-GBRAIN_QUERY_MAX_INPUT_CHARS="${GBRAIN_QUERY_MAX_INPUT_CHARS:-2000}"
-GBRAIN_QUERY_MAX_OUTPUT_CHARS="${GBRAIN_QUERY_MAX_OUTPUT_CHARS:-20000}"
-GBRAIN_QUERY_MAX_LIMIT="${GBRAIN_QUERY_MAX_LIMIT:-20}"
-GBRAIN_CONTENT_MAX_CHARS="${GBRAIN_CONTENT_MAX_CHARS:-50000}"
 
-GBRAIN_PINNED_REF="058f448b9a4ba3d522e2c2a7a4615bccdd00ae76"
-GBRAIN_PINNED_VERSION="0.42.57.0"
 GBRAIN_BIN="${GBRAIN_BIN:-/usr/local/bin/gbrain}"
 GBRAIN_STATE_DIR="${GBRAIN_HOME}/.gbrain"
-MARKER_NAME="readiness.json"
-MARKER_PATH="${GBRAIN_STATE_DIR}/${MARKER_NAME}"
 
 # Schema pack install directory (native gbrain user-pack discovery location).
 SCHEMA_INSTALL_DIR="${GBRAIN_STATE_DIR}/schema-packs"
 BUNDLED_PACKS="gbrain-base gbrain-base-v2 gbrain-recommended"
-
-# Managed link sources that must NOT be forged via the wrapper.
-MANAGED_LINK_SOURCES="markdown frontmatter mentions wikilink-resolved"
 
 log() {
     echo "[josemar-gbrain] $1" >&2
@@ -74,18 +38,8 @@ emit_json() {
     printf '%s\n' "$1"
 }
 
-# Provider credentials that must NEVER reach gbrain in MVP.
-strip_provider_env() {
-    unset ZEROENTROPY_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY VOYAGE_API_KEY \
-        COHERE_API_KEY TOGETHER_API_KEY FIREWORKS_API_KEY GROQ_API_KEY \
-        REPLICATE_API_KEY PERPLEXITY_API_KEY MISTRAL_API_KEY DEEPINFRA_API_KEY \
-        GBRAIN_EMBEDDING_API_KEY GBRAIN_RERANKER_API_KEY GBRAIN_EXPANSION_API_KEY \
-        2>/dev/null || true
-}
-
-# Export the common gbrain runtime env (provider-stripped, startup hooks off).
+# Export the common gbrain runtime env (startup hooks off).
 export_gbrain_env() {
-    strip_provider_env
     export GBRAIN_HOME
     export GBRAIN_BRAIN_REPO
     export GBRAIN_SCHEMA_PACK
@@ -101,39 +55,6 @@ try:
 except Exception:
     sys.exit(0)
 PY
-}
-
-# Extract a field from a JSON payload string. Returns empty string on failure.
-json_get() {
-    python3 - "$1" "$2" <<'PY' 2>/dev/null || echo ""
-import json, sys
-try:
-    data = json.loads(sys.argv[1])
-except Exception:
-    sys.exit(0)
-val = data.get(sys.argv[2])
-if val is None:
-    print("")
-elif isinstance(val, bool):
-    print("true" if val else "false")
-elif isinstance(val, float) and val == int(val):
-    print(int(val))
-else:
-    print(str(val))
-PY
-}
-
-# Read a gbrain config value. Returns empty string on failure.
-# Uses a subshell so the caller's environment is not modified.
-read_gbrain_config() {
-    key="$1"
-    (
-        strip_provider_env
-        export GBRAIN_HOME
-        export GBRAIN_BRAIN_REPO
-        export GBRAIN_SKIP_STARTUP_HOOKS=1
-        "$GBRAIN_BIN" config get "$key" 2>/dev/null
-    ) 2>/dev/null || echo ""
 }
 
 # ---------------------------------------------------------------------------
@@ -166,29 +87,6 @@ source_pack_path() {
     echo ""
 }
 
-# Compute the installed pack path for a pack name.
-installed_pack_path() {
-    pack_name="$1"
-    for ext in pack.yaml pack.yml pack.json; do
-        candidate="${SCHEMA_INSTALL_DIR}/${pack_name}/${ext}"
-        if [ -f "$candidate" ]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-    echo ""
-}
-
-# Compute sha256 of a file. Returns empty string on failure.
-compute_sha256() {
-    file_path="$1"
-    if [ ! -f "$file_path" ]; then
-        echo ""
-        return 1
-    fi
-    sha256sum "$file_path" 2>/dev/null | awk '{print $1}' || echo ""
-}
-
 # Validate path confinement: reject symlinks, path escapes, and non-regular files.
 # Emits error JSON and returns 1 on failure.
 validate_source_pack_path() {
@@ -218,8 +116,7 @@ validate_source_pack_path() {
             ;;
     esac
 
-    # Reject symlinks (check the resolved path differs from the literal path
-    # in a way that indicates a symlink chain — use -L test).
+    # Reject symlinks.
     if [ -L "$src_path" ]; then
         emit_json '{"success": false, "error": "schema_source_symlink", "message": "Source pack path is a symlink; only regular files are allowed."}'
         return 1
@@ -269,11 +166,7 @@ install_source_pack() {
 validate_installed_pack() {
     pack_name="$1"
     (
-        strip_provider_env
-        export GBRAIN_HOME
-        export GBRAIN_BRAIN_REPO
-        export GBRAIN_SCHEMA_PACK
-        export GBRAIN_SKIP_STARTUP_HOOKS=1
+        export_gbrain_env
         "$GBRAIN_BIN" schema validate "$pack_name" >/dev/null 2>&1
     )
     rc=$?
@@ -306,1272 +199,10 @@ validate_schema_pack_name() {
 }
 
 # ---------------------------------------------------------------------------
-# Readiness marker (activation/config invariant)
-# ---------------------------------------------------------------------------
-
-marker_exists() {
-    [ -f "$MARKER_PATH" ]
-}
-
-marker_field() {
-    key="$1"
-    if ! marker_exists; then
-        echo ""
-        return
-    fi
-    python3 - "$MARKER_PATH" "$key" <<'PY' 2>/dev/null || echo ""
-import json, sys
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as fh:
-        data = json.load(fh)
-except Exception:
-    sys.exit(0)
-val = data.get(sys.argv[2], "")
-if val is None:
-    val = ""
-if isinstance(val, bool):
-    print(str(val).lower())
-else:
-    print(val)
-PY
-}
-
-marker_is_valid() {
-    if ! marker_exists; then
-        return 1
-    fi
-    # Core activation fields must always be present and non-empty.
-    for field in gbrain_ref gbrain_version schema_pack gbrain_home_realpath brain_repo_realpath sync_repo_path keyword_only completed_at; do
-        val=$(marker_field "$field")
-        if [ -z "$val" ]; then
-            return 1
-        fi
-    done
-    # Schema source/installed path fields: required for custom packs,
-    # allowed to be empty for bundled packs (sentinel hash "bundled" is used).
-    marker_schema_name=$(marker_field "schema_pack")
-    if ! is_bundled_pack "$marker_schema_name"; then
-        for field in schema_source_pack schema_source_path schema_installed_path; do
-            val=$(marker_field "$field")
-            if [ -z "$val" ]; then
-                return 1
-            fi
-        done
-    fi
-    # Schema hash fields: must be present (key exists in marker JSON).
-    # For bundled packs the value is the sentinel "bundled" (non-empty).
-    # For custom packs the value is a sha256 hex string (non-empty).
-    for field in schema_source_sha256 schema_installed_sha256; do
-        val=$(marker_field "$field")
-        if [ -z "$val" ]; then
-            return 1
-        fi
-    done
-    return 0
-}
-
-# Check the marker matches the current activation/config invariant.
-# Also verifies live gbrain config (sync.repo_path, search.mcp_keyword_only).
-# Does NOT track vault HEAD or git clean status.
-marker_matches_current() {
-    marker_ref=$(marker_field "gbrain_ref")
-    marker_version=$(marker_field "gbrain_version")
-    marker_schema=$(marker_field "schema_pack")
-    marker_home=$(marker_field "gbrain_home_realpath")
-    marker_repo=$(marker_field "brain_repo_realpath")
-    marker_sync_repo=$(marker_field "sync_repo_path")
-    marker_keyword=$(marker_field "keyword_only")
-
-    if [ "$marker_ref" != "$GBRAIN_PINNED_REF" ]; then
-        return 1
-    fi
-    if [ "$marker_version" != "$GBRAIN_PINNED_VERSION" ]; then
-        return 1
-    fi
-    if [ "$marker_schema" != "$GBRAIN_SCHEMA_PACK" ]; then
-        return 1
-    fi
-    current_home=$(resolve_realpath "$GBRAIN_HOME")
-    if [ -z "$current_home" ] || [ "$marker_home" != "$current_home" ]; then
-        return 1
-    fi
-    current_repo=$(resolve_realpath "$GBRAIN_BRAIN_REPO")
-    if [ -z "$current_repo" ] || [ "$marker_repo" != "$current_repo" ]; then
-        return 1
-    fi
-    if [ ! -d "$GBRAIN_STATE_DIR" ]; then
-        return 1
-    fi
-    if [ ! -d "$GBRAIN_BRAIN_REPO" ]; then
-        return 1
-    fi
-    if [ "$marker_sync_repo" != "$current_repo" ]; then
-        return 1
-    fi
-    if [ "$marker_keyword" != "true" ]; then
-        return 1
-    fi
-
-    # Verify live gbrain config: sync.repo_path must match brain repo realpath.
-    config_repo=$(read_gbrain_config "sync.repo_path")
-    if [ -z "$config_repo" ]; then
-        return 1
-    fi
-    config_repo_realpath=$(resolve_realpath "$config_repo")
-    if [ -z "$config_repo_realpath" ] || [ "$config_repo_realpath" != "$current_repo" ]; then
-        return 1
-    fi
-
-    # Verify live gbrain config: search.mcp_keyword_only must be true.
-    config_keyword=$(read_gbrain_config "search.mcp_keyword_only")
-    if [ "$config_keyword" != "true" ]; then
-        return 1
-    fi
-
-    # Verify schema source/installed hashes match the marker.
-    marker_schema_source_pack=$(marker_field "schema_source_pack")
-    marker_schema_source_path=$(marker_field "schema_source_path")
-    marker_schema_source_sha256=$(marker_field "schema_source_sha256")
-    marker_schema_installed_sha256=$(marker_field "schema_installed_sha256")
-    marker_schema_installed_path=$(marker_field "schema_installed_path")
-
-    if is_bundled_pack "$GBRAIN_SCHEMA_PACK"; then
-        # Bundled pack: no source pack to verify. Marker must record the
-        # "bundled" sentinel for hashes. Path/source_pack fields are empty.
-        if [ "$marker_schema_source_sha256" != "bundled" ]; then
-            return 1
-        fi
-        if [ "$marker_schema_installed_sha256" != "bundled" ]; then
-            return 1
-        fi
-    else
-        # Custom pack: source must exist and hash must match.
-        current_source_path=$(source_pack_path "$GBRAIN_SCHEMA_PACK")
-        if [ -z "$current_source_path" ]; then
-            return 1
-        fi
-        if ! validate_source_pack_path "$current_source_path"; then
-            return 1
-        fi
-        current_source_sha256=$(compute_sha256 "$current_source_path")
-        if [ -z "$current_source_sha256" ]; then
-            return 1
-        fi
-        if [ "$marker_schema_source_sha256" != "$current_source_sha256" ]; then
-            return 1
-        fi
-        # Installed pack must exist and hash must match.
-        current_installed_path=$(installed_pack_path "$GBRAIN_SCHEMA_PACK")
-        if [ -z "$current_installed_path" ]; then
-            return 1
-        fi
-        current_installed_sha256=$(compute_sha256 "$current_installed_path")
-        if [ -z "$current_installed_sha256" ]; then
-            return 1
-        fi
-        if [ "$marker_schema_installed_sha256" != "$current_installed_sha256" ]; then
-            return 1
-        fi
-    fi
-
-    return 0
-}
-
-remove_marker() {
-    if [ -f "$MARKER_PATH" ]; then
-        rm -f "$MARKER_PATH" || true
-    fi
-}
-
-# write_marker accepts 6 additional schema arguments:
-#   $1=source_pack  $2=source_path  $3=source_sha256
-#   $4=installed_sha256  $5=installed_path
-write_marker() {
-    m_source_pack="$1"
-    m_source_path="$2"
-    m_source_sha256="$3"
-    m_installed_sha256="$4"
-    m_installed_path="$5"
-    completed_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    home_realpath=$(resolve_realpath "$GBRAIN_HOME")
-    repo_realpath=$(resolve_realpath "$GBRAIN_BRAIN_REPO")
-    mkdir -p "$GBRAIN_STATE_DIR"
-    tmp="${MARKER_PATH}.tmp.$$"
-    python3 - "$tmp" "$GBRAIN_PINNED_REF" "$GBRAIN_PINNED_VERSION" "$GBRAIN_SCHEMA_PACK" "$home_realpath" "$repo_realpath" "$repo_realpath" "true" "$m_source_pack" "$m_source_path" "$m_source_sha256" "$m_installed_sha256" "$m_installed_path" "$completed_at" <<'PY'
-import json, sys
-(path, ref, version, schema, home, repo, sync_repo, keyword,
- source_pack, source_path, source_sha256, installed_sha256, installed_path, completed) = sys.argv[1:15]
-data = {
-    "gbrain_ref": ref,
-    "gbrain_version": version,
-    "schema_pack": schema,
-    "gbrain_home_realpath": home,
-    "brain_repo_realpath": repo,
-    "sync_repo_path": sync_repo,
-    "keyword_only": keyword,
-    "schema_source_pack": source_pack,
-    "schema_source_path": source_path,
-    "schema_source_sha256": source_sha256,
-    "schema_installed_sha256": installed_sha256,
-    "schema_installed_path": installed_path,
-    "completed_at": completed,
-}
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(data, fh, indent=2, ensure_ascii=False)
-    fh.write("\n")
-PY
-    mv "$tmp" "$MARKER_PATH"
-}
-
-# ---------------------------------------------------------------------------
-# Gate check
-# ---------------------------------------------------------------------------
-
-require_gate() {
-    if [ "$GBRAIN_ENABLED" != "true" ]; then
-        emit_json '{"success": false, "error": "gbrain_disabled", "message": "GBRAIN_ENABLED is not true. Set GBRAIN_ENABLED=true to open the gate."}'
-        return 1
-    fi
-    if ! marker_is_valid; then
-        emit_json '{"success": false, "error": "marker_missing_or_invalid", "message": "Activation marker is missing or invalid. Run josemar-gbrain reindex."}'
-        return 1
-    fi
-    if ! marker_matches_current; then
-        emit_json '{"success": false, "error": "marker_stale", "message": "Activation marker does not match current config. Run josemar-gbrain reindex."}'
-        return 1
-    fi
-    return 0
-}
-
-resolve_timeout() {
-    case "$GBRAIN_QUERY_TIMEOUT_SECONDS" in
-        ''|*[!0-9]*)
-            echo "30"
-            ;;
-        *)
-            if [ "$GBRAIN_QUERY_TIMEOUT_SECONDS" -gt 0 ]; then
-                echo "$GBRAIN_QUERY_TIMEOUT_SECONDS"
-            else
-                echo "30"
-            fi
-            ;;
-    esac
-}
-
-cap_output() {
-    raw="$1"
-    printf '%s' "$raw" | head -c "$GBRAIN_QUERY_MAX_OUTPUT_CHARS"
-}
-
-# ---------------------------------------------------------------------------
-# Validation helpers
-# ---------------------------------------------------------------------------
-
-# Validate a slug with thorough checks. Emits error JSON and returns 1 on
-# failure; returns 0 silently on success.
-validate_slug() {
-    slug="$1"
-    if [ -z "$slug" ]; then
-        emit_json '{"success": false, "error": "missing_slug", "message": "slug is required."}'
-        return 1
-    fi
-    python3 - "$slug" <<'PY'
-import json, sys
-slug = sys.argv[1]
-errors = []
-if len(slug) > 512:
-    errors.append("slug too long (max 512 chars)")
-if ".." in slug:
-    errors.append("slug must not contain ..")
-if slug.startswith("/"):
-    errors.append("slug must not start with /")
-if "\\" in slug:
-    errors.append("slug must not contain backslashes")
-for c in slug:
-    cp = ord(c)
-    if cp < 0x20 or cp == 0x7F:
-        errors.append("slug must not contain control characters")
-        break
-for c in slug:
-    cp = ord(c)
-    if cp in (0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
-              0x2066, 0x2067, 0x2068, 0x2069):
-        errors.append("slug must not contain bidi/RTL override characters")
-        break
-lower = slug.lower()
-if "%2e" in lower or "%2f" in lower or "%5c" in lower:
-    errors.append("slug must not contain URL-encoded traversal sequences")
-if errors:
-    print(json.dumps({
-        "success": False,
-        "error": "invalid_slug",
-        "message": "; ".join(errors),
-    }, ensure_ascii=False))
-    sys.exit(1)
-PY
-}
-
-validate_type() {
-    type_val="$1"
-    if [ -z "$type_val" ]; then
-        return 0
-    fi
-    case "$type_val" in
-        *[!a-z0-9-_]*)
-            emit_json '{"success": false, "error": "invalid_type", "message": "type must be lowercase alphanumeric, hyphens, or underscores."}'
-            return 1
-            ;;
-    esac
-    return 0
-}
-
-validate_link_type() {
-    lt="$1"
-    if [ -z "$lt" ]; then
-        return 0
-    fi
-    case "$lt" in
-        *[!a-z0-9-_]*)
-            emit_json '{"success": false, "error": "invalid_link_type", "message": "link_type must be lowercase alphanumeric, hyphens, or underscores."}'
-            return 1
-            ;;
-    esac
-    return 0
-}
-
-validate_link_source() {
-    ls="$1"
-    if [ -z "$ls" ]; then
-        return 0
-    fi
-    for managed in $MANAGED_LINK_SOURCES; do
-        if [ "$ls" = "$managed" ]; then
-            emit_json "$(python3 - "$ls" <<'PY'
-import json, sys
-ls = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "managed_link_source",
-    "message": f"link_source '{ls}' is reconciliation-managed and cannot be set manually. Use 'manual' (the default) or a custom kebab tag.",
-}, ensure_ascii=False))
-PY
-)"
-            return 1
-        fi
-    done
-    case "$ls" in
-        *[!a-z0-9-_]*)
-            emit_json '{"success": false, "error": "invalid_link_source", "message": "link_source must be lowercase alphanumeric, hyphens, or underscores."}'
-            return 1
-            ;;
-    esac
-    return 0
-}
-
-validate_bounded_string() {
-    val="$1"
-    field="$2"
-    max="$3"
-    if [ -z "$val" ]; then
-        return 0
-    fi
-    val_len=$(printf '%s' "$val" | wc -c | tr -d ' ')
-    if [ "$val_len" -gt "$max" ]; then
-        emit_json "$(python3 - "$field" "$max" <<'PY'
-import json, sys
-field, max = sys.argv[1], sys.argv[2]
-print(json.dumps({
-    "success": False,
-    "error": f"{field}_too_long",
-    "message": f"{field} exceeds max chars ({max}).",
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    fi
-    return 0
-}
-
-# Check native output for write-through failure indicators.
-# Returns 0 if output is OK (or not parseable as JSON), 1 if degraded.
-# On failure, prints a JSON error envelope to stdout.
-check_write_through() {
-    raw="$1"
-    action="$2"
-    python3 - "$raw" "$action" <<'PY'
-import json, sys
-raw, action = sys.argv[1], sys.argv[2]
-try:
-    data = json.loads(raw)
-except Exception:
-    sys.exit(0)
-
-degraded = False
-msg = ""
-
-if isinstance(data.get("written"), bool) and not data["written"]:
-    degraded = True
-    msg = "write-through did not write to disk"
-
-wt = data.get("write_through")
-if isinstance(wt, dict):
-    if isinstance(wt.get("written"), bool) and not wt["written"]:
-        degraded = True
-        msg = str(wt.get("error") or "write-through did not write to disk")
-    elif wt.get("error"):
-        degraded = True
-        msg = str(wt["error"])
-    elif wt.get("skipped"):
-        degraded = True
-        msg = "write-through was skipped"
-
-if degraded:
-    print(json.dumps({
-        "success": False,
-        "error": "write_through_degraded",
-        "action": action,
-        "message": msg,
-    }, ensure_ascii=False))
-    sys.exit(1)
-PY
-}
-
-# ---------------------------------------------------------------------------
-# status (no gate, no gbrain invocation)
-# ---------------------------------------------------------------------------
-
-do_status() {
-    enabled="false"
-    if [ "$GBRAIN_ENABLED" = "true" ]; then
-        enabled="true"
-    fi
-
-    state_dir_exists="false"
-    if [ -d "$GBRAIN_STATE_DIR" ]; then
-        state_dir_exists="true"
-    fi
-
-    brain_repo_exists="false"
-    if [ -d "$GBRAIN_BRAIN_REPO" ]; then
-        brain_repo_exists="true"
-    fi
-
-    home_realpath=$(resolve_realpath "$GBRAIN_HOME")
-    repo_realpath=$(resolve_realpath "$GBRAIN_BRAIN_REPO")
-
-    marker_ok="false"
-    marker_matches="false"
-    if marker_is_valid; then
-        marker_ok="true"
-        if marker_matches_current; then
-            marker_matches="true"
-        fi
-    fi
-
-    gate_open="false"
-    if [ "$enabled" = "true" ] && [ "$marker_ok" = "true" ] && [ "$marker_matches" = "true" ]; then
-        gate_open="true"
-    fi
-
-    emit_json "$(python3 - "$enabled" "$state_dir_exists" "$brain_repo_exists" "$home_realpath" "$repo_realpath" "$marker_ok" "$marker_matches" "$gate_open" "$GBRAIN_SCHEMA_PACK" "$GBRAIN_PINNED_REF" "$GBRAIN_PINNED_VERSION" "$GBRAIN_HOME" "$GBRAIN_STATE_DIR" "$GBRAIN_BRAIN_REPO" <<'PY'
-import json, sys
-(enabled, state_dir_exists, brain_repo_exists, home_realpath, repo_realpath, marker_ok, marker_matches, gate_open, schema, ref, version, home, state_dir, repo) = sys.argv[1:15]
-print(json.dumps({
-    "success": True,
-    "action": "status",
-    "gate_open": gate_open == "true",
-    "enabled": enabled == "true",
-    "state_dir_exists": state_dir_exists == "true",
-    "brain_repo_exists": brain_repo_exists == "true",
-    "gbrain_home_realpath": home_realpath,
-    "brain_repo_realpath": repo_realpath,
-    "marker_ok": marker_ok == "true",
-    "marker_matches": marker_matches == "true",
-    "schema_pack": schema,
-    "gbrain_ref": ref,
-    "gbrain_version": version,
-    "gbrain_home": home,
-    "gbrain_state_dir": state_dir,
-    "brain_repo": repo,
-}, indent=2, ensure_ascii=False))
-PY
-)"
-}
-
-# ---------------------------------------------------------------------------
-# search (keyword-only native gbrain search; requires gate)
-# ---------------------------------------------------------------------------
-
-do_search() {
-    payload="${1:-}"
-
-    if ! require_gate; then
-        return 1
-    fi
-
-    query_text=$(json_get "$payload" "query")
-    limit=$(json_get "$payload" "limit")
-    offset=$(json_get "$payload" "offset")
-
-    if [ -z "$limit" ]; then
-        limit="10"
-    fi
-    if [ -z "$offset" ]; then
-        offset="0"
-    fi
-
-    if [ -z "$query_text" ]; then
-        emit_json '{"success": false, "error": "empty_query", "message": "Query text is required."}'
-        return 1
-    fi
-
-    query_len=$(printf '%s' "$query_text" | wc -c | tr -d ' ')
-    if [ "$query_len" -gt "$GBRAIN_QUERY_MAX_INPUT_CHARS" ]; then
-        emit_json "$(python3 - "$GBRAIN_QUERY_MAX_INPUT_CHARS" <<'PY'
-import json, sys
-print(json.dumps({
-    "success": False,
-    "error": "query_too_long",
-    "message": f"Query exceeds max input chars ({sys.argv[1]}).",
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    fi
-
-    case "$limit" in
-        ''|*[!0-9]*)
-            emit_json '{"success": false, "error": "invalid_limit", "message": "limit must be a positive integer."}'
-            return 1
-            ;;
-    esac
-    if [ "$limit" -lt 1 ] || [ "$limit" -gt "$GBRAIN_QUERY_MAX_LIMIT" ]; then
-        emit_json "$(python3 - "$GBRAIN_QUERY_MAX_LIMIT" <<'PY'
-import json, sys
-print(json.dumps({
-    "success": False,
-    "error": "limit_out_of_range",
-    "message": f"limit must be between 1 and {sys.argv[1]}.",
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    fi
-
-    case "$offset" in
-        ''|*[!0-9]*)
-            emit_json '{"success": false, "error": "invalid_offset", "message": "offset must be a non-negative integer."}'
-            return 1
-            ;;
-    esac
-    if [ "$offset" -lt 0 ]; then
-        emit_json '{"success": false, "error": "invalid_offset", "message": "offset must be a non-negative integer."}'
-        return 1
-    fi
-
-    export_gbrain_env
-    query_timeout=$(resolve_timeout)
-
-    config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
-        emit_json "$(python3 - "$config_output" <<'PY'
-import json, sys
-out = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_config_failed",
-    "message": out[:4000],
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    }
-
-    search_json=$(python3 - "$query_text" "$limit" "$offset" <<'PY'
-import json, sys
-query, limit, offset = sys.argv[1], sys.argv[2], sys.argv[3]
-print(json.dumps({"query": query, "limit": int(limit), "offset": int(offset)}, ensure_ascii=False))
-PY
-)
-
-    raw_output=$(
-        timeout "$query_timeout" "$GBRAIN_BIN" call search "$search_json" 2>&1
-    ) || {
-        rc=$?
-        if [ "$rc" -eq 124 ]; then
-            emit_json "$(python3 - "$query_timeout" <<'PY'
-import json, sys
-t = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_search_timeout",
-    "message": f"gbrain search exceeded {t}s timeout.",
-}, ensure_ascii=False))
-PY
-)"
-            return 1
-        fi
-        emit_json "$(python3 - "$rc" "$raw_output" <<'PY'
-import json, sys
-rc = sys.argv[1]
-out = sys.argv[2]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_search_failed",
-    "exit_code": int(rc),
-    "message": out[:4000],
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    }
-
-    capped=$(cap_output "$raw_output")
-    emit_json "$(python3 - "$capped" "$GBRAIN_QUERY_MAX_OUTPUT_CHARS" <<'PY'
-import json, sys
-out = sys.argv[1]
-max_chars = int(sys.argv[2])
-truncated = len(out) >= max_chars
-print(json.dumps({
-    "success": True,
-    "action": "search",
-    "truncated": truncated,
-    "max_output_chars": max_chars,
-    "result": out,
-}, ensure_ascii=False))
-PY
-)"
-}
-
-# ---------------------------------------------------------------------------
-# get (read a page by slug; requires gate)
-# ---------------------------------------------------------------------------
-
-do_get() {
-    payload="${1:-}"
-
-    if ! require_gate; then
-        return 1
-    fi
-
-    slug=$(json_get "$payload" "slug")
-
-    if ! validate_slug "$slug"; then
-        return 1
-    fi
-
-    export_gbrain_env
-    query_timeout=$(resolve_timeout)
-
-    get_json=$(python3 - "$slug" <<'PY'
-import json, sys
-print(json.dumps({"slug": sys.argv[1]}, ensure_ascii=False))
-PY
-)
-
-    raw_output=$(
-        timeout "$query_timeout" "$GBRAIN_BIN" call get_page "$get_json" 2>&1
-    ) || {
-        rc=$?
-        if [ "$rc" -eq 124 ]; then
-            emit_json "$(python3 - "$query_timeout" <<'PY'
-import json, sys
-t = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_get_timeout",
-    "message": f"gbrain get exceeded {t}s timeout.",
-}, ensure_ascii=False))
-PY
-)"
-            return 1
-        fi
-        emit_json "$(python3 - "$rc" "$raw_output" <<'PY'
-import json, sys
-rc = sys.argv[1]
-out = sys.argv[2]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_get_failed",
-    "exit_code": int(rc),
-    "message": out[:4000],
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    }
-
-    capped=$(cap_output "$raw_output")
-    emit_json "$(python3 - "$capped" "$GBRAIN_QUERY_MAX_OUTPUT_CHARS" <<'PY'
-import json, sys
-out = sys.argv[1]
-max_chars = int(sys.argv[2])
-truncated = len(out) >= max_chars
-print(json.dumps({
-    "success": True,
-    "action": "get",
-    "truncated": truncated,
-    "max_output_chars": max_chars,
-    "result": out,
-}, ensure_ascii=False))
-PY
-)"
-}
-
-# ---------------------------------------------------------------------------
-# capture (native capture: write content as a new page; requires gate)
-# ---------------------------------------------------------------------------
-
-do_capture() {
-    payload="${1:-}"
-
-    if ! require_gate; then
-        return 1
-    fi
-
-    content=$(json_get "$payload" "content")
-    slug=$(json_get "$payload" "slug")
-    type_val=$(json_get "$payload" "type")
-
-    if [ -z "$content" ]; then
-        emit_json '{"success": false, "error": "missing_content", "message": "content is required."}'
-        return 1
-    fi
-
-    content_len=$(printf '%s' "$content" | wc -c | tr -d ' ')
-    if [ "$content_len" -gt "$GBRAIN_CONTENT_MAX_CHARS" ]; then
-        emit_json "$(python3 - "$GBRAIN_CONTENT_MAX_CHARS" <<'PY'
-import json, sys
-print(json.dumps({
-    "success": False,
-    "error": "content_too_long",
-    "message": f"Content exceeds max chars ({sys.argv[1]}).",
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    fi
-
-    if [ -n "$slug" ]; then
-        if ! validate_slug "$slug"; then
-            return 1
-        fi
-    fi
-
-    if [ -n "$type_val" ]; then
-        if ! validate_type "$type_val"; then
-            return 1
-        fi
-    fi
-
-    export_gbrain_env
-    query_timeout=$(resolve_timeout)
-
-    set -- --stdin --json
-    if [ -n "$slug" ]; then
-        set -- "$@" --slug "$slug"
-    fi
-    if [ -n "$type_val" ]; then
-        set -- "$@" --type "$type_val"
-    fi
-
-    # Capture stdout and stderr separately so stderr warnings do not
-    # corrupt JSON parsing in check_write_through.
-    raw_stdout=""
-    raw_stderr=""
-    capture_err_file=$(mktemp "${TMPDIR:-/tmp}/jg_capture_err.XXXXXX") || {
-        emit_json '{"success": false, "error": "tempfile_failed", "message": "Failed to create temporary stderr file."}'
-        return 1
-    }
-    raw_stdout=$(printf '%s' "$content" | timeout "$query_timeout" "$GBRAIN_BIN" capture "$@" 2>"$capture_err_file") || {
-        rc=$?
-        raw_stderr=$(cat "$capture_err_file" 2>/dev/null || true)
-        rm -f "$capture_err_file"
-        if [ "$rc" -eq 124 ]; then
-            emit_json "$(python3 - "$query_timeout" <<'PY'
-import json, sys
-t = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_capture_timeout",
-    "message": f"gbrain capture exceeded {t}s timeout.",
-}, ensure_ascii=False))
-PY
-)"
-            return 1
-        fi
-        emit_json "$(python3 - "$rc" "$raw_stdout" "$raw_stderr" <<'PY'
-import json, sys
-rc = sys.argv[1]
-out = sys.argv[2]
-err = sys.argv[3]
-msg = out[:4000]
-if err.strip():
-    msg = msg + " | stderr: " + err[:2000]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_capture_failed",
-    "exit_code": int(rc),
-    "message": msg,
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    }
-    raw_stderr=$(cat "$capture_err_file" 2>/dev/null || true)
-    rm -f "$capture_err_file"
-
-    # Check for write-through failure in native stdout JSON only.
-    if ! check_write_through "$raw_stdout" "capture"; then
-        return 1
-    fi
-
-    capped=$(cap_output "$raw_stdout")
-    emit_json "$(python3 - "$capped" "$GBRAIN_QUERY_MAX_OUTPUT_CHARS" "$raw_stderr" <<'PY'
-import json, sys
-out = sys.argv[1]
-max_chars = int(sys.argv[2])
-stderr = sys.argv[3]
-truncated = len(out) >= max_chars
-data = {
-    "success": True,
-    "action": "capture",
-    "truncated": truncated,
-    "max_output_chars": max_chars,
-    "result": out,
-}
-if stderr.strip():
-    data["stderr"] = stderr[:2000]
-print(json.dumps(data, ensure_ascii=False))
-PY
-)"
-}
-
-# ---------------------------------------------------------------------------
-# put (whole-page upsert by slug; requires gate)
-# ---------------------------------------------------------------------------
-
-do_put() {
-    payload="${1:-}"
-
-    if ! require_gate; then
-        return 1
-    fi
-
-    slug=$(json_get "$payload" "slug")
-    content=$(json_get "$payload" "content")
-
-    if ! validate_slug "$slug"; then
-        return 1
-    fi
-
-    if [ -z "$content" ]; then
-        emit_json '{"success": false, "error": "missing_content", "message": "content is required."}'
-        return 1
-    fi
-
-    content_len=$(printf '%s' "$content" | wc -c | tr -d ' ')
-    if [ "$content_len" -gt "$GBRAIN_CONTENT_MAX_CHARS" ]; then
-        emit_json "$(python3 - "$GBRAIN_CONTENT_MAX_CHARS" <<'PY'
-import json, sys
-print(json.dumps({
-    "success": False,
-    "error": "content_too_long",
-    "message": f"Content exceeds max chars ({sys.argv[1]}).",
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    fi
-
-    export_gbrain_env
-    query_timeout=$(resolve_timeout)
-
-    put_json=$(python3 - "$slug" "$content" <<'PY'
-import json, sys
-slug, content = sys.argv[1], sys.argv[2]
-print(json.dumps({"slug": slug, "content": content}, ensure_ascii=False))
-PY
-)
-
-    # Capture stdout and stderr separately so stderr warnings do not
-    # corrupt JSON parsing in check_write_through.
-    raw_stdout=""
-    raw_stderr=""
-    put_err_file=$(mktemp "${TMPDIR:-/tmp}/jg_put_err.XXXXXX") || {
-        emit_json '{"success": false, "error": "tempfile_failed", "message": "Failed to create temporary stderr file."}'
-        return 1
-    }
-    raw_stdout=$(timeout "$query_timeout" "$GBRAIN_BIN" call put_page "$put_json" 2>"$put_err_file") || {
-        rc=$?
-        raw_stderr=$(cat "$put_err_file" 2>/dev/null || true)
-        rm -f "$put_err_file"
-        if [ "$rc" -eq 124 ]; then
-            emit_json "$(python3 - "$query_timeout" <<'PY'
-import json, sys
-t = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_put_timeout",
-    "message": f"gbrain put exceeded {t}s timeout.",
-}, ensure_ascii=False))
-PY
-)"
-            return 1
-        fi
-        emit_json "$(python3 - "$rc" "$raw_stdout" "$raw_stderr" <<'PY'
-import json, sys
-rc = sys.argv[1]
-out = sys.argv[2]
-err = sys.argv[3]
-msg = out[:4000]
-if err.strip():
-    msg = msg + " | stderr: " + err[:2000]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_put_failed",
-    "exit_code": int(rc),
-    "message": msg,
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    }
-    raw_stderr=$(cat "$put_err_file" 2>/dev/null || true)
-    rm -f "$put_err_file"
-
-    # Check for write-through failure in native stdout JSON only.
-    if ! check_write_through "$raw_stdout" "put"; then
-        return 1
-    fi
-
-    capped=$(cap_output "$raw_stdout")
-    emit_json "$(python3 - "$capped" "$GBRAIN_QUERY_MAX_OUTPUT_CHARS" "$raw_stderr" <<'PY'
-import json, sys
-out = sys.argv[1]
-max_chars = int(sys.argv[2])
-stderr = sys.argv[3]
-truncated = len(out) >= max_chars
-data = {
-    "success": True,
-    "action": "put",
-    "truncated": truncated,
-    "max_output_chars": max_chars,
-    "result": out,
-}
-if stderr.strip():
-    data["stderr"] = stderr[:2000]
-print(json.dumps(data, ensure_ascii=False))
-PY
-)"
-}
-
-# ---------------------------------------------------------------------------
-# link (create a manual link between two pages; requires gate)
-# ---------------------------------------------------------------------------
-
-do_link() {
-    payload="${1:-}"
-
-    if ! require_gate; then
-        return 1
-    fi
-
-    from_slug=$(json_get "$payload" "from")
-    to_slug=$(json_get "$payload" "to")
-    link_type=$(json_get "$payload" "link_type")
-    context=$(json_get "$payload" "context")
-    link_source=$(json_get "$payload" "link_source")
-
-    if ! validate_slug "$from_slug"; then
-        return 1
-    fi
-    if ! validate_slug "$to_slug"; then
-        return 1
-    fi
-    if ! validate_link_type "$link_type"; then
-        return 1
-    fi
-    if ! validate_link_source "$link_source"; then
-        return 1
-    fi
-    if ! validate_bounded_string "$context" "context" "500"; then
-        return 1
-    fi
-
-    export_gbrain_env
-    query_timeout=$(resolve_timeout)
-
-    link_json=$(python3 - "$from_slug" "$to_slug" "$link_type" "$context" "$link_source" <<'PY'
-import json, sys
-from_slug, to_slug, link_type, context, link_source = sys.argv[1:6]
-data = {"from": from_slug, "to": to_slug}
-if link_type:
-    data["link_type"] = link_type
-if context:
-    data["context"] = context
-if link_source:
-    data["link_source"] = link_source
-print(json.dumps(data, ensure_ascii=False))
-PY
-)
-
-    raw_output=$(
-        timeout "$query_timeout" "$GBRAIN_BIN" call add_link "$link_json" 2>&1
-    ) || {
-        rc=$?
-        if [ "$rc" -eq 124 ]; then
-            emit_json "$(python3 - "$query_timeout" <<'PY'
-import json, sys
-t = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_link_timeout",
-    "message": f"gbrain link exceeded {t}s timeout.",
-}, ensure_ascii=False))
-PY
-)"
-            return 1
-        fi
-        emit_json "$(python3 - "$rc" "$raw_output" <<'PY'
-import json, sys
-rc = sys.argv[1]
-out = sys.argv[2]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_link_failed",
-    "exit_code": int(rc),
-    "message": out[:4000],
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    }
-
-    capped=$(cap_output "$raw_output")
-    emit_json "$(python3 - "$capped" "$GBRAIN_QUERY_MAX_OUTPUT_CHARS" <<'PY'
-import json, sys
-out = sys.argv[1]
-max_chars = int(sys.argv[2])
-truncated = len(out) >= max_chars
-print(json.dumps({
-    "success": True,
-    "action": "link",
-    "truncated": truncated,
-    "max_output_chars": max_chars,
-    "result": out,
-}, ensure_ascii=False))
-PY
-)"
-}
-
-# ---------------------------------------------------------------------------
-# backlinks (list incoming links to a page; requires gate)
-# ---------------------------------------------------------------------------
-
-do_backlinks() {
-    payload="${1:-}"
-
-    if ! require_gate; then
-        return 1
-    fi
-
-    slug=$(json_get "$payload" "slug")
-
-    if ! validate_slug "$slug"; then
-        return 1
-    fi
-
-    export_gbrain_env
-    query_timeout=$(resolve_timeout)
-
-    backlinks_json=$(python3 - "$slug" <<'PY'
-import json, sys
-print(json.dumps({"slug": sys.argv[1]}, ensure_ascii=False))
-PY
-)
-
-    raw_output=$(
-        timeout "$query_timeout" "$GBRAIN_BIN" call get_backlinks "$backlinks_json" 2>&1
-    ) || {
-        rc=$?
-        if [ "$rc" -eq 124 ]; then
-            emit_json "$(python3 - "$query_timeout" <<'PY'
-import json, sys
-t = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_backlinks_timeout",
-    "message": f"gbrain backlinks exceeded {t}s timeout.",
-}, ensure_ascii=False))
-PY
-)"
-            return 1
-        fi
-        emit_json "$(python3 - "$rc" "$raw_output" <<'PY'
-import json, sys
-rc = sys.argv[1]
-out = sys.argv[2]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_backlinks_failed",
-    "exit_code": int(rc),
-    "message": out[:4000],
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    }
-
-    capped=$(cap_output "$raw_output")
-    emit_json "$(python3 - "$capped" "$GBRAIN_QUERY_MAX_OUTPUT_CHARS" <<'PY'
-import json, sys
-out = sys.argv[1]
-max_chars = int(sys.argv[2])
-truncated = len(out) >= max_chars
-print(json.dumps({
-    "success": True,
-    "action": "backlinks",
-    "truncated": truncated,
-    "max_output_chars": max_chars,
-    "result": out,
-}, ensure_ascii=False))
-PY
-)"
-}
-
-# ---------------------------------------------------------------------------
-# schema-status (read-only schema pack introspection; no gate required)
-# ---------------------------------------------------------------------------
-
-do_schema_status() {
-    selected_pack="$GBRAIN_SCHEMA_PACK"
-    is_bundled="false"
-    if is_bundled_pack "$selected_pack"; then
-        is_bundled="true"
-    fi
-
-    source_path=""
-    source_sha256=""
-    installed_path=""
-    installed_sha256=""
-    source_exists="false"
-    installed_exists="false"
-
-    if [ "$is_bundled" = "false" ]; then
-        source_path=$(source_pack_path "$selected_pack")
-        if [ -n "$source_path" ]; then
-            source_exists="true"
-            source_sha256=$(compute_sha256 "$source_path")
-        fi
-        installed_path=$(installed_pack_path "$selected_pack")
-        if [ -n "$installed_path" ]; then
-            installed_exists="true"
-            installed_sha256=$(compute_sha256 "$installed_path")
-        fi
-    else
-        # Bundled pack: report sentinel values.
-        source_path="bundled"
-        source_sha256="bundled"
-        installed_path="bundled"
-        installed_sha256="bundled"
-        source_exists="true"
-        installed_exists="true"
-    fi
-
-    # Read marker schema fields if marker exists.
-    marker_source_sha256=""
-    marker_installed_sha256=""
-    marker_source_path=""
-    marker_installed_path=""
-    marker_schema_source_pack=""
-    if marker_exists; then
-        marker_schema_source_pack=$(marker_field "schema_source_pack")
-        marker_source_path=$(marker_field "schema_source_path")
-        marker_source_sha256=$(marker_field "schema_source_sha256")
-        marker_installed_sha256=$(marker_field "schema_installed_sha256")
-        marker_installed_path=$(marker_field "schema_installed_path")
-    fi
-
-    # Compute match status.
-    source_hash_matches="false"
-    installed_hash_matches="false"
-    pack_matches="false"
-    if [ "$marker_schema_source_pack" = "$selected_pack" ]; then
-        pack_matches="true"
-    fi
-    if [ "$is_bundled" = "true" ]; then
-        source_hash_matches="true"
-        installed_hash_matches="true"
-    else
-        if [ -n "$source_sha256" ] && [ "$source_sha256" = "$marker_source_sha256" ]; then
-            source_hash_matches="true"
-        fi
-        if [ -n "$installed_sha256" ] && [ "$installed_sha256" = "$marker_installed_sha256" ]; then
-            installed_hash_matches="true"
-        fi
-    fi
-
-    # Report marker_ok, marker_matches, gate_open (read-only, no gbrain config
-    # reads — those happen in marker_matches_current which is gate-internal).
-    marker_ok="false"
-    marker_matches="false"
-    gate_open="false"
-    if marker_is_valid; then
-        marker_ok="true"
-        if marker_matches_current; then
-            marker_matches="true"
-        fi
-    fi
-    enabled="false"
-    if [ "$GBRAIN_ENABLED" = "true" ]; then
-        enabled="true"
-    fi
-    if [ "$enabled" = "true" ] && [ "$marker_ok" = "true" ] && [ "$marker_matches" = "true" ]; then
-        gate_open="true"
-    fi
-
-    emit_json "$(python3 - "$selected_pack" "$is_bundled" "$source_exists" "$source_path" "$source_sha256" "$installed_exists" "$installed_path" "$installed_sha256" "$marker_schema_source_pack" "$marker_source_path" "$marker_source_sha256" "$marker_installed_sha256" "$marker_installed_path" "$pack_matches" "$source_hash_matches" "$installed_hash_matches" "$marker_ok" "$marker_matches" "$gate_open" <<'PY'
-import json, sys
-(selected, is_bundled, source_exists, source_path, source_sha256,
- installed_exists, installed_path, installed_sha256,
- m_source_pack, m_source_path, m_source_sha256, m_installed_sha256, m_installed_path,
- pack_matches, source_hash_matches, installed_hash_matches,
- marker_ok, marker_matches, gate_open) = sys.argv[1:20]
-data = {
-    "success": True,
-    "action": "schema_status",
-    "selected_pack": selected,
-    "is_bundled": is_bundled == "true",
-    "source_exists": source_exists == "true",
-    "source_path": source_path,
-    "source_sha256": source_sha256,
-    "installed_exists": installed_exists == "true",
-    "installed_path": installed_path,
-    "installed_sha256": installed_sha256,
-    "marker_source_pack": m_source_pack,
-    "marker_source_path": m_source_path,
-    "marker_source_sha256": m_source_sha256,
-    "marker_installed_sha256": m_installed_sha256,
-    "marker_installed_path": m_installed_path,
-    "pack_matches": pack_matches == "true",
-    "source_hash_matches": source_hash_matches == "true",
-    "installed_hash_matches": installed_hash_matches == "true",
-    "marker_ok": marker_ok == "true",
-    "marker_matches": marker_matches == "true",
-    "gate_open": gate_open == "true",
-}
-print(json.dumps(data, indent=2, ensure_ascii=False))
-PY
-)"
-}
-
-# ---------------------------------------------------------------------------
 # reindex (operator-only initial activation)
 # ---------------------------------------------------------------------------
 
 do_reindex() {
-    remove_marker
-
     # Validate schema pack name before any filesystem use.
     if ! validate_schema_pack_name "$GBRAIN_SCHEMA_PACK"; then
         return 1
@@ -1580,21 +211,17 @@ do_reindex() {
     export_gbrain_env
     mkdir -p "$GBRAIN_STATE_DIR"
 
+    # Mark the vault repo as a git safe.directory before any native gbrain
+    # operation that may inspect the repo. The command is idempotent and
+    # best-effort; run this wrapper as the Hermes runtime user so the global
+    # git config lands with the same ownership as chat/runtime commands.
+    if [ -d "$GBRAIN_BRAIN_REPO" ]; then
+        git config --global --add safe.directory "$GBRAIN_BRAIN_REPO" 2>/dev/null || true
+    fi
+
     # --- Schema source pack install (BEFORE init/sync/extract so gbrain
     # resolves the correct active pack during those operations) ---
-    m_source_pack="$GBRAIN_SCHEMA_PACK"
-    m_source_path=""
-    m_source_sha256=""
-    m_installed_sha256=""
-    m_installed_path=""
-
-    if is_bundled_pack "$GBRAIN_SCHEMA_PACK"; then
-        # Bundled pack: no source to install. Record bundled sentinel.
-        m_source_path="bundled"
-        m_installed_path="bundled"
-        m_source_sha256="bundled"
-        m_installed_sha256="bundled"
-    else
+    if ! is_bundled_pack "$GBRAIN_SCHEMA_PACK"; then
         # Custom pack: must have a source file. Fail early before init.
         src_path=$(source_pack_path "$GBRAIN_SCHEMA_PACK")
         if [ -z "$src_path" ]; then
@@ -1615,23 +242,10 @@ PY
             return 1
         fi
 
-        m_source_path=$(resolve_realpath "$src_path")
-        m_source_sha256=$(compute_sha256 "$src_path")
-        if [ -z "$m_source_sha256" ]; then
-            emit_json '{"success": false, "error": "schema_source_hash_failed", "message": "Failed to compute source pack sha256."}'
-            return 1
-        fi
-
         # Install (copy) to native user-pack directory.
-        installed_path=$(install_source_pack "$src_path" "$GBRAIN_SCHEMA_PACK") || {
+        install_source_pack "$src_path" "$GBRAIN_SCHEMA_PACK" >/dev/null || {
             return 1
         }
-        m_installed_path=$(resolve_realpath "$installed_path")
-        m_installed_sha256=$(compute_sha256 "$installed_path")
-        if [ -z "$m_installed_sha256" ]; then
-            emit_json '{"success": false, "error": "schema_install_hash_failed", "message": "Failed to compute installed pack sha256."}'
-            return 1
-        fi
 
         # Validate installed pack using native gbrain schema validate.
         if ! validate_installed_pack "$GBRAIN_SCHEMA_PACK"; then
@@ -1667,6 +281,20 @@ PY
         return 1
     fi
 
+    config_output=$("$GBRAIN_BIN" config set sync.repo_path "$GBRAIN_BRAIN_REPO" 2>&1) || {
+        emit_json "$(python3 - "$config_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_config_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+        return 1
+    }
+
     config_output=$("$GBRAIN_BIN" config set link_resolution.global_basename true 2>&1) || {
         emit_json "$(python3 - "$config_output" <<'PY'
 import json, sys
@@ -1681,7 +309,7 @@ PY
         return 1
     }
 
-    config_output=$("$GBRAIN_BIN" config set sync.repo_path "$GBRAIN_BRAIN_REPO" 2>&1) || {
+    config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
         emit_json "$(python3 - "$config_output" <<'PY'
 import json, sys
 out = sys.argv[1]
@@ -1752,23 +380,11 @@ PY
         return 1
     }
 
-    keyword_config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
-        emit_json "$(python3 - "$keyword_config_output" <<'PY'
-import json, sys
-out = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_config_failed",
-    "message": out[:4000],
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    }
-
-    # --- Native schema backfill: sync page.type for rows matching pack prefixes ---
-    schema_sync_output=$("$GBRAIN_BIN" schema sync --apply --json 2>&1) || {
-        emit_json "$(python3 - "$schema_sync_output" <<'PY'
+    # --- Native schema backfill: sync page.type for rows matching pack prefixes.
+    # Run only when a custom schema pack is in use.
+    if ! is_bundled_pack "$GBRAIN_SCHEMA_PACK"; then
+        schema_sync_output=$("$GBRAIN_BIN" schema sync --apply --json 2>&1) || {
+            emit_json "$(python3 - "$schema_sync_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -1778,22 +394,18 @@ print(json.dumps({
 }, ensure_ascii=False))
 PY
 )"
-        return 1
-    }
+            return 1
+        }
+    fi
 
-    # --- Write activation marker with schema fields ---
-    write_marker "$m_source_pack" "$m_source_path" "$m_source_sha256" "$m_installed_sha256" "$m_installed_path"
-
-    emit_json "$(python3 - "$GBRAIN_SCHEMA_PACK" "$GBRAIN_PINNED_REF" "$GBRAIN_PINNED_VERSION" <<'PY'
+    emit_json "$(python3 - "$GBRAIN_SCHEMA_PACK" <<'PY'
 import json, sys
-schema, ref, version = sys.argv[1:4]
+schema = sys.argv[1]
 print(json.dumps({
     "success": True,
     "action": "reindex",
     "schema_pack": schema,
-    "gbrain_ref": ref,
-    "gbrain_version": version,
-    "message": "Activation complete. The gate is open when GBRAIN_ENABLED is true and status reports gate_open=true.",
+    "message": "Activation complete. gbrain is ready for direct CLI use.",
 }, indent=2, ensure_ascii=False))
 PY
 )"
@@ -1804,58 +416,34 @@ PY
 # ---------------------------------------------------------------------------
 
 usage() {
-    emit_json '{"success": false, "error": "usage", "message": "Usage: josemar-gbrain {status|schema-status|search <json>|get <json>|capture <json>|put <json>|link <json>|backlinks <json>|reindex}"}'
+    emit_json '{"success": false, "error": "usage", "message": "Usage: josemar-gbrain reindex"}'
     return 1
+}
+
+drop_root_for_reindex_if_possible() {
+    if [ "${JOSEMAR_GBRAIN_DROPPED_PRIVS:-}" = "1" ]; then
+        return 0
+    fi
+    if [ "$(id -u 2>/dev/null || printf '1')" != "0" ]; then
+        return 0
+    fi
+    if ! getent passwd hermes >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! command -v su >/dev/null 2>&1; then
+        return 0
+    fi
+
+    exec su -s /bin/sh hermes -c "JOSEMAR_GBRAIN_DROPPED_PRIVS=1 exec '$0' reindex"
 }
 
 main() {
     subcommand="${1:-}"
     shift || true
 
-    # Reject old note.* route names (both dotted and underscored) and
-    # non-native surfaces that must not be exposed from chat.
     case "$subcommand" in
-        note|note.*|note_*|query|call|sync|admin|files)
-            emit_json "$(python3 - "$subcommand" <<'PY'
-import json, sys
-action = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "rejected_action",
-    "message": f"Action '{action}' is not supported. Use: status, schema-status, search, get, capture, put, link, backlinks, reindex.",
-}, ensure_ascii=False))
-PY
-)"
-            return 1
-            ;;
-    esac
-
-    case "$subcommand" in
-        status)
-            do_status
-            ;;
-        schema-status)
-            do_schema_status
-            ;;
-        search)
-            do_search "$@"
-            ;;
-        get)
-            do_get "$@"
-            ;;
-        capture)
-            do_capture "$@"
-            ;;
-        put)
-            do_put "$@"
-            ;;
-        link)
-            do_link "$@"
-            ;;
-        backlinks)
-            do_backlinks "$@"
-            ;;
         reindex)
+            drop_root_for_reindex_if_possible
             do_reindex
             ;;
         *)
