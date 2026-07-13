@@ -109,7 +109,9 @@ COPY scripts/josemar-gbrain /usr/local/bin/josemar-gbrain
 RUN chmod +x /usr/local/bin/josemar-gbrain
 
 COPY scripts/hermes-workspace-sync-cron.sh /opt/josemar/scripts/hermes-workspace-sync-cron.sh
-RUN chmod +x /opt/josemar/scripts/hermes-workspace-sync-cron.sh
+COPY scripts/hermes-gbrain-refresh-cron.sh /opt/josemar/scripts/hermes-gbrain-refresh-cron.sh
+RUN chmod +x /opt/josemar/scripts/hermes-workspace-sync-cron.sh \
+    /opt/josemar/scripts/hermes-gbrain-refresh-cron.sh
 
 COPY config/hermes-config.yaml /opt/josemar/hermes/config.yaml
 COPY docker-hermes-init.sh /etc/cont-init.d/00-josemar-setup

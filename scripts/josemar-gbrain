@@ -5,6 +5,8 @@
 # Subcommands:
 #   reindex - operator-only initial activation: init, config, sync, extract,
 #             extract links, schema sync (if custom pack), git safe.directory.
+#   refresh - recurring lightweight reconciliation for manual Obsidian edits:
+#             sync, extract stale content, extract links. No init/schema work.
 #
 # Design:
 #   - Native gbrain CLI only; no custom indexing/retrieval/ranking/authoring.
@@ -12,6 +14,9 @@
 #     are invoked directly via the `gbrain` CLI; this wrapper no longer gates,
 #     bounds, or re-implements them.
 #   - reindex is manual only; nothing in startup/deploy calls it.
+#   - refresh is safe for cron after activation. It deliberately uses
+#     `--no-embed` while Josemar runs keyword-only; revisit when embeddings are
+#     intentionally enabled.
 #   - GBRAIN_SKIP_STARTUP_HOOKS=1 is exported for every wrapper-invoked gbrain
 #     command to prevent gbrain's detached update-check network call.
 #   - Results are returned in JSON envelopes.
@@ -198,6 +203,69 @@ validate_schema_pack_name() {
     return 0
 }
 
+mark_brain_repo_safe_directory() {
+    if [ -d "$GBRAIN_BRAIN_REPO" ]; then
+        git config --global --add safe.directory "$GBRAIN_BRAIN_REPO" 2>/dev/null || true
+    fi
+}
+
+run_sync_extract_links() {
+    sync_output=$("$GBRAIN_BIN" sync --full --no-embed --yes --no-pull --json --repo "$GBRAIN_BRAIN_REPO" 2>&1) || {
+        emit_json "$(python3 - "$sync_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_sync_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+        return 1
+    }
+    if echo "$sync_output" | grep -iE "\"status\"[: ]*\"(partial|blocked|failed|error)\"|\b(fatal|blocked|aborted|panic)\b" | grep -viE "no embedding|embedding disabled|warn|no_embed" >/dev/null 2>&1; then
+        emit_json "$(python3 - "$sync_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_sync_blocked",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+        return 1
+    fi
+
+    extract_output=$("$GBRAIN_BIN" extract --stale --json 2>&1) || {
+        emit_json "$(python3 - "$extract_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_extract_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+        return 1
+    }
+
+    extract_links_output=$("$GBRAIN_BIN" extract links --source db --json 2>&1) || {
+        emit_json "$(python3 - "$extract_links_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_extract_links_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+        return 1
+    }
+}
+
 # ---------------------------------------------------------------------------
 # reindex (operator-only initial activation)
 # ---------------------------------------------------------------------------
@@ -215,9 +283,7 @@ do_reindex() {
     # operation that may inspect the repo. The command is idempotent and
     # best-effort; run this wrapper as the Hermes runtime user so the global
     # git config lands with the same ownership as chat/runtime commands.
-    if [ -d "$GBRAIN_BRAIN_REPO" ]; then
-        git config --global --add safe.directory "$GBRAIN_BRAIN_REPO" 2>/dev/null || true
-    fi
+    mark_brain_repo_safe_directory
 
     # --- Schema source pack install (BEFORE init/sync/extract so gbrain
     # resolves the correct active pack during those operations) ---
@@ -323,60 +389,7 @@ PY
         return 1
     }
 
-    sync_output=$("$GBRAIN_BIN" sync --full --no-embed --yes --no-pull --json --repo "$GBRAIN_BRAIN_REPO" 2>&1) || {
-        emit_json "$(python3 - "$sync_output" <<'PY'
-import json, sys
-out = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_sync_failed",
-    "message": out[:4000],
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    }
-    if echo "$sync_output" | grep -iE "\"status\"[: ]*\"(partial|blocked|failed|error)\"|\b(fatal|blocked|aborted|panic)\b" | grep -viE "no embedding|embedding disabled|warn|no_embed" >/dev/null 2>&1; then
-        emit_json "$(python3 - "$sync_output" <<'PY'
-import json, sys
-out = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_sync_blocked",
-    "message": out[:4000],
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    fi
-
-    extract_output=$("$GBRAIN_BIN" extract --stale --json 2>&1) || {
-        emit_json "$(python3 - "$extract_output" <<'PY'
-import json, sys
-out = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_extract_failed",
-    "message": out[:4000],
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    }
-
-    # Extract the link graph (wikilinks → backlinks) from the DB so the
-    # backlinks action returns populated results after reindex.
-    extract_links_output=$("$GBRAIN_BIN" extract links --source db --json 2>&1) || {
-        emit_json "$(python3 - "$extract_links_output" <<'PY'
-import json, sys
-out = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_extract_links_failed",
-    "message": out[:4000],
-}, ensure_ascii=False))
-PY
-)"
+    run_sync_extract_links || {
         return 1
     }
 
@@ -411,16 +424,29 @@ PY
 )"
 }
 
+do_refresh() {
+    export_gbrain_env
+    mkdir -p "$GBRAIN_STATE_DIR"
+    mark_brain_repo_safe_directory
+
+    run_sync_extract_links || {
+        return 1
+    }
+
+    emit_json '{"success": true, "action": "refresh", "message": "gbrain refreshed from vault files. Embeddings skipped by design."}'
+}
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
 usage() {
-    emit_json '{"success": false, "error": "usage", "message": "Usage: josemar-gbrain reindex"}'
+    emit_json '{"success": false, "error": "usage", "message": "Usage: josemar-gbrain reindex|refresh"}'
     return 1
 }
 
-drop_root_for_reindex_if_possible() {
+drop_root_if_possible() {
+    subcommand="$1"
     if [ "${JOSEMAR_GBRAIN_DROPPED_PRIVS:-}" = "1" ]; then
         return 0
     fi
@@ -434,7 +460,7 @@ drop_root_for_reindex_if_possible() {
         return 0
     fi
 
-    exec su -s /bin/sh hermes -c "JOSEMAR_GBRAIN_DROPPED_PRIVS=1 exec '$0' reindex"
+    exec su -s /bin/sh hermes -c "JOSEMAR_GBRAIN_DROPPED_PRIVS=1 exec '$0' '$subcommand'"
 }
 
 main() {
@@ -443,8 +469,12 @@ main() {
 
     case "$subcommand" in
         reindex)
-            drop_root_for_reindex_if_possible
+            drop_root_if_possible reindex
             do_reindex
+            ;;
+        refresh)
+            drop_root_if_possible refresh
+            do_refresh
             ;;
         *)
             usage

@@ -122,6 +122,7 @@ services:
       - GBRAIN_BRAIN_REPO=${GBRAIN_BRAIN_REPO:-/opt/data/obsidian}
       - GBRAIN_SCHEMA_PACK=${GBRAIN_SCHEMA_PACK:-gbrain-base-v2}
       - GBRAIN_SCHEMA_SOURCE_ROOT=${GBRAIN_SCHEMA_SOURCE_ROOT:-/opt/data/gbrain/schema-packs}
+      - GBRAIN_REFRESH_INTERVAL=${GBRAIN_REFRESH_INTERVAL:-5}
       - TZ=${TZ:-America/Sao_Paulo}
       - JOSEMAR_TIMEZONE=${JOSEMAR_TIMEZONE:-America/Sao_Paulo}
     ports:

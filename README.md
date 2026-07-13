@@ -236,7 +236,7 @@ private state repo versions them on the next sync.
 
 Current repo-shipped skills:
 
-- `gbrain`: native gbrain vault interface (search, get, capture, put, link, backlinks) used directly via the pinned `gbrain` CLI. Keyword-only search, no embeddings. Operator activation via `josemar-gbrain reindex`.
+- `gbrain`: native gbrain vault interface (search, get, capture, put, link, backlinks) used directly via the pinned `gbrain` CLI. Keyword-only search, no embeddings. Operator activation via `josemar-gbrain reindex`; periodic manual-edit reconciliation via `josemar-gbrain refresh` every 5 minutes by default.
 - `aux-ml`: skill interface for queue-based auxiliary ML jobs.
 - `workspace-sync`: skill interface for workspace git sync, status, commit, and push flows.
 

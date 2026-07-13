@@ -46,6 +46,7 @@ The Josemar gbrain integration is intentionally minimal:
 | `GBRAIN_BRAIN_REPO` | `/opt/data/obsidian` | Vault path gbrain indexes. |
 | `GBRAIN_SCHEMA_PACK` | `gbrain-base-v2` | Schema pack selector. Set to `josemar-user` to use the custom user-owned pack. |
 | `GBRAIN_SCHEMA_SOURCE_ROOT` | `/opt/data/gbrain/schema-packs` | Source root for custom schema packs. The source pack for the selected `GBRAIN_SCHEMA_PACK` must exist at `<root>/<pack>/pack.yaml`. |
+| `GBRAIN_REFRESH_INTERVAL` | `5` | Hermes cron interval, in minutes, for `josemar-gbrain refresh`. Set to `0` to disable. Refresh deliberately uses `gbrain sync --no-embed` while embeddings are deferred; revisit when issue #65 enables embeddings. |
 
 No new Docker volume is added. `GBRAIN_HOME` (`/opt/data`) is the parent;
 gbrain stores its state under `$GBRAIN_HOME/.gbrain`, which lives inside the
@@ -114,6 +115,26 @@ When the Obsidian vault is swapped or materially changed:
    ```
 
 5. **Smoke-test from chat** with `gbrain search` and `gbrain get` as above.
+
+## Periodic Refresh for Manual Obsidian Edits
+
+Manual Obsidian/Syncthing edits change the markdown files on disk, but native
+gbrain search/get/backlinks read from gbrain's indexed state. The Hermes image
+therefore installs a script-only cron job named `gbrain-refresh` that runs every
+`GBRAIN_REFRESH_INTERVAL` minutes (default: `5`):
+
+```bash
+josemar-gbrain refresh
+```
+
+`refresh` is intentionally lighter than `reindex`: it assumes activation already
+happened and runs only native sync, stale extraction, and link extraction. It
+does **not** run init, schema install, or schema sync.
+
+Refresh currently calls `gbrain sync --no-embed` because Josemar is in
+keyword-only/no-embedding mode. When embeddings are enabled (see issue #65),
+revisit whether refresh should drop `--no-embed` or whether embeddings should
+remain a separate scheduled job.
 
 ## Native Write-Through
 

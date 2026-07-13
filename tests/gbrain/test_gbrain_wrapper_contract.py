@@ -5,6 +5,7 @@ to guard the simplified direct-CLI gbrain integration:
 
   - reindex performs initial activation (init, config, sync, extract,
     extract links, schema sync for custom packs, git safe.directory)
+  - refresh performs lightweight vault-file reconciliation without init/schema
   - schema pack install logic for custom packs (source path resolution,
     confinement validation, atomic install, native validate)
   - no readiness marker, no gate, no provider stripping for chat actions,
@@ -24,6 +25,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRAPPER_PATH = REPO_ROOT / "scripts" / "josemar-gbrain"
 DOCKERFILE_PATH = REPO_ROOT / "Dockerfile.hermes"
+HERMES_INIT_PATH = REPO_ROOT / "docker-hermes-init.sh"
 
 
 def _read(path: Path) -> str:
@@ -123,24 +125,24 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         self.assertIn("config set search.mcp_keyword_only true", body)
 
     def test_reindex_runs_full_sync(self) -> None:
-        body = _extract_function(self.src, "do_reindex")
+        body = _extract_function(self.src, "run_sync_extract_links")
         self.assertIn("sync --full --no-embed", body)
         self.assertIn("--repo", body)
         self.assertIn("$GBRAIN_BRAIN_REPO", body)
 
     def test_reindex_runs_extract_stale(self) -> None:
-        body = _extract_function(self.src, "do_reindex")
+        body = _extract_function(self.src, "run_sync_extract_links")
         self.assertIn("extract --stale", body)
 
     def test_reindex_runs_extract_links(self) -> None:
         """reindex must run `extract links --source db` to populate the link graph."""
-        body = _extract_function(self.src, "do_reindex")
+        body = _extract_function(self.src, "run_sync_extract_links")
         self.assertIn("extract links", body)
         self.assertIn("--source db", body)
 
     def test_reindex_extract_links_after_extract_stale(self) -> None:
         """extract links must run AFTER extract --stale."""
-        body = _extract_function(self.src, "do_reindex")
+        body = _extract_function(self.src, "run_sync_extract_links")
         stale_pos = body.find("extract --stale")
         links_pos = body.find("extract links")
         self.assertLess(stale_pos, links_pos,
@@ -148,7 +150,7 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
 
     def test_reindex_extract_links_failure_returns_nonzero(self) -> None:
         """extract links failure must emit gbrain_extract_links_failed and return 1."""
-        body = _extract_function(self.src, "do_reindex")
+        body = _extract_function(self.src, "run_sync_extract_links")
         self.assertIn("gbrain_extract_links_failed", body)
 
     def test_reindex_does_not_pass_schema_pack_flag(self) -> None:
@@ -192,7 +194,7 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         """schema pack install must happen BEFORE gbrain sync."""
         body = _extract_function(self.src, "do_reindex")
         install_pos = body.find("install_source_pack")
-        sync_pos = body.find("sync --full")
+        sync_pos = body.find("run_sync_extract_links")
         self.assertLess(install_pos, sync_pos,
                         "schema pack install must precede gbrain sync")
 
@@ -200,14 +202,14 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         """schema pack install must happen BEFORE gbrain extract."""
         body = _extract_function(self.src, "do_reindex")
         install_pos = body.find("install_source_pack")
-        extract_pos = body.find("extract --stale")
+        extract_pos = body.find("run_sync_extract_links")
         self.assertLess(install_pos, extract_pos,
                         "schema pack install must precede gbrain extract")
 
     def test_reindex_schema_sync_apply_after_file_sync(self) -> None:
         """native schema sync --apply must run after file sync."""
         body = _extract_function(self.src, "do_reindex")
-        sync_pos = body.find("sync --full")
+        sync_pos = body.find("run_sync_extract_links")
         schema_sync_pos = body.find("schema sync --apply")
         self.assertLess(sync_pos, schema_sync_pos,
                         "schema sync --apply must follow file sync")
@@ -240,20 +242,50 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
     def test_reindex_sets_git_safe_directory_before_sync(self) -> None:
         """safe.directory must be configured before native sync/extract."""
         body = _extract_function(self.src, "do_reindex")
-        safe_pos = body.find("safe.directory")
-        sync_pos = body.find("sync --full")
-        extract_pos = body.find("extract --stale")
+        safe_pos = body.find("mark_brain_repo_safe_directory")
+        sync_pos = body.find("run_sync_extract_links")
+        extract_pos = sync_pos
         self.assertLess(safe_pos, sync_pos)
         self.assertLess(safe_pos, extract_pos)
 
     def test_reindex_drops_root_to_hermes_when_possible(self) -> None:
-        self.assertIn("drop_root_for_reindex_if_possible", self.src)
+        self.assertIn("drop_root_if_possible", self.src)
         self.assertIn("JOSEMAR_GBRAIN_DROPPED_PRIVS", self.src)
         self.assertIn("su -s /bin/sh hermes", self.src)
 
     def test_reindex_creates_state_dir(self) -> None:
         body = _extract_function(self.src, "do_reindex")
         self.assertIn('mkdir -p "$GBRAIN_STATE_DIR"', body)
+
+
+class GbrainRefreshContractTests(unittest.TestCase):
+    """refresh reconciles manual vault-file edits without activation work."""
+
+    def setUp(self) -> None:
+        self.src = _read(WRAPPER_PATH)
+
+    def test_refresh_dispatch_exists(self) -> None:
+        body = _extract_function(self.src, "main")
+        self.assertIn("refresh)", body)
+        self.assertIn("do_refresh", body)
+
+    def test_refresh_does_not_run_init_or_schema(self) -> None:
+        body = _extract_function(self.src, "do_refresh")
+        self.assertNotIn("init --pglite", body)
+        self.assertNotIn("schema sync --apply", body)
+        self.assertNotIn("install_source_pack", body)
+
+    def test_refresh_runs_sync_extract_links(self) -> None:
+        body = _extract_function(self.src, "do_refresh")
+        self.assertIn("run_sync_extract_links", body)
+
+    def test_shared_sync_uses_no_embed_for_current_keyword_only_mode(self) -> None:
+        body = _extract_function(self.src, "run_sync_extract_links")
+        self.assertIn("sync --full --no-embed", body)
+
+    def test_refresh_message_mentions_embeddings_skipped(self) -> None:
+        body = _extract_function(self.src, "do_refresh")
+        self.assertIn("Embeddings skipped", body)
 
 
 class GbrainSimplificationContractTests(unittest.TestCase):
@@ -302,10 +334,12 @@ class GbrainSimplificationContractTests(unittest.TestCase):
         self.assertNotIn("status)", body)
         self.assertNotIn("schema-status", body)
 
-    def test_main_only_dispatches_reindex(self) -> None:
+    def test_main_only_dispatches_operator_commands(self) -> None:
         body = _extract_function(self.src, "main")
         self.assertIn("reindex", body)
         self.assertIn("do_reindex", body)
+        self.assertIn("refresh", body)
+        self.assertIn("do_refresh", body)
 
     def test_no_managed_link_sources_constant(self) -> None:
         self.assertNotIn("MANAGED_LINK_SOURCES", self.src)
@@ -355,6 +389,33 @@ class GbrainDockerWrapperCwdContractTests(unittest.TestCase):
     def test_no_chmod_gbrain_skill_binary(self) -> None:
         """The removed Python skill binary must not be chmod'd."""
         self.assertNotIn("gbrain/gbrain", self.src)
+
+    def test_gbrain_refresh_cron_script_installed(self) -> None:
+        self.assertIn("hermes-gbrain-refresh-cron.sh", self.src)
+        self.assertIn("/opt/josemar/scripts/hermes-gbrain-refresh-cron.sh", self.src)
+
+
+class GbrainCronContractTests(unittest.TestCase):
+    """Hermes init must install a 5-minute gbrain refresh cron by default."""
+
+    def setUp(self) -> None:
+        self.src = _read(HERMES_INIT_PATH)
+
+    def test_gbrain_refresh_cron_defaults_to_five_minutes(self) -> None:
+        body = _extract_function(self.src, "install_gbrain_refresh_cron")
+        self.assertIn('refresh_interval="${GBRAIN_REFRESH_INTERVAL:-5}"', body)
+        self.assertIn('"every ${refresh_interval}m"', body)
+
+    def test_gbrain_refresh_cron_installs_script_job(self) -> None:
+        body = _extract_function(self.src, "install_gbrain_refresh_cron")
+        self.assertIn("hermes-gbrain-refresh-cron.sh", body)
+        self.assertIn("--no-agent", body)
+        self.assertIn("--name gbrain-refresh", body)
+
+    def test_gbrain_refresh_cron_can_be_disabled(self) -> None:
+        body = _extract_function(self.src, "install_gbrain_refresh_cron")
+        self.assertIn("GBRAIN_REFRESH_INTERVAL", body)
+        self.assertIn('""|0|*[!0-9]*)', body)
 
 
 class GbrainBunInstallerCurlContractTests(unittest.TestCase):

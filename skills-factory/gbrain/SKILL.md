@@ -27,9 +27,12 @@ chat.
   `engine.searchKeyword` and never the vector/hybrid provider path. Embeddings
   remain deferred in MVP. `gbrain doctor` will warn that embeddings are not
   configured; this is expected and intentional.
-- **No auto indexing.** Nothing in startup, deploy, or chat triggers a
-  reindex. Operators run `josemar-gbrain reindex` manually. See
-  `docs/gbrain-operations.md`.
+- **Periodic refresh, no chat reindex.** Chat does not run activation/reindex.
+  Operators run `josemar-gbrain reindex` manually for activation, schema
+  changes, or vault swaps. A Hermes cron runs `josemar-gbrain refresh` every 5
+  minutes by default to pick up manual Obsidian/Syncthing edits. Refresh uses
+  `gbrain sync --no-embed` while embeddings are deferred; revisit when enabling
+  embeddings. See `docs/gbrain-operations.md`.
 - **put is whole-page replacement.** `gbrain` upserts the entire page content.
   Rename, template instantiation, surgical section/frontmatter patching, and
   physical move are NOT offered natively; use Obsidian manually for those.
@@ -143,3 +146,7 @@ josemar-gbrain reindex
 This performs init, config, full sync, content/link extraction, and schema
 setup. See `docs/gbrain-operations.md` for the full activation and operations
 runbook.
+
+`josemar-gbrain refresh` is also operator-only, but it is scheduled by Hermes
+cron for recurring manual-file reconciliation. It syncs vault files, extracts
+stale content, and refreshes links without init/schema work.
