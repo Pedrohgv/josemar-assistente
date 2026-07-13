@@ -15,6 +15,7 @@ CREDENTIALS_SOURCE_DIR="${JOSEMAR_CREDENTIALS_SOURCE_DIR:-/opt/josemar/credentia
 CREDENTIALS_DIR="${JOSEMAR_CREDENTIALS_DIR:-${HERMES_HOME}/credentials}"
 HERMES_UID_VALUE="${HERMES_UID:-${PUID:-10000}}"
 HERMES_GID_VALUE="${HERMES_GID:-${PGID:-10000}}"
+HERMES_CLI="${HERMES_CLI:-/opt/hermes/.venv/bin/hermes}"
 
 mkdir -p "$HERMES_HOME" "$WORKSPACE_DIR" "$OBSIDIAN_VAULT_DIR" "$CREDENTIALS_DIR"
 
@@ -152,22 +153,88 @@ PY
     fi
 
     log "Creating Hermes workspace-sync cron job"
-    su -s /bin/sh hermes -c '
+    su -s /bin/sh -- hermes -c '
         HOME=$1
         HERMES_HOME=$1
         WORKSPACE_DIR=$2
-        export HOME HERMES_HOME WORKSPACE_DIR
-        shift 2
-        exec hermes cron create "$@"
+        HERMES_CLI=$3
+        export HOME HERMES_HOME WORKSPACE_DIR HERMES_CLI
+        shift 3
+        exec "$HERMES_CLI" cron create "$@"
     ' sh \
         "$HERMES_HOME" \
         "$WORKSPACE_DIR" \
+        "$HERMES_CLI" \
         "every ${sync_interval}m" \
         --no-agent \
         --script hermes-workspace-sync-cron.sh \
         --workdir "$WORKSPACE_DIR" \
         --name workspace-sync \
         || log "WARNING: failed to create Hermes workspace-sync cron job"
+}
+
+install_gbrain_refresh_cron() {
+    script_source="/opt/josemar/scripts/hermes-gbrain-refresh-cron.sh"
+    script_dir="${HERMES_HOME}/scripts"
+    script_path="${script_dir}/hermes-gbrain-refresh-cron.sh"
+    refresh_interval="${GBRAIN_REFRESH_INTERVAL:-5}"
+
+    if [ ! -x "$script_source" ]; then
+        return 0
+    fi
+
+    mkdir -p "$script_dir"
+    cp "$script_source" "$script_path"
+    chmod 700 "$script_path"
+    chown -R "${HERMES_UID_VALUE}:${HERMES_GID_VALUE}" "${HERMES_HOME}/scripts" "${HERMES_HOME}/cron" 2>/dev/null || true
+
+    case "$refresh_interval" in
+        ""|0|*[!0-9]*)
+            log "Hermes gbrain-refresh cron disabled (GBRAIN_REFRESH_INTERVAL=${refresh_interval:-unset})"
+            return 0
+            ;;
+    esac
+
+    if python3 - "${HERMES_HOME}/cron/jobs.json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+
+for job in data.get("jobs", []):
+    if job.get("name") == "gbrain-refresh":
+        sys.exit(0)
+
+sys.exit(1)
+PY
+    then
+        log "Hermes gbrain-refresh cron job already exists"
+        return 0
+    fi
+
+    log "Creating Hermes gbrain-refresh cron job"
+    su -s /bin/sh -- hermes -c '
+        HOME=$1
+        HERMES_HOME=$1
+        WORKSPACE_DIR=$2
+        HERMES_CLI=$3
+        export HOME HERMES_HOME WORKSPACE_DIR HERMES_CLI
+        shift 3
+        exec "$HERMES_CLI" cron create "$@"
+    ' sh \
+        "$HERMES_HOME" \
+        "$WORKSPACE_DIR" \
+        "$HERMES_CLI" \
+        "every ${refresh_interval}m" \
+        --no-agent \
+        --script hermes-gbrain-refresh-cron.sh \
+        --workdir "$WORKSPACE_DIR" \
+        --name gbrain-refresh \
+        || log "WARNING: failed to create Hermes gbrain-refresh cron job"
 }
 
 if [ -n "${WORKSPACE_STATE_REPO:-}" ]; then
@@ -203,6 +270,7 @@ EOF
 fi
 
 install_workspace_sync_cron
+install_gbrain_refresh_cron
 
 if [ -d "$CREDENTIALS_SOURCE_DIR" ]; then
     log "Copying mounted credentials into Hermes data volume"

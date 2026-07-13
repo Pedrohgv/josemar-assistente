@@ -120,6 +120,36 @@ class WorkspaceSyncSkillRegistrationTests(unittest.TestCase):
         self.assertIn("skills/nested-skill/lib/helper.py", manifest)
         self.assertIn("skills/nested-skill/lib/helper.py", tracked_files)
 
+    def test_status_auto_registers_user_skill_files(self) -> None:
+        skill_dir = self.workspace / "skills" / "status-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# Status Skill\n", encoding="utf-8")
+
+        result = self._run_workspace_sync({"action": "status"})
+
+        manifest = (self.workspace / ".sync-manifest").read_text(encoding="utf-8")
+        gitignore = (self.workspace / ".gitignore").read_text(encoding="utf-8")
+        tracked_patterns = cast(list[str], result["tracked_patterns"])
+
+        self.assertTrue(result["success"])
+        self.assertIn("skills/status-skill/SKILL.md", manifest)
+        self.assertIn("skills/status-skill/SKILL.md", tracked_patterns)
+        self.assertIn("!skills/**", gitignore)
+
+    def test_diff_auto_registers_user_skill_files(self) -> None:
+        skill_dir = self.workspace / "skills" / "diff-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# Diff Skill\n", encoding="utf-8")
+
+        result = self._run_workspace_sync({"action": "diff"})
+
+        manifest = (self.workspace / ".sync-manifest").read_text(encoding="utf-8")
+        diff = cast(str, result["diff"])
+
+        self.assertTrue(result["success"])
+        self.assertIn("skills/diff-skill/SKILL.md", manifest)
+        self.assertIn("skills/diff-skill/SKILL.md", diff)
+
     def test_manifest_rejects_protected_runtime_paths(self) -> None:
         for path in ["config.yaml", "credentials/token.json", ".env"]:
             with self.subTest(path=path):
@@ -131,9 +161,9 @@ class WorkspaceSyncSkillRegistrationTests(unittest.TestCase):
                 self.assertIn("protected runtime path", process.stderr)
 
     def test_manifest_rejects_gbrain_runtime_path(self) -> None:
-        # .gbrain holds PGLite DB, config, and readiness marker; it must never
+        # .gbrain holds PGLite DB, config, and cache; it must never
         # be versioned by workspace state sync.
-        for path in [".gbrain", ".gbrain/readiness.json", ".gbrain/brain.pglite"]:
+        for path in [".gbrain", ".gbrain/config.json", ".gbrain/brain.pglite"]:
             with self.subTest(path=path):
                 (self.workspace / ".sync-manifest").write_text(f"{path}\n", encoding="utf-8")
 

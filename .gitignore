@@ -63,6 +63,11 @@ htmlcov/
 # Local deepwork progress tracking
 .slim/deepwork/
 
+# BEGIN oh-my-opencode-slim worktrees
+.slim/worktrees/
+.slim/worktrees.json
+# END oh-my-opencode-slim worktrees
+
 # Credentials directory
 # Contains sensitive OAuth and API credential files
 # These are mounted into the container at runtime

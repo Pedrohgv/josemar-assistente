@@ -32,7 +32,7 @@ flowchart LR
   Agent --> Models[LLM Providers<br/>Ollama Cloud / Z.AI / DeepSeek]
   Agent --> CoreSkills[Repo Core Skills<br/>/opt/josemar/skills]
   Agent --> StateSkills[User State Skills<br/>/opt/data/skills]
-  Agent --> GBrain[gbrain Skill<br/>gbrain-skill CLI]
+  Agent --> GBrain[Native gbrain CLI]
   GBrain --> Vault[Obsidian Vault<br/>obsidian-vault volume]
 
   CoreSkills --> AuxML[aux-ml API<br/>optional]
@@ -74,7 +74,7 @@ The state sync script only versions paths listed in `.sync-manifest`, uses the r
 
 ```mermaid
 flowchart LR
-  Hermes[Hermes Container<br/>/opt/data/obsidian] <--> GBrain[gbrain Skill<br/>gbrain-skill CLI]
+  Hermes[Hermes Container<br/>/opt/data/obsidian] <--> GBrain[Native gbrain CLI]
   GBrain <--> Vault[(obsidian-vault volume)]
   Vault <--> Syncthing[Syncthing Container]
   Syncthing <--> Tailscale[Tailscale Sidecar<br/>private network]
@@ -212,7 +212,7 @@ josemar-assistente/
 
 | Volume | Purpose |
 | --- | --- |
-| `hermes-data` | Hermes runtime state and the private state git worktree at `/opt/data`. Includes gbrain state at `/opt/data/.gbrain` (PGLite database, config, readiness marker). Runtime-private files are ignored by the state repo. |
+| `hermes-data` | Hermes runtime state and the private state git worktree at `/opt/data`. Includes gbrain state at `/opt/data/.gbrain` (PGLite database, config, cache). Runtime-private files are ignored by the state repo. |
 | `aux-ml-shared` | Dedicated handoff volume for files intentionally shared with aux-ml. |
 | `obsidian-vault` | Obsidian notes and attachments, not git-versioned. |
 | `syncthing-config` | Syncthing identity and folder/device config. |
@@ -236,7 +236,7 @@ private state repo versions them on the next sync.
 
 Current repo-shipped skills:
 
-- `gbrain`: gated native gbrain vault interface (search, get, capture, put, link, backlinks). Exposed as `gbrain-skill` CLI in the container. Keyword-only search, no embeddings. Operator activation via `josemar-gbrain reindex`.
+- `gbrain`: native gbrain vault interface (search, get, capture, put, link, backlinks) used directly via the pinned `gbrain` CLI. Keyword-only search, no embeddings. Operator activation via `josemar-gbrain reindex`; periodic manual-edit reconciliation via `josemar-gbrain refresh` every 5 minutes by default.
 - `aux-ml`: skill interface for queue-based auxiliary ML jobs.
 - `workspace-sync`: skill interface for workspace git sync, status, commit, and push flows.
 
@@ -278,7 +278,7 @@ python3 -m unittest discover -s tests -v
 Run scoped contract tests:
 
 ```bash
-python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract tests.gbrain.test_gbrain_skill_gate -v
+python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
 ```
 
 Set up optional pre-commit hooks:

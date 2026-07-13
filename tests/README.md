@@ -58,3 +58,18 @@ Or:
 ```bash
 make test-aux-runtime
 ```
+
+## Gbrain Autopilot Runtime Experiment
+
+A separately gated, reusable experiment harness observes native gbrain
+sync/dream/autopilot behavior against a dummy Obsidian vault. It is skipped by
+default and asserts only safety invariants; adoption conclusions must be made
+by manual inspection of the printed reports and the JSON summary written to
+`dump_folder/gbrain-autopilot-experiment-report.json`.
+
+```bash
+RUN_DOCKER_TESTS=1 RUN_GBRAIN_AUTOPILOT_EXPERIMENT=1 \
+  python3 -m unittest tests.runtime.test_gbrain_autopilot_experiment -v
+```
+
+See issue #67 for the autopilot/dream follow-up discussion.

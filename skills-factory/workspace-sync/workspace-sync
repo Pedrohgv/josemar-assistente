@@ -257,6 +257,11 @@ has_changes() {
 }
 
 do_status() {
+    if [ -f "$MANIFEST_PATH" ]; then
+        register_user_skill_files
+        validate_manifest_files || exit 1
+    fi
+
     tracked=""
     if [ -f "$MANIFEST_PATH" ]; then
         tracked=$(grep -v '^\s*#' "$MANIFEST_PATH" | grep -v '^\s*$' || true)
@@ -301,6 +306,11 @@ PY
 }
 
 do_diff() {
+    if [ -f "$MANIFEST_PATH" ]; then
+        register_user_skill_files
+        validate_manifest_files || exit 1
+    fi
+
     diff_output=$(git diff 2>/dev/null; git diff --cached 2>/dev/null)
 
     WS_DIFF_OUTPUT="$diff_output" python3 - <<'PY'

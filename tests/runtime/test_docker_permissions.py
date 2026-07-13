@@ -29,12 +29,12 @@ class DockerPermissionTests(unittest.TestCase):
         )
         self.runtime.exec("hermes", "sh", "-lc", script)
 
-        # Verify the gbrain skill is installed and executable.
+        # Verify the gbrain CLI is installed and executable.
         process = self.runtime.exec(
             "hermes",
             "sh",
             "-lc",
-            "gbrain-skill status",
+            "su -s /bin/sh hermes -c 'gbrain status'",
         )
         self.assertIn('"success"', process.stdout)
 

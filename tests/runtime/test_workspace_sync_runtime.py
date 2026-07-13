@@ -11,6 +11,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE_SYNC_SCRIPT = REPO_ROOT / "scripts" / "workspace-sync.sh"
 CRON_WRAPPER_SCRIPT = REPO_ROOT / "scripts" / "hermes-workspace-sync-cron.sh"
+GBRAIN_REFRESH_CRON_SCRIPT = REPO_ROOT / "scripts" / "hermes-gbrain-refresh-cron.sh"
 TEST_GIT_EMAIL = "test" + "@example.invalid"
 
 
@@ -38,7 +39,7 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
 
     def test_workspace_sync_script_protects_gbrain_runtime_path(self) -> None:
         # The workspace-sync.sh script must reject .gbrain in .sync-manifest
-        # so PGLite DB/config/marker are never versioned.
+        # so PGLite DB/config/cache are never versioned.
         (Path(self.workspace) / ".sync-manifest").write_text(".gbrain\n", encoding="utf-8")
 
         result = self._run_workspace_sync_script()
@@ -96,6 +97,32 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode, "wrapper must propagate nonzero exit")
         combined = result.stdout + result.stderr
         self.assertIn("FAKE_FAIL", combined)
+
+    def test_gbrain_refresh_cron_wrapper_propagates_success(self) -> None:
+        fake = self._make_fake_sync(exit_code=0, stdout="GBRAIN_OK", stderr="")
+        wrapper = self._patched_cron_wrapper(
+            fake,
+            source=GBRAIN_REFRESH_CRON_SCRIPT,
+            hardcoded_path="/usr/local/bin/josemar-gbrain",
+        )
+
+        result = self._run_cron_wrapper(wrapper)
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_gbrain_refresh_cron_wrapper_propagates_failure(self) -> None:
+        fake = self._make_fake_sync(exit_code=9, stdout="GBRAIN_FAIL", stderr="refresh_err")
+        wrapper = self._patched_cron_wrapper(
+            fake,
+            source=GBRAIN_REFRESH_CRON_SCRIPT,
+            hardcoded_path="/usr/local/bin/josemar-gbrain",
+        )
+
+        result = self._run_cron_wrapper(wrapper)
+
+        self.assertNotEqual(0, result.returncode, "gbrain refresh wrapper must propagate nonzero exit")
+        combined = result.stdout + result.stderr
+        self.assertIn("GBRAIN_FAIL", combined)
 
     # ------------------------------------------------------------------
     # helpers
@@ -323,15 +350,21 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
         fake.chmod(0o755)
         return fake
 
-    def _patched_cron_wrapper(self, fake_sync: Path) -> Path:
+    def _patched_cron_wrapper(
+        self,
+        fake_sync: Path,
+        *,
+        source: Path = CRON_WRAPPER_SCRIPT,
+        hardcoded_path: str = "/usr/local/bin/workspace-sync.sh",
+    ) -> Path:
         """Return a copy of the cron wrapper with the hardcoded sync path replaced.
 
-        The production wrapper hardcodes ``/usr/local/bin/workspace-sync.sh`` which
+        The production wrapper hardcodes a binary path which
         is not writable in the test environment, so we substitute the fake script
         path while preserving the rest of the wrapper logic verbatim.
         """
-        src = CRON_WRAPPER_SCRIPT.read_text(encoding="utf-8")
-        patched = src.replace("/usr/local/bin/workspace-sync.sh", str(fake_sync))
+        src = source.read_text(encoding="utf-8")
+        patched = src.replace(hardcoded_path, str(fake_sync))
         self.assertNotEqual(src, patched, "cron wrapper does not reference expected hardcoded path")
         out_dir = Path(self._mk_dir())
         wrapper = out_dir / "cron-wrapper.sh"

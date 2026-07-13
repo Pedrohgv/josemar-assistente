@@ -1,6 +1,6 @@
 ---
 name: gbrain
-description: Gated native gbrain vault interface. Bounded authoring, retrieval, and linking via the pinned native CLI. Keyword-only search, no embeddings or provider calls. No auto indexing.
+description: Native gbrain vault interface. Direct authoring, retrieval, and linking via the pinned native CLI. Keyword-only search, no embeddings. No auto indexing.
 categories:
   - retrieval
   - search
@@ -10,180 +10,143 @@ categories:
 
 # GBrain Skill
 
-Thin, gated chat-facing wrapper around the pinned native `gbrain` CLI. Exposes
-bounded native authoring, retrieval, and linking actions. `reindex` (initial
-activation) is intentionally not exposed from chat.
-
-Prefer the short `gbrain-skill ...` CLI form for shell use. JSON-over-stdin
-remains supported for programmatic use and backward compatibility.
+Josemar uses the pinned native `gbrain` CLI directly as the canonical Obsidian
+vault interface for retrieval, authoring, and linking. There is no custom
+wrapper between chat and `gbrain`; the CLI is invoked directly from the Hermes
+runtime. Operator-only activation (init/sync/extract/schema setup) is provided
+by the `josemar-gbrain reindex` maintenance command and is not exposed from
+chat.
 
 ## Important Notes
 
-- **Gate defaults to enabled, marker-gated.** The gate (`GBRAIN_ENABLED`)
-  defaults to `true`, but all actions except `status` are rejected until the
-  activation/config readiness marker is valid and matches the current config.
-  Set `GBRAIN_ENABLED=false` to force-close the gate.
-- **Activation marker, not a vault snapshot.** Readiness is an activation/config
-  invariant: pinned gbrain ref/version, schema pack, `GBRAIN_HOME` realpath,
-  `GBRAIN_BRAIN_REPO` realpath, configured `sync.repo_path`, and
-  `search.mcp_keyword_only=true`. The marker does NOT track vault Git HEAD or
-  clean worktree status. A successful native `capture`/`put` does not stale
-  readiness.
-- **Keyword-only native gbrain search.** Before every chat search the wrapper
-  sets `search.mcp_keyword_only=true` and dispatches via
-  `gbrain call search <json>`. In pinned gbrain this operation reads the
-  config and calls `engine.searchKeyword`, never the vector/hybrid provider
-  path. The wrapper forces this native keyword-only operation; it does not
-  claim provider config cannot exist. Provider credentials are also unset
-  before every gbrain invocation as defense-in-depth.
-- **No auto indexing.** Nothing in startup, deploy, or chat triggers a
-  reindex. Operators run `josemar-gbrain reindex` manually.
-- **put is whole-page replacement.** `put` upserts the entire page content.
+- **Native CLI only.** Use the `gbrain` binary directly (`/usr/local/bin/gbrain`
+  in the container). Do not call `josemar-gbrain` from chat — it is an
+  operator maintenance convenience for reindex/activation only.
+- **Keyword-only search, no embeddings.** Activation configures
+  `search.mcp_keyword_only=true` and runs with `--no-embedding`, so search uses
+  `engine.searchKeyword` and never the vector/hybrid provider path. Embeddings
+  remain deferred in MVP. `gbrain doctor` will warn that embeddings are not
+  configured; this is expected and intentional.
+- **Periodic refresh, no chat reindex.** Chat does not run activation/reindex.
+  Operators run `josemar-gbrain reindex` manually for activation, schema
+  changes, or vault swaps. A Hermes cron runs `josemar-gbrain refresh` every 5
+  minutes by default to pick up manual Obsidian/Syncthing edits. Refresh uses
+  `gbrain sync --no-embed` while embeddings are deferred; revisit when enabling
+  embeddings. See `docs/gbrain-operations.md`.
+- **put is whole-page replacement.** `gbrain` upserts the entire page content.
   Rename, template instantiation, surgical section/frontmatter patching, and
-  physical move are NOT offered (gbrain has no native equivalent; use Obsidian
-  manually for those).
-- **Old note.* routes are rejected.** This skill does not support the legacy
-  vault-gateway `note.*` route API. Use the native gbrain actions below.
+  physical move are NOT offered natively; use Obsidian manually for those.
 - **Wikilinks and backlinks.** Obsidian `[[wikilinks]]` in page content are
-  resolved automatically when a page is written via `put` or `capture` (basename
-  resolution is enabled). `backlinks` returns all incoming links, including
+  resolved automatically when a page is written (basename resolution is
+  enabled). `gbrain backlinks` returns all incoming links, including
   wikilink-resolved edges. Cross-page link extraction for pre-existing pages
-  is an operator action (`josemar-gbrain reindex` or `gbrain extract links
-  --source db`); see `docs/gbrain-operations.md`.
+  is an operator action (`josemar-gbrain reindex` or
+  `gbrain extract links --source db`); see `docs/gbrain-operations.md`.
+- **Runtime state.** gbrain state lives under `/opt/data/.gbrain` (PGLite
+  database, config, cache). It is runtime-only and never versioned by
+  workspace sync.
 
 ## Actions
 
-### `status`
+All actions are invoked directly via the native `gbrain` CLI. Run `gbrain --help`
+for the full command surface. The commands below are the ones Josemar uses
+routinely from chat.
 
-Return machine-readable gate status. Safe to call at any time (no gate
-required). Status may read live gbrain config to verify the activation marker.
+### `gbrain status`
 
-```bash
-gbrain-skill status
-```
-
-### `schema_status`
-
-Read-only schema pack introspection. Safe to call at any time (no gate
-required). Reports the selected pack, whether it is bundled or custom, source
-and installed paths/hashes, marker match status, and validation state.
+Report native gbrain runtime/config status. Safe to call at any time.
 
 ```bash
-gbrain-skill schema-status
+gbrain status
 ```
 
-Schema mutation is NOT exposed from chat. To change the schema pack, follow
-the source-first approval workflow: propose a diff, get explicit approval,
-update the source pack in agent-state, commit, then run
-`josemar-gbrain reindex` to validate, install, and activate. See
-`docs/gbrain-operations.md` for the schema workflow.
+### `gbrain search`
 
-### `search`
-
-Bounded keyword-only native gbrain search. Requires the gate to be open.
+Keyword-only native search. Activation sets `search.mcp_keyword_only=true`, so
+search uses `engine.searchKeyword` and never the vector/hybrid provider path.
 
 ```bash
-gbrain-skill search "notes on obsidian sync" --limit 10 --offset 0
+gbrain search "notes on obsidian sync" --limit 10
 ```
 
-Fields:
-- `query` (string, required, non-empty, max `GBRAIN_QUERY_MAX_INPUT_CHARS` chars)
-- `limit` (integer, optional, default 10, range 1..`GBRAIN_QUERY_MAX_LIMIT`)
-- `offset` (integer, optional, default 0, non-negative)
+Common flags:
+- `--limit` (integer, optional, result cap)
+- `--offset` (integer, optional, pagination)
 
-### `get`
+### `gbrain get`
 
-Read a page by slug. Requires the gate to be open.
+Read a page by slug.
 
 ```bash
-gbrain-skill get inbox/my-note
+gbrain get inbox/my-note
 ```
 
-Fields:
-- `slug` (string, required, validated; no `..`, leading `/`, or newlines)
+### `gbrain capture`
 
-### `capture`
-
-Native gbrain capture: write content as a new page. Requires the gate to be
-open.
+Write content as a new page. Provide content positionally, with `--stdin`, or
+with `--file`.
 
 ```bash
-gbrain-skill capture --slug inbox/custom --type note --content "remember to follow up on X"
+gbrain capture "remember to follow up on X" --slug inbox/custom --type note --json
+printf '%s' "remember to follow up on X" | gbrain capture --stdin --json
 ```
 
-Fields:
-- `content` (string, required, non-empty, max `GBRAIN_CONTENT_MAX_CHARS` chars)
-- `slug` (string, optional, validated)
-- `type` (string, optional, lowercase kebab; e.g. `note`, `diary`)
+Common flags:
+- `--slug` (optional, target slug)
+- `--type` (optional, lowercase kebab; e.g. `note`, `diary`)
+- `--stdin` (read content from stdin)
+- `--json` (emit JSON)
 
-Does not expose `--file` or arbitrary `--source`.
+### `gbrain put`
 
-### `put`
-
-Whole-page upsert by slug. Requires the gate to be open.
+Whole-page upsert by slug. Supports stdin for longer content.
 
 ```bash
-gbrain-skill put inbox/my-note --content "---\ntitle: My Note\n---\nFull content here"
+printf '%s' "$FULL_MARKDOWN" | gbrain put inbox/my-note
 ```
-
-For longer content, pipe stdin instead of shell-quoting the whole page:
-
-```bash
-printf '%s' "$FULL_MARKDOWN" | gbrain-skill put inbox/my-note
-```
-
-Fields:
-- `slug` (string, required, validated)
-- `content` (string, required, full markdown with YAML frontmatter, max `GBRAIN_CONTENT_MAX_CHARS` chars)
 
 This is a whole-page replacement. There is no patch, section-append, or
-frontmatter-surgical API. Rename and physical move are not offered.
+frontmatter-surgical API. Rename and physical move are not offered natively.
 
-### `link`
+### `gbrain link`
 
-Create a manual link between two pages. Requires the gate to be open.
+Create a manual link between two pages.
 
 ```bash
-gbrain-skill link inbox/a people/b --link-type mentions --context "meeting notes" --link-source manual
+gbrain link inbox/a people/b --link-type mentions --context "meeting notes" --link-source manual
 ```
-
-Fields:
-- `from` (string, required, validated slug)
-- `to` (string, required, validated slug)
-- `link_type` (string, optional, lowercase kebab)
-- `context` (string, optional, max 500 chars)
-- `link_source` (string, optional, lowercase kebab; defaults to `manual`)
 
 Reconciliation-managed sources (`markdown`, `frontmatter`, `mentions`,
-`wikilink-resolved`) are rejected.
+`wikilink-resolved`) are managed by gbrain itself; use `manual` (the default)
+or a custom kebab tag for chat-created links.
 
-### `backlinks`
+### `gbrain backlinks`
 
-List incoming links to a page. Requires the gate to be open.
-
-```bash
-gbrain-skill backlinks people/b
-```
-
-## JSON stdin compatibility
-
-JSON-over-stdin is still accepted when no CLI arguments are provided:
+List incoming links to a page.
 
 ```bash
-echo '{"action":"search","query":"notes on obsidian sync","limit":10}' | gbrain-skill
+gbrain backlinks people/b
 ```
 
-## Excluded Actions
+### Other useful commands
 
-`reindex` is not exposed from chat. It is a manual operator action run on the
+`gbrain tags`, `gbrain timeline`, `gbrain graph`, `gbrain delete`,
+`gbrain history`, and `gbrain revert` are available natively where useful.
+Run `gbrain --help` for the full surface and per-command help.
+
+## Operator-Only Activation
+
+`reindex` is not a chat action. It is a manual operator command run on the
 host/container shell:
 
 ```bash
 josemar-gbrain reindex
 ```
 
-The following are intentionally NOT exposed from chat: generic `call`, `query`,
-`sync`, admin, raw uploads, `delete`, `restore`, `purge-deleted`, and all old
-`note.*` vault-gateway route names.
+This performs init, config, full sync, content/link extraction, and schema
+setup. See `docs/gbrain-operations.md` for the full activation and operations
+runbook.
 
-See `docs/gbrain-operations.md` for the safe activation and operations runbook.
+`josemar-gbrain refresh` is also operator-only, but it is scheduled by Hermes
+cron for recurring manual-file reconciliation. It syncs vault files, extracts
+stale content, and refreshes links without init/schema work.
