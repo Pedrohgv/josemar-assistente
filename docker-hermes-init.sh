@@ -15,6 +15,7 @@ CREDENTIALS_SOURCE_DIR="${JOSEMAR_CREDENTIALS_SOURCE_DIR:-/opt/josemar/credentia
 CREDENTIALS_DIR="${JOSEMAR_CREDENTIALS_DIR:-${HERMES_HOME}/credentials}"
 HERMES_UID_VALUE="${HERMES_UID:-${PUID:-10000}}"
 HERMES_GID_VALUE="${HERMES_GID:-${PGID:-10000}}"
+HERMES_CLI="${HERMES_CLI:-/opt/hermes/.venv/bin/hermes}"
 
 mkdir -p "$HERMES_HOME" "$WORKSPACE_DIR" "$OBSIDIAN_VAULT_DIR" "$CREDENTIALS_DIR"
 
@@ -156,12 +157,14 @@ PY
         HOME=$1
         HERMES_HOME=$1
         WORKSPACE_DIR=$2
-        export HOME HERMES_HOME WORKSPACE_DIR
-        shift 2
-        exec hermes cron create "$@"
+        HERMES_CLI=$3
+        export HOME HERMES_HOME WORKSPACE_DIR HERMES_CLI
+        shift 3
+        exec "$HERMES_CLI" cron create "$@"
     ' sh \
         "$HERMES_HOME" \
         "$WORKSPACE_DIR" \
+        "$HERMES_CLI" \
         "every ${sync_interval}m" \
         --no-agent \
         --script hermes-workspace-sync-cron.sh \
@@ -218,12 +221,14 @@ PY
         HOME=$1
         HERMES_HOME=$1
         WORKSPACE_DIR=$2
-        export HOME HERMES_HOME WORKSPACE_DIR
-        shift 2
-        exec hermes cron create "$@"
+        HERMES_CLI=$3
+        export HOME HERMES_HOME WORKSPACE_DIR HERMES_CLI
+        shift 3
+        exec "$HERMES_CLI" cron create "$@"
     ' sh \
         "$HERMES_HOME" \
         "$WORKSPACE_DIR" \
+        "$HERMES_CLI" \
         "every ${refresh_interval}m" \
         --no-agent \
         --script hermes-gbrain-refresh-cron.sh \

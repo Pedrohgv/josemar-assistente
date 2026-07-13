@@ -417,6 +417,11 @@ class GbrainCronContractTests(unittest.TestCase):
         self.assertIn("GBRAIN_REFRESH_INTERVAL", body)
         self.assertIn('""|0|*[!0-9]*)', body)
 
+    def test_cron_creation_uses_hermes_cli_absolute_path(self) -> None:
+        self.assertIn('HERMES_CLI="${HERMES_CLI:-/opt/hermes/.venv/bin/hermes}"', self.src)
+        self.assertIn('exec "$HERMES_CLI" cron create "$@"', self.src)
+        self.assertNotIn('exec hermes cron create "$@"', self.src)
+
 
 class GbrainBunInstallerCurlContractTests(unittest.TestCase):
     """Bun installer stage must apt-install curl."""
