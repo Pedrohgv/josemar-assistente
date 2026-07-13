@@ -422,6 +422,14 @@ class GbrainCronContractTests(unittest.TestCase):
         self.assertIn('exec "$HERMES_CLI" cron create "$@"', self.src)
         self.assertNotIn('exec hermes cron create "$@"', self.src)
 
+    def test_cron_creation_stops_su_option_parsing_before_hermes_flags(self) -> None:
+        """su must not consume cron-create flags such as --no-agent."""
+        for function_name in ("install_workspace_sync_cron", "install_gbrain_refresh_cron"):
+            with self.subTest(function_name=function_name):
+                body = _extract_function(self.src, function_name)
+                self.assertIn("su -s /bin/sh -- hermes -c", body)
+                self.assertNotIn("su -s /bin/sh hermes -c", body)
+
 
 class GbrainBunInstallerCurlContractTests(unittest.TestCase):
     """Bun installer stage must apt-install curl."""

@@ -153,7 +153,7 @@ PY
     fi
 
     log "Creating Hermes workspace-sync cron job"
-    su -s /bin/sh hermes -c '
+    su -s /bin/sh -- hermes -c '
         HOME=$1
         HERMES_HOME=$1
         WORKSPACE_DIR=$2
@@ -217,7 +217,7 @@ PY
     fi
 
     log "Creating Hermes gbrain-refresh cron job"
-    su -s /bin/sh hermes -c '
+    su -s /bin/sh -- hermes -c '
         HOME=$1
         HERMES_HOME=$1
         WORKSPACE_DIR=$2
