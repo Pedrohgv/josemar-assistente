@@ -7,5 +7,8 @@ agent@josemar\.local
 token@github\.com
 YOUR_GATEWAY_AUTH_PASSWORD@your-domain\.com
 
-# llama.cpp b9045 release SHA256 in docker-compose.yml; pii_guard.py can match the numeric suffix as a phone.
-docker-compose\.yml:\d+:phone:42995[0-9]{6}:.*1264b54287d7cf2cdfa991bbe6bead1c2df33bdf0fac2b4b082bf42995[0-9]{6}
+# llama.cpp b9585 release SHA256 in docker-compose.yml; pii_guard.py can match numeric runs in the hex digest.
+docker-compose\.yml:\d+:phone:.*be111dd28e6228fc4cb6a6ec41f03a67947ab61f315a3d22d0e68ac7372a58ab
+
+# Official llama.cpp b9585 commit hash; its numeric run can resemble a phone number.
+(?:\.env\.example|aux-ml/models/README\.md|docs/aux-ml\.md):\d+:phone:44[8]6904469:.*d73cd076740db9c111d0e58ddd44[8]6904469e75e

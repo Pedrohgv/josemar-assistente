@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
 import base64
 import mimetypes
 
@@ -174,6 +175,7 @@ async def run_ocr_task(
     column_split_pages: tuple[int, ...] | None,
     allowed_roots: tuple[Path, ...],
     router: LlamaRouterClient,
+    cancel_event: asyncio.Event | None = None,
 ) -> dict:
     resolved_file = _resolve_safe_input_path(file_path, allowed_roots)
     effective_prompt = (prompt or model_spec.default_prompt).strip()
@@ -187,6 +189,8 @@ async def run_ocr_task(
         merged_parts: list[str] = []
         try:
             for page_index, page in enumerate(document, start=1):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise asyncio.CancelledError("OCR cancelled between pages")
                 if page_index > max_pages:
                     raise ValueError(
                         f"PDF has more than {max_pages} pages. Increase AUX_ML_OCR_MAX_PAGES if needed."

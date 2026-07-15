@@ -157,6 +157,14 @@ def _wait_for_job(job_id, timeout_seconds):
                 "error": job.get("error", "Job failed"),
                 "job": job,
             }
+        if status == "cancelled":
+            return {
+                "success": False,
+                "job_id": job_id,
+                "status": status,
+                "error": "Job was cancelled",
+                "job": job,
+            }
         time.sleep(AUX_ML_POLL_INTERVAL_SECONDS)
 
     return {
@@ -165,6 +173,10 @@ def _wait_for_job(job_id, timeout_seconds):
         "status": "timeout",
         "error": f"Timed out waiting for job after {timeout_seconds}s",
     }
+
+
+def _cancel_job(job_id):
+    return _http_json("POST", f"/jobs/{job_id}/cancel", timeout=30)
 
 
 def action_ocr_file(data):
@@ -228,6 +240,25 @@ def action_wait_for_job(data):
     return _wait_for_job(job_id, timeout_seconds)
 
 
+def action_cancel_job(data):
+    job_id = data.get("job_id")
+    if not job_id:
+        return {"success": False, "error": "Missing required field: job_id"}
+    try:
+        result = _cancel_job(job_id)
+    except RuntimeError as exc:
+        return {"success": False, "error": str(exc), "job_id": job_id}
+    cancelled = bool(result.get("cancelled", False))
+    return {
+        "success": cancelled,
+        "job_id": job_id,
+        "status": result.get("status"),
+        "cancelled": cancelled,
+        "message": result.get("message"),
+        "job": result,
+    }
+
+
 def action_queue_status(_data):
     queue = _http_json("GET", "/queue", timeout=30)
     return {"success": True, "queue": queue}
@@ -243,6 +274,7 @@ ACTIONS = {
     "submit_job": action_submit_job,
     "job_status": action_job_status,
     "wait_for_job": action_wait_for_job,
+    "cancel_job": action_cancel_job,
     "queue_status": action_queue_status,
     "health": action_health,
 }
