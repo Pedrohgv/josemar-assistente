@@ -14,7 +14,7 @@ The image build copies this directory into `/models` inside the container.
 If local files are not present here, compose defaults download and bundle the required model files.
 Granite Speech files are optional at runtime. If they are not present, the transcription model is not registered and OCR can still run. Set `AUX_ML_ENABLE_GRANITE_SPEECH=false` to remove copied Granite files during image build and use the OCR-only llama.cpp preset.
 
-The `aux-ml` image also overlays the verified llama.cpp `b9045` release by default. Granite Speech GGUF produced coherent transcripts with `b9045`; later moving Docker tags produced unusable audio output in testing.
+The `aux-ml` image also overlays the verified llama.cpp `b9585` release by default (target commit `d73cd076740db9c111d0e58ddd4486904469e75e`). `b9585` contains an embedding-scale fix relevant to Granite Speech; runtime validation in a real container is still required. Earlier moving Docker tags produced unusable audio output in testing.
 
 You can override URLs/checksums with:
 

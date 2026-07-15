@@ -21,6 +21,12 @@ SUPPORTED_AUDIO_EXTENSIONS = {
     ".wav",
 }
 
+# One-pass ffmpeg loudnorm filter applied to every transcription request
+# (short/single-shot and each long-audio chunk) before llama.cpp. Produces
+# 16 kHz mono PCM WAV, which is what Granite Speech expects.
+LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
+NORMALIZED_SAMPLE_RATE = 16000
+
 BOUNDARY_SCAN_WORDS = 120
 MAX_OVERLAP_WORDS = 100
 MIN_OVERLAP_WORDS = 8
@@ -76,21 +82,85 @@ def _extract_text_from_completion(response: dict) -> str:
     return ""
 
 
-async def _run_command(args: list[str], timeout_seconds: int) -> str:
+async def _run_command(
+    args: list[str],
+    timeout_seconds: int,
+    *,
+    cancel_event: asyncio.Event | None = None,
+) -> str:
+    """Run a subprocess with rigorous cancellation.
+
+    The child is started in its own session (``start_new_session=True``) so
+    we can terminate the whole process group. On cancellation or timeout we:
+      1. Terminate the process group (SIGTERM) with a bounded grace period.
+      2. If still alive, SIGKILL the group.
+      3. Reap the process (await communicate).
+      4. Always cancel and await the ``cancel_event.wait()`` helper task so
+         no pending helper task lingers.
+    """
+    import os
+    import signal
+
     process = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
+    communicate_task = asyncio.ensure_future(process.communicate())
+    cancel_task: asyncio.Task | None = None
+    if cancel_event is not None:
+        cancel_task = asyncio.ensure_future(cancel_event.wait())
+
     try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(),
+        wait_set = {communicate_task}
+        if cancel_task is not None:
+            wait_set.add(cancel_task)
+
+        done, pending = await asyncio.wait(
+            wait_set,
             timeout=timeout_seconds,
+            return_when=asyncio.FIRST_COMPLETED,
         )
-    except asyncio.TimeoutError as exc:
-        process.kill()
-        await process.communicate()
-        raise TimeoutError(f"Command timed out ({args[0]}) after {timeout_seconds}s") from exc
+
+        cancelled = cancel_event is not None and cancel_event.is_set()
+        timed_out = not done
+
+        if cancelled or timed_out:
+            reason = "Command cancelled" if cancelled else (
+                f"Command timed out ({args[0]}) after {timeout_seconds}s"
+            )
+            await _terminate_process_group(process)
+            communicate_task.cancel()
+            try:
+                await communicate_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            if cancelled:
+                raise asyncio.CancelledError(reason)
+            raise TimeoutError(reason)
+
+        # Normal completion.
+        stdout, stderr = communicate_task.result()
+    except (asyncio.CancelledError, TimeoutError):
+        # Outer cancellation (e.g. job task cancelled) or timeout already
+        # handled above. Ensure the process group is reaped.
+        await _terminate_process_group(process)
+        communicate_task.cancel()
+        try:
+            await communicate_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        raise
+    finally:
+        # Always clean up the helper task so nothing lingers.
+        if cancel_task is not None and not cancel_task.done():
+            cancel_task.cancel()
+            try:
+                await cancel_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
     if process.returncode != 0:
         message = stderr.decode("utf-8", errors="replace").strip()
         if len(message) > 500:
@@ -99,7 +169,94 @@ async def _run_command(args: list[str], timeout_seconds: int) -> str:
     return stdout.decode("utf-8", errors="replace").strip()
 
 
-async def _probe_duration_seconds(file_path: Path, timeout_seconds: int) -> float:
+async def _terminate_process_group(
+    process: asyncio.subprocess.Process,
+    *,
+    grace_seconds: float = 2.0,
+) -> None:
+    """Terminate the child's process group with bounded grace and SIGKILL
+    fallback, then reap the process. Avoids double-kill and masks no
+    ``ProcessLookupError``."""
+    import os
+    import signal
+
+    if process.returncode is not None:
+        return
+
+    pgid: int | None = None
+    try:
+        pgid = os.getpgid(process.pid)
+    except ProcessLookupError:
+        # Already reaped.
+        return
+    except OSError:
+        pgid = None
+
+    # SIGTERM the whole group.
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except OSError:
+            # Fallback: kill just the process.
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                return
+            except OSError:
+                pass
+    else:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+
+    # Bounded grace: wait for the process to exit.
+    try:
+        await asyncio.wait_for(process.wait(), timeout=grace_seconds)
+        return
+    except asyncio.TimeoutError:
+        pass
+    except ProcessLookupError:
+        return
+
+    # SIGKILL the group.
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except OSError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                return
+            except OSError:
+                pass
+    else:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+
+    # Reap.
+    try:
+        await process.wait()
+    except (ProcessLookupError, asyncio.CancelledError, Exception):
+        pass
+
+
+async def _probe_duration_seconds(
+    file_path: Path,
+    timeout_seconds: int,
+    *,
+    cancel_event: asyncio.Event | None = None,
+) -> float:
     output = await _run_command(
         [
             "ffprobe",
@@ -114,6 +271,7 @@ async def _probe_duration_seconds(file_path: Path, timeout_seconds: int) -> floa
             str(file_path),
         ],
         timeout_seconds=timeout_seconds,
+        cancel_event=cancel_event,
     )
     try:
         duration = float(output)
@@ -133,8 +291,7 @@ def _chunk_ranges(
     if duration_seconds <= chunk_seconds:
         return [(0.0, duration_seconds)]
 
-    overlap = min(overlap_seconds, max(chunk_seconds - 1, 0))
-    step = chunk_seconds - overlap
+    step = chunk_seconds - overlap_seconds
     ranges: list[tuple[float, float]] = []
     start = 0.0
     while start < duration_seconds:
@@ -146,23 +303,38 @@ def _chunk_ranges(
     return ranges
 
 
-async def _create_chunk(
+async def _normalize_audio(
     *,
     source_file: Path,
     output_file: Path,
-    start_seconds: float,
-    duration_seconds: float,
+    start_seconds: float | None = None,
+    duration_seconds: float | None = None,
     timeout_seconds: int,
+    cancel_event: asyncio.Event | None = None,
 ) -> None:
-    await _run_command(
+    """Normalize any audio input to 16 kHz mono PCM WAV with one-pass
+    ffmpeg loudnorm.
+
+    This is the single cancellation-safe helper reused by both the
+    short/single-shot path and each long-audio chunk. When ``start_seconds``
+    and ``duration_seconds`` are provided, the source is seeked/sliced
+    (chunk extraction + normalization in one ffmpeg pass). Otherwise the
+    whole file is normalized.
+
+    Cancellation is delegated to ``_run_command`` which terminates the
+    ffmpeg process group on cancel/timeout.
+    """
+    args: list[str] = [
+        "ffmpeg",
+        "-nostdin",
+        "-y",
+    ]
+    if start_seconds is not None:
+        args.extend(["-ss", f"{start_seconds:.3f}"])
+    if duration_seconds is not None:
+        args.extend(["-t", f"{duration_seconds:.3f}"])
+    args.extend(
         [
-            "ffmpeg",
-            "-nostdin",
-            "-y",
-            "-ss",
-            f"{start_seconds:.3f}",
-            "-t",
-            f"{duration_seconds:.3f}",
             "-protocol_whitelist",
             "file,pipe",
             "-i",
@@ -170,15 +342,21 @@ async def _create_chunk(
             "-map",
             "0:a:0",
             "-vn",
+            "-af",
+            LOUDNORM_FILTER,
             "-ac",
             "1",
             "-ar",
-            "16000",
+            str(NORMALIZED_SAMPLE_RATE),
             "-acodec",
             "pcm_s16le",
             str(output_file),
-        ],
+        ]
+    )
+    await _run_command(
+        args,
         timeout_seconds=timeout_seconds,
+        cancel_event=cancel_event,
     )
 
 
@@ -310,6 +488,7 @@ async def run_transcription_task(
     ffmpeg_timeout_seconds: int,
     allowed_roots: tuple[Path, ...],
     router: LlamaRouterClient,
+    cancel_event: asyncio.Event | None = None,
 ) -> dict:
     resolved_file = _resolve_safe_input_path(file_path, allowed_roots)
     suffix = resolved_file.suffix.lower()
@@ -327,6 +506,7 @@ async def run_transcription_task(
     duration_seconds = await _probe_duration_seconds(
         resolved_file,
         timeout_seconds=ffmpeg_timeout_seconds,
+        cancel_event=cancel_event,
     )
     if duration_seconds > max_duration_seconds:
         raise ValueError(
@@ -347,26 +527,44 @@ async def run_transcription_task(
     chunk_results: list[dict] = []
     chunk_texts: list[str] = []
     if len(chunks) == 1:
-        completion = await router.audio_transcription(
-            file_path=resolved_file,
-            model_id=model_id,
-            prompt=effective_prompt,
-            mime_type=_guess_mime_type(resolved_file),
-            timeout_seconds=timeout_seconds,
-        )
+        # Normalize even short/single-shot input to 16 kHz mono PCM WAV with
+        # loudnorm before llama.cpp. Temporary file is cleaned in finally.
+        with tempfile.TemporaryDirectory(prefix="aux-ml-transcribe-") as temp_dir:
+            normalized_file = Path(temp_dir) / "normalized.wav"
+            await _normalize_audio(
+                source_file=resolved_file,
+                output_file=normalized_file,
+                timeout_seconds=ffmpeg_timeout_seconds,
+                cancel_event=cancel_event,
+            )
+            try:
+                completion = await router.audio_transcription(
+                    file_path=normalized_file,
+                    model_id=model_id,
+                    prompt=effective_prompt,
+                    mime_type="audio/x-wav",
+                    timeout_seconds=timeout_seconds,
+                )
+            finally:
+                normalized_file.unlink(missing_ok=True)
         text = _extract_text_from_completion(completion)
         mode = "single-shot"
     else:
         with tempfile.TemporaryDirectory(prefix="aux-ml-transcribe-") as temp_dir:
             temp_root = Path(temp_dir)
             for index, (start, end) in enumerate(chunks, start=1):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise asyncio.CancelledError("Transcription cancelled between chunks")
                 chunk_file = temp_root / f"chunk-{index:04d}.wav"
-                await _create_chunk(
+                # Each chunk is extracted AND normalized in one ffmpeg pass
+                # using the same loudnorm helper as the single-shot path.
+                await _normalize_audio(
                     source_file=resolved_file,
                     output_file=chunk_file,
                     start_seconds=start,
                     duration_seconds=end - start,
                     timeout_seconds=ffmpeg_timeout_seconds,
+                    cancel_event=cancel_event,
                 )
                 try:
                     completion = await router.audio_transcription(

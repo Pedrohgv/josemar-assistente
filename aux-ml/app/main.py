@@ -6,6 +6,7 @@ import asyncio
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .jobs import QueueFullError
@@ -132,10 +133,15 @@ async def health() -> dict:
     router_ok = await service.router.ping()
     queue_state = await service.queue_snapshot()
 
-    status = "ok" if router_ok else "degraded"
+    # Degraded when the router is unreachable OR dispatch is blocked (e.g.
+    # a cleanup failure left the runtime in an unknown state and new work
+    # cannot start safely).
+    dispatch_blocked = bool(queue_state.get("dispatch_blocked"))
+    status = "ok" if (router_ok and not dispatch_blocked) else "degraded"
     return {
         "status": status,
         "router_reachable": router_ok,
+        "dispatch_blocked": dispatch_blocked,
         "memory_policy": app.state.memory_policy,
         "queue": queue_state,
         "registered_models": app.state.registry.list_models(),
@@ -175,6 +181,33 @@ async def get_job(job_id: str) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail=f"Unknown job id: {job_id}")
     return job
+
+
+@app.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str):
+    """Cancel a queued or running job.
+
+    HTTP semantics:
+      - queued    -> 200, status=cancelled
+      - running   -> 202, status=cancelling
+      - cancelling-> 202, status=cancelling (idempotent)
+      - cancelled -> 200, status=cancelled (idempotent)
+      - succeeded/failed -> 409, cancelled=false
+      - unknown   -> 404
+    """
+    service = _service()
+    try:
+        result = await service.cancel_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    status = result.get("status")
+    if status in ("cancelled",):
+        return JSONResponse(status_code=200, content=result)
+    if status in ("cancelling",):
+        return JSONResponse(status_code=202, content=result)
+    # succeeded / failed -> 409
+    return JSONResponse(status_code=409, content=result)
 
 
 @app.post("/run")

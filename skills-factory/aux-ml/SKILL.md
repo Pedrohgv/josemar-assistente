@@ -70,15 +70,33 @@ echo '{
   "action": "submit_job",
   "task": "transcribe",
   "model": "granite-speech-4.1-2b",
-  "file_path": "/shared/meeting.mp3"
+  "file_path": "/shared/meeting.mp3",
+  "prompt": "transcribe the speech with proper punctuation and capitalization."
 }' | aux-ml
 ```
 
-Note: Granite Speech support uses pinned llama.cpp `b9045` experimental audio input. Long files are chunked with ffmpeg and merged with conservative fuzzy overlap cleanup. Treat long-form transcripts as draft output: spot-check important sections, expect occasional duplicated overlap or model repetition, and do not treat transcripts as authoritative without human review.
+The generic `submit_job` action accepts the optional `prompt` field for both OCR and transcription. For Granite Speech, use one of the model's task prompts rather than free-form instructions:
+
+- Raw transcript: `can you transcribe the speech into a written format?`
+- Transcript with punctuation and capitalization (default): `transcribe the speech with proper punctuation and capitalization.`
+- Keyword-biased transcript: `transcribe the speech to text. Keywords: <keyword1>, <keyword2>, ...`
+- Speech translation: `translate the speech to <language>.`
+- Speech translation with punctuation: `translate the speech to <language> with proper punctuation and capitalization.`
+
+Do not include the `<|audio|>` token; the service removes it before calling llama.cpp's audio transcription endpoint. Unfamiliar or malformed prompts may be ignored by the model, which then falls back to plain transcription.
+
+Note: Granite Speech support uses pinned llama.cpp `b9585` experimental audio input. `b9585` contains an embedding-scale fix relevant to Granite Speech; runtime validation in a real container is still required. Every request is normalized to 16 kHz mono PCM WAV with one-pass ffmpeg loudnorm before llama.cpp, including short/single-shot input and each long-audio chunk. Long files are chunked with ffmpeg and merged with conservative fuzzy overlap cleanup. Treat long-form transcripts as draft output: spot-check important sections, expect occasional duplicated overlap or model repetition, and do not treat transcripts as authoritative without human review.
 
 Language/format caveats:
-- Granite Speech currently works best for English. Portuguese and other languages may produce lower-quality or unreliable transcripts; tell the user when confidence may be low and prefer human review for important content.
-- Telegram voice notes commonly arrive as OGG/Opus. If aux-ml rejects them or output quality is poor, convert them to 16 kHz mono WAV before submitting transcription.
+- Supported transcription languages are English, French, German, Spanish, Portuguese, and Japanese. Do not imply support for arbitrary languages.
+- Portuguese is officially supported, but local Q8_0 tests on multi-speaker meeting audio remained unreliable with llama.cpp `b9585`, loudness normalization, and 30-second chunks. Some segments mixed Portuguese and English or collapsed to the repeated phrase `Thank you very much.` Treat that phrase as a likely transcription failure, not valid output.
+- Prefer clean, single-speaker segments of roughly 15–30 seconds when accuracy matters. The base model does not provide speaker attribution, and overlapping or far-field meeting speech requires careful human review.
+- For punctuated or keyword-biased transcription of non-English audio, keep the task prompt in English. Multilingual prompts are supported only for the raw-transcript task.
+- Speech translation is supported between English and French, German, Spanish, Portuguese, or Japanese, plus English-to-Italian and English-to-Mandarin. Translation is distinct from same-language transcription.
+- The model does not document a language-identification task or API language parameter; use a supported task prompt and review important non-English output.
+- Telegram voice notes commonly arrive as OGG/Opus. The service normalizes every request to 16 kHz mono PCM WAV with ffmpeg loudnorm before llama.cpp, so you can submit OGG/Opus directly. If output quality is poor, review the prompt and language settings.
+
+Prompt and language guidance is based on the [official Granite Speech 4.1 2B model card](https://huggingface.co/ibm-granite/granite-speech-4.1-2b).
 
 ### `job_status`
 
@@ -90,11 +108,23 @@ echo '{"action": "job_status", "job_id": "<job-id>"}' | aux-ml
 
 ### `wait_for_job`
 
-Poll until terminal state (`succeeded` or `failed`).
+Poll until terminal state (`succeeded`, `failed`, or `cancelled`).
 
 ```bash
 echo '{"action": "wait_for_job", "job_id": "<job-id>", "timeout_seconds": 1800}' | aux-ml
 ```
+
+### `cancel_job`
+
+Cancel a queued or running job. Queued jobs are removed from the queue and marked cancelled immediately. Running jobs transition to `cancelling`: the endpoint records intent and returns promptly, and the worker unloads the model and marks the job cancelled once the router confirms the unload.
+
+```bash
+echo '{"action": "cancel_job", "job_id": "<job-id>"}' | aux-ml
+```
+
+Returns `cancelled: true` with `status` `cancelled` (queued) or `cancelling` (running), and `cancelled: false` with the current `status` when the job was already in a terminal state (`succeeded`, `failed`, or `cancelled`).
+
+Note: active cancellation cancels the local inference request and unloads the model child; it is considered cancelled only after the router confirms the unload. The pinned llama.cpp `b9585` runtime behavior still needs real-container validation.
 
 ### `queue_status`
 

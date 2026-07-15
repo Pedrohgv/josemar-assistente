@@ -37,6 +37,16 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+# Minimum chunk size enforced at settings load. Smaller chunks would create
+# pathological step sizes once overlap is applied; explicit overrides below
+# this floor are rejected to surface misconfiguration early.
+MIN_CHUNK_SECONDS = 10
+
+
+class SettingsValidationError(ValueError):
+    """Raised when settings values are internally inconsistent."""
+
+
 def _parse_allowed_input_dirs(raw: str | None) -> tuple[Path, ...]:
     if not raw:
         return (Path("/shared"),)
@@ -85,6 +95,24 @@ def load_settings() -> Settings:
     else:
         memory_limit_mb = None
 
+    chunk_seconds = max(_env_int("AUX_ML_TRANSCRIBE_CHUNK_SECONDS", 30), 1)
+    overlap_seconds = max(_env_int("AUX_ML_TRANSCRIBE_OVERLAP_SECONDS", 2), 0)
+    max_chunks = max(_env_int("AUX_ML_TRANSCRIBE_MAX_CHUNKS", 72), 1)
+
+    # Validate chunk/overlap consistency at load time instead of silently
+    # producing pathological 1-second steps. A minimum chunk size of 10
+    # seconds is enforced; overlap must be strictly less than the chunk size.
+    if chunk_seconds < MIN_CHUNK_SECONDS:
+        raise SettingsValidationError(
+            f"AUX_ML_TRANSCRIBE_CHUNK_SECONDS={chunk_seconds} is below the "
+            f"minimum of {MIN_CHUNK_SECONDS}s."
+        )
+    if overlap_seconds >= chunk_seconds:
+        raise SettingsValidationError(
+            f"AUX_ML_TRANSCRIBE_OVERLAP_SECONDS={overlap_seconds} must be "
+            f"strictly less than AUX_ML_TRANSCRIBE_CHUNK_SECONDS={chunk_seconds}."
+        )
+
     return Settings(
         bind_host=os.getenv("AUX_ML_BIND_HOST", "0.0.0.0"),
         port=_env_int("AUX_ML_PORT", 8091),
@@ -99,8 +127,8 @@ def load_settings() -> Settings:
         ocr_max_pages=max(_env_int("AUX_ML_OCR_MAX_PAGES", 50), 1),
         transcribe_max_bytes=max(_env_int("AUX_ML_TRANSCRIBE_MAX_BYTES", 100 * 1024 * 1024), 1),
         transcribe_max_duration_seconds=max(_env_int("AUX_ML_TRANSCRIBE_MAX_DURATION_SECONDS", 1800), 1),
-        transcribe_max_chunks=max(_env_int("AUX_ML_TRANSCRIBE_MAX_CHUNKS", 16), 1),
-        transcribe_chunk_seconds=max(_env_int("AUX_ML_TRANSCRIBE_CHUNK_SECONDS", 240), 30),
-        transcribe_overlap_seconds=max(_env_int("AUX_ML_TRANSCRIBE_OVERLAP_SECONDS", 20), 0),
+        transcribe_max_chunks=max_chunks,
+        transcribe_chunk_seconds=chunk_seconds,
+        transcribe_overlap_seconds=overlap_seconds,
         transcribe_ffmpeg_timeout_seconds=max(_env_int("AUX_ML_TRANSCRIBE_FFMPEG_TIMEOUT_SECONDS", 300), 1),
     )
