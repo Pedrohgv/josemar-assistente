@@ -822,22 +822,27 @@ class SyncAndApplyBehavioralTests(unittest.TestCase):
 class ManifestGitignoreTests(unittest.TestCase):
     """Live + template manifest/gitignore allow only the dedicated toggle paths."""
 
+    def _read_live_state_file(self, path: Path) -> str:
+        if not path.exists():
+            self.skipTest("private agent-state checkout is not present")
+        return path.read_text(encoding="utf-8")
+
     def test_live_manifest_allows_toggle_paths(self) -> None:
-        text = LIVE_MANIFEST.read_text(encoding="utf-8")
+        text = self._read_live_state_file(LIVE_MANIFEST)
         self.assertIn("hermes/skill-toggles/default.json", text)
         self.assertIn("hermes/skill-toggles/profiles/*.json", text)
 
     def test_live_manifest_does_not_allow_broad_hermes(self) -> None:
-        text = LIVE_MANIFEST.read_text(encoding="utf-8")
+        text = self._read_live_state_file(LIVE_MANIFEST)
         self.assertNotIn("hermes/**", text)
 
     def test_live_gitignore_allows_toggle_paths(self) -> None:
-        text = LIVE_GITIGNORE.read_text(encoding="utf-8")
+        text = self._read_live_state_file(LIVE_GITIGNORE)
         self.assertIn("!hermes/skill-toggles/default.json", text)
         self.assertIn("!hermes/skill-toggles/profiles/*.json", text)
 
     def test_live_gitignore_does_not_allow_broad_hermes(self) -> None:
-        text = LIVE_GITIGNORE.read_text(encoding="utf-8")
+        text = self._read_live_state_file(LIVE_GITIGNORE)
         self.assertNotIn("!hermes/**", text)
 
     def test_template_manifest_allows_toggle_paths(self) -> None:
