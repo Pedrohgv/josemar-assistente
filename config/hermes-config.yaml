@@ -48,10 +48,14 @@ compression:
   protect_first_n: 3
 
 skills:
-  creation_nudge_interval: 15
+  creation_nudge_interval: 0
+  write_approval: true
   external_dirs:
     - /opt/josemar/skills
     - /opt/data/skills
+
+curator:
+  enabled: false
 
 platform_toolsets:
   cli: [hermes-cli]

@@ -64,6 +64,50 @@ done
 
 SOURCE_CONFIG="/opt/josemar/hermes/config.yaml"
 RUNTIME_CONFIG="${HERMES_HOME}/config.yaml"
+JOSEMAR_SKILL_STATE="${JOSEMAR_SKILL_STATE:-/opt/hermes/hermes_cli/josemar_skill_state.py}"
+
+# Before the repo template overwrites the runtime config, extract existing
+# default/named profile toggle keys into absent sidecars only when the keys
+# exist. This preserves a pre-feature deployment's toggles across the upgrade.
+# Does NOT create an empty default.json so production migration can preserve
+# pre-feature toggles. Malformed sidecars surface clearly and never modify
+# config.
+migrate_existing_toggles() {
+    if [ ! -f "$JOSEMAR_SKILL_STATE" ]; then
+        log "josemar_skill_state helper missing; skipping toggle migration"
+        return 0
+    fi
+
+    log "Migrating existing skill toggles into sidecars (pre template overwrite)"
+    WORKSPACE_DIR="$WORKSPACE_DIR" /opt/hermes/.venv/bin/python3 "$JOSEMAR_SKILL_STATE" migrate \
+        --hermes-home "$HERMES_HOME" --config-path "$RUNTIME_CONFIG" \
+        || log "WARNING: default profile toggle migration failed; continuing"
+
+    profiles_root="${HERMES_HOME}/profiles"
+    if [ -d "$profiles_root" ]; then
+        for profile_dir in "$profiles_root"/*/; do
+            [ -d "$profile_dir" ] || continue
+            profile_config="${profile_dir}config.yaml"
+            [ -f "$profile_config" ] || continue
+            WORKSPACE_DIR="$WORKSPACE_DIR" /opt/hermes/.venv/bin/python3 "$JOSEMAR_SKILL_STATE" migrate \
+                --hermes-home "$profile_dir" --config-path "$profile_config" \
+                || log "WARNING: named profile toggle migration failed for ${profile_dir}; continuing"
+        done
+    fi
+}
+
+apply_sidecars_and_policy() {
+    if [ ! -f "$JOSEMAR_SKILL_STATE" ]; then
+        log "josemar_skill_state helper missing; skipping toggle apply/policy"
+        return 0
+    fi
+
+    log "Applying skill toggle sidecars and enforcing policy"
+    WORKSPACE_DIR="$WORKSPACE_DIR" /opt/hermes/.venv/bin/python3 "$JOSEMAR_SKILL_STATE" apply-all \
+        || log "WARNING: skill toggle apply/policy failed; continuing"
+}
+
+migrate_existing_toggles
 
 if [ -f "$SOURCE_CONFIG" ]; then
     if [ -f "$RUNTIME_CONFIG" ] && ! cmp -s "$SOURCE_CONFIG" "$RUNTIME_CONFIG" 2>/dev/null; then
@@ -256,6 +300,29 @@ if [ -n "${WORKSPACE_STATE_REPO:-}" ]; then
 elif [ ! -d "${WORKSPACE_DIR}/.git" ]; then
     seed_workspace_from_manifest
 fi
+
+# After the template overwrite and workspace clone/sync/seed, apply the
+# canonical sidecars back to default/named configs and enforce the Josemar
+# skill policy (creation_nudge_interval=0, write_approval=true,
+# curator.enabled=false) while preserving unrelated config keys.
+apply_sidecars_and_policy
+
+# The migration/seed/apply steps above can create the dedicated
+# ${WORKSPACE_DIR}/hermes/skill-toggles tree as root (e.g. when there is
+# no WORKSPACE_STATE_REPO and the tree is seeded from the template, or
+# when migration creates a sidecar before the final HERMES_HOME chown).
+# The dashboard runtime user must be able to atomically replace the
+# root-owned directory/file, so chown ONLY this dedicated toggle tree.
+# This does NOT broaden the writable-volume policy or chown bind mounts,
+# read-only mounts, or cross-service volumes.
+repair_skill_toggle_ownership() {
+    toggle_tree="${WORKSPACE_DIR}/hermes/skill-toggles"
+    if [ -d "$toggle_tree" ] && [ "$(id -u)" = "0" ]; then
+        chown -R "${HERMES_UID_VALUE}:${HERMES_GID_VALUE}" "$toggle_tree" 2>/dev/null || true
+    fi
+}
+
+repair_skill_toggle_ownership
 
 mkdir -p "${HERMES_HOME}/cron"
 

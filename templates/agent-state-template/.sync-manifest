@@ -23,3 +23,9 @@ cron/jobs.json
 # never be versioned.
 gbrain/schema-packs/josemar-user/pack.yaml
 gbrain/schema-packs/josemar-user/README.md
+
+# Josemar state-backed Hermes skill toggles. Only the dedicated toggle JSON
+# sidecars are versioned, never the full config.yaml. default.json may be
+# absent on a pre-feature deployment; absence is acceptable.
+hermes/skill-toggles/default.json
+hermes/skill-toggles/profiles/*.json

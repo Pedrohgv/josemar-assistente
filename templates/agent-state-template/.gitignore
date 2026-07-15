@@ -36,3 +36,12 @@
 !gbrain/schema-packs/josemar-user/
 !gbrain/schema-packs/josemar-user/pack.yaml
 !gbrain/schema-packs/josemar-user/README.md
+
+# Josemar state-backed Hermes skill toggles. Only the dedicated toggle JSON
+# sidecars are versioned, never the full config.yaml. The lock file and any
+# other hermes/ artifacts stay ignored.
+!hermes/
+!hermes/skill-toggles/
+!hermes/skill-toggles/default.json
+!hermes/skill-toggles/profiles/
+!hermes/skill-toggles/profiles/*.json
