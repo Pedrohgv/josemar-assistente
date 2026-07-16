@@ -234,6 +234,60 @@ Runtime-created user skills should be written under `/opt/data/skills/<skill>/` 
 `SKILL.md`; `workspace-sync` auto-registers those files in `.sync-manifest` so the
 private state repo versions them on the next sync.
 
+### Skill toggles and creation policy
+
+Josemar pins Hermes so that skill enable/disable toggles and the skill-creation
+policy are backed by git-tracked state instead of the noisy, sensitive
+`/opt/data/config.yaml` (which is deliberately untracked).
+
+- **Automatic skill patching/creation is disabled.** `config/hermes-config.yaml`
+  sets `skills.creation_nudge_interval: 0` (no creation nudges),
+  `skills.write_approval: true` (skill writes require approval), and
+  `curator.enabled: false` (no background skill curator). The user-owned
+  `creating-skills` skill is retained so manual/user-approved creation remains
+  possible. Memory nudge is untouched.
+- **Native dashboard/CLI toggles survive redeploys.** The Hermes dashboard
+  `PUT /api/skills/toggle` and the `hermes skills` CLI flow through a Josemar
+  helper (`scripts/josemar_skill_state.py`, copied into the image at
+  `/opt/hermes/hermes_cli/josemar_skill_state.py`) that atomically writes a
+  canonical JSON sidecar first and then invokes native `save_config` under one
+  advisory lock. A state write failure fails the dashboard/CLI save rather than
+  silently diverging.
+- **Per-profile sidecar paths.** Only the dedicated toggle JSON is versioned,
+  never the full config:
+  - Default (base `HERMES_HOME`) -> `hermes/skill-toggles/default.json`
+  - Named profile `<canonical>` -> `hermes/skill-toggles/profiles/<canonical>.json`
+  - Other `HERMES_HOME` paths are rejected. Sidecar schema is exactly
+    `{"version":1,"disabled":[...],"platform_disabled":{"<platform>":[...]}}`,
+    one line, sorted/deduped string lists, explicit empty arrays retained, and
+    arbitrary platform keys allowed.
+- **Persistence timing.** A dashboard/CLI toggle writes the local sidecar
+  immediately; remote durability happens at the next periodic workspace sync
+  (no Git/network inside dashboard requests). The periodic
+  `hermes-workspace-sync-cron.sh` delegates to the helper's
+  `sync-and-apply` operation so one advisory lock covers git sync, remote
+  merge, and the sidecar/policy apply — dashboard writes and sync never race.
+- **Remote-wins conflicts.** Workspace sync uses remote-wins merge resolution,
+  so a conflicting remote sidecar overwrites a local one on merge. This is
+  intentional for a single-user state repo.
+- **Redeploy restoration.** On startup, `docker-hermes-init.sh` migrates
+  existing toggle keys into absent sidecars (only when the keys exist and only
+  for absent sidecars, so a pre-feature deployment's toggles survive the
+  upgrade and an empty `default.json` is not created for a feature-less
+  config), overwrites the runtime config from the repo template, runs
+  workspace clone/sync/seed, and then applies the sidecars back to the
+  default/named configs while enforcing the policy keys and preserving
+  unrelated config. Malformed sidecars surface clearly and never modify config.
+- **Session reset.** Toggling a skill does not reset an already-built prompt
+  for the current session; the change takes effect on the next session/prompt
+  build. Run `hermes setup` or start a new session to pick up the new toggle
+  state immediately.
+- **Why full config stays untracked.** `config.yaml` contains secrets,
+  host-specific paths, and Hermes schema defaults that change across versions.
+  Tracking it would leak secrets and create noisy diffs. The narrow sidecars
+  contain only toggle state, so they are safe to version and survive
+  redeploys without dragging unrelated config along.
+
 Current repo-shipped skills:
 
 - `gbrain`: native gbrain vault interface (search, get, capture, put, link, backlinks) used directly via the pinned `gbrain` CLI. Keyword-only search, no embeddings. Operator activation via `josemar-gbrain reindex`; periodic manual-edit reconciliation via `josemar-gbrain refresh` every 5 minutes by default.

@@ -82,6 +82,18 @@ RUN python3 /tmp/patch-hermes-dashboard-profile-name.py \
         /opt/hermes/hermes_cli/web_server.py \
     && rm /tmp/patch-hermes-dashboard-profile-name.py
 
+# Josemar state-backed skill toggles: copy the helper next to
+# skills_config.py so the build-time patch can import it at runtime, then
+# patch save_disabled_skills to route through the stateful helper that
+# writes the canonical JSON sidecar before invoking native save_config.
+COPY scripts/josemar_skill_state.py /opt/hermes/hermes_cli/josemar_skill_state.py
+COPY scripts/patch-hermes-skills-config.py /tmp/patch-hermes-skills-config.py
+RUN python3 /tmp/patch-hermes-skills-config.py \
+    && /opt/hermes/.venv/bin/python3 -m py_compile \
+        /opt/hermes/hermes_cli/skills_config.py \
+        /opt/hermes/hermes_cli/josemar_skill_state.py \
+    && rm /tmp/patch-hermes-skills-config.py
+
 COPY --from=gogcli-builder /build/bin/gog /usr/local/bin/gog
 RUN chmod +x /usr/local/bin/gog
 

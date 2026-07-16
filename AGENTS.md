@@ -87,6 +87,9 @@ When modifying user state, commit/push inside `agent-state` repo when requested.
 - Repo-owned skills: `skills-factory/*` -> copied to `/opt/josemar/skills`.
 - User-owned skills: `agent-state/skills/*` -> synced into `/opt/data/skills`.
 - Keep native gbrain (`skills-factory/gbrain` + `scripts/josemar-gbrain`) as the canonical vault interface. Josemar uses the pinned `gbrain` CLI directly; `josemar-gbrain` provides operator-only `reindex` activation and lightweight `refresh` for periodic manual Obsidian edit reconciliation.
+- Automatic skill creation, patching, and curation are intentionally disabled (`skills.creation_nudge_interval: 0`, `skills.write_approval: true`, `curator.enabled: false`). Keep these guards until issue #69's re-enable criteria pass against a pinned Hermes release.
+- Until issue #69 is resolved, intentional user-skill authoring must be explicit and use the flat `/opt/data/skills/<name>/SKILL.md` layout so workspace sync can version it. Never route runtime writes into `/opt/josemar/skills`.
+- Per-profile skill enable/disable choices are user state under `hermes/skill-toggles/`; never version the full Hermes `config.yaml`.
 
 ## Security Rules
 
