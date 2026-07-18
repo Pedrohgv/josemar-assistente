@@ -39,6 +39,7 @@ All workflows run on a self-hosted runner.
 | `HERMES_DASHBOARD_SESSION_TOKEN` | Yes | Dashboard session token used by Hermes Desktop for REST/WebSocket access |
 | `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` | Yes | Browser dashboard Basic Auth password |
 | `HERMES_DASHBOARD_BASIC_AUTH_SECRET` | Yes | Stable dashboard session signing secret |
+| `BROWSER_TUNNEL_AUTHORIZED_KEY` | No | Required when `BROWSER_CONTROL_ENABLED=true`; single-line SSH public key for the reverse tunnel sidecar |
 
 ## Required Variables
 
@@ -69,6 +70,11 @@ All workflows run on a self-hosted runner.
 | `HERMES_DEFAULT_PROFILE_DISPLAY_NAME` | No | URL-safe dashboard profile label for the base Hermes profile (default `Josemar`) |
 | `HERMES_DASHBOARD_BIND_IP` | No | Host bind IP for the dashboard port (default `127.0.0.1`; `0.0.0.0` is rejected) |
 | `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` | No | Browser dashboard Basic Auth username (default `admin`) |
+| `BROWSER_CONTROL_ENABLED` | No | Enable the optional `browser-control` overlay (default `false`). See `docs/browser-control.md`. |
+| `BROWSER_CONTROL_SUBNET` | No | Override the internal `browser-control` Docker subnet (default `172.31.250.0/29`). Set together with the gateway/IP overrides if the default collides. |
+| `BROWSER_CONTROL_GATEWAY` | No | Override the `browser-control` gateway IPv4 (default `172.31.250.1`). |
+| `BROWSER_CONTROL_HERMES_IP` | No | Override Hermes's static IPv4 on `browser-control` (default `172.31.250.2`); the SSH daemon binds only to this IP and Tailscale Serve forwards to it. |
+| `BROWSER_CONTROL_TAILSCALE_IP` | No | Override Tailscale's static IPv4 on `browser-control` (default `172.31.250.3`). |
 
 Security note: keep `SYNCTHING_GUI_BIND_IP` on localhost unless explicitly secured. Keep `HERMES_DASHBOARD_INSECURE=0`; if `HERMES_DASHBOARD_BIND_IP` is set beyond localhost for a Cloudflare Tunnel running on another host, ensure the dashboard Basic Auth secrets are configured and avoid binding to `0.0.0.0`. Do not set `HERMES_API_SERVER_BIND_IP=0.0.0.0` unless `HERMES_API_SERVER_KEY` is set and the network path is trusted.
 
@@ -79,7 +85,10 @@ Security note: keep `SYNCTHING_GUI_BIND_IP` on localhost unless explicitly secur
 - `fresh_start=true` is disabled after moving state into `/opt/data`; use a manual, reviewed cleanup instead.
 - Deploy verifies Hermes container health (`${JOSEMAR_CONTAINER_PREFIX:-josemar}-hermes`).
 - Deploy verifies repo-owned skills under `/opt/josemar/skills`.
-- Deploy removes plaintext `.env` at the end.
+- Browser control is an optional Compose overlay (`docker-compose.browser-control.yml`). When `BROWSER_CONTROL_ENABLED=true`, deploy populates the `tailscale-serve-config` and `browser-tunnel-authorized-keys` named volumes atomically via a pinned Alpine image (real legacy TCPForward `{"TCP":{"2222":{"TCPForward":"<HERMES_IP>:2222"}}}` and the operator's SSH public key), sets `COMPOSE_FILE=docker-compose.yml:docker-compose.browser-control.yml`, adds `browser-control` to `COMPOSE_PROFILES`, and verifies the `browser-tunnel` sidecar is running plus Tailscale Serve tcp:2222 targets the exact Hermes IP with no Funnel. It does not require the laptop/Chrome to be online.
+- When `BROWSER_CONTROL_ENABLED=false`, deploy writes `{}` into `tailscale-serve-config` and clears `browser-tunnel-authorized-keys` so stale tcp:2222 is deterministically removed on restart/redeploy, uses base Compose only, and verifies tcp:2222 is absent.
+- Deploy always tears down with base + overlay + browser-control profile before the selected config, so a previously-enabled overlay service/network is removed when disabling.
+- Deploy removes plaintext `.env` at the end. Persistent named volumes (`tailscale-serve-config`, `browser-tunnel-authorized-keys`, `browser-tunnel-state`) are never deleted by cleanup.
 
 ## Stop Workflow Notes
 

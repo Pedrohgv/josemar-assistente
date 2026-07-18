@@ -86,3 +86,12 @@ agent:
   reasoning_effort: "medium"
   verbose: false
   verify_on_stop: false
+
+# Remote browser control (optional). When the browser-control Compose profile
+# is enabled and a laptop has established the reverse SSH tunnel, Chrome's CDP
+# endpoint is reachable at 127.0.0.1:9222 inside the Hermes container (the
+# browser-tunnel sidecar shares Hermes's network namespace). Leave this URL
+# pointing at 127.0.0.1:9222; never expose CDP on 0.0.0.0 or via Tailscale Funnel.
+# See docs/browser-control.md for enablement and laptop setup.
+browser:
+  cdp_url: "http://127.0.0.1:9222"

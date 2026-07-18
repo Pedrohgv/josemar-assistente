@@ -206,9 +206,10 @@ josemar-assistente/
 | --- | --- |
 | `hermes` | Main Hermes gateway, Telegram channel, dashboard/API, agent runtime. |
 | `aux-ml` | Optional internal queue API for long-running OCR jobs. |
-| `tailscale` | Private-network sidecar for Syncthing connectivity. |
+| `tailscale` | Private-network sidecar for Syncthing connectivity and (optionally) Tailscale Serve for browser control. |
 | `syncthing` | Syncs the Obsidian vault to trusted devices. |
 | `obsidian-backup` | Runs daily rclone backups into rotating Google Drive slots. |
+| `browser-tunnel` | Optional hardened OpenSSH reverse-tunnel sidecar for remote browser control. Only started under the `browser-control` Compose overlay/profile. See `docs/browser-control.md`. |
 
 | Volume | Purpose |
 | --- | --- |
@@ -219,6 +220,7 @@ josemar-assistente/
 | `tailscale-state` | Tailscale node identity and login state. |
 | `obsidian-rclone-config` | rclone config used by vault backup container. |
 | `obsidian-backup-state` | Rotating backup slot pointer. |
+| `browser-tunnel-state` | Persistent Ed25519 SSH host key for the optional `browser-tunnel` sidecar so laptop `known_hosts` stays stable across redeploys. |
 
 ## Skills
 
@@ -358,6 +360,7 @@ Credentials go under `credentials/<service>/` and are mounted read-only into Her
 - `docs/aux-ml.md`: auxiliary ML API, queue, model lifecycle, and OCR operations.
 - `docs/obsidian-operations.md`: Syncthing, Tailscale, rclone backup, and restore runbook.
 - `docs/gbrain-operations.md`: gbrain activation, reindex, vault swap, schema pack workflow, and troubleshooting.
+- `docs/browser-control.md`: optional remote browser control via a reverse SSH tunnel over Tailscale.
 - `.github/workflows/AGENTS.md`: deployment, stop, privacy scan, and runner workflow documentation.
 - `templates/agent-state-template/README.md`: starting point for a private state repo.
 

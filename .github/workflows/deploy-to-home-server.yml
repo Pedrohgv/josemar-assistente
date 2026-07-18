@@ -40,6 +40,12 @@ jobs:
           WORKSPACE_STATE_REPO: ${{ vars.WORKSPACE_STATE_REPO }}
           SYNCTHING_GUI_BIND_IP: ${{ vars.SYNCTHING_GUI_BIND_IP }}
           HERMES_DASHBOARD_BIND_IP: ${{ vars.HERMES_DASHBOARD_BIND_IP }}
+          BROWSER_CONTROL_ENABLED_INPUT: ${{ vars.BROWSER_CONTROL_ENABLED }}
+          BROWSER_CONTROL_SUBNET: ${{ vars.BROWSER_CONTROL_SUBNET }}
+          BROWSER_CONTROL_GATEWAY: ${{ vars.BROWSER_CONTROL_GATEWAY }}
+          BROWSER_CONTROL_HERMES_IP: ${{ vars.BROWSER_CONTROL_HERMES_IP }}
+          BROWSER_CONTROL_TAILSCALE_IP: ${{ vars.BROWSER_CONTROL_TAILSCALE_IP }}
+          BROWSER_TUNNEL_AUTHORIZED_KEY: ${{ secrets.BROWSER_TUNNEL_AUTHORIZED_KEY }}
         run: |
           if [ -z "$WORKSPACE_STATE_REPO" ]; then
             echo "ERROR: Repository variable WORKSPACE_STATE_REPO is required"
@@ -68,6 +74,93 @@ jobs:
               echo "ERROR: HERMES_DASHBOARD_BIND_IP must be an IPv4 address when set"
               exit 1
             fi
+          fi
+
+          # Browser control is optional and disabled by default. When enabled,
+          # require a single-line SSH public key secret and validate subnet/IP
+          # overrides together using ipaddress (Python stdlib, no installs).
+          # SSH user (tunnel), SSH port (2222), and CDP port (9222) are fixed
+          # constants and not configurable.
+          BROWSER_CONTROL_ENABLED="$BROWSER_CONTROL_ENABLED_INPUT"
+          if [ -z "$BROWSER_CONTROL_ENABLED" ]; then
+            BROWSER_CONTROL_ENABLED="false"
+          fi
+          if [ "$BROWSER_CONTROL_ENABLED" != "true" ] && [ "$BROWSER_CONTROL_ENABLED" != "false" ]; then
+            echo "ERROR: BROWSER_CONTROL_ENABLED must be 'true' or 'false' (got: $BROWSER_CONTROL_ENABLED)"
+            exit 1
+          fi
+
+          if [ "$BROWSER_CONTROL_ENABLED" = "true" ]; then
+            if [ -z "$BROWSER_TUNNEL_AUTHORIZED_KEY" ]; then
+              echo "ERROR: BROWSER_TUNNEL_AUTHORIZED_KEY secret is required when BROWSER_CONTROL_ENABLED=true"
+              exit 1
+            fi
+            if [[ "$BROWSER_TUNNEL_AUTHORIZED_KEY" == *$'\n'* || "$BROWSER_TUNNEL_AUTHORIZED_KEY" == *$'\r'* ]]; then
+              echo "ERROR: BROWSER_TUNNEL_AUTHORIZED_KEY must be a single-line SSH public key"
+              exit 1
+            fi
+            if ! printf '%s' "$BROWSER_TUNNEL_AUTHORIZED_KEY" | grep -Eq '^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)) [A-Za-z0-9+/=]+( .*)?$'; then
+              echo "ERROR: BROWSER_TUNNEL_AUTHORIZED_KEY does not look like a single OpenSSH public key line"
+              exit 1
+            fi
+
+            # Validate subnet/IP overrides together using ipaddress. Defaults
+            # are applied later; here we validate any provided overrides.
+            python3 - <<'PY'
+          import ipaddress
+          import os
+          import sys
+
+          subnet = os.environ.get("BROWSER_CONTROL_SUBNET") or "172.31.250.0/29"
+          gateway = os.environ.get("BROWSER_CONTROL_GATEWAY") or "172.31.250.1"
+          hermes = os.environ.get("BROWSER_CONTROL_HERMES_IP") or "172.31.250.2"
+          ts = os.environ.get("BROWSER_CONTROL_TAILSCALE_IP") or "172.31.250.3"
+
+          provided = {
+              "BROWSER_CONTROL_SUBNET": os.environ.get("BROWSER_CONTROL_SUBNET"),
+              "BROWSER_CONTROL_GATEWAY": os.environ.get("BROWSER_CONTROL_GATEWAY"),
+              "BROWSER_CONTROL_HERMES_IP": os.environ.get("BROWSER_CONTROL_HERMES_IP"),
+              "BROWSER_CONTROL_TAILSCALE_IP": os.environ.get("BROWSER_CONTROL_TAILSCALE_IP"),
+          }
+          if any(provided.values()):
+              missing = [k for k, v in provided.items() if not v]
+              if missing:
+                  print(f"ERROR: when overriding browser-control networking, set {', '.join(missing)} together with the others")
+                  sys.exit(1)
+
+          try:
+              net = ipaddress.ip_network(subnet, strict=True)
+          except ValueError as exc:
+              print(f"ERROR: BROWSER_CONTROL_SUBNET is not a valid strict network: {subnet} ({exc})")
+              sys.exit(1)
+          if net.version != 4:
+              print(f"ERROR: BROWSER_CONTROL_SUBNET must be IPv4: {subnet}")
+              sys.exit(1)
+
+          ips = {}
+          for name, value in (("BROWSER_CONTROL_GATEWAY", gateway),
+                              ("BROWSER_CONTROL_HERMES_IP", hermes),
+                              ("BROWSER_CONTROL_TAILSCALE_IP", ts)):
+              try:
+                  addr = ipaddress.ip_address(value)
+              except ValueError as exc:
+                  print(f"ERROR: {name} is not a valid IPv4 address: {value} ({exc})")
+                  sys.exit(1)
+              if addr.version != 4:
+                  print(f"ERROR: {name} must be IPv4: {value}")
+                  sys.exit(1)
+              if addr not in net:
+                  print(f"ERROR: {name} {addr} is not inside subnet {net}")
+                  sys.exit(1)
+              if addr in (net.network_address, net.broadcast_address):
+                  print(f"ERROR: {name} {addr} is the network/broadcast address and not usable")
+                  sys.exit(1)
+              ips[name] = addr
+
+          if len(set(ips.values())) != len(ips):
+              print("ERROR: BROWSER_CONTROL_GATEWAY, BROWSER_CONTROL_HERMES_IP, and BROWSER_CONTROL_TAILSCALE_IP must be unique")
+              sys.exit(1)
+          PY
           fi
 
       - name: Create .env file
@@ -111,6 +204,12 @@ jobs:
           AUX_ML_LLAMACPP_TIMEOUT_SECONDS: ${{ vars.AUX_ML_LLAMACPP_TIMEOUT_SECONDS }}
           AUX_ML_ENFORCE_MEMORY_LIMIT: ${{ vars.AUX_ML_ENFORCE_MEMORY_LIMIT }}
           AUX_ML_OCR_MAX_PAGES: ${{ vars.AUX_ML_OCR_MAX_PAGES }}
+          BROWSER_CONTROL_ENABLED_INPUT: ${{ vars.BROWSER_CONTROL_ENABLED }}
+          BROWSER_CONTROL_SUBNET: ${{ vars.BROWSER_CONTROL_SUBNET }}
+          BROWSER_CONTROL_GATEWAY: ${{ vars.BROWSER_CONTROL_GATEWAY }}
+          BROWSER_CONTROL_HERMES_IP: ${{ vars.BROWSER_CONTROL_HERMES_IP }}
+          BROWSER_CONTROL_TAILSCALE_IP: ${{ vars.BROWSER_CONTROL_TAILSCALE_IP }}
+          BROWSER_TUNNEL_AUTHORIZED_KEY: ${{ secrets.BROWSER_TUNNEL_AUTHORIZED_KEY }}
         run: |
           AUX_ML_ENABLED="$AUX_ML_ENABLED_INPUT"
           if [ -z "$AUX_ML_ENABLED" ]; then
@@ -120,6 +219,25 @@ jobs:
           COMPOSE_PROFILES_VALUE=""
           if [ "$AUX_ML_ENABLED" = "true" ]; then
             COMPOSE_PROFILES_VALUE="aux-ml"
+          fi
+
+          BROWSER_CONTROL_ENABLED="$BROWSER_CONTROL_ENABLED_INPUT"
+          if [ -z "$BROWSER_CONTROL_ENABLED" ]; then
+            BROWSER_CONTROL_ENABLED="false"
+          fi
+
+          # Apply browser-control subnet/IP defaults.
+          BC_SUBNET="${BROWSER_CONTROL_SUBNET:-172.31.250.0/29}"
+          BC_GATEWAY="${BROWSER_CONTROL_GATEWAY:-172.31.250.1}"
+          BC_HERMES="${BROWSER_CONTROL_HERMES_IP:-172.31.250.2}"
+          BC_TS="${BROWSER_CONTROL_TAILSCALE_IP:-172.31.250.3}"
+
+          if [ "$BROWSER_CONTROL_ENABLED" = "true" ]; then
+            if [ -n "$COMPOSE_PROFILES_VALUE" ]; then
+              COMPOSE_PROFILES_VALUE="${COMPOSE_PROFILES_VALUE},browser-control"
+            else
+              COMPOSE_PROFILES_VALUE="browser-control"
+            fi
           fi
 
           JOSEMAR_CONTAINER_PREFIX="$JOSEMAR_CONTAINER_PREFIX_INPUT"
@@ -290,13 +408,94 @@ jobs:
           write_env AUX_ML_ENFORCE_MEMORY_LIMIT "$AUX_ML_ENFORCE_MEMORY_LIMIT"
           write_env AUX_ML_OCR_MAX_PAGES "$AUX_ML_OCR_MAX_PAGES"
 
+          # Browser control (optional). Subnet/IP overrides are written only
+          # when enabled; the overlay reads them with defaults. SSH user/port
+          # and CDP port are fixed constants and not written here.
+          write_env BROWSER_CONTROL_ENABLED "$BROWSER_CONTROL_ENABLED"
+          if [ "$BROWSER_CONTROL_ENABLED" = "true" ]; then
+            write_env BROWSER_CONTROL_SUBNET "$BC_SUBNET"
+            write_env BROWSER_CONTROL_GATEWAY "$BC_GATEWAY"
+            write_env BROWSER_CONTROL_HERMES_IP "$BC_HERMES"
+            write_env BROWSER_CONTROL_TAILSCALE_IP "$BC_TS"
+          fi
+
           chmod 600 .env
           echo "COMPOSE_PROFILES=$COMPOSE_PROFILES_VALUE" >> "$GITHUB_ENV"
           echo "JOSEMAR_CONTAINER_PREFIX=$JOSEMAR_CONTAINER_PREFIX" >> "$GITHUB_ENV"
+          echo "BROWSER_CONTROL_ENABLED=$BROWSER_CONTROL_ENABLED" >> "$GITHUB_ENV"
+          echo "BC_HERMES_IP=$BC_HERMES" >> "$GITHUB_ENV"
 
       - name: Set compose profiles
         run: |
           echo "COMPOSE_PROFILES=${COMPOSE_PROFILES}"
+          echo "BROWSER_CONTROL_ENABLED=${BROWSER_CONTROL_ENABLED}"
+
+      - name: Populate browser-control persistent volumes
+        env:
+          BROWSER_TUNNEL_AUTHORIZED_KEY: ${{ secrets.BROWSER_TUNNEL_AUTHORIZED_KEY }}
+        run: |
+          # Populate the tailscale-serve-config and browser-tunnel-authorized-keys
+          # named volumes using a pinned Alpine image (same Docker-only pattern
+          # as the rclone config step). No host bind mounts of checkout files;
+          # no deletion of volume contents on cleanup.
+          #
+          # tailscale-serve-config always receives a serve.json:
+          #   - enabled: real legacy TCPForward to BC_HERMES_IP:2222
+          #   - disabled: empty {} so stale tcp:2222 is cleared on restart/redeploy
+          #
+          # browser-tunnel-authorized-keys receives authorized_keys when enabled,
+          # and is cleared when disabled.
+          #
+          # Copies into the volumes are atomic: write to a temp file in the same
+          # volume, chmod, then mv into place so a reader never sees a partial
+          # file.
+          COMPOSE_PROJECT="$(basename "$PWD")"
+          TS_SERVE_VOLUME="${COMPOSE_PROJECT}_tailscale-serve-config"
+          AUTH_KEYS_VOLUME="${COMPOSE_PROJECT}_browser-tunnel-authorized-keys"
+
+          docker volume create "$TS_SERVE_VOLUME" >/dev/null
+          docker volume create "$AUTH_KEYS_VOLUME" >/dev/null
+
+          TMP_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TMP_DIR"' EXIT
+
+          if [ "${BROWSER_CONTROL_ENABLED}" = "true" ]; then
+            printf '%s\n' "{\"TCP\":{\"2222\":{\"TCPForward\":\"${BC_HERMES_IP}:2222\"}}}" > "$TMP_DIR/serve.json"
+            printf '%s\n' "$BROWSER_TUNNEL_AUTHORIZED_KEY" > "$TMP_DIR/authorized_keys"
+            chmod 600 "$TMP_DIR/authorized_keys"
+          else
+            printf '%s\n' '{}' > "$TMP_DIR/serve.json"
+          fi
+
+          # Atomic copy into tailscale-serve-config: temp file + chmod + mv.
+          docker run --rm \
+            -v "$TMP_DIR:/seed:ro" \
+            -v "$TS_SERVE_VOLUME:/config/tailscale-serve" \
+            alpine:3.20.3 \
+            sh -c 'cp /seed/serve.json /config/tailscale-serve/serve.json.new && chmod 644 /config/tailscale-serve/serve.json.new && mv /config/tailscale-serve/serve.json.new /config/tailscale-serve/serve.json'
+
+          if [ "${BROWSER_CONTROL_ENABLED}" = "true" ]; then
+            # Atomic copy into browser-tunnel-authorized-keys.
+            docker run --rm \
+              -v "$TMP_DIR:/seed:ro" \
+              -v "$AUTH_KEYS_VOLUME:/authorized-keys" \
+              alpine:3.20.3 \
+              sh -c 'mkdir -p /authorized-keys && cp /seed/authorized_keys /authorized-keys/authorized_keys.new && chmod 600 /authorized-keys/authorized_keys.new && mv /authorized-keys/authorized_keys.new /authorized-keys/authorized_keys'
+          else
+            # Clear any stale authorized key content from a previous enabled deploy.
+            docker run --rm \
+              -v "$AUTH_KEYS_VOLUME:/authorized-keys" \
+              alpine:3.20.3 \
+              sh -c 'rm -f /authorized-keys/authorized_keys 2>/dev/null || true'
+          fi
+
+          # Set COMPOSE_FILE for subsequent steps: base only when disabled,
+          # base + overlay when enabled.
+          if [ "${BROWSER_CONTROL_ENABLED}" = "true" ]; then
+            echo "COMPOSE_FILE=docker-compose.yml:docker-compose.browser-control.yml" >> "$GITHUB_ENV"
+          else
+            echo "COMPOSE_FILE=docker-compose.yml" >> "$GITHUB_ENV"
+          fi
 
       - name: Validate aux-ml model source
         if: vars.AUX_ML_ENABLED != 'false'
@@ -343,7 +542,15 @@ jobs:
           exit 1
 
       - name: Stop existing services
-        run: docker compose down --remove-orphans
+        # Always tear down with base + overlay + browser-control profile first,
+        # so a previously-enabled browser-tunnel sidecar and the browser-control
+        # network are removed even when this deploy is disabling the overlay.
+        # Then tear down with the selected config for this deploy.
+        run: |
+          echo "Tearing down any previous overlay-enabled stack..."
+          docker compose -f docker-compose.yml -f docker-compose.browser-control.yml --profile browser-control down --remove-orphans 2>/dev/null || true
+          echo "Tearing down with selected config..."
+          docker compose down --remove-orphans
 
       - name: Clean up old Docker images
         run: |
@@ -422,6 +629,67 @@ jobs:
               raise SystemExit(f"Missing Hermes Python dependencies: {', '.join(missing)}")
           print("Hermes Python dependencies OK")
           PY
+
+      - name: Verify browser-control sidecars (only when enabled)
+        if: vars.BROWSER_CONTROL_ENABLED == 'true'
+        run: |
+          # browser-tunnel sidecar must be running. We do NOT require the
+          # laptop/Chrome to be online — only that the SSH daemon started and
+          # Tailscale Serve picked up the TCP forward config with the exact
+          # expected target.
+          echo "Checking browser-tunnel sidecar..."
+          if ! docker compose ps browser-tunnel | grep -q "Up"; then
+            echo "ERROR: browser-tunnel service is not running"
+            docker compose ps
+            docker compose logs --tail=80 browser-tunnel
+            exit 1
+          fi
+
+          echo "Checking Tailscale Serve TCP config for tcp:2222 -> ${BC_HERMES_IP}:2222..."
+          EXPECTED_TARGET="${BC_HERMES_IP}:2222"
+          SERVE_OK=0
+          for i in {1..20}; do
+            SERVE_OUT="$(docker compose exec -T tailscale tailscale serve status --json 2>/dev/null || true)"
+            if echo "$SERVE_OUT" | grep -q '"2222"' && echo "$SERVE_OUT" | grep -q "$EXPECTED_TARGET"; then
+              echo "Tailscale Serve tcp:2222 -> $EXPECTED_TARGET is configured"
+              # Assert no Funnel is configured.
+              if echo "$SERVE_OUT" | grep -q '"Funnel"'; then
+                echo "ERROR: Tailscale Funnel is configured; browser control must never use Funnel"
+                exit 1
+              fi
+              SERVE_OK=1
+              break
+            fi
+            echo "Waiting for Tailscale Serve to apply config... ($i/20)"
+            sleep 2
+          done
+          if [ "$SERVE_OK" -ne 1 ]; then
+            echo "ERROR: Tailscale Serve tcp:2222 -> $EXPECTED_TARGET was not applied"
+            docker compose logs --tail=80 tailscale
+            exit 1
+          fi
+
+      - name: Verify Tailscale Serve is cleared (only when disabled)
+        if: vars.BROWSER_CONTROL_ENABLED != 'true'
+        run: |
+          # The disabled deploy wrote {} into tailscale-serve-config, so
+          # tcp:2222 must not be present after Tailscale picks it up.
+          SERVE_OK=0
+          for i in {1..20}; do
+            SERVE_OUT="$(docker compose exec -T tailscale tailscale serve status --json 2>/dev/null || true)"
+            if echo "$SERVE_OUT" | grep -q '"2222"'; then
+              echo "ERROR: stale Tailscale Serve tcp:2222 still present after disabled redeploy"
+              docker compose logs --tail=80 tailscale
+              exit 1
+            fi
+            # Empty serve config is reported as an empty/no TCP map; treat
+            # absence of 2222 as success.
+            SERVE_OK=1
+            break
+          done
+          if [ "$SERVE_OK" -ne 1 ]; then
+            echo "WARNING: could not confirm Tailscale Serve status; verify manually"
+          fi
 
       - name: Cleanup sensitive files
         if: always()

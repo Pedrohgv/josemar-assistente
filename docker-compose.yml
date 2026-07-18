@@ -165,8 +165,15 @@ services:
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_USERSPACE=false
       - TS_EXTRA_ARGS=${TS_EXTRA_ARGS:-}
+      # Declarative Tailscale Serve config is always mounted from a persistent
+      # named volume so a disabled redeploy deterministically clears any stale
+      # tcp:2222 forward. The deploy workflow writes the real legacy
+      # ipn.ServeConfig JSON when browser control is enabled and an empty `{}`
+      # when disabled. No Funnel and no host port publication is configured here.
+      - TS_SERVE_CONFIG=/config/tailscale-serve/serve.json
     volumes:
       - tailscale-state:/var/lib/tailscale
+      - tailscale-serve-config:/config/tailscale-serve:ro
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add:
@@ -219,4 +226,10 @@ volumes:
   obsidian-backup-state:
     driver: local
   tailscale-state:
+    driver: local
+  # Persistent Tailscale Serve config volume. The deploy workflow writes
+  # serve.json here (real TCPForward when browser control is enabled, empty
+  # `{}` when disabled) so stale Serve state is cleared on every redeploy.
+  # Mounted read-only into the tailscale container.
+  tailscale-serve-config:
     driver: local

@@ -1,0 +1,78 @@
+# Browser tunnel sshd configuration template.
+#
+# Hardened, forwarding-only reverse tunnel endpoint. The entrypoint renders
+# this template with the runtime bind IP and authorized_keys options, then
+# starts sshd with `-D -e -f <rendered config>`.
+#
+# Constants: SSH user `tunnel`, SSH port 2222, CDP reverse-forward port 9222.
+#
+# Security posture:
+#   - Public-key only (AuthenticationMethods publickey); passwords,
+#     keyboard-interactive, root login, shell/TTY, X11, agent forwarding,
+#     local/dynamic/stream forwarding all disabled.
+#   - MaxSessions 0 denies shell/command/subsystem session channels while
+#     ssh -N remote forwarding remains possible.
+#   - Only remote forwarding is allowed, and only to 127.0.0.1:9222.
+#   - GatewayPorts is no, so the reverse listener stays on 127.0.0.1 inside the
+#     shared Hermes namespace (Hermes reaches it at 127.0.0.1:9222).
+#   - sshd binds only to the browser-control interface IP, not josemar-network
+#     or the tailnet.
+
+Port 2222
+ListenAddress __BROWSER_CONTROL_HERMES_IP__
+
+AddressFamily inet
+
+# Host keys: persisted in /var/lib/browser-tunnel/ssh_host_ed25519_key
+# (browser-tunnel-state volume) so laptop known_hosts stays stable across
+# redeploys. Generated on first start by the entrypoint.
+HostKey /var/lib/browser-tunnel/ssh_host_ed25519_key
+
+# Authorized keys populated by the deploy workflow into a named volume and
+# mounted read-only at /authorized-keys. The entrypoint copies them into a
+# tmpfs runtime dir with restrictive options prefixed so a supplied plain
+# public key cannot gain a shell and can only create the intended listener.
+AuthorizedKeysFile /etc/ssh/runtime/authorized_keys
+
+# Authentication: public-key only.
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+AuthenticationMethods publickey
+
+# Forwarding-only user.
+AllowUsers tunnel
+AllowTcpForwarding remote
+AllowStreamLocalForwarding no
+GatewayPorts no
+PermitTunnel no
+X11Forwarding no
+
+# Restrict the remote listener to 127.0.0.1:9222 only.
+# OpenSSH matches PermitListen entries by the listener spec the client requests.
+PermitListen 127.0.0.1:9222
+
+# Deny shell/command/subsystem session channels while permitting ssh -N remote
+# forwarding. MaxSessions 0 is the supported way to refuse session channels
+# without breaking reverse forwarding.
+MaxSessions 0
+
+# No TTY, no interactive sessions.
+PermitTTY no
+PrintMotd no
+AcceptEnv none
+PermitUserEnvironment no
+
+# Logging.
+SyslogFacility AUTH
+LogLevel VERBOSE
+
+# Misc hardening.
+LoginGraceTime 20
+MaxAuthTries 3
+ClientAliveInterval 30
+ClientAliveCountMax 3
+StrictModes yes
