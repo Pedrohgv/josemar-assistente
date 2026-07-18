@@ -65,7 +65,9 @@ Key points:
   `BROWSER_CONTROL_HERMES_IP:2222` (an explicit IP, not a Docker DNS alias).
   No Funnel, no host port publication.
 - `config/hermes-config.yaml` sets `browser.cdp_url: "http://127.0.0.1:9222"`.
-  No custom skill, no Playwright/Chrome install, no Hermes source patch.
+  No Playwright/Chrome install, no Hermes source patch. The repo-owned
+  `browser-control` skill is conditionally registered by this overlay (see
+  "Repo-owned browser-control skill" below), not baked into the image.
 - SSH user (`tunnel`), SSH port (`2222`), and CDP port (`9222`) are fixed
   constants and not configurable.
 
@@ -418,8 +420,33 @@ does not change (it pins the Tailscale node name, not the browser-control IP).
   is unchanged.
 - The `obsidian-vault` volume, rclone backup, and gbrain vault interface are
   untouched.
-- No new Hermes source patch, no custom skill, no Playwright/Chrome install on
-  the server.
+- No new Hermes source patch, no Playwright/Chrome install on the server.
+
+## Repo-owned browser-control skill
+
+The repo-owned `skills-factory/browser-control/SKILL.md` is an instruction-only
+skill (a SKILL.md with no executable binary) that teaches the assistant how to
+use the `browser_*` tools against the externally connected browser and what the
+safety boundaries are. Unlike `gbrain`, `aux-ml`, and `workspace-sync`, it is
+**not** baked into the Hermes image. It is registered only when this overlay is
+applied, via a read-only bind mount on the `hermes` service:
+
+```yaml
+volumes:
+  - ./skills-factory/browser-control:/opt/josemar/skills/browser-control:ro
+```
+
+A base-only (disabled) deploy does not mount the skill directory, so this
+repo-owned skill and its remote-browser guidance are not registered. This does
+not by itself remove Hermes's built-in browser tool schemas; it only means the
+repo-owned guidance for driving the externally connected browser is absent. The
+skill has no executable binary; the actual integration point is Hermes's
+`browser.cdp_url` config in `config/hermes-config.yaml`.
+
+Closing the external browser on the operator side makes the CDP endpoint
+unreachable, so subsequent `browser_*` calls fail. Reopening the external
+browser restores the endpoint, and later `browser_*` calls reconnect without
+restarting Hermes.
 
 ## Warnings
 

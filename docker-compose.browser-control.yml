@@ -9,6 +9,9 @@
 #     tailscale) with configurable static IPs,
 #   - browser-specific network attachments for hermes (alias
 #     `hermes-browser-tunnel`, static IP) and tailscale (static IP),
+#   - a read-only bind mount of `./skills-factory/browser-control` into
+#     `/opt/josemar/skills/browser-control` so the repo-owned browser-control
+#     skill (instruction-only) is registered only when the overlay is applied,
 #   - the `browser-tunnel` hardened OpenSSH reverse-tunnel sidecar under the
 #     `browser-control` profile, sharing Hermes's network namespace
 #     (network_mode: service:hermes),
@@ -25,6 +28,14 @@
 
 services:
   hermes:
+    # Conditionally mount the repo-owned browser-control skill
+    # (instruction-only, no executable) into
+    # /opt/josemar/skills/browser-control. This skill is NOT baked into the
+    # Hermes image (unlike gbrain/aux-ml/workspace-sync) so a base-only
+    # (disabled) deploy does not register it. Read-only bind mount; no
+    # credentials, no runtime writes.
+    volumes:
+      - ./skills-factory/browser-control:/opt/josemar/skills/browser-control:ro
     networks:
       josemar-network: null
       browser-control:
