@@ -188,14 +188,17 @@ docker compose up -d --build
 josemar-assistente/
 ├── agent-state/                    # Nested private git repo for assistant state
 ├── aux-ml/                         # Optional FastAPI + llama.cpp queue service
+├── browser-tunnel/                 # Optional hardened OpenSSH reverse-tunnel sidecar image
 ├── credentials/                    # Local credentials, not versioned
 ├── docs/                           # Operations runbooks
+├── laptop/linux/                   # Optional on-demand Linux laptop launcher (Mint-tested)
 ├── scripts/                        # Workspace sync, backup, privacy tooling
 ├── skills-factory/                 # Repo-owned core skills shipped in image
 ├── templates/agent-state-template/ # Starter private state repo template
 ├── tests/                          # Python unit tests
 ├── .github/workflows/              # Deploy, stop, runner test, privacy scan
 ├── docker-compose.yml              # Service topology and persistent volumes
+├── docker-compose.browser-control.yml # Optional browser-control overlay
 ├── Dockerfile.hermes               # Custom Hermes image
 └── .env.example                    # Environment template
 ```

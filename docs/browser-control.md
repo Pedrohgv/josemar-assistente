@@ -100,111 +100,148 @@ Browser control lives in a committed overlay file,
 
 ## Laptop setup
 
-These are commands only. Do not run anything that installs software on the
-laptop without your explicit approval; this runbook assumes Chrome and an SSH
-client are already present.
-
-### 1. Generate an SSH keypair (if you do not have one)
-
-macOS / Linux / Windows (PowerShell or Git Bash):
-
-```bash
-ssh-keygen -t ed25519 -f ~/.ssh/josemar_browser_tunnel -N ""
-```
-
-This produces `~/.ssh/josemar_browser_tunnel` (private, keep secret on the
-laptop) and `~/.ssh/josemar_browser_tunnel.pub` (public, upload as the GitHub
-secret).
-
-### 2. Add the public key as the `BROWSER_TUNNEL_AUTHORIZED_KEY` secret
-
-Copy the single-line contents of `josemar_browser_tunnel.pub` and set it as the
-`BROWSER_TUNNEL_AUTHORIZED_KEY` repository secret in GitHub
-(Settings > Secrets and variables > Actions). It must be a single line in
-OpenSSH format, e.g.:
-
-```
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... your-email@example.com
-```
-
-### 3. Grant the laptop access to tcp:2222 on the server (Tailscale ACL)
-
-In the Tailscale admin console (ACLs), allow the laptop to reach the server's
-`tcp:2222`. Use an explicit tag or host alias for both `src` and `dst`; broad
-allow rules (e.g. `src: ["*"]`) defeat the narrowing and are not recommended.
-
-Example ACL grant using a laptop tag and the server's tailnet IP/alias:
-
-```json
-{
-  "action": "accept",
-  "src":    ["tag:laptop"],
-  "dst":    ["josemar-server:2222"]
-}
-```
-
-Replace `tag:laptop` with your laptop's tag (or a specific user) and
-`josemar-server` with the Tailscale node name set by `TAILSCALE_HOSTNAME`
-(default `josemar-server`). Do not use a wildcard `src`.
-
-### 4. Start Chrome with a dedicated, non-default persistent profile
-
 > **Dedicated logins warning**: use a dedicated Chrome profile for this tunnel.
 > Do NOT use your normal, day-to-day Chrome profile. A remote automation agent
 > with CDP access can read/act on everything in that profile, including
 > logged-in sessions. Create a fresh profile used only for Josemar browser
 > control.
 
-Chrome 136+ is required. Start Chrome with a dedicated user-data-dir and remote
-debugging on `127.0.0.1:9222`:
+### One-time prerequisites (all platforms)
 
-macOS:
+1. **Generate an SSH keypair** (macOS / Linux / Windows PowerShell or Git Bash):
+
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/josemar_browser_tunnel -N ""
+   ```
+
+   This produces `~/.ssh/josemar_browser_tunnel` (private, keep secret on the
+   laptop) and `~/.ssh/josemar_browser_tunnel.pub` (public, upload as the
+   GitHub secret).
+
+2. **Add the public key as the `BROWSER_TUNNEL_AUTHORIZED_KEY` secret** in
+   GitHub (Settings > Secrets and variables > Actions). It must be a single
+   line in OpenSSH format, e.g.:
+
+   ```
+   ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... your-email@example.com
+   ```
+
+3. **Grant the laptop access to tcp:2222 on the server (Tailscale ACL).** In
+   the Tailscale admin console (ACLs), allow the laptop to reach the server's
+   `tcp:2222`. Use an explicit tag or host alias for both `src` and `dst`;
+   broad allow rules (e.g. `src: ["*"]`) defeat the narrowing and are not
+   recommended.
+
+   ```json
+   {
+     "action": "accept",
+     "src":    ["tag:laptop"],
+     "dst":    ["josemar-server:2222"]
+   }
+   ```
+
+   Replace `tag:laptop` with your laptop's tag (or a specific user) and
+   `josemar-server` with the Tailscale node name set by `TAILSCALE_HOSTNAME`
+   (default `josemar-server`). Do not use a wildcard `src`.
+
+4. **Confirm Chrome/Chromium 136+ and the Tailscale client are installed** on
+   the laptop. The launcher does not install packages.
+
+### Linux Mint (tested/supported) — repo on-demand launcher
+
+The recommended Linux Mint workflow is the repo-provided on-demand launcher.
+Nothing starts at system/login startup; you launch it from the Mint application
+menu or a clickable desktop entry, and closing all dedicated Josemar Chrome
+windows stops the SSH tunnel.
+
+#### One-time install
+
+From a checkout of this repo on the laptop:
 
 ```bash
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --user-data-dir="$HOME/.josemar-chrome-profile" \
-  --remote-debugging-port=9222 \
-  --remote-debugging-address=127.0.0.1
+bash laptop/linux/install-launcher.sh
 ```
 
-Linux:
+The installer is idempotent and creates only user-level paths:
+
+- `~/.local/bin/josemar-browser-control` (symlink to the repo script)
+- `~/.local/share/applications/josemar-browser.desktop` (rendered entry)
+
+It does **not** launch the browser or tunnel, does **not** configure autostart,
+and does **not** install any packages or require sudo. It validates the desktop
+entry with `desktop-file-validate` only if that tool is already installed.
+
+After install, "Josemar Browser" appears in the Mint application menu. The
+desktop entry also exposes a right-click "Stop Josemar Browser" action.
+
+#### Daily use
+
+- **Start**: launch "Josemar Browser" from the Mint menu. The launcher starts
+  the dedicated Chrome profile (`~/.josemar-chrome-profile`) with loopback-only
+  remote debugging on `127.0.0.1:9222`, waits for the CDP endpoint, then opens
+  the reverse SSH tunnel to the server's `browser-tunnel` sidecar.
+- **Already running**: if you click the launcher again while it is active, it
+  opens/focuses a new dedicated window instead of starting a duplicate
+  controller.
+- **Stop**: closing all dedicated Josemar Chrome windows automatically stops the
+  SSH tunnel (Chrome is launched with `--disable-background-mode` so it does
+  not linger after the last dedicated window closes). You can also right-click
+  the menu entry and choose "Stop Josemar Browser", or run
+  `josemar-browser-control stop` in a terminal.
+- **Status**: `josemar-browser-control status` reports controller/chrome/tunnel/
+  cdp state without reading page or session contents.
+
+#### What persists across reboot
+
+- The dedicated Chrome profile (`~/.josemar-chrome-profile`) persists.
+- The SSH key (`~/.ssh/josemar_browser_tunnel`) and known_hosts
+  (`~/.ssh/josemar_browser_tunnel_known_hosts`) persist.
+- The launcher install (`~/.local/bin`, `~/.local/share/applications`) persists.
+- No session, tunnel, or Chrome process survives a reboot; the launcher is
+  strictly on-demand.
+
+#### Troubleshooting
+
+- `josemar-browser-control status` — check controller/chrome/tunnel/cdp state.
+- Logs live under `~/.local/state/josemar-browser-control/logs/` (no secrets).
+- If the tunnel fails, confirm Tailscale is up (`tailscale status`), the server
+  sidecar is running, and the `BROWSER_TUNNEL_AUTHORIZED_KEY` secret matches
+  this laptop's public key.
+- If Chrome fails to start, confirm a graphical session is active
+  (`DISPLAY`/`WAYLAND_DISPLAY`) and Chrome 136+ is installed.
+
+#### Uninstall
 
 ```bash
+bash laptop/linux/install-launcher.sh --uninstall
+```
+
+Removes only the files the installer owns (the launcher symlink and desktop
+entry). It does **not** delete the Chrome profile, SSH key, known_hosts, or
+any credentials.
+
+### Manual commands (diagnostic/fallback)
+
+The launcher wraps the following manual commands. Use them only for
+diagnostics or on platforms without the launcher. The normal Chrome profile is
+**not supported**; always pass a dedicated `--user-data-dir`.
+
+```bash
+# Start Chrome with the dedicated profile and loopback-only CDP.
 google-chrome \
   --user-data-dir="$HOME/.josemar-chrome-profile" \
   --remote-debugging-port=9222 \
   --remote-debugging-address=127.0.0.1
-```
 
-Windows (PowerShell):
-
-```powershell
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" `
-  --user-data-dir="$env:USERPROFILE\.josemar-chrome-profile" `
-  --remote-debugging-port=9222 `
-  --remote-debugging-address=127.0.0.1
-```
-
-The normal Chrome profile is **not supported**. Always pass a dedicated
-`--user-data-dir`.
-
-### 5. Verify CDP is up locally on the laptop
-
-```bash
+# Verify CDP is up locally (do not parse page contents).
 curl -s http://127.0.0.1:9222/json/version
-```
 
-You should see JSON with `Browser: Chrome/...` and `webSocketDebuggerUrl`.
-
-### 6. Open the reverse SSH tunnel
-
-Replace `josemar-server` with your Tailscale node name and keep the keepalive
-flags so idle tunnels do not drop:
-
-```bash
+# Open the reverse SSH tunnel.
 ssh -N \
   -i ~/.ssh/josemar_browser_tunnel \
   -o IdentitiesOnly=yes \
+  -o StrictHostKeyChecking=accept-new \
+  -o UserKnownHostsFile=~/.ssh/josemar_browser_tunnel_known_hosts \
   -o ServerAliveInterval=30 \
   -o ServerAliveCountMax=3 \
   -o ExitOnForwardFailure=yes \
@@ -216,101 +253,50 @@ ssh -N \
 created (e.g. another laptop already has the tunnel open). The laptop's
 `127.0.0.1:9222` is forwarded to `127.0.0.1:9222` inside the Hermes namespace.
 
-### 7. Keep the tunnel alive after server redeploys
+### macOS (untested, best-effort)
 
-The server's `browser-tunnel` sidecar restarts automatically, but the laptop's
-SSH client will drop when the sidecar restarts. Use one of the native
-supervisors below to reconnect automatically. Do not install `autossh`; the
-examples use only the OS's built-in supervisor and the `ssh` client already on
-the laptop.
+> The following is an **untested architectural suggestion**, not a shipped or
+> supported implementation. It requires native macOS testing and is not
+> authoritative.
 
-#### Linux (systemd user unit)
+No macOS launcher is shipped. To adapt the Linux lifecycle script:
 
-Save as `~/.config/systemd/user/josemar-browser-tunnel.service`:
+- Copy `laptop/linux/josemar-browser-control` and adjust the Chrome binary path
+  to `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`.
+- Replace `/proc/<pid>/cmdline` PID verification with `ps -p <pid> -o command=`
+  (macOS has no `/proc`).
+- Use a wrapper `.app` (Automator "Application") or a Shortcuts shortcut to
+  make it clickable from Finder/Launchpad, with `Terminal=false`-equivalent
+  behavior.
+- Use `launchd` (e.g. a `~/Library/LaunchAgents` plist) **only if you want
+  automatic reconnect/startup behavior**. The user requirement for this repo is
+  on-demand only; do not enable `RunAtLoad` unless you explicitly want
+  auto-start.
 
-```ini
-[Unit]
-Description=Josemar browser control reverse SSH tunnel
-After=network-online.target
+These are architectural suggestions only. They are not tested here and are not
+claimed to work.
 
-[Service]
-ExecStart=/usr/bin/ssh -N \
-  -i %h/.ssh/josemar_browser_tunnel \
-  -o IdentitiesOnly=yes \
-  -o ServerAliveInterval=30 \
-  -o ServerAliveCountMax=3 \
-  -o ExitOnForwardFailure=yes \
-  -R 127.0.0.1:9222:127.0.0.1:9222 \
-  -p 2222 tunnel@josemar-server
-Restart=always
-RestartSec=5
+### Windows (untested, best-effort)
 
-[Install]
-WantedBy=default.target
-```
+> The following is an **untested architectural suggestion**, not a shipped or
+> supported implementation. It requires native Windows testing and is not
+> authoritative.
 
-Enable and start:
+No Windows launcher is shipped. To adapt the lifecycle:
 
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now josemar-browser-tunnel.service
-```
+- Write a PowerShell lifecycle script mirroring `josemar-browser-control`
+  (`start`/`stop`/`status`), using explicit Chrome and OpenSSH paths, e.g.
+  `C:\Program Files\Google\Chrome\Application\chrome.exe` and the Windows
+  OpenSSH client.
+- Track the dedicated Chrome process and SSH master by PID; verify command
+  lines before signaling (do not `Stop-Process` generic Chrome/SSH).
+- Create a `.lnk` shortcut for clickable launch from the Start menu/desktop.
+- Use Task Scheduler **only if you want automatic reconnect/startup behavior**.
+  The user requirement for this repo is on-demand only; do not configure
+  logon-triggered tasks unless you explicitly want auto-start.
 
-#### macOS (launchd)
-
-Save as `~/Library/LaunchAgents/local.josemar.browser-tunnel.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>local.josemar.browser-tunnel</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/bin/ssh</string>
-    <string>-N</string>
-    <string>-i</string>
-    <string>/Users/YOURUSER/.ssh/josemar_browser_tunnel</string>
-    <string>-o</string><string>IdentitiesOnly=yes</string>
-    <string>-o</string><string>ServerAliveInterval=30</string>
-    <string>-o</string><string>ServerAliveCountMax=3</string>
-    <string>-o</string><string>ExitOnForwardFailure=yes</string>
-    <string>-R</string><string>127.0.0.1:9222:127.0.0.1:9222</string>
-    <string>-p</string><string>2222</string>
-    <string>tunnel@josemar-server</string>
-  </array>
-  <key>KeepAlive</key><true/>
-  <key>RunAtLoad</key><true/>
-</dict>
-</plist>
-```
-
-Load:
-
-```bash
-launchctl load ~/Library/LaunchAgents/local.josemar.browser-tunnel.plist
-```
-
-#### Windows (Task Scheduler)
-
-Create a task that runs at logon with the action:
-
-```powershell
-ssh -N `
-  -i $env:USERPROFILE\.ssh\josemar_browser_tunnel `
-  -o IdentitiesOnly=yes `
-  -o ServerAliveInterval=30 `
-  -o ServerAliveCountMax=3 `
-  -o ExitOnForwardFailure=yes `
-  -R 127.0.0.1:9222:127.0.0.1:9222 `
-  -p 2222 tunnel@josemar-server
-```
-
-In Task Scheduler, set "Start the task at logon" and "Restart the task every
-5 minutes if it fails" under Settings. This does not require installing
-autossh.
+These are architectural suggestions only. They are not tested here and are not
+claimed to work.
 
 ## Enablement (GitHub variables)
 
@@ -383,10 +369,11 @@ This only works while the laptop's reverse tunnel is up.
 - The `browser-tunnel` sidecar has `restart: unless-stopped`. If it restarts,
   the persistent Ed25519 host key in `browser-tunnel-state` is reused, so the
   laptop's `known_hosts` entry stays valid.
-- If the laptop's tunnel drops, the native supervisor (systemd/launchd/Task
-  Scheduler) reconnects automatically. Only one laptop can hold the
-  `127.0.0.1:9222` listener at a time; a second connection fails fast with
-  `ExitOnForwardFailure=yes`.
+- If the laptop's tunnel drops (e.g. after a server redeploy), re-launch
+  "Josemar Browser" from the menu, or run `josemar-browser-control start`. The
+  launcher is on-demand by design; it does not auto-reconnect. Only one laptop
+  can hold the `127.0.0.1:9222` listener at a time; a second connection fails
+  fast with `ExitOnForwardFailure=yes`.
 - If Tailscale Serve does not pick up the config, restart the tailscale
   container: `docker compose restart tailscale`.
 - A disabled redeploy writes `{}` into `tailscale-serve-config`, so a stale

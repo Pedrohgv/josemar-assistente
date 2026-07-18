@@ -1,0 +1,493 @@
+#!/usr/bin/env bash
+# Josemar browser control — on-demand laptop lifecycle controller.
+#
+# Starts a dedicated Chrome profile with loopback-only remote debugging and a
+# reverse SSH tunnel to the Josemar server's browser-tunnel sidecar, then stops
+# the tunnel when the dedicated Chrome session ends. Designed for Linux Mint
+# (tested/supported). Launched from a desktop menu entry; nothing here enables
+# autostart.
+#
+# Usage: josemar-browser-control {start|stop|status} [--debug]
+#
+# Constants (server-side ports are NOT configurable here):
+#   SSH port 2222, CDP port 9222, SSH user `tunnel`.
+#
+# Safe path/host overrides via env vars (optional, rarely needed):
+#   JOSEMAR_BC_SERVER          Tailscale node name (default: josemar-server)
+#   JOSEMAR_BC_PROFILE_DIR     Chrome profile dir (default: $HOME/.josemar-chrome-profile)
+#   JOSEMAR_BC_KEY             SSH private key (default: $HOME/.ssh/josemar_browser_tunnel)
+#   JOSEMAR_BC_KNOWN_HOSTS     SSH known_hosts file (default: $HOME/.ssh/josemar_browser_tunnel_known_hosts)
+#
+# This script never reads or prints private/public key contents.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+readonly SSH_PORT=2222
+readonly CDP_PORT=9222
+readonly SSH_USER="tunnel"
+readonly DEFAULT_SERVER="josemar-server"
+readonly DEFAULT_PROFILE_SUFFIX=".josemar-chrome-profile"
+readonly DEFAULT_KEY_SUFFIX=".ssh/josemar_browser_tunnel"
+readonly DEFAULT_KNOWN_HOSTS_SUFFIX=".ssh/josemar_browser_tunnel_known_hosts"
+readonly APP_NAME="Josemar Browser"
+
+# ---------------------------------------------------------------------------
+# Config (env overrides)
+# ---------------------------------------------------------------------------
+SERVER="${JOSEMAR_BC_SERVER:-$DEFAULT_SERVER}"
+PROFILE_DIR="${JOSEMAR_BC_PROFILE_DIR:-$HOME/$DEFAULT_PROFILE_SUFFIX}"
+SSH_KEY="${JOSEMAR_BC_KEY:-$HOME/$DEFAULT_KEY_SUFFIX}"
+KNOWN_HOSTS="${JOSEMAR_BC_KNOWN_HOSTS:-$HOME/$DEFAULT_KNOWN_HOSTS_SUFFIX}"
+
+# ---------------------------------------------------------------------------
+# Runtime dirs
+# ---------------------------------------------------------------------------
+XDG_RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+if [ ! -d "$XDG_RUNTIME" ] || [ ! -w "$XDG_RUNTIME" ]; then
+    # Safe fallback: a per-user runtime dir under XDG state home.
+    XDG_STATE="${XDG_STATE_HOME:-$HOME/.local/state}"
+    XDG_RUNTIME="$XDG_STATE/josemar-browser-control/runtime"
+    mkdir -p "$XDG_RUNTIME" 2>/dev/null || true
+fi
+readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/josemar-browser-control"
+readonly RUNTIME_DIR="$XDG_RUNTIME/josemar-browser-control"
+readonly LOG_DIR="$STATE_DIR/logs"
+readonly LOG_FILE="$LOG_DIR/josemar-browser-control.log"
+readonly LOCK_FILE="$RUNTIME_DIR/controller.lock"
+readonly PID_FILE="$RUNTIME_DIR/controller.pid"
+readonly CHROME_PID_FILE="$RUNTIME_DIR/chrome.pid"
+readonly SSH_CONTROL="$RUNTIME_DIR/ssh-control"
+
+mkdir -p "$STATE_DIR" "$RUNTIME_DIR" "$LOG_DIR" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+DEBUG=0
+for arg in "$@"; do
+    case "$arg" in
+        --debug) DEBUG=1 ;;
+    esac
+done
+
+log() {
+    local ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "[$ts] $*" >>"$LOG_FILE" 2>/dev/null || true
+    if [ "$DEBUG" -eq 1 ]; then
+        echo "[$ts] $*" >&2
+    fi
+}
+
+notify() {
+    # Best-effort desktop notification; graceful fallback if notify-send missing.
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -a "$APP_NAME" "$1" "$2" 2>/dev/null || true
+    fi
+    log "notify: $1 -- $2"
+}
+
+die() {
+    log "ERROR: $*"
+    notify "Josemar Browser failed" "$*"
+    echo "josemar-browser-control: error: $*" >&2
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+have() { command -v "$1" >/dev/null 2>&1; }
+
+find_chrome() {
+    for c in google-chrome google-chrome-stable chromium chromium-browser; do
+        if have "$c"; then
+            command -v "$c"
+            return 0
+        fi
+    done
+    return 1
+}
+
+is_pid_alive() {
+    local pid="$1"
+    [ -n "$pid" ] || return 1
+    [ "$pid" -eq 0 ] && return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+# Verify a PID is the expected dedicated Chrome process (not generic Chrome).
+verify_chrome_pid() {
+    local pid="$1"
+    is_pid_alive "$pid" || return 1
+    local cmdline
+    cmdline="$(cat /proc/"$pid"/cmdline 2>/dev/null | tr '\0' ' ')" || return 1
+    # Must reference the dedicated profile dir to be ours.
+    [ -n "$cmdline" ] || return 1
+    case "$cmdline" in
+        *"$PROFILE_DIR"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Verify a PID is our SSH master (not generic ssh).
+verify_ssh_pid() {
+    local pid="$1"
+    is_pid_alive "$pid" || return 1
+    local cmdline
+    cmdline="$(cat /proc/"$pid"/cmdline 2>/dev/null | tr '\0' ' ')" || return 1
+    [ -n "$cmdline" ] || return 1
+    case "$cmdline" in
+        *"$SSH_CONTROL"*|*"$SSH_KEY"*|*"josemar_browser_tunnel"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+read_pid_file() {
+    local file="$1"
+    [ -f "$file" ] || return 1
+    local pid
+    pid="$(cat "$file" 2>/dev/null)" || return 1
+    [ -n "$pid" ] || return 1
+    echo "$pid"
+}
+
+cdp_up() {
+    curl -s --max-time 2 "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1
+}
+
+server_reachable() {
+    # Best-effort reachability check over Tailscale. We do not require a ping;
+    # a TCP probe to the SSH port is more meaningful and avoids ICMP filters.
+    if ! have tailscale; then
+        return 0  # cannot check; let ssh fail later with a clear message
+    fi
+    # tailscale status is enough to confirm the tailnet is up.
+    tailscale status >/dev/null 2>&1 || return 1
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Locking (atomic PID lock to prevent duplicate controllers)
+# ---------------------------------------------------------------------------
+acquire_lock() {
+    if [ -f "$LOCK_FILE" ]; then
+        local existing_pid
+        existing_pid="$(cat "$LOCK_FILE" 2>/dev/null)" || existing_pid=""
+        if [ -n "$existing_pid" ] && is_pid_alive "$existing_pid"; then
+            return 1  # active controller exists
+        fi
+        # Stale lock; remove.
+        rm -f "$LOCK_FILE" 2>/dev/null || true
+    fi
+    # Atomic create with PID.
+    ( set -C; echo "$$" > "$LOCK_FILE" ) 2>/dev/null || return 1
+    return 0
+}
+
+release_lock() {
+    # Only remove if it holds our PID.
+    if [ -f "$LOCK_FILE" ]; then
+        local lock_pid
+        lock_pid="$(cat "$LOCK_FILE" 2>/dev/null)" || lock_pid=""
+        if [ "$lock_pid" = "$$" ]; then
+            rm -f "$LOCK_FILE" 2>/dev/null || true
+        fi
+    fi
+}
+
+# Idempotent owner-only cleanup. Only tears down Chrome/tunnel if this process
+# is the active controller (holds the lock with its own PID). This makes the
+# trap safe for the controller process: a duplicate/status/stop process that
+# does not own the lock will not kill the active owner's processes.
+owner_cleanup() {
+    local owns=0
+    if [ -f "$LOCK_FILE" ]; then
+        local lock_pid
+        lock_pid="$(cat "$LOCK_FILE" 2>/dev/null)" || lock_pid=""
+        if [ "$lock_pid" = "$$" ]; then
+            owns=1
+        fi
+    fi
+    if [ "$owns" -eq 1 ]; then
+        do_stop_quiet
+    fi
+    release_lock
+}
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+validate_env() {
+    [ -n "$HOME" ] && [ -d "$HOME" ] || die "HOME is not set or does not exist"
+    [ -f "$SSH_KEY" ] || die "SSH key not found at $SSH_KEY (generate with: ssh-keygen -t ed25519 -f \"$SSH_KEY\" -N \"\")"
+    have ssh || die "ssh client not found"
+    have curl || die "curl not found"
+    local chrome
+    chrome="$(find_chrome)" || die "no Chrome/Chromium binary found (google-chrome, chromium)"
+    CHROME_BIN="$chrome"
+    # Display/session check: only require a DISPLAY for headful start.
+    if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+        die "no DISPLAY/WAYLAND_DISPLAY session; the launcher requires a graphical session"
+    fi
+    server_reachable || die "Tailscale not reachable (run 'tailscale up' and confirm the laptop is on the tailnet)"
+    log "validation ok: chrome=$CHROME_BIN server=$SERVER key=$SSH_KEY profile=$PROFILE_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# start
+# ---------------------------------------------------------------------------
+do_start() {
+    validate_env
+
+    # If a controller is already active, open/focus a new dedicated window
+    # instead of starting a duplicate controller.
+    if [ -f "$LOCK_FILE" ]; then
+        local existing_pid
+        existing_pid="$(cat "$LOCK_FILE" 2>/dev/null)" || existing_pid=""
+        if [ -n "$existing_pid" ] && is_pid_alive "$existing_pid"; then
+            log "controller already active (pid $existing_pid); opening a new dedicated window"
+            notify "Josemar Browser already running" "Opening a new dedicated window."
+            # Open a new window/tab in the existing dedicated profile session.
+            "$CHROME_BIN" \
+                --user-data-dir="$PROFILE_DIR" \
+                --remote-debugging-port="$CDP_PORT" \
+                --remote-debugging-address=127.0.0.1 \
+                --no-first-run \
+                --new-window \
+                "about:blank" >/dev/null 2>&1 &
+            disown 2>/dev/null || true
+            return 0
+        fi
+        rm -f "$LOCK_FILE" 2>/dev/null || true
+    fi
+
+    acquire_lock || die "could not acquire controller lock (another instance is starting)"
+    # Owner-only cleanup on EXIT/TERM/INT/HUP. owner_cleanup checks the lock
+    # holds our PID before tearing down, so a non-owner process (status/stop)
+    # sharing this code path cannot kill the active controller's processes.
+    trap 'owner_cleanup' EXIT
+    trap 'owner_cleanup; exit 130' INT
+    trap 'owner_cleanup; exit 143' TERM
+    trap 'owner_cleanup; exit 129' HUP
+
+    mkdir -p "$PROFILE_DIR" 2>/dev/null || true
+
+    log "starting Chrome (profile=$PROFILE_DIR)"
+    notify "Josemar Browser starting" "Launching dedicated Chrome and reverse tunnel."
+
+    # Headful start with the dedicated profile. --disable-background-mode
+    # prevents Chrome from keeping running in the background after the last
+    # dedicated-profile window closes, so closing all Josemar windows ends
+    # the browser (and the controller then stops the tunnel).
+    "$CHROME_BIN" \
+        --user-data-dir="$PROFILE_DIR" \
+        --remote-debugging-port="$CDP_PORT" \
+        --remote-debugging-address=127.0.0.1 \
+        --disable-background-mode \
+        --no-first-run \
+        --no-default-browser-check \
+        --restore-last-session \
+        "about:blank" >/dev/null 2>&1 &
+    local chrome_pid=$!
+    echo "$chrome_pid" > "$CHROME_PID_FILE"
+    disown 2>/dev/null || true
+
+    # Wait for CDP endpoint (do not read/parse page contents).
+    local waited=0
+    while [ "$waited" -lt 60 ]; do
+        if cdp_up; then
+            log "CDP endpoint up"
+            break
+        fi
+        if ! is_pid_alive "$chrome_pid"; then
+            rm -f "$CHROME_PID_FILE" 2>/dev/null || true
+            die "Chrome exited before CDP endpoint came up"
+        fi
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+    cdp_up || { rm -f "$CHROME_PID_FILE" 2>/dev/null || true; die "CDP endpoint did not come up within 30s"; }
+
+    # Start the reverse SSH master with a control socket.
+    log "starting reverse SSH tunnel to $SERVER:$SSH_PORT"
+    ssh -N -f \
+        -i "$SSH_KEY" \
+        -o IdentitiesOnly=yes \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile="$KNOWN_HOSTS" \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=3 \
+        -o ExitOnForwardFailure=yes \
+        -o ControlMaster=yes \
+        -o ControlPath="$SSH_CONTROL" \
+        -o ControlPersist=yes \
+        -R "127.0.0.1:${CDP_PORT}:127.0.0.1:${CDP_PORT}" \
+        -p "$SSH_PORT" "${SSH_USER}@${SERVER}" \
+        || die "reverse SSH tunnel failed (check Tailscale, key, and server sidecar)"
+
+    # Record the ssh master PID (best-effort). OpenSSH emits the running
+    # master PID via `Master running (pid=...)` on stderr from `ssh -O check`,
+    # so capture combined stdout+stderr (2>&1) and parse with a bash regex.
+    # Do not log the captured output (it may include connection details).
+    local ssh_pid=""
+    local check_out
+    check_out="$(ssh -O check \
+        -o ControlPath="$SSH_CONTROL" \
+        -o IdentitiesOnly=yes \
+        -p "$SSH_PORT" "${SSH_USER}@${SERVER}" 2>&1)" || true
+    if [[ "$check_out" =~ pid=([0-9]+) ]]; then
+        ssh_pid="${BASH_REMATCH[1]}"
+    fi
+    if [ -n "$ssh_pid" ]; then
+        echo "$ssh_pid" > "$PID_FILE"
+    fi
+
+    echo "$$" > "$LOCK_FILE"
+    notify "Josemar Browser ready" "Dedicated Chrome and reverse tunnel are up."
+
+    # Monitor the dedicated Chrome process; the EXIT trap (owner_cleanup)
+    # stops the tunnel when this controller exits, whether because all
+    # dedicated Josemar windows closed or because it was signaled.
+    log "monitoring Chrome pid $chrome_pid"
+    while is_pid_alive "$chrome_pid"; do
+        sleep 2
+    done
+    log "dedicated Chrome session ended; controller exiting (trap will stop tunnel)"
+    notify "Josemar Browser stopped" "Dedicated Chrome closed; tunnel stopped."
+    # Exit normally; the EXIT trap runs owner_cleanup -> do_stop_quiet.
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# stop
+# ---------------------------------------------------------------------------
+do_stop_quiet() {
+    # Stop the SSH master via control socket (graceful). Use `-O exit` so the
+    # reverse-forward master actually terminates (the softer stop variant can
+    # leave the master alive). Include the fixed port and server identity
+    # consistently with the connect command.
+    if [ -e "$SSH_CONTROL" ]; then
+        ssh -O exit \
+            -o ControlPath="$SSH_CONTROL" \
+            -o IdentitiesOnly=yes \
+            -p "$SSH_PORT" "${SSH_USER}@${SERVER}" 2>/dev/null || true
+        # If the control socket file remains, the master may already be gone.
+        rm -f "$SSH_CONTROL" 2>/dev/null || true
+    fi
+    # Kill the recorded ssh PID if it is still alive and is ours.
+    local ssh_pid
+    ssh_pid="$(read_pid_file "$PID_FILE" 2>/dev/null)" || ssh_pid=""
+    if [ -n "$ssh_pid" ] && verify_ssh_pid "$ssh_pid"; then
+        kill "$ssh_pid" 2>/dev/null || true
+        sleep 1
+        is_pid_alive "$ssh_pid" && kill -9 "$ssh_pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE" 2>/dev/null || true
+
+    # Stop only the dedicated-profile Chrome process, never generic Chrome.
+    local chrome_pid
+    chrome_pid="$(read_pid_file "$CHROME_PID_FILE" 2>/dev/null)" || chrome_pid=""
+    if [ -n "$chrome_pid" ] && verify_chrome_pid "$chrome_pid"; then
+        kill "$chrome_pid" 2>/dev/null || true
+        sleep 1
+        is_pid_alive "$chrome_pid" && kill -9 "$chrome_pid" 2>/dev/null || true
+    fi
+    rm -f "$CHROME_PID_FILE" 2>/dev/null || true
+
+    # Clean stale runtime files safely.
+    rm -f "$SSH_CONTROL" "$SSH_CONTROL".* 2>/dev/null || true
+    release_lock
+}
+
+do_stop() {
+    # If a controller is running, signal it to stop (its EXIT trap tears down
+    # Chrome/tunnel and releases the lock). Then do a best-effort direct
+    # teardown in case the controller is already dead or unresponsive.
+    local controller_pid
+    controller_pid="$(read_pid_file "$LOCK_FILE" 2>/dev/null)" || controller_pid=""
+    if [ -n "$controller_pid" ] && is_pid_alive "$controller_pid"; then
+        log "signaling controller $controller_pid to stop"
+        kill "$controller_pid" 2>/dev/null || true
+        # Give the controller's trap a moment to clean up gracefully.
+        sleep 1
+    fi
+    # Direct teardown fallback (idempotent). do_stop_quiet verifies PIDs before
+    # signaling, so it is safe even if the controller already cleaned up.
+    do_stop_quiet
+    # If a stale lock remains (controller died without running its trap),
+    # remove it only if the recorded PID is no longer alive.
+    if [ -f "$LOCK_FILE" ]; then
+        local stale_pid
+        stale_pid="$(cat "$LOCK_FILE" 2>/dev/null)" || stale_pid=""
+        if [ -n "$stale_pid" ] && ! is_pid_alive "$stale_pid"; then
+            rm -f "$LOCK_FILE" 2>/dev/null || true
+        fi
+    fi
+    log "stopped"
+    notify "Josemar Browser stopped" "Tunnel and dedicated Chrome stopped."
+}
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+do_status() {
+    local controller="no"
+    local chrome="no"
+    local tunnel="no"
+    local cdp="no"
+
+    local controller_pid
+    controller_pid="$(read_pid_file "$LOCK_FILE" 2>/dev/null)" || controller_pid=""
+    if [ -n "$controller_pid" ] && is_pid_alive "$controller_pid"; then
+        controller="yes (pid $controller_pid)"
+    fi
+
+    local chrome_pid
+    chrome_pid="$(read_pid_file "$CHROME_PID_FILE" 2>/dev/null)" || chrome_pid=""
+    if [ -n "$chrome_pid" ] && verify_chrome_pid "$chrome_pid"; then
+        chrome="yes (pid $chrome_pid)"
+    fi
+
+    if [ -e "$SSH_CONTROL" ]; then
+        if ssh -O check \
+            -o ControlPath="$SSH_CONTROL" \
+            -o IdentitiesOnly=yes \
+            -p "$SSH_PORT" "${SSH_USER}@${SERVER}" >/dev/null 2>&1; then
+            tunnel="yes"
+        fi
+    fi
+
+    if cdp_up; then
+        cdp="yes"
+    fi
+
+    echo "controller: $controller"
+    echo "chrome:     $chrome"
+    echo "tunnel:      $tunnel"
+    echo "cdp:         $cdp"
+    echo "server:      $SERVER"
+    echo "profile:     $PROFILE_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+main() {
+    local action="${1:-start}"
+    case "$action" in
+        start) do_start ;;
+        stop) do_stop ;;
+        status) do_status ;;
+        --debug) shift; main "$@" ;;
+        *)
+            echo "usage: $0 {start|stop|status} [--debug]" >&2
+            exit 2
+            ;;
+    esac
+}
+
+main "$@"
