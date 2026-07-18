@@ -1,0 +1,121 @@
+# Optional browser-control overlay.
+#
+# Apply together with docker-compose.yml ONLY when browser control is enabled:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.browser-control.yml
+#   COMPOSE_PROFILES=browser-control   (in addition to aux-ml if needed)
+#
+# This overlay adds:
+#   - the internal `browser-control` Docker network (shared only by hermes and
+#     tailscale) with configurable static IPs,
+#   - browser-specific network attachments for hermes (alias
+#     `hermes-browser-tunnel`, static IP) and tailscale (static IP),
+#   - a read-only bind mount of `./skills-factory/browser-control` into
+#     `/opt/josemar/skills/browser-control` so the repo-owned browser-control
+#     skill (instruction-only) is registered only when the overlay is applied,
+#   - the `browser-tunnel` hardened OpenSSH reverse-tunnel sidecar under the
+#     `browser-control` profile, sharing Hermes's network namespace
+#     (network_mode: service:hermes),
+#   - the `browser-tunnel-state` volume for the persistent Ed25519 SSH host key,
+#   - the `browser-tunnel-authorized-keys` volume populated by the deploy
+#     workflow with the operator's SSH public key.
+#
+# When browser control is disabled, this overlay is NOT applied; the base
+# docker-compose.yml alone is used. The base file keeps the always-present
+# `tailscale-serve-config` volume and `TS_SERVE_CONFIG` env so a disabled
+# redeploy writes `{}` and deterministically clears any stale tcp:2222 forward.
+#
+# See docs/browser-control.md for the full threat model and laptop setup.
+
+services:
+  hermes:
+    # Conditionally mount the repo-owned browser-control skill
+    # (instruction-only, no executable) into
+    # /opt/josemar/skills/browser-control. This skill is NOT baked into the
+    # Hermes image (unlike gbrain/aux-ml/workspace-sync) so a base-only
+    # (disabled) deploy does not register it. Read-only bind mount; no
+    # credentials, no runtime writes.
+    volumes:
+      - ./skills-factory/browser-control:/opt/josemar/skills/browser-control:ro
+    networks:
+      josemar-network: null
+      browser-control:
+        # Tailscale Serve forwards tcp:2222 to the SSH daemon, which binds to
+        # BROWSER_CONTROL_HERMES_IP:2222 on this network. The alias is kept for
+        # diagnostics; the Serve TCPForward target uses the explicit IP.
+        aliases:
+          - hermes-browser-tunnel
+        ipv4_address: ${BROWSER_CONTROL_HERMES_IP:-172.31.250.2}
+
+  tailscale:
+    networks:
+      josemar-network: null
+      browser-control:
+        ipv4_address: ${BROWSER_CONTROL_TAILSCALE_IP:-172.31.250.3}
+
+  browser-tunnel:
+    profiles:
+      - browser-control
+    build:
+      context: ./browser-tunnel
+      dockerfile: Dockerfile
+    container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-browser-tunnel
+    restart: unless-stopped
+    # Shares Hermes's network namespace so the reverse tunnel listener at
+    # 127.0.0.1:9222 is reachable from Hermes as 127.0.0.1:9222. The SSH daemon
+    # binds only to the browser-control interface IP (not josemar-network or
+    # the tailnet). No `networks:` key is allowed with network_mode: service:.
+    network_mode: service:hermes
+    depends_on:
+      - hermes
+    environment:
+      - BROWSER_CONTROL_HERMES_IP=${BROWSER_CONTROL_HERMES_IP:-172.31.250.2}
+    volumes:
+      # Persistent Ed25519 SSH host key so laptop known_hosts stays stable.
+      - browser-tunnel-state:/var/lib/browser-tunnel
+      # Authorized keys populated by the deploy workflow into a named volume.
+      # The entrypoint reads /authorized-keys/authorized_keys.
+      - browser-tunnel-authorized-keys:/authorized-keys:ro
+    read_only: true
+    tmpfs:
+      - /run:size=1m,mode=1777
+      - /tmp:size=1m,mode=1777
+      - /etc/ssh/runtime:size=1m,mode=0755
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Minimal caps sshd actually needs: chown generated host key on first
+    # start, setuid/setgid to drop to the `tunnel` user after auth, and
+    # sys_chroot for the privilege-separation sandbox. Port 2222 is
+    # unprivileged so no bind-service cap is required. No host ports published.
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - SYS_CHROOT
+
+networks:
+  # Internal-only network shared by hermes and tailscale when browser control
+  # is enabled. `internal: true` blocks external egress; inter-container
+  # traffic (Tailscale -> BROWSER_CONTROL_HERMES_IP:2222) still works. The
+  # browser-tunnel sidecar inherits Hermes's namespace and does not attach
+  # directly. No port is published to the host.
+  browser-control:
+    driver: bridge
+    internal: true
+    ipam:
+      driver: default
+      config:
+        - subnet: ${BROWSER_CONTROL_SUBNET:-172.31.250.0/29}
+          gateway: ${BROWSER_CONTROL_GATEWAY:-172.31.250.1}
+    attachable: false
+
+volumes:
+  # Persistent SSH host key for browser-tunnel. No credentials stored here.
+  browser-tunnel-state:
+    driver: local
+  # Authorized keys populated by the deploy workflow from the
+  # BROWSER_TUNNEL_AUTHORIZED_KEY secret. Mounted read-only into browser-tunnel
+  # at /authorized-keys.
+  browser-tunnel-authorized-keys:
+    driver: local

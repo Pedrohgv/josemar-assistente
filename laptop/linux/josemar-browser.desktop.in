@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Name=Josemar Browser
+GenericName=Josemar Remote Browser Control
+Comment=Start the dedicated Josemar Chrome profile and reverse tunnel
+Exec=__INSTALL_BIN__ start
+Icon=google-chrome
+Terminal=false
+Categories=Network;WebBrowser;
+StartupNotify=true
+Actions=Stop;
+# Managed by josemar-browser-control install-launcher.sh; do not edit by hand.
+X-Josemar-Managed=true
+
+[Desktop Action Stop]
+Name=Stop Josemar Browser
+Exec=__INSTALL_BIN__ stop
+Icon=process-stop
