@@ -1121,6 +1121,74 @@ class SourceRoutingTests(unittest.TestCase):
         self.assertTrue(sync_calls)
         self.assertIn("--source", sync_calls[0]["argv"])
 
+    def test_incremental_sync_accepts_pinned_human_success_output(self) -> None:
+        with mock.patch(
+            "tasknotes_mcp_core.run_subprocess",
+            return_value=self.core.SubprocessResult(
+                returncode=0,
+                stdout="Already up to date.\n",
+                stderr="",
+            ),
+        ):
+            result = self.core.gbrain_sync_incremental(
+                self.engine.gbrain_bin,
+                self.engine._gbrain_env,
+                self.vault,
+                "default",
+            )
+        self.assertEqual(result, {})
+
+    def test_full_sync_accepts_pinned_human_success_output(self) -> None:
+        with mock.patch(
+            "tasknotes_mcp_core.run_subprocess",
+            return_value=self.core.SubprocessResult(
+                returncode=0,
+                stdout="First sync complete. Checkpoint: deadbeef\n",
+                stderr="",
+            ),
+        ):
+            result = self.core.gbrain_sync_full(
+                self.engine.gbrain_bin,
+                self.engine._gbrain_env,
+                self.vault,
+                "default",
+            )
+        self.assertEqual(result, {})
+
+    def test_get_page_maps_structured_missing_page_to_typed_error(self) -> None:
+        with mock.patch(
+            "tasknotes_mcp_core.run_subprocess",
+            return_value=self.core.SubprocessResult(
+                returncode=1,
+                stdout='{"error":"page_not_found"}\n',
+                stderr="",
+            ),
+        ):
+            with self.assertRaises(self.core.GbrainPageNotFound):
+                self.core.gbrain_get_page(
+                    self.engine.gbrain_bin,
+                    self.engine._gbrain_env,
+                    "tasks/missing",
+                    "default",
+                )
+
+    def test_get_page_maps_pinned_missing_stderr_to_typed_error(self) -> None:
+        with mock.patch(
+            "tasknotes_mcp_core.run_subprocess",
+            return_value=self.core.SubprocessResult(
+                returncode=1,
+                stdout="",
+                stderr="Page not found: tasks/missing\n",
+            ),
+        ):
+            with self.assertRaises(self.core.GbrainPageNotFound):
+                self.core.gbrain_get_page(
+                    self.engine.gbrain_bin,
+                    self.engine._gbrain_env,
+                    "tasks/missing",
+                    "default",
+                )
+
 
 @unittest.skipUnless(_has_yaml(), "PyYAML required")
 class ReconstructionTests(unittest.TestCase):

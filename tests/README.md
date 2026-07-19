@@ -47,6 +47,24 @@ make test-runtime
 
 These tests create an isolated Docker Compose project with unique container names and Compose-project-scoped test volumes. They must not attach to the production `obsidian-vault` volume. Cleanup runs `docker compose down -v --remove-orphans` for the test project.
 
+### TaskNotes real-gbrain lifecycle
+
+Build the Hermes image, then run the isolated TaskNotes MCP lifecycle against
+the pinned real gbrain CLI. The test uses an ephemeral in-container vault,
+disables networking, and passes Telegram/provider credentials as empty values.
+It never mounts the production vault.
+
+```bash
+HERMES_DASHBOARD_SESSION_TOKEN=test \
+HERMES_DASHBOARD_BASIC_AUTH_USERNAME=test \
+HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=test \
+HERMES_DASHBOARD_BASIC_AUTH_SECRET=test \
+  docker compose build hermes
+
+RUN_DOCKER_TESTS=1 \
+  python3 -m unittest tests.tasknotes_mcp.test_docker_runtime -v
+```
+
 Aux-ML runtime tests are separately gated because the aux-ml image can be expensive to build:
 
 ```bash

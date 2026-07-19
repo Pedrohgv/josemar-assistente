@@ -186,6 +186,10 @@ class GbrainError(CoreError):
     """A gbrain call returned an error or unexpected response."""
 
 
+class GbrainPageNotFound(GbrainError):
+    """A source-routed gbrain get_page call did not find the requested page."""
+
+
 class RecoveryRequired(CoreError):
     """A recovery marker is present; mutations are blocked until operator recovery."""
 
@@ -1173,8 +1177,13 @@ def gbrain_get_page(
         except json.JSONDecodeError:
             pass
     if data is not None and "error" in data:
-        raise GbrainError(f"gbrain get_page error: {data['error']}")
+        error = data["error"]
+        if error == "page_not_found":
+            raise GbrainPageNotFound("gbrain page not found")
+        raise GbrainError(f"gbrain get_page error: {error}")
     if result.returncode != 0:
+        if result.stderr.strip().lower().startswith("page not found:"):
+            raise GbrainPageNotFound("gbrain page not found")
         raise GbrainError(f"gbrain get_page failed: {_redact(result.stderr)[:200]}")
     if data is None:
         try:
@@ -1217,7 +1226,12 @@ def gbrain_sync_incremental(
     vault: Path,
     source_id: str,
 ) -> Dict[str, Any]:
-    """Run incremental gbrain sync (``--source <id> --no-embed --no-extract --yes --no-pull --json --repo``)."""
+    """Run incremental gbrain sync and ignore human single-source stdout.
+
+    Pinned gbrain documents ``--json`` globally, but the single-source path
+    still renders text such as ``Already up to date.``. The adapter only needs
+    the process outcome, so successful stdout is intentionally not parsed.
+    """
     result = run_subprocess(
         [gbrain_bin, "sync", "--source", source_id, "--no-embed", "--no-extract",
          "--yes", "--no-pull", "--json", "--repo", str(vault)],
@@ -1226,11 +1240,7 @@ def gbrain_sync_incremental(
     )
     if result.returncode != 0:
         raise GbrainError(f"gbrain sync failed: {_redact(result.stderr)[:200]}")
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise GbrainError(f"gbrain sync returned invalid JSON: {exc}") from exc
-    return data if isinstance(data, dict) else {}
+    return {}
 
 
 def gbrain_sync_full(
@@ -1239,7 +1249,7 @@ def gbrain_sync_full(
     vault: Path,
     source_id: str,
 ) -> Dict[str, Any]:
-    """Run full gbrain sync (recovery path)."""
+    """Run full gbrain sync (recovery path), ignoring human stdout."""
     result = run_subprocess(
         [gbrain_bin, "sync", "--source", source_id, "--full", "--no-embed",
          "--yes", "--no-pull", "--json", "--repo", str(vault)],
@@ -1248,11 +1258,7 @@ def gbrain_sync_full(
     )
     if result.returncode != 0:
         raise GbrainError(f"gbrain full sync failed: {_redact(result.stderr)[:200]}")
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise GbrainError(f"gbrain full sync returned invalid JSON: {exc}") from exc
-    return data if isinstance(data, dict) else {}
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -1957,10 +1963,8 @@ class TaskNotesEngine:
             page = gbrain_get_page(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id)  # type: ignore[arg-type]
             # If we got here, the page exists in the DB => failure.
             raise ValidationError(f"create target already exists in gbrain DB: {gbrain_slug}")
-        except GbrainError as exc:
-            # page_not_found is expected; any other gbrain error propagates.
-            if "page_not_found" not in str(exc):
-                raise
+        except GbrainPageNotFound:
+            pass
 
     def _mutation_pre_put_guard(self, profile: TaskNotesProfile, slug: str) -> None:
         """Update/complete/archive pre-put guard: target must exist and be Git-clean; profile hash re-read."""
