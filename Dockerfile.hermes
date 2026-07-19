@@ -111,6 +111,7 @@ RUN mkdir -p /opt/josemar/skills /opt/josemar/hermes /opt/josemar/scripts
 COPY skills-factory/aux-ml /opt/josemar/skills/aux-ml
 COPY skills-factory/workspace-sync /opt/josemar/skills/workspace-sync
 COPY skills-factory/gbrain /opt/josemar/skills/gbrain
+COPY skills-factory/tasknotes /opt/josemar/skills/tasknotes
 RUN chmod +x /opt/josemar/skills/aux-ml/aux-ml \
     /opt/josemar/skills/workspace-sync/workspace-sync
 
@@ -122,8 +123,15 @@ RUN chmod +x /usr/local/bin/josemar-gbrain
 
 COPY scripts/hermes-workspace-sync-cron.sh /opt/josemar/scripts/hermes-workspace-sync-cron.sh
 COPY scripts/hermes-gbrain-refresh-cron.sh /opt/josemar/scripts/hermes-gbrain-refresh-cron.sh
+COPY scripts/tasknotes_mcp_core.py scripts/tasknotes_mcp.py scripts/tasknotes_lock_run.py /opt/josemar/scripts/
 RUN chmod +x /opt/josemar/scripts/hermes-workspace-sync-cron.sh \
-    /opt/josemar/scripts/hermes-gbrain-refresh-cron.sh
+    /opt/josemar/scripts/hermes-gbrain-refresh-cron.sh \
+    /opt/josemar/scripts/tasknotes_mcp.py \
+    /opt/josemar/scripts/tasknotes_lock_run.py \
+    && /opt/hermes/.venv/bin/python3 -m compileall -q \
+        /opt/josemar/scripts/tasknotes_mcp_core.py \
+        /opt/josemar/scripts/tasknotes_mcp.py \
+        /opt/josemar/scripts/tasknotes_lock_run.py
 
 COPY config/hermes-config.yaml /opt/josemar/hermes/config.yaml
 COPY docker-hermes-init.sh /etc/cont-init.d/00-josemar-setup

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import os
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE_SYNC_SCRIPT = REPO_ROOT / "scripts" / "workspace-sync.sh"
 CRON_WRAPPER_SCRIPT = REPO_ROOT / "scripts" / "hermes-workspace-sync-cron.sh"
 GBRAIN_REFRESH_CRON_SCRIPT = REPO_ROOT / "scripts" / "hermes-gbrain-refresh-cron.sh"
+TASKNOTES_LOCK_RUNNER = REPO_ROOT / "scripts" / "tasknotes_lock_run.py"
 TEST_GIT_EMAIL = "test" + "@example.invalid"
 
 
@@ -123,6 +125,27 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode, "gbrain refresh wrapper must propagate nonzero exit")
         combined = result.stdout + result.stderr
         self.assertIn("GBRAIN_FAIL", combined)
+
+    def test_gbrain_refresh_cron_skips_when_tasknotes_lock_is_busy(self) -> None:
+        fake = self._make_fake_sync(exit_code=0, stdout="MUST_NOT_RUN", stderr="")
+        wrapper = self._patched_cron_wrapper(
+            fake,
+            source=GBRAIN_REFRESH_CRON_SCRIPT,
+            hardcoded_path="/usr/local/bin/josemar-gbrain",
+        )
+        lock_path = Path(wrapper).parent / "tasknotes.lock"
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self._run_cron_wrapper(
+                wrapper, extra_env={"TASKNOTES_LOCK_PATH": str(lock_path)}
+            )
+        finally:
+            os.close(fd)
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("refresh skipped", result.stdout)
+        self.assertNotIn("MUST_NOT_RUN", result.stdout + result.stderr)
 
     # ------------------------------------------------------------------
     # helpers
@@ -372,9 +395,15 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
         wrapper.chmod(0o755)
         return wrapper
 
-    def _run_cron_wrapper(self, wrapper: Path) -> subprocess.CompletedProcess[str]:
+    def _run_cron_wrapper(
+        self, wrapper: Path, *, extra_env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["TMPDIR"] = str(Path(wrapper).parent)
+        env["TASKNOTES_LOCK_RUNNER"] = str(TASKNOTES_LOCK_RUNNER)
+        env["TASKNOTES_LOCK_PATH"] = str(Path(wrapper).parent / "tasknotes.lock")
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             ["bash", str(wrapper)],
             env=env,

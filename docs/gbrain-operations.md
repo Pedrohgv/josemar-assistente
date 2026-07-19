@@ -10,12 +10,13 @@ The Josemar gbrain integration is intentionally minimal:
 - The pinned `gbrain` CLI is installed in the Hermes image under `/opt/gbrain`
   with a `/usr/local/bin/gbrain` wrapper that `cd`s to `/opt/gbrain` and runs
   `bun src/cli.ts`.
-- Josemar uses the native `gbrain` CLI directly from chat for retrieval,
+- Josemar uses the native `gbrain` CLI directly from chat for general retrieval,
   authoring, and linking (`gbrain status`, `gbrain search`, `gbrain get`,
   `gbrain capture`, `gbrain put`, `gbrain link`, `gbrain backlinks`, plus
   `gbrain tags`, `gbrain timeline`, `gbrain graph`, `gbrain delete`,
-  `gbrain history`, `gbrain revert` where useful). There is no custom chat
-  wrapper between Hermes and `gbrain`.
+  `gbrain history`, `gbrain revert` where useful). The bounded TaskNotes MCP is
+  the only specialized exception; it uses short-lived native gbrain commands
+  and is the required interface for TaskNotes task-file mutations.
 - `scripts/josemar-gbrain` (installed at `/usr/local/bin/josemar-gbrain`) is
   retained only as an operator maintenance convenience. It exposes a single
   `reindex` subcommand that performs init, config, full sync, content/link
@@ -47,6 +48,7 @@ The Josemar gbrain integration is intentionally minimal:
 | `GBRAIN_SCHEMA_PACK` | `gbrain-base-v2` | Schema pack selector. Set to `josemar-user` to use the custom user-owned pack. |
 | `GBRAIN_SCHEMA_SOURCE_ROOT` | `/opt/data/gbrain/schema-packs` | Source root for custom schema packs. The source pack for the selected `GBRAIN_SCHEMA_PACK` must exist at `<root>/<pack>/pack.yaml`. |
 | `GBRAIN_REFRESH_INTERVAL` | `5` | Hermes cron interval, in minutes, for `josemar-gbrain refresh`. Set to `0` to disable. Refresh deliberately uses `gbrain sync --no-embed` while embeddings are deferred; revisit when issue #65 enables embeddings. |
+| `GBRAIN_REFRESH_TIMEOUT` | `240` | Maximum seconds for the refresh child while it holds the shared TaskNotes/gbrain lock. |
 
 No new Docker volume is added. `GBRAIN_HOME` (`/opt/data`) is the parent;
 gbrain stores its state under `$GBRAIN_HOME/.gbrain`, which lives inside the
@@ -131,12 +133,22 @@ josemar-gbrain refresh
 happened and runs only native sync, stale extraction, and link extraction. It
 does **not** run init, schema install, or schema sync.
 
+Refresh acquires `/opt/data/.locks/tasknotes.lock` nonblockingly through the
+repo-owned lock runner. If a task operation is active, the cron logs a skip and
+exits successfully. The refresh child is bounded by `GBRAIN_REFRESH_TIMEOUT`
+(default `240` seconds). See `docs/tasknotes-mcp.md` for the task transaction and
+recovery model.
+
 Refresh currently calls `gbrain sync --no-embed` because Josemar is in
 keyword-only/no-embedding mode. When embeddings are enabled (see issue #65),
 revisit whether refresh should drop `--no-embed` or whether embeddings should
 remain a separate scheduled job.
 
 ## Native Write-Through
+
+For TaskNotes task files, use the bounded `task_*` MCP tools rather than direct
+native capture/put. The tools preserve TaskNotes fields and add Git/profile/read-
+back guards. The native commands below remain valid for general vault pages.
 
 Native gbrain writes (`gbrain capture`, `gbrain put`) update both the database
 and the on-disk vault files. If a write-through fails (disk error, permission

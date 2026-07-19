@@ -61,6 +61,15 @@ platform_toolsets:
   cli: [hermes-cli]
   telegram: [hermes-telegram]
 
+mcp_servers:
+  tasknotes:
+    command: "/opt/hermes/.venv/bin/python3"
+    args:
+      - "/opt/josemar/scripts/tasknotes_mcp.py"
+    connect_timeout: 30
+    timeout: 180
+    supports_parallel_tool_calls: false
+
 display:
   compact: true
   tool_progress: new
