@@ -60,11 +60,15 @@ class IntegrationContractTests(unittest.TestCase):
     def test_runbook_documents_external_prerequisites_and_recovery(self) -> None:
         text = (REPO_ROOT / "docs" / "tasknotes-mcp.md").read_text(encoding="utf-8")
         self.assertIn("https://tasknotes.dev/", text)
-        self.assertIn("Server-local vault Git history", text)
+        self.assertIn("Verify the existing gbrain Git repository", text)
+        self.assertIn("reinitialize an existing vault", text)
         self.assertIn("Exclude `.git/` from Syncthing", text)
         self.assertIn("TaskNotes `4.11.1`", text)
         self.assertIn("tasknotes-recovery.marker", text)
         self.assertIn("git -C \"$GBRAIN_BRAIN_REPO\" gc", text)
+        self.assertIn("gbrain sources harden", text)
+        self.assertIn("local-only gbrain", text)
+        self.assertIn("pulls or pushes", text)
 
     def test_compose_passes_refresh_timeout(self) -> None:
         text = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")

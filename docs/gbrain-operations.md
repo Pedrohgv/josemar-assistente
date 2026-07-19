@@ -31,6 +31,12 @@ The Josemar gbrain integration is intentionally minimal:
 - **Runtime state.** gbrain state lives under `$GBRAIN_HOME/.gbrain` (PGLite
   database, config, cache). It is runtime-only and never versioned by
   workspace sync.
+- **Git-native file sync.** The configured vault is a Git working tree with a
+  valid `HEAD`. Gbrain sync uses Git commits and its `last_commit` bookmark for
+  incremental reconciliation. `gbrain init` creates the database/configuration;
+  it does not initialize the vault repository. A successful Josemar reindex or
+  refresh therefore proves the vault Git prerequisite already exists. This
+  repository is local-only and has no remote consumer.
 
 ## Pinned Values
 
@@ -153,8 +159,19 @@ back guards. The native commands below remain valid for general vault pages.
 Native gbrain writes (`gbrain capture`, `gbrain put`) update both the database
 and the on-disk vault files. If a write-through fails (disk error, permission
 issue), the command returns a non-zero exit and an error message; the vault
-files remain the user-facing artifact. Operators should inspect the vault if
-a write-through failure is reported.
+files remain the user-facing artifact. Native write-through does not commit the
+changed file. TaskNotes MCP supplies bounded local preflight and target commits;
+general native gbrain writes still follow their caller's normal Git workflow.
+Operators should inspect the vault if a write-through failure is reported.
+
+### Optional native source hardening
+
+Pinned gbrain provides `gbrain sources harden` for GitHub-backed sources, but
+Josemar does not use that topology. The vault is synchronized as files through
+Syncthing, has no Git remote consumer, and `josemar-gbrain refresh` passes
+`--no-pull`. The TaskNotes adapter commits locally with hooks disabled and never
+pushes. A future remote-backed vault would be a separate integration requiring
+explicit design and validation.
 
 ## Doctor Warns in No-Embedding Mode
 

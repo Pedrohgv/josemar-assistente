@@ -22,26 +22,27 @@ Markdown/frontmatter, body edit, or arbitrary tag replacement API.
 Repo deployment does not apply these changes automatically. Complete all of
 them before enabling task mutations in production.
 
-### 1. Server-local vault Git history
+### 1. Verify the existing gbrain Git repository
 
-`$GBRAIN_BRAIN_REPO` must be an initialized Git repository with a valid `HEAD`.
-This history is a local transaction journal for the adapter; it is not the
-private agent-state repository and does not need a remote.
+Native gbrain sync already requires `$GBRAIN_BRAIN_REPO` to be a Git repository
+with a valid `HEAD`. A Josemar vault that has completed `josemar-gbrain reindex`
+or a periodic refresh already satisfies this requirement; the TaskNotes adapter
+reuses that history and does not introduce a second repository. Do not
+reinitialize an existing vault. This repository is local-only gbrain
+infrastructure: Josemar does not publish it, pull from it, or use it as a remote
+backup channel.
 
-For a new local history, review the vault contents first, then initialize and
-create the first commit as the Hermes runtime user. Do not run this blindly on
-an existing repository.
+Verify the current repository as the Hermes runtime user:
 
 ```bash
-docker compose exec hermes su -s /bin/sh hermes -c '
-  git -C "$GBRAIN_BRAIN_REPO" init &&
-  git -C "$GBRAIN_BRAIN_REPO" add -A &&
-  git -C "$GBRAIN_BRAIN_REPO" \
-    -c user.name=tasknotes-mcp \
-    -c user.email=tasknotes-mcp@local \
-    commit -m "Initialize local vault history"
-'
+docker compose exec hermes su -s /bin/sh hermes -c \
+  'git -C "$GBRAIN_BRAIN_REPO" rev-parse --is-inside-work-tree &&
+   git -C "$GBRAIN_BRAIN_REPO" rev-parse --verify HEAD'
 ```
+
+Only a new greenfield vault that has never completed native gbrain activation
+needs Git initialization and an initial commit. That setup belongs to gbrain
+activation, not TaskNotes activation.
 
 ### 2. Exclude `.git/` from Syncthing
 
@@ -83,10 +84,13 @@ The adapter passes that source ID explicitly to every get, put, and sync.
 
 ## Runtime behavior
 
-Before a mutation, the adapter takes `/opt/data/.locks/tasknotes.lock`, commits
-pending vault edits, and runs incremental source-scoped gbrain sync. It then
-performs one whole-page gbrain put, verifies both gbrain and the on-disk task,
-and commits only the target task file.
+Gbrain uses Git `HEAD` and its stored `last_commit` as the native incremental
+sync boundary. Native gbrain write-through updates the database and Markdown
+file but does not create a Git commit. The TaskNotes adapter fills that local
+commit gap: before a mutation, it takes `/opt/data/.locks/tasknotes.lock`,
+commits pending vault edits, and runs incremental source-scoped gbrain sync. It
+then performs one whole-page gbrain put, verifies both gbrain and the on-disk
+task, and commits only the target task file.
 
 The periodic `gbrain-refresh` cron uses the same lock nonblockingly. If a task
 operation holds the lock, refresh logs a skip and exits successfully rather
@@ -96,6 +100,15 @@ process (default `240` seconds).
 Hermes registers the server from `config/hermes-config.yaml` with parallel tool
 calls disabled. One author at a time per task file remains an operating rule;
 do not mutate the same task concurrently from Obsidian and chat.
+
+### Native gbrain durability hardening
+
+Pinned gbrain also offers an optional `gbrain sources harden` topology for
+GitHub-backed sources, but it is not part of Josemar's supported deployment.
+Josemar's vault repository has no remote consumer, refresh deliberately uses
+`--no-pull`, and the adapter creates local commits with hooks disabled. It never
+pulls or pushes. Any future remote-backed vault would require a separate design
+and validation effort rather than enabling native hardening implicitly.
 
 ## Mutation outcomes
 
@@ -130,7 +143,8 @@ Never remove the marker merely to retry a failed call.
 ## Maintenance
 
 Run periodic local Git garbage collection during a maintenance window, outside
-task mutations and gbrain refresh:
+task mutations and gbrain refresh. This maintains the same repository native
+gbrain already uses; it is not a separate TaskNotes repository:
 
 ```bash
 docker compose exec hermes su -s /bin/sh hermes -c \

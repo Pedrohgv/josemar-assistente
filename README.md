@@ -88,7 +88,7 @@ flowchart LR
   Backup --> Drive[Google Drive<br/>slot-1 ... slot-N]
 ```
 
-The vault persists in its own Docker volume, syncs through Syncthing, and is backed up by rotating rclone snapshots. The optional TaskNotes MCP requires server-local Git history as a transaction journal; that `.git/` directory must be excluded from Syncthing and is separate from agent-state versioning.
+The vault persists in its own Docker volume, syncs through Syncthing, and is backed up by rotating rclone snapshots. Native gbrain sync already uses local-only Git history; the TaskNotes MCP reuses it for safe automatic commits. The repository has no remote consumer, its `.git/` directory must be excluded from Syncthing, and it is separate from agent-state versioning.
 
 ## Quick Start
 
@@ -221,7 +221,7 @@ josemar-assistente/
 | --- | --- |
 | `hermes-data` | Hermes runtime state and the private state git worktree at `/opt/data`. Includes gbrain state at `/opt/data/.gbrain` (PGLite database, config, cache). Runtime-private files are ignored by the state repo. |
 | `aux-ml-shared` | Dedicated handoff volume for files intentionally shared with aux-ml. |
-| `obsidian-vault` | Obsidian notes and attachments. TaskNotes MCP deployments keep server-local Git history here, excluded from Syncthing. |
+| `obsidian-vault` | Obsidian notes and attachments plus local-only Git history required by native gbrain sync. The history has no remote consumer and `.git/` is excluded from Syncthing. |
 | `syncthing-config` | Syncthing identity and folder/device config. |
 | `tailscale-state` | Tailscale node identity and login state. |
 | `obsidian-rclone-config` | rclone config used by vault backup container. |
