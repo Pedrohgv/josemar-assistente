@@ -73,6 +73,8 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn("gbrain sources harden", text)
         self.assertIn("local-only gbrain", text)
         self.assertIn("pulls or pushes", text)
+        self.assertIn("Task naming convention", text)
+        self.assertIn("YYYY-MM-DD-HHmmss-slugified-title", text)
 
     def test_compose_passes_refresh_timeout(self) -> None:
         text = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")

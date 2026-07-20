@@ -117,6 +117,30 @@ Josemar's vault repository has no remote consumer, refresh deliberately uses
 pulls or pushes. Any future remote-backed vault would require a separate design
 and validation effort rather than enabling native hardening implicitly.
 
+## Task naming convention
+
+The adapter and the TaskNotes plugin use different filename generation
+strategies, but both produce gbrain-safe filenames that sort chronologically:
+
+- **Adapter-created tasks** (`task_create` without an explicit slug):
+  `YYYY-MM-DD-HHmmss-slugified-title` (e.g.
+  `2026-07-18-143000-buy-groceries.md`). The timestamp prefix ensures
+  chronological ordering. The slugified title (lowercased, hyphens, no spaces
+  or special characters) provides human readability and is safe for gbrain's
+  `put` command, which does not slugify the slug argument.
+
+- **Plugin-created tasks** (with `taskFilenameFormat: "timestamp"`):
+  `YYYY-MM-DD-HHmmss` (e.g. `2026-07-18-143000.md`). The plugin's `timestamp`
+  format is recommended so both adapter-created and plugin-created tasks sort
+  chronologically in the Obsidian file explorer.
+
+When `task_create` is called with an explicit slug, the slug must already be
+gbrain-safe (lowercase, hyphens, no spaces). The adapter does not slugify an
+explicitly provided slug.
+
+The title is always stored in frontmatter and is visible in the Obsidian UI
+regardless of the filename.
+
 ## Mutation outcomes
 
 - `applied_and_committed`: task and local Git commit verified.
