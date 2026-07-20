@@ -141,6 +141,35 @@ explicitly provided slug.
 The title is always stored in frontmatter and is visible in the Obsidian UI
 regardless of the filename.
 
+### Known gbrain slug limitation
+
+Gbrain's `put` command does not slugify the explicit slug argument — it only
+lowercases and rejects unsafe characters. Gbrain's `sync` command, however,
+does slugify file paths (lowercases, replaces spaces with hyphens, strips
+special characters). This means a file created by the plugin with spaces in its
+filename would be indexed under a different slug than the same content written
+via `gbrain put`. See <https://github.com/garrytan/gbrain/issues/3034>.
+
+The adapter avoids this mismatch by always generating gbrain-safe slugs
+(lowercase, hyphens, no spaces) for adapter-created tasks. The recommended
+plugin `taskFilenameFormat: "timestamp"` also produces gbrain-safe filenames.
+
+## Current limitations
+
+The adapter does not yet support:
+
+- **Custom user fields** (e.g. `pipeline_stage`): the plugin's `customUserFields`
+  are read from the profile but cannot be set via the MCP tools. This is planned.
+- **Recurrence rules**: TaskNotes supports native recurrence but the adapter
+  does not yet pass recurrence data through `task_create`. This is planned.
+- **Tag add/remove**: only the task-identification tag and archive tag are
+  managed automatically. Custom tags (e.g. `#cliente`) cannot be added or
+  removed via the MCP tools. This is planned.
+- **Search/filter**: `task_list` returns bounded metadata but does not support
+  filtering by tag, status, or custom field. This is planned.
+
+For these operations, suggest Obsidian or native gbrain (for non-task pages).
+
 ## Mutation outcomes
 
 - `applied_and_committed`: task and local Git commit verified.

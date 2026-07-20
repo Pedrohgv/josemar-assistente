@@ -54,10 +54,14 @@ class IntegrationContractTests(unittest.TestCase):
         ):
             self.assertIn(f"`{name}`", text)
         self.assertIn("Do not use native `gbrain", text)
-        self.assertIn("cron/reminder", text)
+        self.assertIn("Hermes cron", text)
         self.assertIn("One author at a time", text)
         self.assertIn("YYYY-MM-DD-HHmmss-slugified-title", text)
         self.assertIn("auto-generated", text)
+        self.assertIn("https://tasknotes.dev/", text)
+        self.assertIn("Plugin configuration", text)
+        self.assertIn("Custom user fields", text)
+        self.assertIn("native recurrence", text)
 
     def test_runbook_documents_external_prerequisites_and_recovery(self) -> None:
         text = (REPO_ROOT / "docs" / "tasknotes-mcp.md").read_text(encoding="utf-8")
@@ -75,6 +79,10 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn("pulls or pushes", text)
         self.assertIn("Task naming convention", text)
         self.assertIn("YYYY-MM-DD-HHmmss-slugified-title", text)
+        self.assertIn("issues/3034", text)
+        self.assertIn("Current limitations", text)
+        self.assertIn("Custom user fields", text)
+        self.assertIn("Recurrence rules", text)
 
     def test_compose_passes_refresh_timeout(self) -> None:
         text = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
