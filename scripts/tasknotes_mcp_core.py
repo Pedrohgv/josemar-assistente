@@ -123,6 +123,47 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _TAG_RE = re.compile(r"^[^\s\x00-\x1f\x7f]+$")  # non-empty, no whitespace/control
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# Slug generation: timestamp prefix + slugified title.
+_SLUGIFY_RE = re.compile(r"[^a-z0-9]+")
+
+
+def slugify_title(title: str) -> str:
+    """Slugify a human-readable title into a gbrain-safe slug segment.
+
+    Lowercases, replaces non-alphanumeric runs with single hyphens,
+    strips leading/trailing hyphens. Returns an empty string if the
+    title contains no alphanumeric characters.
+    """
+    slugified = _SLUGIFY_RE.sub("-", title.lower().strip())
+    slugified = slugified.strip("-")
+    if len(slugified) > MAX_SLUG_LEN // 2:
+        slugified = slugified[: MAX_SLUG_LEN // 2].rstrip("-")
+    return slugified
+
+
+def generate_slug(title: str, *, tz: str = "UTC") -> str:
+    """Generate a task slug from a title and the current timestamp.
+
+    Format: ``YYYY-MM-DD-HHmmss-slugified-title``. The timestamp prefix
+    ensures chronological ordering by filename. The slugified title
+    provides human readability. If the title has no alphanumeric content,
+    the slug is just the timestamp.
+
+    Examples:
+        "Buy Groceries" → "2026-07-18-143000-buy-groceries"
+        "Review Q3 Report!" → "2026-07-18-143000-review-q3-report"
+        "日本語" → "2026-07-18-143000" (no ASCII alphanumeric content)
+    """
+    timestamp = datetime.datetime.now(_get_zoneinfo(tz)).strftime("%Y-%m-%d-%H%M%S")
+    title_slug = slugify_title(title)
+    if title_slug:
+        slug = f"{timestamp}-{title_slug}"
+    else:
+        slug = timestamp
+    if len(slug) > MAX_SLUG_LEN:
+        slug = slug[:MAX_SLUG_LEN].rstrip("-")
+    return slug
+
 # Pinned gbrain timeline sentinel (markdown.ts: `<!-- timeline -->`).
 TIMELINE_SENTINEL = "<!-- timeline -->"
 
@@ -1924,21 +1965,18 @@ def validate_projects(value: Any) -> List[str]:
     return out
 
 
+def _get_zoneinfo(tzname: str) -> datetime.tzinfo:
+    """Return a tzinfo for the given timezone name, falling back to UTC."""
+    try:
+        import zoneinfo  # type: ignore
+        return zoneinfo.ZoneInfo(tzname or "UTC")  # type: ignore
+    except Exception:
+        return datetime.timezone.utc
+
+
 def today_in_tz(tz: str) -> str:
     """Return today's date as YYYY-MM-DD in the configured TZ."""
-    try:
-        zone = datetime.timezone(datetime.timedelta(hours=0))
-        # Use the TZ env var if available; fall back to UTC.
-        tzname = tz or "UTC"
-        # datetime.datetime.now with a tz from zoneinfo if available.
-        try:
-            import zoneinfo  # type: ignore
-            zone = zoneinfo.ZoneInfo(tzname)  # type: ignore
-        except Exception:
-            zone = datetime.timezone.utc
-        return datetime.datetime.now(zone).strftime("%Y-%m-%d")
-    except Exception:
-        return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    return datetime.datetime.now(_get_zoneinfo(tz)).strftime("%Y-%m-%d")
 
 
 # ---------------------------------------------------------------------------
@@ -2188,7 +2226,7 @@ class TaskNotesEngine:
 
     def create(
         self,
-        slug: str,
+        slug: Optional[str],
         title: str,
         *,
         status: Optional[str] = None,
@@ -2199,8 +2237,14 @@ class TaskNotesEngine:
         tags: Optional[List[str]] = None,
         body: str = "",
     ) -> MutationResult:
-        """Create a new task. Rejects completed status and archive tag."""
+        """Create a new task. Rejects completed status and archive tag.
+
+        When ``slug`` is ``None``, a slug is auto-generated from the title
+        and current timestamp (``YYYY-MM-DD-HHmmss-slugified-title``).
+        """
         # Input validation BEFORE preflight (no side effects).
+        if slug is None:
+            slug = generate_slug(title, tz=self.tz)
         validate_slug(slug)
         title = validate_title(title)
         body = validate_body(body)

@@ -24,8 +24,11 @@ priority, dates, projects, completion, or archival.
 
 ## Tools
 
-- `task_create`: create one task. Generate an immutable lowercase slug such as
-  `20260718t143000`; add a short lowercase suffix if a collision occurs.
+- `task_create`: create one task. The slug is optional; when omitted, a
+  timestamp-prefixed slug is auto-generated from the title
+  (e.g. `2026-07-18-143000-buy-groceries`). When provided, the slug must be
+  lowercase with no spaces or special characters (hyphens and underscores
+  allowed). Slugs are immutable after creation.
 - `task_get`: read one task by slug.
 - `task_list`: list structured task metadata with a bounded result count.
 - `task_update`: change only status, priority, due date, scheduled date, or
@@ -37,6 +40,20 @@ priority, dates, projects, completion, or archival.
 Dates must use `YYYY-MM-DD`. Keep slugs lowercase and treat them as immutable.
 Use the status and priority values accepted by the current TaskNotes profile;
 if the profile rejects a value, report that constraint instead of guessing.
+
+## Naming convention
+
+Adapter-created tasks use the format `YYYY-MM-DD-HHmmss-slugified-title`
+(e.g. `2026-07-18-143000-buy-groceries`). The timestamp prefix ensures
+chronological ordering by filename. The slugified title provides human
+readability. This matches gbrain's slug constraints (lowercase, hyphens, no
+spaces) and is consistent with the TaskNotes plugin's `timestamp` filename
+format (`2026-07-18-143000`), so both adapter-created and plugin-created tasks
+sort chronologically in the file explorer.
+
+When `task_create` is called without a slug, the adapter generates one
+automatically. When a slug is provided explicitly, it must already be
+gbrain-safe (lowercase, hyphens, no spaces).
 
 ## Boundaries
 

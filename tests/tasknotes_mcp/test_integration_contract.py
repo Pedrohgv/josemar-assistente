@@ -56,6 +56,8 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn("Do not use native `gbrain", text)
         self.assertIn("cron/reminder", text)
         self.assertIn("One author at a time", text)
+        self.assertIn("YYYY-MM-DD-HHmmss-slugified-title", text)
+        self.assertIn("auto-generated", text)
 
     def test_runbook_documents_external_prerequisites_and_recovery(self) -> None:
         text = (REPO_ROOT / "docs" / "tasknotes-mcp.md").read_text(encoding="utf-8")

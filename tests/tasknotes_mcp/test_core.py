@@ -824,6 +824,34 @@ class PathTests(unittest.TestCase):
         with self.assertRaises(self.core.PathError):
             self.core.validate_slug("a" * 201)
 
+    def test_slugify_title_basic(self) -> None:
+        self.assertEqual(self.core.slugify_title("Buy Groceries"), "buy-groceries")
+        self.assertEqual(self.core.slugify_title("Review Q3 Report!"), "review-q3-report")
+        self.assertEqual(self.core.slugify_title("  trim  "), "trim")
+        self.assertEqual(self.core.slugify_title("multiple   spaces"), "multiple-spaces")
+
+    def test_slugify_title_empty(self) -> None:
+        self.assertEqual(self.core.slugify_title("日本語"), "")
+        self.assertEqual(self.core.slugify_title("!!!"), "")
+        self.assertEqual(self.core.slugify_title(""), "")
+
+    def test_generate_slug_format(self) -> None:
+        slug = self.core.generate_slug("Buy Groceries", tz="UTC")
+        # Format: YYYY-MM-DD-HHmmss-buy-groceries
+        self.assertRegex(slug, r"^\d{4}-\d{2}-\d{2}-\d{6}-buy-groceries$")
+        # Must pass validation
+        self.core.validate_slug(slug)
+
+    def test_generate_slug_no_alphanumeric_title(self) -> None:
+        slug = self.core.generate_slug("日本語", tz="UTC")
+        self.assertRegex(slug, r"^\d{4}-\d{2}-\d{2}-\d{6}$")
+        self.core.validate_slug(slug)
+
+    def test_generate_slug_long_title_truncated(self) -> None:
+        long_title = "a" * 300
+        slug = self.core.generate_slug(long_title, tz="UTC")
+        self.assertLessEqual(len(slug), self.core.MAX_SLUG_LEN)
+
 
 @unittest.skipUnless(_has_yaml(), "PyYAML required")
 class GitTests(unittest.TestCase):

@@ -86,7 +86,6 @@ def _engine_call(operation: str, method: str, *args: Any, **kwargs: Any) -> Any:
 
 @mcp.tool(structured_output=True)
 def task_create(
-    slug: str,
     title: str,
     status: Optional[str] = None,
     priority: Optional[str] = None,
@@ -95,8 +94,9 @@ def task_create(
     projects: Optional[list[str]] = None,
     tags: Optional[list[str]] = None,
     body: str = "",
+    slug: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Create one task. Slug is immutable; dates use YYYY-MM-DD."""
+    """Create one task. When slug is omitted, a timestamp-prefixed slug is auto-generated from the title (e.g. 2026-07-18-143000-buy-groceries). Dates use YYYY-MM-DD."""
     result = _engine_call(
         "task_create",
         "create",

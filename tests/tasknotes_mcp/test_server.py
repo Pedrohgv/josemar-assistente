@@ -92,7 +92,6 @@ class ServerContractTests(unittest.TestCase):
             state="applied_and_committed", slug="t1", commit_id="abc"
         )
         result = self.server.task_create(
-            "t1",
             "Task",
             status="open",
             priority="normal",
@@ -100,6 +99,7 @@ class ServerContractTests(unittest.TestCase):
             projects=["home"],
             tags=["next"],
             body="Details",
+            slug="t1",
         )
         self.assertEqual(
             result,
@@ -115,6 +115,28 @@ class ServerContractTests(unittest.TestCase):
             projects=["home"],
             tags=["next"],
             body="Details",
+        )
+
+    def test_create_auto_generates_slug_when_omitted(self) -> None:
+        self.engine.create.return_value = self.server.MutationResult(
+            state="applied_and_committed", slug="auto-slug", commit_id="abc"
+        )
+        result = self.server.task_create(
+            "Buy Groceries",
+            status="open",
+        )
+        self.assertEqual(result["state"], "applied_and_committed")
+        # Engine receives None as slug (auto-generation happens in engine).
+        self.engine.create.assert_called_once_with(
+            None,
+            "Buy Groceries",
+            status="open",
+            priority=None,
+            due=None,
+            scheduled=None,
+            projects=None,
+            tags=None,
+            body="",
         )
 
     def test_update_forwards_only_supported_fields(self) -> None:
