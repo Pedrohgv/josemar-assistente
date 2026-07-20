@@ -58,14 +58,21 @@ the profile differs. Required settings are:
 
 - task identification method: `tag`, with a non-empty task tag;
 - an existing lowercase relative tasks folder with no symlink components;
-- `storeTitleInFilename: false`;
-- `taskFilenameFormat: zettel`;
-- `moveArchivedTasks: false`;
 - exactly one completed custom status and valid default status;
 - valid custom priorities and default priority;
 - unique, non-conflicting mappings for title, status, priority, due, scheduled,
   projects, and completed date;
 - a valid archive tag different from the task-identification tag.
+
+The adapter is config-adaptive for other plugin settings:
+
+- `storeTitleInFilename` and `taskFilenameFormat` do not affect adapter-created
+  tasks because gbrain writes files with explicit slugs and the frontmatter
+  title always takes precedence over filename-based extraction.
+- `moveArchivedTasks` is supported. When true, the adapter reads `archiveFolder`
+  and checks both the tasks folder and the archive folder for `task_get`,
+  `task_update`, and read-back verification. The plugin moves archived files
+  asynchronously; the adapter handles whichever location the file is in.
 
 The adapter reads `.obsidian/plugins/tasknotes/manifest.json` and `data.json`
 dynamically. Unsupported or changed settings produce a tool error before Git or

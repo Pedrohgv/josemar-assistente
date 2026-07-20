@@ -64,6 +64,8 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn("reinitialize an existing vault", text)
         self.assertIn("Exclude `.git/` from Syncthing", text)
         self.assertIn("TaskNotes `4.11.1`", text)
+        self.assertIn("config-adaptive", text)
+        self.assertIn("moveArchivedTasks` is supported", text)
         self.assertIn("tasknotes-recovery.marker", text)
         self.assertIn("git -C \"$GBRAIN_BRAIN_REPO\" gc", text)
         self.assertIn("gbrain sources harden", text)

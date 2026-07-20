@@ -230,6 +230,8 @@ class TaskNotesProfile:
     source_id: Optional[str]
     raw_manifest: Mapping[str, Any]
     raw_data: Mapping[str, Any]
+    move_archived_tasks: bool = False
+    archive_folder: Optional[str] = None
 
 
 def _read_json_from_directory(directory_fd: int, name: str) -> Mapping[str, Any]:
@@ -270,6 +272,49 @@ def _validate_tasks_folder(value: Any, vault: Path) -> str:
             "tasksFolder must already exist inside the vault without symlinks"
         ) from exc
     os.close(fd)
+    return value
+
+
+def _validate_archive_folder(value: Any, vault: Path) -> str:
+    """Validate ``archiveFolder``: same constraints as tasksFolder but may not exist yet.
+
+    The plugin creates the archive folder on first archive move. If it does
+    not exist yet, the adapter accepts it as long as the path is a valid
+    relative path inside the vault with no symlink components on existing
+    parents.
+    """
+    if not isinstance(value, str) or not value:
+        raise ProfileIncompatible("archiveFolder must be a non-empty string")
+    if value != value.lower():
+        raise ProfileIncompatible("archiveFolder must be lowercase")
+    if value.startswith("/"):
+        raise ProfileIncompatible("archiveFolder must be relative (no leading '/')")
+    if "\\" in value:
+        raise ProfileIncompatible("archiveFolder must not contain backslash")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in value):
+        raise ProfileIncompatible("archiveFolder must not contain control characters")
+    parts = value.split("/")
+    for part in parts:
+        if part in ("", ".", ".."):
+            raise ProfileIncompatible("archiveFolder must not contain traversal segments")
+    # Check that existing parent components are not symlinks. The final
+    # component may not exist yet (the plugin creates it on first move).
+    try:
+        resolved = (vault / value).resolve()
+        vault_resolved = vault.resolve()
+        resolved.relative_to(vault_resolved)
+    except ValueError:
+        raise ProfileIncompatible("archiveFolder escapes the vault")
+    # If the folder exists, validate it with no-follow (same as tasksFolder).
+    candidate = vault / value
+    if candidate.is_dir():
+        try:
+            fd = _open_relative_directory_no_follow(vault, value)
+        except PathError as exc:
+            raise ProfileIncompatible(
+                "archiveFolder must not contain symlink components"
+            ) from exc
+        os.close(fd)
     return value
 
 
@@ -446,15 +491,24 @@ def load_profile(
     # tasksFolder.
     tasks_folder = _validate_tasks_folder(data.get("tasksFolder"), vault)
 
-    # Filename settings.
-    if data.get("storeTitleInFilename") is not False:
-        raise ProfileIncompatible("storeTitleInFilename must be false")
-    if data.get("taskFilenameFormat") != "zettel":
-        raise ProfileIncompatible("taskFilenameFormat must be 'zettel'")
+    # Filename settings: the adapter writes files via gbrain with explicit
+    # slugs, so the plugin's filename generation does not apply to adapter-
+    # created tasks. The frontmatter title always takes precedence over
+    # filename-based title extraction, so storeTitleInFilename does not
+    # affect adapter-created tasks either. No hard requirement here.
 
-    # Archive settings.
-    if data.get("moveArchivedTasks") is not False:
-        raise ProfileIncompatible("moveArchivedTasks must be false")
+    # Archive settings: moveArchivedTasks is config-adaptive. When true, the
+    # plugin moves archived tasks to archiveFolder. The adapter reads
+    # archiveFolder and handles both locations.
+    move_archived = bool(data.get("moveArchivedTasks", False))
+    archive_folder: Optional[str] = None
+    if move_archived:
+        raw_archive_folder = data.get("archiveFolder")
+        if not isinstance(raw_archive_folder, str) or not raw_archive_folder:
+            raise ProfileIncompatible(
+                "moveArchivedTasks is true but archiveFolder is not set"
+            )
+        archive_folder = _validate_archive_folder(raw_archive_folder, vault)
 
     # Statuses (customStatuses).
     statuses, completed_status = _validate_statuses(data.get("customStatuses"))
@@ -509,6 +563,8 @@ def load_profile(
         source_id=None,  # set by verify_gbrain_source under lock
         raw_manifest=manifest,
         raw_data=data,
+        move_archived_tasks=move_archived,
+        archive_folder=archive_folder,
     )
 
 
@@ -642,9 +698,34 @@ def resolve_gbrain_slug(profile: TaskNotesProfile, slug: str) -> str:
 def resolve_task_path(
     vault: Path, profile: TaskNotesProfile, slug: str
 ) -> Path:
-    """Return the on-disk task path (logical; does not follow symlinks)."""
+    """Return the primary on-disk task path (in the tasks folder).
+
+    Does not follow symlinks. For archived tasks that may have been moved
+    by the plugin to the archive folder, use :func:`resolve_task_path_any`.
+    """
     validate_slug(slug)
     return vault / profile.tasks_folder / f"{slug}.md"
+
+
+def resolve_task_path_any(
+    vault: Path, profile: TaskNotesProfile, slug: str
+) -> Optional[Path]:
+    """Return the on-disk task path, checking tasks folder then archive folder.
+
+    When ``moveArchivedTasks`` is true, the plugin may have moved an
+    archived task to ``archiveFolder``. This helper checks both locations
+    and returns the first existing path (no-follow). Returns ``None`` if
+    the task file does not exist in either location.
+    """
+    validate_slug(slug)
+    primary = vault / profile.tasks_folder / f"{slug}.md"
+    if target_exists_no_follow(primary):
+        return primary
+    if profile.move_archived_tasks and profile.archive_folder:
+        archived = vault / profile.archive_folder / f"{slug}.md"
+        if target_exists_no_follow(archived):
+            return archived
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1559,13 +1640,34 @@ def semantic_from_disk(
     ``PathError`` if the path is a symlink or escapes, ``CoreError`` if
     the file is too large, has no valid frontmatter, or is missing the
     task tag.
+
+    When ``moveArchivedTasks`` is true, checks the tasks folder first,
+    then the archive folder.
     """
     validate_slug(slug)
-    directory_fd = _open_relative_directory_no_follow(vault, profile.tasks_folder)
+    # Try the tasks folder first.
+    folder = profile.tasks_folder
     try:
-        text = _read_directory_entry_no_follow(
-            directory_fd, f"{slug}.md", max_size=max_size
-        )
+        directory_fd = _open_relative_directory_no_follow(vault, folder)
+    except PathError:
+        if not profile.move_archived_tasks or not profile.archive_folder:
+            raise
+        directory_fd = _open_relative_directory_no_follow(vault, profile.archive_folder)
+        folder = profile.archive_folder
+    try:
+        try:
+            text = _read_directory_entry_no_follow(
+                directory_fd, f"{slug}.md", max_size=max_size
+            )
+        except PathError:
+            if not profile.move_archived_tasks or not profile.archive_folder or folder == profile.archive_folder:
+                raise
+            os.close(directory_fd)
+            directory_fd = _open_relative_directory_no_follow(vault, profile.archive_folder)
+            folder = profile.archive_folder
+            text = _read_directory_entry_no_follow(
+                directory_fd, f"{slug}.md", max_size=max_size
+            )
     finally:
         os.close(directory_fd)
     fm, raw_body = _parse_frontmatter(text)
@@ -1968,10 +2070,10 @@ class TaskNotesEngine:
 
     def _mutation_pre_put_guard(self, profile: TaskNotesProfile, slug: str) -> None:
         """Update/complete/archive pre-put guard: target must exist and be Git-clean; profile hash re-read."""
-        target = resolve_task_path(self.vault, profile, slug)
+        target = resolve_task_path_any(self.vault, profile, slug)
         # Target must exist (no-follow).
-        if not target_exists_no_follow(target):
-            raise ValidationError(f"target does not exist on disk: {target}")
+        if target is None:
+            raise ValidationError(f"target does not exist on disk: {slug}")
         # Target must be Git-clean.
         if not git_target_clean(self.vault, target, self._git_env):
             raise ValidationError(f"target has uncommitted changes: {target}")
@@ -2042,8 +2144,10 @@ class TaskNotesEngine:
             )
         except Exception:
             return self._recover_from_disk_failure(profile, slug, gbrain_slug)
-        # Commit target.
-        target = resolve_task_path(self.vault, profile, slug)
+        # Commit target (may be in archive folder if the plugin moved it).
+        target = resolve_task_path_any(self.vault, profile, slug)
+        if target is None:
+            target = resolve_task_path(self.vault, profile, slug)
         try:
             git_commit_target(self.vault, target, self._git_env)
         except Exception:

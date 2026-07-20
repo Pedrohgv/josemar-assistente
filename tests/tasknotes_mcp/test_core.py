@@ -532,26 +532,45 @@ class ProfileTests(unittest.TestCase):
         with self.assertRaises(self.core.ProfileIncompatible):
             self.core.load_profile(self.vault, self.vault)
 
-    def test_store_title_in_filename_must_be_false(self) -> None:
+    def test_store_title_in_filename_accepted(self) -> None:
         d = copy.deepcopy(REAL_PROFILE_DATA)
         d["storeTitleInFilename"] = True
         _write_profile(self.vault, data=d)
-        with self.assertRaises(self.core.ProfileIncompatible):
-            self.core.load_profile(self.vault, self.vault)
+        profile = self.core.load_profile(self.vault, self.vault)
+        self.assertEqual(profile.version, "4.11.1")
 
-    def test_filename_format_must_be_zettel(self) -> None:
+    def test_custom_filename_format_accepted(self) -> None:
         d = copy.deepcopy(REAL_PROFILE_DATA)
         d["taskFilenameFormat"] = "custom"
         _write_profile(self.vault, data=d)
-        with self.assertRaises(self.core.ProfileIncompatible):
-            self.core.load_profile(self.vault, self.vault)
+        profile = self.core.load_profile(self.vault, self.vault)
+        self.assertEqual(profile.version, "4.11.1")
 
-    def test_move_archived_must_be_false(self) -> None:
+    def test_move_archived_tasks_true_accepted_with_archive_folder(self) -> None:
         d = copy.deepcopy(REAL_PROFILE_DATA)
         d["moveArchivedTasks"] = True
+        d["archiveFolder"] = "tasks/archive"
+        _write_profile(self.vault, data=d)
+        (self.vault / "tasks" / "archive").mkdir(exist_ok=True)
+        profile = self.core.load_profile(self.vault, self.vault)
+        self.assertTrue(profile.move_archived_tasks)
+        self.assertEqual(profile.archive_folder, "tasks/archive")
+
+    def test_move_archived_tasks_true_rejected_without_archive_folder(self) -> None:
+        d = copy.deepcopy(REAL_PROFILE_DATA)
+        d["moveArchivedTasks"] = True
+        del d["archiveFolder"]
         _write_profile(self.vault, data=d)
         with self.assertRaises(self.core.ProfileIncompatible):
             self.core.load_profile(self.vault, self.vault)
+
+    def test_move_archived_tasks_false_ignores_archive_folder(self) -> None:
+        d = copy.deepcopy(REAL_PROFILE_DATA)
+        d["moveArchivedTasks"] = False
+        _write_profile(self.vault, data=d)
+        profile = self.core.load_profile(self.vault, self.vault)
+        self.assertFalse(profile.move_archived_tasks)
+        self.assertIsNone(profile.archive_folder)
 
     def test_uppercase_tasks_folder_rejected(self) -> None:
         d = copy.deepcopy(REAL_PROFILE_DATA)
