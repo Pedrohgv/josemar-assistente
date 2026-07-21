@@ -1,10 +1,12 @@
 """Contract tests for the repo-owned browser-control skill.
 
-The skill is instruction-only (a SKILL.md with no executable) and is registered
-only by the optional docker-compose.browser-control.yml overlay via a read-only
-bind mount on the `hermes` service. These tests enforce the agreed design:
-valid frontmatter with required tools, generic operator-agnostic wording, the
-native workflow/safety/recovery guidance, and overlay-only read-only mounting.
+The skill is instruction-only (SKILL.md + SETUP.md, no executable) and is
+baked into the Hermes image so it is always registered, regardless of
+whether the browser-control Compose overlay is enabled. The overlay gates the
+tunnel sidecar and network, not the skill. These tests enforce the agreed
+design: valid frontmatter with required tools, generic operator-agnostic
+wording in SKILL.md (operator-specific setup content lives in SETUP.md),
+the native workflow/safety/recovery guidance, and image-baked registration.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from .helpers import ComposeRuntime
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL_DIR = REPO_ROOT / "skills-factory" / "browser-control"
 SKILL_MD = SKILL_DIR / "SKILL.md"
+SETUP_MD = SKILL_DIR / "SETUP.md"
 DOCKERFILE = REPO_ROOT / "Dockerfile.hermes"
 BASE_COMPOSE = REPO_ROOT / "docker-compose.yml"
 OVERLAY = REPO_ROOT / "docker-compose.browser-control.yml"
@@ -61,8 +64,10 @@ def parse_frontmatter(text: str) -> dict:
 
 
 # Operator-specific / unsupported strings that must not leak into the
-# LLM-facing skill. Includes the unsupported `browser_select` tool (pinned
-# Hermes exposes navigate/snapshot/click/type/scroll/back/press/get_images/
+# LLM-facing SKILL.md (runtime-driving guidance). Operator-specific setup
+# content lives in SETUP.md, which has its own content contract. Includes
+# the unsupported `browser_select` tool (pinned Hermes exposes
+# navigate/snapshot/click/type/scroll/back/press/get_images/
 # vision/console/cdp/dialog, not select).
 FORBIDDEN_SKILL_STRINGS = [
     "Josemar Browser", "josemar-browser-control", ".josemar-chrome-profile",
@@ -74,7 +79,7 @@ FORBIDDEN_SKILL_STRINGS = [
     "--remote-debugging-port", "0.0.0.0", "browser_select",
 ]
 
-# Required substrings in the skill body, grouped by concern. Each entry is
+# Required substrings in the SKILL.md body, grouped by concern. Each entry is
 # (label, needle) so failures name the missing concept, not just the string.
 REQUIRED_SKILL_STRINGS = [
     ("headful external browser", "externally connected"),
@@ -100,7 +105,34 @@ REQUIRED_SKILL_STRINGS = [
     ("task scoping", "scope"),
     ("task scoping", "unrelated"),
     ("instruction-only/repo-owned", "instruction-only"),
-    ("overlay gates guidance not tools", "not registered"),
+    ("soft-gate: always registered", "always registered"),
+    ("soft-gate: overlay gates tunnel not skill", "overlay gates"),
+    ("setup pointer", "setup.md"),
+]
+
+# Required substrings in SETUP.md. Operator-specific setup content that is
+# forbidden in SKILL.md must be present here.
+REQUIRED_SETUP_STRINGS = [
+    ("ssh keypair generation", "ssh-keygen"),
+    ("ssh keypair path", "josemar_browser_tunnel"),
+    ("authorized key secret", "BROWSER_TUNNEL_AUTHORIZED_KEY"),
+    ("overlay enablement variable", "BROWSER_CONTROL_ENABLED"),
+    ("tailscale ACL", "tailscale"),
+    ("tailscale ACL dst port", "2222"),
+    ("chrome version requirement", "136"),
+    ("linux mint launcher", "josemar-browser-control"),
+    ("dedicated chrome profile", ".josemar-chrome-profile"),
+    ("cdp verification", "/json/version"),
+    ("disable/rollback", "BROWSER_CONTROL_ENABLED=false"),
+    ("dedicated profile warning", "dedicated"),
+]
+
+# SETUP.md must not duplicate the runtime-driving workflow guidance that
+# belongs in SKILL.md. Keep setup focused on first-time enablement.
+FORBIDDEN_SETUP_STRINGS = [
+    "snapshot first",
+    "re-snapshot",
+    "prompt-injection",
 ]
 
 # Affirmative headless phrasings the skill must not use (negation like
@@ -109,12 +141,16 @@ FORBIDDEN_HEADLESS_PHRASES = [
     "use the headless", "drive headless", "run headless", "launch headless",
 ]
 
-# False claims the skill must not make: the overlay gates registration of this
-# repo-owned guidance, not Hermes's built-in browser tool schemas.
+# False claims the skill must not make: the skill is always registered
+# (baked into the image), so claims that it disappears when the overlay is off
+# are wrong. The overlay gates the tunnel sidecar, not the skill.
 FORBIDDEN_SKILL_CLAIMS = [
     "browser_* tools are not available",
     "browser_* tools are unavailable",
     "documentation-only",
+    "not registered",
+    "is not registered",
+    "are not registered",
 ]
 
 
@@ -126,18 +162,21 @@ class BrowserControlSkillContractTests(unittest.TestCase):
         self.text = SKILL_MD.read_text(encoding="utf-8")
         self.lower = self.text.lower()
 
-    def test_skill_dir_has_only_skill_md(self) -> None:
+    def test_skill_dir_has_skill_md_and_setup_md(self) -> None:
         self.assertEqual(
             sorted(p.name for p in SKILL_DIR.iterdir()),
-            ["SKILL.md"],
+            ["SETUP.md", "SKILL.md"],
         )
+
+    def test_setup_md_exists(self) -> None:
+        self.assertTrue(SETUP_MD.is_file(), f"missing setup file: {SETUP_MD}")
 
     def test_frontmatter_fields_and_required_tools(self) -> None:
         if yaml is None:
             self.skipTest("PyYAML not available")
         data = parse_frontmatter(self.text)
         self.assertEqual(data.get("name"), "browser-control")
-        self.assertEqual(data.get("version"), "1.0.0")
+        self.assertEqual(data.get("version"), "1.1.0")
         desc = data.get("description")
         self.assertIsInstance(desc, str)
         assert isinstance(desc, str)
@@ -175,10 +214,15 @@ class BrowserControlSkillContractTests(unittest.TestCase):
                     f"missing required concept {label!r}: {needle!r}",
                 )
 
-    def test_skill_not_baked_into_image(self) -> None:
+    def test_skill_baked_into_image(self) -> None:
         dockerfile = DOCKERFILE.read_text(encoding="utf-8")
-        self.assertNotIn("COPY skills-factory/browser-control", dockerfile)
-        self.assertNotIn("skills/browser-control/browser-control", dockerfile)
+        # The browser-control skill is baked into the image (not overlay-
+        # mounted) so it is always registered and can guide first-time setup
+        # and self-diagnose when the overlay is disabled.
+        self.assertIn(
+            "COPY skills-factory/browser-control /opt/josemar/skills/browser-control",
+            dockerfile,
+        )
         # Other repo-owned skills are still baked in.
         for skill in ("gbrain", "aux-ml", "workspace-sync"):
             with self.subTest(skill=skill):
@@ -188,28 +232,54 @@ class BrowserControlSkillContractTests(unittest.TestCase):
                 )
 
 
+class BrowserControlSetupMdContractTests(unittest.TestCase):
+    """SETUP.md holds operator-specific first-time setup content."""
+
+    def setUp(self) -> None:
+        self.assertTrue(SETUP_MD.is_file(), f"missing setup file: {SETUP_MD}")
+        self.text = SETUP_MD.read_text(encoding="utf-8")
+        self.lower = self.text.lower()
+
+    def test_setup_md_teaches_required_concepts(self) -> None:
+        for label, needle in REQUIRED_SETUP_STRINGS:
+            with self.subTest(concept=label, needle=needle):
+                self.assertIn(
+                    needle.lower(), self.lower,
+                    f"missing required setup concept {label!r}: {needle!r}",
+                )
+
+    def test_setup_md_does_not_duplicate_runtime_guidance(self) -> None:
+        for needle in FORBIDDEN_SETUP_STRINGS:
+            with self.subTest(kind="forbidden in setup", needle=needle):
+                self.assertNotIn(
+                    needle.lower(), self.lower,
+                    f"runtime-driving guidance must stay in SKILL.md, not SETUP.md: {needle!r}",
+                )
+
+
 class BrowserControlComposeMountTests(unittest.TestCase):
-    """Skill is mounted only by the overlay, read-only, never by base/image."""
+    """Skill is baked into the image; the overlay must NOT bind-mount it."""
 
     def setUp(self) -> None:
         self.base = BASE_COMPOSE.read_text(encoding="utf-8")
         self.overlay = OVERLAY.read_text(encoding="utf-8")
 
-    def test_base_and_image_exclude_skill(self) -> None:
-        self.assertNotIn(SKILL_SOURCE, self.base)
-        self.assertNotIn(SKILL_TARGET, self.base)
+    def test_base_and_overlay_exclude_skill_bind_mount(self) -> None:
+        # No bind mount of the skill source in either base or overlay.
+        self.assertNotIn(f"{SKILL_SOURCE}:", self.base)
+        self.assertNotIn(f"{SKILL_SOURCE}:", self.overlay)
+        self.assertNotIn(f"{SKILL_TARGET}:ro", self.overlay)
+        self.assertNotIn(f"{SKILL_TARGET}:rw", self.overlay)
 
-    def test_overlay_hermes_mounts_skill_read_only(self) -> None:
-        block = service_block(self.overlay, "hermes")
-        self.assertIn(f"{SKILL_SOURCE}:{SKILL_TARGET}:ro", block)
-        # browser-tunnel sidecar must not mount the skill.
+    def test_overlay_browser_tunnel_does_not_mount_skill(self) -> None:
         tunnel = service_block(self.overlay, "browser-tunnel")
         self.assertNotIn(SKILL_SOURCE, tunnel)
         self.assertNotIn(SKILL_TARGET, tunnel)
 
 
 class BrowserControlRenderedComposeTests(unittest.TestCase):
-    """Rendered `docker compose config` proves base excludes and overlay :ro."""
+    """Rendered `docker compose config` proves neither base nor overlay
+    bind-mounts the skill (it is baked into the image)."""
 
     def setUp(self) -> None:
         if shutil.which("docker") is None:
@@ -237,24 +307,21 @@ class BrowserControlRenderedComposeTests(unittest.TestCase):
             )
         return proc.stdout
 
-    def test_rendered_base_excludes_and_overlay_includes_read_only(self) -> None:
+    def test_rendered_base_and_overlay_exclude_skill_bind_mount(self) -> None:
         base = self._render(with_overlay=False)
         self.assertNotIn(SKILL_SOURCE, base)
         self.assertNotIn(SKILL_TARGET, base)
 
         overlay = self._render(with_overlay=True)
-        self.assertIn("skills-factory/browser-control", overlay)
-        self.assertIn(SKILL_TARGET, overlay)
-        # `docker compose config` normalizes bind mounts to {source, target,
-        # read_only}; assert read_only: true near the skill target.
-        idx = overlay.find(f"target: {SKILL_TARGET}")
-        self.assertGreater(idx, -1, "skill target not found in rendered overlay")
-        self.assertIn("read_only: true", overlay[idx - 200 : idx + 200])
-        self.assertNotIn(f"{SKILL_TARGET}:rw", overlay)
+        # The skill is baked into the image; the overlay must not bind-mount
+        # the skill source directory.
+        self.assertNotIn(SKILL_SOURCE, overlay)
+        self.assertNotIn(SKILL_TARGET, overlay)
 
 
 class BrowserControlDocsAccuracyTests(unittest.TestCase):
-    """Docs must not claim built-in browser tools vanish when control is off."""
+    """Docs must reflect that the skill is baked in (always registered) and
+    that the overlay gates the tunnel sidecar, not the skill."""
 
     def setUp(self) -> None:
         self.assertTrue(DOCS.is_file(), f"missing docs: {DOCS}")
@@ -263,11 +330,15 @@ class BrowserControlDocsAccuracyTests(unittest.TestCase):
     def test_docs_accurate_about_disabled_deploy(self) -> None:
         self.assertNotIn(
             "will not attempt browser actions", self.docs,
-            "overlay gates this repo-owned skill/guidance, not built-in browser tools",
+            "overlay gates the tunnel sidecar, not built-in browser tools",
+        )
+        self.assertNotIn(
+            "not registered", self.docs,
+            "the skill is baked into the image and always registered; docs must not claim it disappears when the overlay is off",
         )
         self.assertIn(
-            "not registered", self.docs,
-            "docs should state the repo-owned skill/guidance is not registered when off",
+            "baked", self.docs,
+            "docs should state the repo-owned skill is baked into the image",
         )
 
 

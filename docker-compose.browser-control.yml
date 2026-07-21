@@ -9,15 +9,19 @@
 #     tailscale) with configurable static IPs,
 #   - browser-specific network attachments for hermes (alias
 #     `hermes-browser-tunnel`, static IP) and tailscale (static IP),
-#   - a read-only bind mount of `./skills-factory/browser-control` into
-#     `/opt/josemar/skills/browser-control` so the repo-owned browser-control
-#     skill (instruction-only) is registered only when the overlay is applied,
 #   - the `browser-tunnel` hardened OpenSSH reverse-tunnel sidecar under the
 #     `browser-control` profile, sharing Hermes's network namespace
 #     (network_mode: service:hermes),
 #   - the `browser-tunnel-state` volume for the persistent Ed25519 SSH host key,
 #   - the `browser-tunnel-authorized-keys` volume populated by the deploy
 #     workflow with the operator's SSH public key.
+#
+# The repo-owned browser-control skill is baked into the Hermes image
+# (see Dockerfile.hermes), so this overlay no longer bind-mounts it. The skill
+# is always registered; when this overlay is disabled, `browser_*` calls fail
+# at the CDP endpoint and the skill surfaces both "overlay disabled" and
+# "laptop client offline" as possible causes. See
+# skills-factory/browser-control/SKILL.md and SETUP.md.
 #
 # When browser control is disabled, this overlay is NOT applied; the base
 # docker-compose.yml alone is used. The base file keeps the always-present
@@ -28,14 +32,10 @@
 
 services:
   hermes:
-    # Conditionally mount the repo-owned browser-control skill
-    # (instruction-only, no executable) into
-    # /opt/josemar/skills/browser-control. This skill is NOT baked into the
-    # Hermes image (unlike gbrain/aux-ml/workspace-sync) so a base-only
-    # (disabled) deploy does not register it. Read-only bind mount; no
-    # credentials, no runtime writes.
-    volumes:
-      - ./skills-factory/browser-control:/opt/josemar/skills/browser-control:ro
+    # The repo-owned browser-control skill is baked into the image
+    # (Dockerfile.hermes), not bind-mounted here. The overlay only adds the
+    # browser-control network attachment so Tailscale Serve can forward
+    # tcp:2222 to the browser-tunnel sidecar.
     networks:
       josemar-network: null
       browser-control:

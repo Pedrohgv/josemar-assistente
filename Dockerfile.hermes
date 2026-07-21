@@ -112,6 +112,11 @@ COPY skills-factory/aux-ml /opt/josemar/skills/aux-ml
 COPY skills-factory/workspace-sync /opt/josemar/skills/workspace-sync
 COPY skills-factory/gbrain /opt/josemar/skills/gbrain
 COPY skills-factory/tasknotes /opt/josemar/skills/tasknotes
+# browser-control is baked in (not overlay-mounted) so Josemar can guide
+# first-time setup and self-diagnose when the overlay is disabled. The skill
+# is instruction-only (SKILL.md + SETUP.md, no executable); the overlay still
+# gates the tunnel sidecar and network, not the skill registration.
+COPY skills-factory/browser-control /opt/josemar/skills/browser-control
 RUN chmod +x /opt/josemar/skills/aux-ml/aux-ml \
     /opt/josemar/skills/workspace-sync/workspace-sync
 
