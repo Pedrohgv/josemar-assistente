@@ -33,9 +33,12 @@ priority, dates, projects, completion, or archival.
   lowercase with no spaces or special characters (hyphens and underscores
   allowed). Slugs are immutable after creation. Supports `custom_fields` for
   plugin-configured custom user fields (text, list, date, number, boolean,
-  link).
+  link) and `recurrence` for native TaskNotes recurrence rules (RFC 5545 RRULE
+  string, e.g. `FREQ=WEEKLY;BYDAY=MO,WE,FR`).
 - `task_get`: read one task by slug.
 - `task_list`: list structured task metadata with a bounded result count.
+  Supports optional filters: `status`, `priority`, `tag`, and `archived`
+  (combine with AND logic).
 - `task_update`: change only status, priority, due date, scheduled date,
   projects, or custom user fields. Use the explicit clear flags to remove
   optional fields. Pass `custom_fields` with `None` values to clear custom
@@ -104,10 +107,9 @@ config-adaptive:
 
 The adapter does not yet support:
 
-- Recurrence rules in `task_create`. TaskNotes supports native recurrence but
-  the adapter does not yet pass recurrence data through. This is planned.
-- Search/filter beyond `task_list` (no filtering by tag, status, or custom
-  field). This is planned.
+- Unarchive (removing the archive tag without a full unarchive workflow).
+- Delete, rename/move, title or body edits, bulk operations, raw frontmatter,
+  or inline-task conversion.
 
 ### Views (.base files)
 

@@ -83,8 +83,10 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn("YYYY-MM-DD-HHmmss-slugified-title", text)
         self.assertIn("issues/3034", text)
         self.assertIn("Current limitations", text)
-        self.assertIn("Recurrence rules", text)
-        self.assertIn("Search/filter", text)
+        self.assertIn("Unarchive", text)
+        self.assertIn("recurrence", text)
+        self.assertIn("status", text)
+        self.assertIn("archived", text)
 
     def test_compose_passes_refresh_timeout(self) -> None:
         text = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")

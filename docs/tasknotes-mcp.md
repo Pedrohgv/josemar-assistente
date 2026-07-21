@@ -160,10 +160,9 @@ plugin `taskFilenameFormat: "timestamp"` also produces gbrain-safe filenames.
 
 The adapter does not yet support:
 
-- **Recurrence rules**: TaskNotes supports native recurrence but the adapter
-  does not yet pass recurrence data through `task_create`. This is planned.
-- **Search/filter**: `task_list` returns bounded metadata but does not support
-  filtering by tag, status, or custom field. This is planned.
+- **Unarchive**: removing the archive tag without a full unarchive workflow.
+- **Delete, rename/move, title/body edits, bulk operations, raw frontmatter,
+  inline-task conversion**: these operations are not exposed via the MCP tools.
 
 For these operations, suggest Obsidian or native gbrain (for non-task pages).
 

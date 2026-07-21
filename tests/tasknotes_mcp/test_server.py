@@ -118,6 +118,7 @@ class ServerContractTests(unittest.TestCase):
             tags=["next"],
             body="Details",
             custom_fields=None,
+            recurrence=None,
         )
 
     def test_create_auto_generates_slug_when_omitted(self) -> None:
@@ -141,6 +142,7 @@ class ServerContractTests(unittest.TestCase):
             tags=None,
             body="",
             custom_fields=None,
+            recurrence=None,
         )
 
     def test_update_forwards_only_supported_fields(self) -> None:
@@ -182,6 +184,7 @@ class ServerContractTests(unittest.TestCase):
             tags=None,
             body="",
             custom_fields={"pipeline_stage": "drafting"},
+            recurrence=None,
         )
 
     def test_update_forwards_custom_fields(self) -> None:
@@ -245,7 +248,13 @@ class ServerContractTests(unittest.TestCase):
         self.assertEqual(
             self.server.task_list(25), [{"slug": "t1", "title": "Task"}]
         )
-        self.engine.list.assert_called_once_with(max_results=25)
+        self.engine.list.assert_called_once_with(
+            max_results=25,
+            status=None,
+            priority=None,
+            tag=None,
+            archived=None,
+        )
 
     def test_engine_uses_runtime_environment(self) -> None:
         setattr(self.server, "_ENGINE", None)

@@ -1385,6 +1385,44 @@ class ReconstructionTests(unittest.TestCase):
         self.assertIn("task", fm["tags"])
         self.assertIn("custom", fm["tags"])
 
+    def test_build_create_markdown_writes_recurrence(self) -> None:
+        md = self.core.build_create_markdown(
+            self.profile, "Title", "open", "normal", None, None, None, None, "body",
+            recurrence="FREQ=WEEKLY;BYDAY=MO,WE,FR",
+        )
+        fm, _ = self.core._parse_frontmatter(md)
+        self.assertEqual(fm["recurrence"], "FREQ=WEEKLY;BYDAY=MO,WE,FR")
+
+    def test_build_create_markdown_omits_recurrence_when_none(self) -> None:
+        md = self.core.build_create_markdown(
+            self.profile, "Title", "open", "normal", None, None, None, None, "body"
+        )
+        fm, _ = self.core._parse_frontmatter(md)
+        self.assertNotIn("recurrence", fm)
+
+    def test_build_create_markdown_recurrence_requires_profile_mapping(self) -> None:
+        # Build a profile without a recurrence mapping by removing it.
+        d = copy.deepcopy(REAL_PROFILE_DATA)
+        del d["fieldMapping"]["recurrence"]
+        _write_profile(self.vault, data=d)
+        profile = self.core.load_profile(self.vault, self.vault)
+        with self.assertRaises(self.core.ValidationError):
+            self.core.build_create_markdown(
+                profile, "Title", "open", "normal", None, None, None, None, "body",
+                recurrence="FREQ=DAILY",
+            )
+
+    def test_profile_extracts_recurrence_mapping(self) -> None:
+        # The real profile data declares recurrence in fieldMapping.
+        self.assertEqual(self.profile.mappings.get("recurrence"), "recurrence")
+
+    def test_profile_without_recurrence_mapping(self) -> None:
+        d = copy.deepcopy(REAL_PROFILE_DATA)
+        del d["fieldMapping"]["recurrence"]
+        _write_profile(self.vault, data=d)
+        profile = self.core.load_profile(self.vault, self.vault)
+        self.assertNotIn("recurrence", profile.mappings)
+
     def test_split_body_timeline_at_sentinel(self) -> None:
         body = "line1\nline2\n\n<!-- timeline -->\nevent1\nevent2"
         compiled, timeline = self.core._split_body_timeline(body)
@@ -1473,6 +1511,71 @@ class ListingTests(unittest.TestCase):
         path.write_text("---\n: invalid: : :\n---\nbody\n", encoding="utf-8")
         results = self.core.list_tasks(self.vault, self.profile)
         self.assertEqual(results, [])
+
+    def test_list_filter_by_status(self) -> None:
+        self._write_task("t1", {"title": "T1", "status": "open", "priority": "normal", "tags": ["task"]})
+        self._write_task("t2", {"title": "T2", "status": "in-progress", "priority": "normal", "tags": ["task"]})
+        results = self.core.list_tasks(self.vault, self.profile, status="open")
+        slugs = [r["slug"] for r in results]
+        self.assertEqual(slugs, ["t1"])
+
+    def test_list_filter_by_priority(self) -> None:
+        self._write_task("t1", {"title": "T1", "status": "open", "priority": "normal", "tags": ["task"]})
+        self._write_task("t2", {"title": "T2", "status": "open", "priority": "high", "tags": ["task"]})
+        results = self.core.list_tasks(self.vault, self.profile, priority="high")
+        slugs = [r["slug"] for r in results]
+        self.assertEqual(slugs, ["t2"])
+
+    def test_list_filter_by_tag(self) -> None:
+        self._write_task("t1", {"title": "T1", "status": "open", "tags": ["task", "urgent"]})
+        self._write_task("t2", {"title": "T2", "status": "open", "tags": ["task"]})
+        results = self.core.list_tasks(self.vault, self.profile, tag="urgent")
+        slugs = [r["slug"] for r in results]
+        self.assertEqual(slugs, ["t1"])
+
+    def test_list_filter_archived_true(self) -> None:
+        self._write_task("t1", {"title": "T1", "status": "open", "tags": ["task"]})
+        self._write_task("t2", {"title": "T2", "status": "open", "tags": ["task", "archived"]})
+        results = self.core.list_tasks(self.vault, self.profile, archived=True)
+        slugs = [r["slug"] for r in results]
+        self.assertEqual(slugs, ["t2"])
+
+    def test_list_filter_archived_false(self) -> None:
+        self._write_task("t1", {"title": "T1", "status": "open", "tags": ["task"]})
+        self._write_task("t2", {"title": "T2", "status": "open", "tags": ["task", "archived"]})
+        results = self.core.list_tasks(self.vault, self.profile, archived=False)
+        slugs = [r["slug"] for r in results]
+        self.assertEqual(slugs, ["t1"])
+
+    def test_list_filter_archived_none_returns_all(self) -> None:
+        self._write_task("t1", {"title": "T1", "status": "open", "tags": ["task"]})
+        self._write_task("t2", {"title": "T2", "status": "open", "tags": ["task", "archived"]})
+        results = self.core.list_tasks(self.vault, self.profile, archived=None)
+        slugs = sorted(r["slug"] for r in results)
+        self.assertEqual(slugs, ["t1", "t2"])
+
+    def test_list_combined_filters(self) -> None:
+        self._write_task("t1", {"title": "T1", "status": "open", "priority": "normal", "tags": ["task", "urgent"]})
+        self._write_task("t2", {"title": "T2", "status": "open", "priority": "high", "tags": ["task", "urgent"]})
+        self._write_task("t3", {"title": "T3", "status": "in-progress", "priority": "normal", "tags": ["task", "urgent"]})
+        self._write_task("t4", {"title": "T4", "status": "open", "priority": "normal", "tags": ["task"]})
+        results = self.core.list_tasks(
+            self.vault, self.profile, status="open", priority="normal", tag="urgent"
+        )
+        slugs = [r["slug"] for r in results]
+        self.assertEqual(slugs, ["t1"])
+
+    def test_list_filter_returns_empty_when_no_match(self) -> None:
+        self._write_task("t1", {"title": "T1", "status": "open", "tags": ["task"]})
+        results = self.core.list_tasks(self.vault, self.profile, status="done")
+        self.assertEqual(results, [])
+
+    def test_list_filter_via_engine(self) -> None:
+        self._write_task("t1", {"title": "T1", "status": "open", "tags": ["task"]})
+        self._write_task("t2", {"title": "T2", "status": "in-progress", "tags": ["task"]})
+        results = self.core.list_tasks(self.vault, self.profile, status="open")
+        slugs = [r["slug"] for r in results]
+        self.assertEqual(slugs, ["t1"])
 
 
 @unittest.skipUnless(_has_yaml(), "PyYAML required")
@@ -1630,6 +1733,44 @@ class EngineOperationTests(unittest.TestCase):
         with self.assertRaises(self.core.ValidationError):
             self.engine.create("t1", "T", body="b")
 
+    def test_create_writes_recurrence_to_frontmatter(self) -> None:
+        self.engine.create(
+            "t1", "T", body="b", recurrence="FREQ=MONTHLY;BYMONTHDAY=15"
+        )
+        target = self.vault / "tasks" / "t1.md"
+        fm, _ = self.core._parse_frontmatter(target.read_text(encoding="utf-8"))
+        self.assertEqual(fm["recurrence"], "FREQ=MONTHLY;BYMONTHDAY=15")
+
+    def test_create_without_recurrence_omits_field(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        target = self.vault / "tasks" / "t1.md"
+        fm, _ = self.core._parse_frontmatter(target.read_text(encoding="utf-8"))
+        self.assertNotIn("recurrence", fm)
+
+    def test_create_rejects_empty_recurrence(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "T", body="b", recurrence="")
+
+    def test_create_rejects_control_chars_in_recurrence(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "T", body="b", recurrence="FREQ=DAILY\n\x00")
+
+    def test_create_rejects_oversized_recurrence(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "T", body="b", recurrence="x" * (self.core.MAX_RECURRENCE_LEN + 1))
+
+    def test_create_rejects_non_string_recurrence(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "T", body="b", recurrence=123)
+
+    def test_create_recurrence_requires_profile_mapping(self) -> None:
+        # Rewrite the profile without a recurrence mapping.
+        d = copy.deepcopy(REAL_PROFILE_DATA)
+        del d["fieldMapping"]["recurrence"]
+        _write_profile(self.vault, data=d)
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "T", body="b", recurrence="FREQ=DAILY")
+
     def test_get_returns_modeled_fields(self) -> None:
         self.engine.create("t1", "T", body="b")
         result = self.engine.get("t1")
@@ -1646,6 +1787,29 @@ class EngineOperationTests(unittest.TestCase):
         slugs = {r["slug"] for r in results}
         self.assertIn("t1", slugs)
         self.assertIn("t2", slugs)
+
+    def test_list_via_engine_with_status_filter(self) -> None:
+        self.engine.create("t1", "T1", status="open", body="b")
+        self.engine.create("t2", "T2", status="in-progress", body="b")
+        results = self.engine.list(status="open")
+        slugs = {r["slug"] for r in results}
+        self.assertEqual(slugs, {"t1"})
+
+    def test_list_via_engine_with_tag_filter(self) -> None:
+        self.engine.create("t1", "T1", tags=["urgent"], body="b")
+        self.engine.create("t2", "T2", body="b")
+        results = self.engine.list(tag="urgent")
+        slugs = {r["slug"] for r in results}
+        self.assertEqual(slugs, {"t1"})
+
+    def test_list_via_engine_with_archived_filter(self) -> None:
+        self.engine.create("t1", "T1", body="b")
+        self.engine.create("t2", "T2", body="b")
+        self.engine.archive("t2")
+        archived = self.engine.list(archived=True)
+        non_archived = self.engine.list(archived=False)
+        self.assertEqual({r["slug"] for r in archived}, {"t2"})
+        self.assertEqual({r["slug"] for r in non_archived}, {"t1"})
 
     def test_update_success(self) -> None:
         self.engine.create("t1", "T", status="open", body="b")

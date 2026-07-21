@@ -96,8 +96,9 @@ def task_create(
     body: str = "",
     slug: Optional[str] = None,
     custom_fields: Optional[dict[str, Any]] = None,
+    recurrence: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Create one task. When slug is omitted, a timestamp-prefixed slug is auto-generated from the title (e.g. 2026-07-18-143000-buy-groceries). Dates use YYYY-MM-DD."""
+    """Create one task. When slug is omitted, a timestamp-prefixed slug is auto-generated from the title (e.g. 2026-07-18-143000-buy-groceries). Dates use YYYY-MM-DD. ``recurrence`` is an optional RFC 5545 RRULE string (e.g. FREQ=WEEKLY;BYDAY=MO,WE,FR)."""
     result = _engine_call(
         "task_create",
         "create",
@@ -111,6 +112,7 @@ def task_create(
         tags=tags,
         body=body,
         custom_fields=custom_fields,
+        recurrence=recurrence,
     )
     return _mutation_dict(result)
 
@@ -122,13 +124,27 @@ def task_get(slug: str) -> dict[str, Any]:
 
 
 @mcp.tool(structured_output=True)
-def task_list(max_results: int = 100) -> list[dict[str, Any]]:
-    """List bounded structured task metadata from TaskNotes files."""
+def task_list(
+    max_results: int = 100,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    tag: Optional[str] = None,
+    archived: Optional[bool] = None,
+) -> list[dict[str, Any]]:
+    """List bounded structured task metadata from TaskNotes files. Optional filters (combined with AND logic): ``status`` and ``priority`` match mapped frontmatter values, ``tag`` keeps tasks carrying the tag, ``archived`` (True/False) filters by archive state."""
     if isinstance(max_results, bool) or not isinstance(max_results, int):
         raise ToolError("max_results must be an integer")
     if max_results < 1 or max_results > LIST_MAX_RESULTS:
         raise ToolError(f"max_results must be between 1 and {LIST_MAX_RESULTS}")
-    return _engine_call("task_list", "list", max_results=max_results)
+    return _engine_call(
+        "task_list",
+        "list",
+        max_results=max_results,
+        status=status,
+        priority=priority,
+        tag=tag,
+        archived=archived,
+    )
 
 
 @mcp.tool(structured_output=True)

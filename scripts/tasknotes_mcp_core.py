@@ -116,6 +116,7 @@ MAX_PROJECT_LEN = 200
 MAX_TAGS_COUNT = 50
 MAX_PROJECTS_COUNT = 50
 MAX_MARKDOWN_LEN = 200_000  # constructed markdown + stdin cap
+MAX_RECURRENCE_LEN = 500
 
 # Slug validation: lowercase, single segment (no '/' for MVP), starts with
 # alphanumeric, contains only lowercase alphanumeric, hyphen, or underscore.
@@ -462,6 +463,12 @@ def _validate_mappings(value: Any) -> Mapping[str, str]:
     if not _TAG_RE.match(archive_tag):
         raise ProfileIncompatible("fieldMapping.archiveTag contains whitespace or control characters")
     mappings["archiveTag"] = archive_tag
+    # Optional mappings (not required, but extracted when present so callers
+    # can use them via profile.mappings). recurrence is an optional RFC 5545
+    # RRULE field; only extracted when the profile declares it.
+    recurrence = value.get("recurrence")
+    if isinstance(recurrence, str) and recurrence:
+        mappings["recurrence"] = recurrence
     return mappings
 
 
@@ -1677,6 +1684,7 @@ def build_create_markdown(
     tags: Optional[List[str]],
     body: str,
     custom_fields: Optional[Dict[str, Any]] = None,
+    recurrence: Optional[str] = None,
 ) -> str:
     """Build markdown for a new task (no existing page)."""
     m = profile.mappings
@@ -1694,6 +1702,10 @@ def build_create_markdown(
         fm[m["scheduled"]] = scheduled
     if projects is not None:
         fm[m["projects"]] = list(projects)
+    if recurrence is not None:
+        if "recurrence" not in m:
+            raise ValidationError("recurrence is not configured in the TaskNotes profile")
+        fm[m["recurrence"]] = recurrence
     all_tags = list(tags or [])
     if profile.task_tag not in all_tags:
         all_tags.append(profile.task_tag)
@@ -1918,6 +1930,10 @@ def list_tasks(
     max_files: int = LIST_MAX_FILES,
     max_size: int = LIST_MAX_FILE_SIZE,
     max_results: int = LIST_MAX_RESULTS,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    tag: Optional[str] = None,
+    archived: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
     """Read-only structured listing of the tasks folder.
 
@@ -1927,6 +1943,14 @@ def list_tasks(
     whose frontmatter ``tags`` include the task tag are returned. Modeled
     fields are extracted using the profile mappings; unknown frontmatter
     keys are dropped from the listing output.
+
+    Optional filters (combined with AND logic):
+      - ``status``: keep only tasks whose mapped status equals this value.
+      - ``priority``: keep only tasks whose mapped priority equals this value.
+      - ``tag``: keep only tasks whose tags list contains this tag.
+      - ``archived``: ``True`` keeps only archived tasks (those carrying
+        the configured archive tag), ``False`` keeps only non-archived
+        tasks, ``None`` disables the archive filter.
     """
     results: List[Dict[str, Any]] = []
     count = 0
@@ -1958,12 +1982,28 @@ def list_tasks(
                 continue
             tags = fm.get("tags", [])
             if not isinstance(tags, list) or not all(
-                isinstance(tag, str) for tag in tags
+                isinstance(tag_item, str) for tag_item in tags
             ):
                 continue
             tags_t = tuple(tags)
             if profile.task_tag not in tags_t:
                 continue
+            # Apply optional filters (AND logic).
+            if status is not None:
+                if fm.get(profile.mappings["status"]) != status:
+                    continue
+            if priority is not None:
+                if fm.get(profile.mappings["priority"]) != priority:
+                    continue
+            if tag is not None:
+                if tag not in tags_t:
+                    continue
+            if archived is not None:
+                is_archived = profile.archive_tag in tags_t
+                if archived and not is_archived:
+                    continue
+                if not archived and is_archived:
+                    continue
             slug = name[:-3]
             modeled = _extract_modeled_fields(fm, profile)
             modeled["slug"] = slug
@@ -2041,6 +2081,24 @@ def validate_optional_date(value: Any, field_name: str) -> Optional[str]:
     if value is None:
         return None
     return validate_date(value, field_name)
+
+
+def validate_recurrence(value: Any) -> str:
+    """Validate an RFC 5545 RRULE recurrence string.
+
+    Must be a non-empty string of at most ``MAX_RECURRENCE_LEN`` characters
+    with no control characters. The adapter does not parse the RRULE; the
+    TaskNotes plugin validates it on read.
+    """
+    if not isinstance(value, str):
+        raise ValidationError("recurrence must be a string")
+    if not value:
+        raise ValidationError("recurrence must be a non-empty string")
+    if len(value) > MAX_RECURRENCE_LEN:
+        raise ValidationError("recurrence exceeds length bound")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in value):
+        raise ValidationError("recurrence must not contain control characters")
+    return value
 
 
 def validate_tags(value: Any, profile: TaskNotesProfile, *, allow_archive: bool) -> List[str]:
@@ -2438,6 +2496,7 @@ class TaskNotesEngine:
         tags: Optional[List[str]] = None,
         body: str = "",
         custom_fields: Optional[Dict[str, Any]] = None,
+        recurrence: Optional[str] = None,
     ) -> MutationResult:
         """Create a new task. Rejects completed status and archive tag.
 
@@ -2450,6 +2509,7 @@ class TaskNotesEngine:
         validate_slug(slug)
         title = validate_title(title)
         body = validate_body(body)
+        recurrence_v = validate_recurrence(recurrence) if recurrence is not None else None
         with Lock(self.lock_path, timeout=self.lock_timeout):
             self._check_recovery_marker()
             profile = self.load_profile()
@@ -2479,7 +2539,7 @@ class TaskNotesEngine:
             # Build markdown.
             markdown = build_create_markdown(
                 profile, title, st, pr, due_v, scheduled_v, projects_v, tags_v, body,
-                custom_fields_v,
+                custom_fields_v, recurrence_v,
             )
             if len(markdown) > MAX_MARKDOWN_LEN:
                 raise ValidationError("constructed markdown exceeds length bound")
@@ -2523,10 +2583,22 @@ class TaskNotesEngine:
         self,
         *,
         max_results: int = LIST_MAX_RESULTS,
+        status: Optional[str] = None,
+        priority: Optional[str] = None,
+        tag: Optional[str] = None,
+        archived: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """Read-only structured listing of the tasks folder (lock-free)."""
         profile = self.load_profile()
-        return list_tasks(self.vault, profile, max_results=max_results)
+        return list_tasks(
+            self.vault,
+            profile,
+            max_results=max_results,
+            status=status,
+            priority=priority,
+            tag=tag,
+            archived=archived,
+        )
 
     def update(
         self,
