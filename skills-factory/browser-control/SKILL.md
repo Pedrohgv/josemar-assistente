@@ -1,7 +1,7 @@
 ---
 name: browser-control
 description: Drive the configured externally connected browser via browser_* tools. Use when the user asks to interact with an authenticated or session-dependent site, or when a browser_* tool reports a connection/CDP failure that needs recovery guidance.
-version: 1.0.0
+version: 1.1.0
 metadata:
   hermes:
     requires_tools:
@@ -18,12 +18,21 @@ windows on the operator's screen. Treat it as the operator's own browser, made
 available on demand.
 
 This skill is repo-owned and instruction-only. It carries no executable and
-needs no customization outside the repo. It is registered only by the
-read-only overlay mount that exposes this skill directory; if the mount is not
-applied, this skill is not registered and its remote-browser guidance is not
-loaded. The `metadata.hermes.requires_tools` list is defense-in-depth: it keeps
-the skill from loading without the underlying browser tools, but the mount (not
-this list) is what gates registration of this repo-owned guidance.
+needs no customization outside the repo. It is baked into the Hermes image and
+always registered, regardless of whether the browser-control Compose overlay
+is enabled on the server. The `metadata.hermes.requires_tools` list is
+defense-in-depth: it keeps the skill from loading without the underlying
+browser tools. The overlay gates the tunnel sidecar and network, not the skill
+registration. When the overlay is disabled, `browser_*` calls fail at the CDP
+endpoint; see "Connection failures" below for how to surface that to the user.
+
+A companion `SETUP.md` in this skill directory holds the first-time setup
+walkthrough (keypair generation, server-side overlay enablement, laptop
+launcher install, network ACL). When the user asks how to set up browser
+control for the first time, or when a connection failure looks like the
+overlay is disabled, point them to `SETUP.md` and walk them through it. Do
+not reproduce the setup steps inline from memory; read `SETUP.md` and
+follow it.
 
 ## When to use the browser
 
@@ -49,13 +58,25 @@ this list) is what gates registration of this repo-owned guidance.
 ## Connection failures
 
 If a `browser_*` tool reports a connection, CDP, or "browser not reachable"
-error:
+error, the cause is one of:
 
-- State that the on-demand browser-control client (or its launcher) may be
-  offline on the operator's side.
-- Ask the operator to start or reopen the configured browser-control client, so
-  the externally connected browser endpoint is available again.
-- Then retry the requested action.
+- The browser-control Compose overlay is disabled on the server (no tunnel
+  sidecar, no `cdp_url` reachable). This is the most likely cause on a fresh
+  or recently-redeployed server.
+- The overlay is enabled but the operator's on-demand browser-control client
+  (or its launcher) is offline on the operator side.
+- The overlay is enabled and the client was running, but the tunnel dropped
+  (e.g. after a server redeploy, network change, or laptop sleep).
+
+Surface all three to the user and let them disambiguate. Do not assume one
+cause. A practical phrasing: "I can't reach the browser. This usually means
+either the browser-control overlay is disabled on the server, or the laptop
+client isn't running. If you haven't set this up before, see SETUP.md in this
+skill directory for first-time setup. If you have set it up, try starting or
+reopening the browser-control client on the laptop, then tell me to retry."
+
+Then, once the user confirms the cause is addressed, retry the requested
+action.
 
 Do not attempt to shell into the operator's machine, run launchers, edit
 browser/CDP/network configuration, or restart services on their behalf. The

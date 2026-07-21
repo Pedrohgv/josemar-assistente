@@ -66,8 +66,9 @@ Key points:
   No Funnel, no host port publication.
 - `config/hermes-config.yaml` sets `browser.cdp_url: "http://127.0.0.1:9222"`.
   No Playwright/Chrome install, no Hermes source patch. The repo-owned
-  `browser-control` skill is conditionally registered by this overlay (see
-  "Repo-owned browser-control skill" below), not baked into the image.
+  `browser-control` skill is baked into the Hermes image (see
+  "Repo-owned browser-control skill" below), so it is always registered and
+  can guide first-time setup and self-diagnose when the overlay is disabled.
 - SSH user (`tunnel`), SSH port (`2222`), and CDP port (`9222`) are fixed
   constants and not configurable.
 
@@ -81,7 +82,10 @@ Browser control lives in a committed overlay file,
   network attachments. The base file keeps the always-present
   `tailscale-serve-config` named volume and `TS_SERVE_CONFIG` env so a disabled
   redeploy writes `{}` into `serve.json` and deterministically clears any stale
-  `tcp:2222` forward from a previous enabled deploy.
+  `tcp:2222` forward from a previous enabled deploy. The repo-owned
+  `browser-control` skill remains registered (it is baked into the image), so
+  Josemar can guide the operator through first-time setup and surface
+  "overlay disabled" as a likely cause when `browser_*` calls fail.
 - **Enabled**: the deploy workflow sets
   `COMPOSE_FILE=docker-compose.yml:docker-compose.browser-control.yml` and adds
   `browser-control` to `COMPOSE_PROFILES` (preserving `aux-ml` if enabled).
@@ -427,20 +431,23 @@ does not change (it pins the Tailscale node name, not the browser-control IP).
 The repo-owned `skills-factory/browser-control/SKILL.md` is an instruction-only
 skill (a SKILL.md with no executable binary) that teaches the assistant how to
 use the `browser_*` tools against the externally connected browser and what the
-safety boundaries are. Unlike `gbrain`, `aux-ml`, and `workspace-sync`, it is
-**not** baked into the Hermes image. It is registered only when this overlay is
-applied, via a read-only bind mount on the `hermes` service:
+safety boundaries are. Unlike `gbrain`, `aux-ml`, and `workspace-sync`, it
+carries a companion `SETUP.md` with the first-time setup walkthrough (SSH
+keypair, server-side overlay enablement, laptop launcher install, Tailscale
+ACL). The skill is **baked into the Hermes image** via
+`COPY skills-factory/browser-control /opt/josemar/skills/browser-control` in
+`Dockerfile.hermes`, so it is always registered regardless of whether the
+browser-control overlay is enabled. This lets Josemar guide the operator
+through first-time setup and self-diagnose when `browser_*` calls fail (the
+skill surfaces both "overlay disabled" and "laptop client offline" as
+possible causes and points to `SETUP.md`).
 
-```yaml
-volumes:
-  - ./skills-factory/browser-control:/opt/josemar/skills/browser-control:ro
-```
-
-A base-only (disabled) deploy does not mount the skill directory, so this
-repo-owned skill and its remote-browser guidance are not registered. This does
-not by itself remove Hermes's built-in browser tool schemas; it only means the
-repo-owned guidance for driving the externally connected browser is absent. The
-skill has no executable binary; the actual integration point is Hermes's
+The overlay no longer bind-mounts the skill directory. The overlay only adds
+the `browser-control` network attachment and the `browser-tunnel` sidecar; the
+skill itself is always present from the image. This does not remove Hermes's
+built-in browser tool schemas; the skill is guidance for driving the
+externally connected browser, not the tool registration mechanism. The skill
+has no executable binary; the actual integration point is Hermes's
 `browser.cdp_url` config in `config/hermes-config.yaml`.
 
 Closing the external browser on the operator side makes the CDP endpoint
