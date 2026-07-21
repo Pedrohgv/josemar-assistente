@@ -11,17 +11,18 @@ categories:
 # GBrain Skill
 
 Josemar uses the pinned native `gbrain` CLI directly as the canonical Obsidian
-vault interface for retrieval, authoring, and linking. There is no custom
-wrapper between chat and `gbrain`; the CLI is invoked directly from the Hermes
-runtime. Operator-only activation (init/sync/extract/schema setup) is provided
-by the `josemar-gbrain reindex` maintenance command and is not exposed from
-chat.
+vault interface for general retrieval, authoring, and linking. The bounded
+TaskNotes MCP is the only specialized exception: it invokes short-lived native
+gbrain commands and must be used for TaskNotes task-file mutations. Operator-only
+activation (init/sync/extract/schema setup) is provided by the
+`josemar-gbrain reindex` maintenance command and is not exposed from chat.
 
 ## Important Notes
 
-- **Native CLI only.** Use the `gbrain` binary directly (`/usr/local/bin/gbrain`
+- **General vault work uses the native CLI.** Use the `gbrain` binary directly (`/usr/local/bin/gbrain`
   in the container). Do not call `josemar-gbrain` from chat — it is an
-  operator maintenance convenience for reindex/activation only.
+  operator maintenance convenience for reindex/activation only. For TaskNotes
+  task files, use the bounded `task_*` MCP tools instead of native capture/put.
 - **Keyword-only search, no embeddings.** Activation configures
   `search.mcp_keyword_only=true` and runs with `--no-embedding`, so search uses
   `engine.searchKeyword` and never the vector/hybrid provider path. Embeddings

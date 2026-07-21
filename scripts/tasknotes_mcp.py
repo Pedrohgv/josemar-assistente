@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""Bounded stdio MCP surface for gbrain-backed TaskNotes tasks."""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any, Optional
+
+from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+
+from tasknotes_mcp_core import (
+    LIST_MAX_RESULTS,
+    CoreError,
+    MutationResult,
+    TaskNotesEngine,
+    ValidationError,
+)
+
+
+LOGGER = logging.getLogger("tasknotes-mcp")
+
+mcp = FastMCP(
+    "tasknotes",
+    instructions=(
+        "Manage TaskNotes tasks through the bounded gbrain-backed lifecycle API. "
+        "Task slugs are immutable lowercase identifiers."
+    ),
+    log_level="WARNING",
+)
+
+_ENGINE: Optional[TaskNotesEngine] = None
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValidationError(f"{name} must be a number") from exc
+    if value <= 0:
+        raise ValidationError(f"{name} must be greater than zero")
+    return value
+
+
+def _get_engine() -> TaskNotesEngine:
+    global _ENGINE
+    if _ENGINE is None:
+        _ENGINE = TaskNotesEngine(
+            vault=Path(os.environ.get("GBRAIN_BRAIN_REPO", "/opt/data/obsidian")),
+            gbrain_bin=os.environ.get("TASKNOTES_GBRAIN_BIN", "/usr/local/bin/gbrain"),
+            gbrain_home=Path(os.environ.get("GBRAIN_HOME", "/opt/data")),
+            lock_dir=Path(os.environ.get("TASKNOTES_LOCK_DIR", "/opt/data/.locks")),
+            lock_timeout=_env_float("TASKNOTES_LOCK_TIMEOUT", 10.0),
+            tz=os.environ.get("TZ", "UTC"),
+        )
+    return _ENGINE
+
+
+def _mutation_dict(result: MutationResult) -> dict[str, Any]:
+    return {key: value for key, value in asdict(result).items() if value is not None}
+
+
+def _tool_call(operation: str, function: Any, *args: Any, **kwargs: Any) -> Any:
+    try:
+        return function(*args, **kwargs)
+    except CoreError as exc:
+        raise ToolError(str(exc)) from exc
+    except Exception as exc:
+        # Never include task arguments or content in logs or error responses.
+        LOGGER.error("unexpected failure in %s", operation)
+        raise ToolError(f"{operation} failed unexpectedly") from exc
+
+
+def _engine_call(operation: str, method: str, *args: Any, **kwargs: Any) -> Any:
+    return _tool_call(
+        operation,
+        lambda: getattr(_get_engine(), method)(*args, **kwargs),
+    )
+
+
+@mcp.tool(structured_output=True)
+def task_create(
+    title: str,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    due: Optional[str] = None,
+    scheduled: Optional[str] = None,
+    projects: Optional[list[str]] = None,
+    tags: Optional[list[str]] = None,
+    body: str = "",
+    slug: Optional[str] = None,
+    custom_fields: Optional[dict[str, Any]] = None,
+    recurrence: Optional[str] = None,
+) -> dict[str, Any]:
+    """Create one task. When slug is omitted, a timestamp-prefixed slug is auto-generated from the title (e.g. 2026-07-18-143000-buy-groceries). Dates use YYYY-MM-DD. ``recurrence`` is an optional RFC 5545 RRULE string (e.g. FREQ=WEEKLY;BYDAY=MO,WE,FR)."""
+    result = _engine_call(
+        "task_create",
+        "create",
+        slug,
+        title,
+        status=status,
+        priority=priority,
+        due=due,
+        scheduled=scheduled,
+        projects=projects,
+        tags=tags,
+        body=body,
+        custom_fields=custom_fields,
+        recurrence=recurrence,
+    )
+    return _mutation_dict(result)
+
+
+@mcp.tool(structured_output=True)
+def task_get(slug: str) -> dict[str, Any]:
+    """Get one task by its immutable lowercase slug."""
+    return _engine_call("task_get", "get", slug)
+
+
+@mcp.tool(structured_output=True)
+def task_list(
+    max_results: int = 100,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    tag: Optional[str] = None,
+    archived: Optional[bool] = None,
+) -> list[dict[str, Any]]:
+    """List bounded structured task metadata from TaskNotes files. Optional filters (combined with AND logic): ``status`` and ``priority`` match mapped frontmatter values, ``tag`` keeps tasks carrying the tag, ``archived`` (True/False) filters by archive state."""
+    if isinstance(max_results, bool) or not isinstance(max_results, int):
+        raise ToolError("max_results must be an integer")
+    if max_results < 1 or max_results > LIST_MAX_RESULTS:
+        raise ToolError(f"max_results must be between 1 and {LIST_MAX_RESULTS}")
+    return _engine_call(
+        "task_list",
+        "list",
+        max_results=max_results,
+        status=status,
+        priority=priority,
+        tag=tag,
+        archived=archived,
+    )
+
+
+@mcp.tool(structured_output=True)
+def task_update(
+    slug: str,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    due: Optional[str] = None,
+    scheduled: Optional[str] = None,
+    projects: Optional[list[str]] = None,
+    clear_due: bool = False,
+    clear_scheduled: bool = False,
+    clear_projects: bool = False,
+    custom_fields: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Update status, priority, dates, or projects; cannot complete a task."""
+    result = _engine_call(
+        "task_update",
+        "update",
+        slug,
+        status=status,
+        priority=priority,
+        due=due,
+        scheduled=scheduled,
+        projects=projects,
+        clear_due=clear_due,
+        clear_scheduled=clear_scheduled,
+        clear_projects=clear_projects,
+        custom_fields=custom_fields,
+    )
+    return _mutation_dict(result)
+
+
+@mcp.tool(structured_output=True)
+def task_complete(
+    slug: str,
+    completion_date: Optional[str] = None,
+) -> dict[str, Any]:
+    """Complete one task, optionally with an explicit YYYY-MM-DD date."""
+    result = _engine_call(
+        "task_complete",
+        "complete",
+        slug,
+        completion_date=completion_date,
+    )
+    return _mutation_dict(result)
+
+
+@mcp.tool(structured_output=True)
+def task_archive(slug: str) -> dict[str, Any]:
+    """Add the configured archive tag to one task idempotently."""
+    result = _engine_call("task_archive", "archive", slug)
+    return _mutation_dict(result)
+
+
+@mcp.tool(structured_output=True)
+def task_add_tag(slug: str, tag: str) -> dict[str, Any]:
+    """Add a custom tag to one task idempotently. Rejects the task-identification and archive tags."""
+    result = _engine_call("task_add_tag", "add_tag", slug, tag)
+    return _mutation_dict(result)
+
+
+@mcp.tool(structured_output=True)
+def task_remove_tag(slug: str, tag: str) -> dict[str, Any]:
+    """Remove a custom tag from one task idempotently. Rejects the task-identification and archive tags."""
+    result = _engine_call("task_remove_tag", "remove_tag", slug, tag)
+    return _mutation_dict(result)
+
+
+def main() -> None:
+    """Run the server over stdio. Stdout is reserved for MCP traffic."""
+    mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

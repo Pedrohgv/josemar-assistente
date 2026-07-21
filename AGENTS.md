@@ -16,7 +16,7 @@ Core architecture:
 - Hermes gateway runtime (dashboard/API/Telegram/cron/skills)
 - Two-scope skills (repo-owned `skills-factory/` + user-owned `agent-state/skills/`)
 - Git-backed state sync (`scripts/workspace-sync.sh`)
-- Obsidian vault operations (native gbrain + Syncthing + backup)
+- Obsidian vault operations (native gbrain + bounded TaskNotes MCP + Syncthing + backup)
 - Optional `aux-ml` queue service for long OCR jobs
 
 ## Directory Structure
@@ -41,7 +41,7 @@ josemar-assistente/
 
 - `hermes-data`: Hermes runtime state plus private state git worktree (`/opt/data`). Includes gbrain state at `/opt/data/.gbrain` (PGLite database, config, cache).
 - `aux-ml-shared`: explicit file handoff area for aux-ml (`/shared` in both Hermes and aux-ml)
-- `obsidian-vault`: notes/attachments (not git-versioned)
+- `obsidian-vault`: notes/attachments plus local-only Git history already required by native gbrain sync; there is no remote consumer, `.git/` is excluded from Syncthing, and the history is unrelated to agent-state sync
 - `syncthing-config`, `tailscale-state`, `obsidian-rclone-config`, `obsidian-backup-state`
 
 Docker named volumes default to `root:root 0755`, but the Hermes gateway runs as `HERMES_UID` (default 10000). `docker-hermes-init.sh` chowns an explicit allowlist of Hermes-writable volumes (`HERMES_HOME` and `/shared`) at startup and verifies write access. When adding a new Hermes-writable volume, add its mount path to `HERMES_WRITABLE_VOLUMES` in `docker-hermes-init.sh`. Do not chown bind mounts, read-only mounts, or cross-service volumes (e.g. `obsidian-vault`).
@@ -86,7 +86,7 @@ When modifying user state, commit/push inside `agent-state` repo when requested.
 
 - Repo-owned skills: `skills-factory/*` -> copied to `/opt/josemar/skills`.
 - User-owned skills: `agent-state/skills/*` -> synced into `/opt/data/skills`.
-- Keep native gbrain (`skills-factory/gbrain` + `scripts/josemar-gbrain`) as the canonical vault interface. Josemar uses the pinned `gbrain` CLI directly; `josemar-gbrain` provides operator-only `reindex` activation and lightweight `refresh` for periodic manual Obsidian edit reconciliation.
+- Keep native gbrain (`skills-factory/gbrain` + `scripts/josemar-gbrain`) as the canonical vault interface. Josemar uses the pinned `gbrain` CLI directly for general vault work; the bounded `tasknotes` MCP is the only specialized exception and still uses short-lived native gbrain commands as the sole task writer. `josemar-gbrain` provides operator-only `reindex` activation and lightweight `refresh` for periodic manual Obsidian edit reconciliation.
 - Automatic skill creation, patching, and curation are intentionally disabled (`skills.creation_nudge_interval: 0`, `skills.write_approval: true`, `curator.enabled: false`). Keep these guards until issue #69's re-enable criteria pass against a pinned Hermes release.
 - Until issue #69 is resolved, intentional user-skill authoring must be explicit and use the flat `/opt/data/skills/<name>/SKILL.md` layout so workspace sync can version it. Never route runtime writes into `/opt/josemar/skills`.
 - Per-profile skill enable/disable choices are user state under `hermes/skill-toggles/`; never version the full Hermes `config.yaml`.
@@ -115,4 +115,5 @@ python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
 - `credentials/README.md` - credential setup
 - `docs/aux-ml.md` - aux-ml operations
 - `docs/gbrain-operations.md` - gbrain activation, reindex, vault swap, and schema workflow
+- `docs/tasknotes-mcp.md` - TaskNotes MCP prerequisites, profile gate, locking, and recovery
 - `docs/obsidian-operations.md` - Obsidian sync/backup runbook

@@ -11,6 +11,7 @@ This repository is the public/platform layer. Personal identity, memories, priva
 - **Independent agent state**: private git-backed Hermes state tree for context files, cron jobs, avatars, and user-owned skills.
 - **Two-scope skills model**: repo-owned platform skills in `skills-factory/`, user-owned skills in `agent-state/skills/`.
 - **Obsidian vault infrastructure**: dedicated Docker volume synchronized with Syncthing over a Tailscale sidecar.
+- **TaskNotes lifecycle MCP**: bounded create/get/list/update/complete/archive tools backed by native gbrain, with fail-closed profile and Git transaction guards.
 - **Google Drive vault backups**: daily rotating backup slots via rclone.
 - **Optional auxiliary ML service**: internal `aux-ml` container for FIFO, one-at-a-time long-running OCR jobs through llama.cpp.
 - **Multi-provider LLM config**: Ollama Cloud, Z.AI/GLM, DeepSeek, and other OpenAI-compatible providers can be configured.
@@ -33,6 +34,8 @@ flowchart LR
   Agent --> CoreSkills[Repo Core Skills<br/>/opt/josemar/skills]
   Agent --> StateSkills[User State Skills<br/>/opt/data/skills]
   Agent --> GBrain[Native gbrain CLI]
+  Agent --> TaskNotes[Bounded TaskNotes MCP]
+  TaskNotes --> GBrain
   GBrain --> Vault[Obsidian Vault<br/>obsidian-vault volume]
 
   CoreSkills --> AuxML[aux-ml API<br/>optional]
@@ -85,7 +88,7 @@ flowchart LR
   Backup --> Drive[Google Drive<br/>slot-1 ... slot-N]
 ```
 
-The vault is not git-versioned. It persists in its own Docker volume, syncs through Syncthing, and is backed up by rotating rclone snapshots.
+The vault persists in its own Docker volume, syncs through Syncthing, and is backed up by rotating rclone snapshots. Native gbrain sync already uses local-only Git history; the TaskNotes MCP reuses it for safe automatic commits. The repository has no remote consumer, its `.git/` directory must be excluded from Syncthing, and it is separate from agent-state versioning.
 
 ## Quick Start
 
@@ -218,7 +221,7 @@ josemar-assistente/
 | --- | --- |
 | `hermes-data` | Hermes runtime state and the private state git worktree at `/opt/data`. Includes gbrain state at `/opt/data/.gbrain` (PGLite database, config, cache). Runtime-private files are ignored by the state repo. |
 | `aux-ml-shared` | Dedicated handoff volume for files intentionally shared with aux-ml. |
-| `obsidian-vault` | Obsidian notes and attachments, not git-versioned. |
+| `obsidian-vault` | Obsidian notes and attachments plus local-only Git history required by native gbrain sync. The history has no remote consumer and `.git/` is excluded from Syncthing. |
 | `syncthing-config` | Syncthing identity and folder/device config. |
 | `tailscale-state` | Tailscale node identity and login state. |
 | `obsidian-rclone-config` | rclone config used by vault backup container. |
@@ -296,6 +299,7 @@ policy are backed by git-tracked state instead of the noisy, sensitive
 Current repo-shipped skills:
 
 - `gbrain`: native gbrain vault interface (search, get, capture, put, link, backlinks) used directly via the pinned `gbrain` CLI. Keyword-only search, no embeddings. Operator activation via `josemar-gbrain reindex`; periodic manual-edit reconciliation via `josemar-gbrain refresh` every 5 minutes by default.
+- `tasknotes`: bounded durable-task lifecycle through the `task_*` MCP tools. Native gbrain remains the backend and sole task writer. See `docs/tasknotes-mcp.md` for prerequisites and recovery.
 - `aux-ml`: skill interface for queue-based auxiliary ML jobs.
 - `workspace-sync`: skill interface for workspace git sync, status, commit, and push flows.
 
@@ -363,6 +367,7 @@ Credentials go under `credentials/<service>/` and are mounted read-only into Her
 - `docs/aux-ml.md`: auxiliary ML API, queue, model lifecycle, and OCR operations.
 - `docs/obsidian-operations.md`: Syncthing, Tailscale, rclone backup, and restore runbook.
 - `docs/gbrain-operations.md`: gbrain activation, reindex, vault swap, schema pack workflow, and troubleshooting.
+- `docs/tasknotes-mcp.md`: TaskNotes profile gate, local Git/Syncthing prerequisites, tool outcomes, locking, and recovery.
 - `docs/browser-control.md`: optional remote browser control via a reverse SSH tunnel over Tailscale.
 - `.github/workflows/AGENTS.md`: deployment, stop, privacy scan, and runner workflow documentation.
 - `templates/agent-state-template/README.md`: starting point for a private state repo.
