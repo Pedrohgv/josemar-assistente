@@ -31,14 +31,22 @@ priority, dates, projects, completion, or archival.
   timestamp-prefixed slug is auto-generated from the title
   (e.g. `2026-07-18-143000-buy-groceries`). When provided, the slug must be
   lowercase with no spaces or special characters (hyphens and underscores
-  allowed). Slugs are immutable after creation.
+  allowed). Slugs are immutable after creation. Supports `custom_fields` for
+  plugin-configured custom user fields (text, list, date, number, boolean,
+  link).
 - `task_get`: read one task by slug.
 - `task_list`: list structured task metadata with a bounded result count.
-- `task_update`: change only status, priority, due date, scheduled date, or
-  projects. Use the explicit clear flags to remove optional fields.
+- `task_update`: change only status, priority, due date, scheduled date,
+  projects, or custom user fields. Use the explicit clear flags to remove
+  optional fields. Pass `custom_fields` with `None` values to clear custom
+  fields.
 - `task_complete`: complete a task. Omit the completion date to use today in the
   configured timezone.
 - `task_archive`: add the configured archive tag. This is idempotent.
+- `task_add_tag`: add a custom tag to a task. Rejects the task-identification
+  tag and the archive tag (use `task_archive` for archival). Idempotent.
+- `task_remove_tag`: remove a custom tag from a task. Rejects the
+  task-identification tag and the archive tag. Idempotent.
 
 Dates must use `YYYY-MM-DD`. Keep slugs lowercase and treat them as immutable.
 Use the status and priority values accepted by the current TaskNotes profile;
@@ -96,13 +104,8 @@ config-adaptive:
 
 The adapter does not yet support:
 
-- Custom user fields (e.g. `pipeline_stage`). These are read from the profile
-  but cannot be set via the MCP tools. This is planned for a future release.
 - Recurrence rules in `task_create`. TaskNotes supports native recurrence but
   the adapter does not yet pass recurrence data through. This is planned.
-- Tag add/remove (only the task tag and archive tag are managed; custom tags
-  like `#cliente` cannot be added or removed via the MCP tools). This is
-  planned.
 - Search/filter beyond `task_list` (no filtering by tag, status, or custom
   field). This is planned.
 
@@ -129,10 +132,9 @@ put` or `gbrain capture` to create or modify TaskNotes task files. Native gbrain
 remains appropriate for non-task vault pages.
 
 This interface does not currently support unarchive, delete, search,
-rename/move, title or body edits, arbitrary tag replacement/removal, recurrence,
-bulk operations, raw frontmatter, custom user fields, or inline-task conversion.
-Suggest Obsidian for an unsupported task edit rather than approximating it with
-another writer.
+rename/move, title or body edits, recurrence, bulk operations, raw frontmatter,
+or inline-task conversion. Suggest Obsidian for an unsupported task edit rather
+than approximating it with another writer.
 
 One author at a time per task file is required. Do not run parallel mutations
 against the same task.

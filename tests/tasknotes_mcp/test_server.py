@@ -82,6 +82,8 @@ class ServerContractTests(unittest.TestCase):
                 "task_update",
                 "task_complete",
                 "task_archive",
+                "task_add_tag",
+                "task_remove_tag",
             },
         )
         for _function, options in self.server.mcp.tools.values():
@@ -115,6 +117,7 @@ class ServerContractTests(unittest.TestCase):
             projects=["home"],
             tags=["next"],
             body="Details",
+            custom_fields=None,
         )
 
     def test_create_auto_generates_slug_when_omitted(self) -> None:
@@ -137,6 +140,7 @@ class ServerContractTests(unittest.TestCase):
             projects=None,
             tags=None,
             body="",
+            custom_fields=None,
         )
 
     def test_update_forwards_only_supported_fields(self) -> None:
@@ -155,7 +159,67 @@ class ServerContractTests(unittest.TestCase):
             clear_due=True,
             clear_scheduled=False,
             clear_projects=False,
+            custom_fields=None,
         )
+
+    def test_create_forwards_custom_fields(self) -> None:
+        self.engine.create.return_value = self.server.MutationResult(
+            state="applied_and_committed", slug="t1", commit_id="abc"
+        )
+        self.server.task_create(
+            "Task",
+            slug="t1",
+            custom_fields={"pipeline_stage": "drafting"},
+        )
+        self.engine.create.assert_called_once_with(
+            "t1",
+            "Task",
+            status=None,
+            priority=None,
+            due=None,
+            scheduled=None,
+            projects=None,
+            tags=None,
+            body="",
+            custom_fields={"pipeline_stage": "drafting"},
+        )
+
+    def test_update_forwards_custom_fields(self) -> None:
+        self.engine.update.return_value = self.server.MutationResult(
+            state="applied_and_committed", slug="t1", commit_id="abc"
+        )
+        self.server.task_update("t1", custom_fields={"pipeline_stage": None})
+        self.engine.update.assert_called_once_with(
+            "t1",
+            status=None,
+            priority=None,
+            due=None,
+            scheduled=None,
+            projects=None,
+            clear_due=False,
+            clear_scheduled=False,
+            clear_projects=False,
+            custom_fields={"pipeline_stage": None},
+        )
+
+    def test_add_tag_forwards_to_engine(self) -> None:
+        self.engine.add_tag.return_value = self.server.MutationResult(
+            state="applied_and_committed", slug="t1", commit_id="abc"
+        )
+        result = self.server.task_add_tag("t1", "urgent")
+        self.assertEqual(
+            result,
+            {"state": "applied_and_committed", "slug": "t1", "commit_id": "abc"},
+        )
+        self.engine.add_tag.assert_called_once_with("t1", "urgent")
+
+    def test_remove_tag_forwards_to_engine(self) -> None:
+        self.engine.remove_tag.return_value = self.server.MutationResult(
+            state="not_applied", slug="t1"
+        )
+        result = self.server.task_remove_tag("t1", "urgent")
+        self.assertEqual(result, {"state": "not_applied", "slug": "t1"})
+        self.engine.remove_tag.assert_called_once_with("t1", "urgent")
 
     def test_expected_core_error_becomes_tool_error(self) -> None:
         self.engine.get.side_effect = self.server.ValidationError("invalid slug")

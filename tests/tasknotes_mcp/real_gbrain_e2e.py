@@ -56,6 +56,9 @@ PROFILE = {
         {"id": "normal", "value": "normal"},
         {"id": "high", "value": "high"},
     ],
+    "userFields": [
+        {"id": "pipeline_stage", "key": "pipeline_stage", "type": "text", "label": "Pipeline Stage"},
+    ],
 }
 
 
@@ -167,6 +170,8 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
                 "task_update",
                 "task_complete",
                 "task_archive",
+                "task_add_tag",
+                "task_remove_tag",
             ], names
 
             created = await call(
@@ -181,6 +186,7 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
                     "projects": ["validation"],
                     "tags": ["smoke"],
                     "body": "Disposable body preserved by gbrain.",
+                    "custom_fields": {"pipeline_stage": "discovered"},
                 },
             )
             assert created["state"] == "applied_and_committed", created
@@ -193,6 +199,13 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
             tasks = await call(session, "task_list", {"max_results": 10})
             assert [item["slug"] for item in tasks["result"]] == ["20260719t120000"], tasks
 
+            tagged = await call(
+                session,
+                "task_add_tag",
+                {"slug": "20260719t120000", "tag": "followup"},
+            )
+            assert tagged["state"] == "applied_and_committed", tagged
+
             updated = await call(
                 session,
                 "task_update",
@@ -203,9 +216,17 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
                     "scheduled": "2026-07-19",
                     "projects": ["validation", "mcp"],
                     "clear_due": True,
+                    "custom_fields": {"pipeline_stage": "negotiating"},
                 },
             )
             assert updated["state"] == "applied_and_committed", updated
+
+            untagged = await call(
+                session,
+                "task_remove_tag",
+                {"slug": "20260719t120000", "tag": "followup"},
+            )
+            assert untagged["state"] == "applied_and_committed", untagged
 
             completed = await call(
                 session,
@@ -220,14 +241,16 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
             final = await call(session, "task_get", {"slug": "20260719t120000"})
             assert final["status"] == "done", final
             assert "archived" in final["tags"], final
+            assert "followup" not in final["tags"], final
             assert final["body"].strip() == "Disposable body preserved by gbrain.", final
 
     clean = run(["git", "status", "--porcelain"], env=env, cwd=vault)
     assert clean.strip() == "", clean
     log = run(["git", "log", "--oneline"], env=env, cwd=vault)
-    assert log.count("tasknotes-mcp: task update") == 4, log
+    assert log.count("tasknotes-mcp: task update") == 6, log
     task_text = (vault / "tasks" / "20260719t120000.md").read_text(encoding="utf-8")
     assert "archived" in task_text
+    assert "pipeline_stage" in task_text
     assert "Disposable body preserved by gbrain." in task_text
 
 

@@ -273,6 +273,7 @@ class TaskNotesProfile:
     raw_data: Mapping[str, Any]
     move_archived_tasks: bool = False
     archive_folder: Optional[str] = None
+    user_fields: Tuple[Dict[str, str], ...] = ()
 
 
 def _read_json_from_directory(directory_fd: int, name: str) -> Mapping[str, Any]:
@@ -464,6 +465,61 @@ def _validate_mappings(value: Any) -> Mapping[str, str]:
     return mappings
 
 
+_USER_FIELD_TYPES: Tuple[str, ...] = (
+    "text",
+    "list",
+    "date",
+    "number",
+    "boolean",
+    "link",
+)
+
+
+def _validate_user_fields(value: Any) -> Tuple[Dict[str, str], ...]:
+    """Validate ``userFields``: list of objects with id/key/type (and optional label).
+
+    Each field must have a non-empty string ``id``, ``key``, and ``type``
+    belonging to the allowed set. Returns a tuple of plain dicts with the
+    keys ``id``, ``key``, ``type``, and ``label`` (label defaults to "").
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ProfileIncompatible("userFields must be a list")
+    out: List[Dict[str, str]] = []
+    seen_keys: set = set()
+    seen_ids: set = set()
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise ProfileIncompatible("each userField must be an object")
+        fid = entry.get("id")
+        if not isinstance(fid, str) or not fid:
+            raise ProfileIncompatible("each userField must have a non-empty id")
+        key = entry.get("key")
+        if not isinstance(key, str) or not key:
+            raise ProfileIncompatible("each userField must have a non-empty key")
+        ftype = entry.get("type")
+        if not isinstance(ftype, str) or ftype not in _USER_FIELD_TYPES:
+            raise ProfileIncompatible(
+                f"userField type {ftype!r} not in allowed set {_USER_FIELD_TYPES}"
+            )
+        label = entry.get("label", "")
+        if not isinstance(label, str):
+            raise ProfileIncompatible("userField label must be a string")
+        if key in seen_keys:
+            raise ProfileIncompatible(f"userField key {key!r} must be unique")
+        if fid in seen_ids:
+            raise ProfileIncompatible(f"userField id {fid!r} must be unique")
+        if key in RESERVED_FRONTMATTER_KEYS:
+            raise ProfileIncompatible(
+                f"userField key {key!r} collides with reserved key"
+            )
+        seen_keys.add(key)
+        seen_ids.add(fid)
+        out.append({"id": fid, "key": key, "type": ftype, "label": label})
+    return tuple(out)
+
+
 def _git_state_ok(vault: Path, git_env: Dict[str, str]) -> None:
     """Reject bad Git repo state. Raises GitError on any disqualifying state."""
     git_dir = vault / ".git"
@@ -571,6 +627,16 @@ def load_profile(
     if archive_tag == task_tag:
         raise ProfileIncompatible("archiveTag must differ from taskTag")
 
+    # Custom user fields (userFields).
+    user_fields = _validate_user_fields(data.get("userFields", []))
+    # User field keys must not collide with modeled field mappings.
+    mapped_values = set(mappings.values())
+    for uf in user_fields:
+        if uf["key"] in mapped_values:
+            raise ProfileIncompatible(
+                f"userField key {uf['key']!r} collides with a fieldMapping value"
+            )
+
     # Vault equals configured brain repo.
     try:
         vault_resolved = vault.resolve()
@@ -606,6 +672,7 @@ def load_profile(
         raw_data=data,
         move_archived_tasks=move_archived,
         archive_folder=archive_folder,
+        user_fields=user_fields,
     )
 
 
@@ -694,6 +761,9 @@ def verify_gbrain_source(
         source_id=matching[0],
         raw_manifest=profile.raw_manifest,
         raw_data=profile.raw_data,
+        move_archived_tasks=profile.move_archived_tasks,
+        archive_folder=profile.archive_folder,
+        user_fields=profile.user_fields,
     )
 
 
@@ -1342,6 +1412,28 @@ def gbrain_put(
     return data
 
 
+def gbrain_untag(
+    gbrain_bin: str,
+    env: Dict[str, str],
+    slug: str,
+    tag: str,
+    source_id: str,
+) -> None:
+    """Call ``gbrain untag <slug> <tag> --source <id>`` to remove a tag from the DB.
+
+    Gbrain's ``put_page`` reconciles tags additively and does not remove tags
+    that are absent from the new frontmatter. After a ``put`` that removes a
+    tag from frontmatter, this call is needed to sync the DB tag index.
+    """
+    result = run_subprocess(
+        [gbrain_bin, "untag", slug, tag, "--source", source_id],
+        env=env,
+        timeout=DEFAULT_TIMEOUT,
+    )
+    if result.returncode != 0:
+        raise GbrainError(f"gbrain untag failed: {_redact(result.stderr)[:200]}")
+
+
 def gbrain_sync_incremental(
     gbrain_bin: str,
     env: Dict[str, str],
@@ -1507,8 +1599,18 @@ def reconstruct_markdown(
     decoded = decode_page(page)
     fm: Dict[str, Any] = dict(decoded["frontmatter"])
 
-    # Apply updates to mapped fields.
+    # Separate custom field updates (applied by raw key) from modeled
+    # field updates (applied via profile.mappings).
+    custom_updates: Dict[str, Any] = {}
+    modeled_updates: Dict[str, Any] = {}
     for logical, value in updates.items():
+        if logical in profile.mappings or logical in ("tags", "title"):
+            modeled_updates[logical] = value
+        else:
+            custom_updates[logical] = value
+
+    # Apply updates to mapped fields.
+    for logical, value in modeled_updates.items():
         if logical == "tags":
             if value is None:
                 fm.pop("tags", None)
@@ -1526,6 +1628,13 @@ def reconstruct_markdown(
         if logical not in profile.mappings:
             continue
         key = profile.mappings[logical]
+        if value is None:
+            fm.pop(key, None)
+        else:
+            fm[key] = value
+
+    # Apply custom field updates by raw key.
+    for key, value in custom_updates.items():
         if value is None:
             fm.pop(key, None)
         else:
@@ -1567,6 +1676,7 @@ def build_create_markdown(
     projects: Optional[List[str]],
     tags: Optional[List[str]],
     body: str,
+    custom_fields: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build markdown for a new task (no existing page)."""
     m = profile.mappings
@@ -1588,6 +1698,10 @@ def build_create_markdown(
     if profile.task_tag not in all_tags:
         all_tags.append(profile.task_tag)
     fm["tags"] = sorted(all_tags)
+    if custom_fields:
+        for key, value in custom_fields.items():
+            if value is not None:
+                fm[key] = value
     parts = [_serialize_frontmatter(fm)]
     if body:
         parts.append(body)
@@ -1649,6 +1763,14 @@ def _normalize_semantic_frontmatter(
     # Pinned gbrain normalizes bare TaskNotes dates to midnight UTC strings.
     for logical in ("due", "scheduled", "completedDate"):
         key = profile.mappings[logical]
+        value = normalized.get(key)
+        if isinstance(value, str) and _DATE_RE.fullmatch(value):
+            normalized[key] = value + "T00:00:00.000Z"
+    # Custom user fields of type "date" are also normalized by gbrain on disk.
+    for uf in profile.user_fields:
+        if uf["type"] != "date":
+            continue
+        key = uf["key"]
         value = normalized.get(key)
         if isinstance(value, str) and _DATE_RE.fullmatch(value):
             normalized[key] = value + "T00:00:00.000Z"
@@ -1965,6 +2087,85 @@ def validate_projects(value: Any) -> List[str]:
     return out
 
 
+def validate_custom_fields(
+    custom_fields: Any, profile: TaskNotesProfile
+) -> Dict[str, Any]:
+    """Validate a ``{field_key: value}`` dict against the profile user fields.
+
+    Returns a normalized dict of ``{field_key: value}`` ready to write into
+    frontmatter. A value of ``None`` is preserved (means "clear the field"
+    in update). Raises ``ValidationError`` on unknown keys or type
+    mismatches.
+    """
+    if custom_fields is None:
+        return {}
+    if not isinstance(custom_fields, dict):
+        raise ValidationError("custom_fields must be a dict")
+    # Build a lookup by key.
+    by_key: Dict[str, Dict[str, str]] = {uf["key"]: uf for uf in profile.user_fields}
+    out: Dict[str, Any] = {}
+    for key, value in custom_fields.items():
+        if not isinstance(key, str) or not key:
+            raise ValidationError("custom_fields keys must be non-empty strings")
+        field = by_key.get(key)
+        if field is None:
+            raise ValidationError(f"custom field {key!r} is not defined in profile")
+        ftype = field["type"]
+        # None means "clear" and is always allowed.
+        if value is None:
+            out[key] = None
+            continue
+        if ftype == "text":
+            if not isinstance(value, str):
+                raise ValidationError(f"custom field {key!r} (text) must be a string")
+            if len(value) > 500:
+                raise ValidationError(f"custom field {key!r} (text) exceeds 500 chars")
+        elif ftype == "list":
+            if not isinstance(value, list):
+                raise ValidationError(f"custom field {key!r} (list) must be a list")
+            if len(value) > 50:
+                raise ValidationError(f"custom field {key!r} (list) exceeds 50 items")
+            for item in value:
+                if not isinstance(item, str):
+                    raise ValidationError(
+                        f"custom field {key!r} (list) items must be strings"
+                    )
+                if len(item) > 200:
+                    raise ValidationError(
+                        f"custom field {key!r} (list) item exceeds 200 chars"
+                    )
+        elif ftype == "date":
+            if not isinstance(value, str) or not _DATE_RE.match(value):
+                raise ValidationError(
+                    f"custom field {key!r} (date) must be a YYYY-MM-DD string"
+                )
+            try:
+                datetime.date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValidationError(
+                    f"custom field {key!r} (date) is not a valid date: {exc}"
+                ) from exc
+        elif ftype == "number":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValidationError(
+                    f"custom field {key!r} (number) must be a number"
+                )
+        elif ftype == "boolean":
+            if not isinstance(value, bool):
+                raise ValidationError(
+                    f"custom field {key!r} (boolean) must be a bool"
+                )
+        elif ftype == "link":
+            if not isinstance(value, str):
+                raise ValidationError(f"custom field {key!r} (link) must be a string")
+            if len(value) > 500:
+                raise ValidationError(f"custom field {key!r} (link) exceeds 500 chars")
+        else:  # pragma: no cover - guarded by profile validation
+            raise ValidationError(f"custom field {key!r} has unknown type {ftype!r}")
+        out[key] = value
+    return out
+
+
 def _get_zoneinfo(tzname: str) -> datetime.tzinfo:
     """Return a tzinfo for the given timezone name, falling back to UTC."""
     try:
@@ -2236,6 +2437,7 @@ class TaskNotesEngine:
         projects: Optional[List[str]] = None,
         tags: Optional[List[str]] = None,
         body: str = "",
+        custom_fields: Optional[Dict[str, Any]] = None,
     ) -> MutationResult:
         """Create a new task. Rejects completed status and archive tag.
 
@@ -2261,6 +2463,7 @@ class TaskNotesEngine:
             scheduled_v = validate_optional_date(scheduled, "scheduled")
             projects_v = validate_projects(projects) if projects is not None else None
             tags_v = validate_tags(tags, profile, allow_archive=False) if tags is not None else None
+            custom_fields_v = validate_custom_fields(custom_fields, profile)
             # Verify gbrain source under lock.
             profile = self._verify_source(profile)
             # Preflight.
@@ -2275,7 +2478,8 @@ class TaskNotesEngine:
             profile = self._verify_source(profile)
             # Build markdown.
             markdown = build_create_markdown(
-                profile, title, st, pr, due_v, scheduled_v, projects_v, tags_v, body
+                profile, title, st, pr, due_v, scheduled_v, projects_v, tags_v, body,
+                custom_fields_v,
             )
             if len(markdown) > MAX_MARKDOWN_LEN:
                 raise ValidationError("constructed markdown exceeds length bound")
@@ -2336,8 +2540,9 @@ class TaskNotesEngine:
         clear_due: bool = False,
         clear_scheduled: bool = False,
         clear_projects: bool = False,
+        custom_fields: Optional[Dict[str, Any]] = None,
     ) -> MutationResult:
-        """Update only status/priority/due/scheduled/projects. No completion transition."""
+        """Update only status/priority/due/scheduled/projects/custom fields. No completion transition."""
         validate_slug(slug)
         # Input validation BEFORE preflight.
         if status is not None:
@@ -2374,6 +2579,7 @@ class TaskNotesEngine:
                 status_v = validate_status_value(status_v, profile)
             if priority_v is not None:
                 priority_v = validate_priority_value(priority_v, profile)
+            custom_fields_v = validate_custom_fields(custom_fields, profile)
             # Verify gbrain source under lock.
             profile = self._verify_source(profile)
             # Preflight.
@@ -2409,6 +2615,9 @@ class TaskNotesEngine:
                 updates["projects"] = None
             elif projects_v is not None:
                 updates["projects"] = list(projects_v)
+            # Custom field updates (None means clear).
+            for key, value in custom_fields_v.items():
+                updates[key] = value
             if not updates:
                 return MutationResult(state=NOT_APPLIED, slug=slug)
             markdown = reconstruct_markdown(page, profile, updates)
@@ -2530,6 +2739,126 @@ class TaskNotesEngine:
                 self._pre_put_hook(self, slug, profile)
                 self._mutation_pre_put_guard(profile, slug)
             # PUT-STARTED BOUNDARY.
+            try:
+                put_result = gbrain_put(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
+            except Exception as exc:
+                return self._reconcile_after_put_failure(
+                    profile, slug, gbrain_slug, exc, expected_document
+                )
+            return self._handle_post_put(
+                profile,
+                slug,
+                gbrain_slug,
+                put_result,
+                expected_document=expected_document,
+            )
+
+    def _validate_tag_value(self, tag: Any) -> str:
+        """Validate a single tag string against format and length bounds."""
+        if not isinstance(tag, str) or not tag:
+            raise ValidationError("tag must be a non-empty string")
+        if len(tag) > MAX_TAG_LEN:
+            raise ValidationError("tag exceeds length bound")
+        if not _TAG_RE.match(tag):
+            raise ValidationError("tag contains whitespace or control characters")
+        return tag
+
+    def add_tag(self, slug: str, tag: str) -> MutationResult:
+        """Add a custom tag idempotently. Rejects the task and archive tags."""
+        validate_slug(slug)
+        tag = self._validate_tag_value(tag)
+        with Lock(self.lock_path, timeout=self.lock_timeout):
+            self._check_recovery_marker()
+            profile = self.load_profile()
+            if tag == profile.task_tag:
+                raise ValidationError(
+                    "cannot add the task-identification tag; it is always present"
+                )
+            if tag == profile.archive_tag:
+                raise ValidationError(
+                    "cannot add the archive tag; use task_archive"
+                )
+            profile = self._verify_source(profile)
+            original_hash = profile.profile_hash
+            self._preflight(profile)
+            profile = self._verify_profile_stable(original_hash)
+            profile = self._verify_source(profile)
+            gbrain_slug = resolve_gbrain_slug(profile, slug)
+            page = gbrain_get_page(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id)  # type: ignore[arg-type]
+            decoded = decode_page(page)
+            current_tags = list(decoded["tags"])
+            if tag in current_tags:
+                return MutationResult(state=NOT_APPLIED, slug=slug)
+            if len(current_tags) + 1 > MAX_TAGS_COUNT:
+                raise ValidationError("adding the tag would exceed the tag count bound")
+            new_tags = sorted(set(current_tags) | {tag})
+            updates: Dict[str, Any] = {"tags": new_tags}
+            markdown = reconstruct_markdown(page, profile, updates)
+            if len(markdown) > MAX_MARKDOWN_LEN:
+                raise ValidationError("constructed markdown exceeds length bound")
+            expected_document = semantic_from_markdown(markdown, profile)
+            self._mutation_pre_put_guard(profile, slug)
+            if self._pre_put_hook is not None:
+                self._pre_put_hook(self, slug, profile)
+                self._mutation_pre_put_guard(profile, slug)
+            try:
+                put_result = gbrain_put(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
+            except Exception as exc:
+                return self._reconcile_after_put_failure(
+                    profile, slug, gbrain_slug, exc, expected_document
+                )
+            return self._handle_post_put(
+                profile,
+                slug,
+                gbrain_slug,
+                put_result,
+                expected_document=expected_document,
+            )
+
+    def remove_tag(self, slug: str, tag: str) -> MutationResult:
+        """Remove a custom tag idempotently. Rejects the task and archive tags."""
+        validate_slug(slug)
+        tag = self._validate_tag_value(tag)
+        with Lock(self.lock_path, timeout=self.lock_timeout):
+            self._check_recovery_marker()
+            profile = self.load_profile()
+            if tag == profile.task_tag:
+                raise ValidationError(
+                    "cannot remove the task-identification tag"
+                )
+            if tag == profile.archive_tag:
+                raise ValidationError(
+                    "cannot remove the archive tag; use a future unarchive tool"
+                )
+            profile = self._verify_source(profile)
+            original_hash = profile.profile_hash
+            self._preflight(profile)
+            profile = self._verify_profile_stable(original_hash)
+            profile = self._verify_source(profile)
+            gbrain_slug = resolve_gbrain_slug(profile, slug)
+            page = gbrain_get_page(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id)  # type: ignore[arg-type]
+            decoded = decode_page(page)
+            current_tags = list(decoded["tags"])
+            if tag not in current_tags:
+                return MutationResult(state=NOT_APPLIED, slug=slug)
+            new_tags = sorted(set(current_tags) - {tag})
+            updates: Dict[str, Any] = {"tags": new_tags}
+            markdown = reconstruct_markdown(page, profile, updates)
+            if len(markdown) > MAX_MARKDOWN_LEN:
+                raise ValidationError("constructed markdown exceeds length bound")
+            expected_document = semantic_from_markdown(markdown, profile)
+            self._mutation_pre_put_guard(profile, slug)
+            if self._pre_put_hook is not None:
+                self._pre_put_hook(self, slug, profile)
+                self._mutation_pre_put_guard(profile, slug)
+            # Gbrain's put_page reconciles tags additively: it re-adds all
+            # DB tags to the file even if the new frontmatter omits them.
+            # We must untag from the DB FIRST, then put the new markdown
+            # so the write-through picks up the updated DB tag set.
+            try:
+                gbrain_untag(self.gbrain_bin, self._gbrain_env, gbrain_slug, tag, profile.source_id)  # type: ignore[arg-type]
+            except GbrainError:
+                pass  # Best-effort; continue with put.
             try:
                 put_result = gbrain_put(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
             except Exception as exc:

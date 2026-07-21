@@ -143,6 +143,20 @@ REAL_PROFILE_DATA = {
         {"id": "normal", "value": "normal", "label": "Normal", "color": "#ffaa00", "weight": 2},
         {"id": "high", "value": "high", "label": "High", "color": "#ff0000", "weight": 3},
     ],
+    "userFields": [
+        {"id": "pipeline_stage", "key": "pipeline_stage", "type": "text",
+         "label": "Pipeline stage"},
+        {"id": "tags_extra", "key": "tags_extra", "type": "list",
+         "label": "Extra tags"},
+        {"id": "effort_hours", "key": "effort_hours", "type": "number",
+         "label": "Effort hours"},
+        {"id": "blocked", "key": "blocked", "type": "boolean",
+         "label": "Blocked"},
+        {"id": "review_date", "key": "review_date", "type": "date",
+         "label": "Review date"},
+        {"id": "related", "key": "related", "type": "link",
+         "label": "Related note"},
+    ],
 }
 
 
@@ -2030,6 +2044,215 @@ class DirtyTargetTests(unittest.TestCase):
         self.core.git_commit_target(self.vault, target, self.core._build_git_env())
         target.write_text("y", encoding="utf-8")
         self.assertFalse(self.core.git_target_clean(self.vault, target, self.core._build_git_env()))
+
+
+@unittest.skipUnless(_has_yaml(), "PyYAML required")
+class CustomFieldsTests(unittest.TestCase):
+    """Custom user field validation and create/update tests."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_"))
+        self.engine, self.vault, self.gbrain_bin = _make_engine(self.core, self.tmpdir)
+        self.profile = self.engine.load_profile()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_profile_loads_user_fields(self) -> None:
+        keys = {uf["key"] for uf in self.profile.user_fields}
+        self.assertIn("pipeline_stage", keys)
+        self.assertIn("tags_extra", keys)
+        types = {uf["key"]: uf["type"] for uf in self.profile.user_fields}
+        self.assertEqual(types["pipeline_stage"], "text")
+        self.assertEqual(types["tags_extra"], "list")
+        self.assertEqual(types["effort_hours"], "number")
+        self.assertEqual(types["blocked"], "boolean")
+        self.assertEqual(types["review_date"], "date")
+        self.assertEqual(types["related"], "link")
+
+    def test_create_writes_custom_fields_to_frontmatter(self) -> None:
+        result = self.engine.create(
+            "t1", "T", body="b",
+            custom_fields={"pipeline_stage": "drafting", "tags_extra": ["x", "y"]},
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fm["pipeline_stage"], "drafting")
+        self.assertEqual(fm["tags_extra"], ["x", "y"])
+
+    def test_update_updates_custom_fields(self) -> None:
+        self.engine.create(
+            "t1", "T", body="b",
+            custom_fields={"pipeline_stage": "drafting"},
+        )
+        result = self.engine.update(
+            "t1", custom_fields={"pipeline_stage": "review"},
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fm["pipeline_stage"], "review")
+
+    def test_update_none_clears_custom_field(self) -> None:
+        self.engine.create(
+            "t1", "T", body="b",
+            custom_fields={"pipeline_stage": "drafting"},
+        )
+        result = self.engine.update(
+            "t1", custom_fields={"pipeline_stage": None},
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("pipeline_stage", fm)
+
+    def test_create_rejects_unknown_custom_field(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create(
+                "t1", "T", body="b",
+                custom_fields={"not_a_field": "x"},
+            )
+
+    def test_update_rejects_unknown_custom_field(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.update(
+                "t1", custom_fields={"not_a_field": "x"},
+            )
+
+    def test_create_rejects_wrong_type_for_number(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create(
+                "t1", "T", body="b",
+                custom_fields={"effort_hours": "not-a-number"},
+            )
+
+    def test_create_rejects_wrong_type_for_boolean(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create(
+                "t1", "T", body="b",
+                custom_fields={"blocked": "yes"},
+            )
+
+    def test_create_rejects_wrong_type_for_list(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create(
+                "t1", "T", body="b",
+                custom_fields={"tags_extra": "not-a-list"},
+            )
+
+    def test_create_rejects_wrong_type_for_date(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create(
+                "t1", "T", body="b",
+                custom_fields={"review_date": "not-a-date"},
+            )
+
+    def test_create_rejects_wrong_type_for_text(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create(
+                "t1", "T", body="b",
+                custom_fields={"pipeline_stage": 123},
+            )
+
+    def test_create_accepts_number_and_boolean(self) -> None:
+        result = self.engine.create(
+            "t1", "T", body="b",
+            custom_fields={"effort_hours": 3.5, "blocked": True},
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fm["effort_hours"], 3.5)
+        self.assertIs(fm["blocked"], True)
+
+    def test_create_accepts_date_and_link(self) -> None:
+        result = self.engine.create(
+            "t1", "T", body="b",
+            custom_fields={"review_date": "2026-07-20", "related": "[[Note]]"},
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(str(fm["review_date"])[:10], "2026-07-20")
+        self.assertEqual(fm["related"], "[[Note]]")
+
+
+@unittest.skipUnless(_has_yaml(), "PyYAML required")
+class TagMutationTests(unittest.TestCase):
+    """add_tag / remove_tag engine method tests."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_"))
+        self.engine, self.vault, self.gbrain_bin = _make_engine(self.core, self.tmpdir)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_add_tag_adds_custom_tag(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        result = self.engine.add_tag("t1", "urgent")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertIn("urgent", fm["tags"])
+
+    def test_add_tag_idempotent(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        self.engine.add_tag("t1", "urgent")
+        result = self.engine.add_tag("t1", "urgent")
+        self.assertEqual(result.state, self.core.NOT_APPLIED)
+
+    def test_add_tag_rejects_task_identification_tag(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.add_tag("t1", "task")
+
+    def test_add_tag_rejects_archive_tag(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.add_tag("t1", "archived")
+
+    def test_add_tag_rejects_invalid_tag_format(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.add_tag("t1", "has space")
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.add_tag("t1", "")
+
+    def test_remove_tag_removes_custom_tag(self) -> None:
+        self.engine.create("t1", "T", body="b", tags=["urgent"])
+        result = self.engine.remove_tag("t1", "urgent")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("urgent", fm["tags"])
+
+    def test_remove_tag_idempotent(self) -> None:
+        self.engine.create("t1", "T", body="b", tags=["urgent"])
+        self.engine.remove_tag("t1", "urgent")
+        result = self.engine.remove_tag("t1", "urgent")
+        self.assertEqual(result.state, self.core.NOT_APPLIED)
+
+    def test_remove_tag_rejects_task_identification_tag(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.remove_tag("t1", "task")
+
+    def test_remove_tag_rejects_archive_tag(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.remove_tag("t1", "archived")
 
 
 if __name__ == "__main__":

@@ -60,8 +60,10 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn("auto-generated", text)
         self.assertIn("https://tasknotes.dev/", text)
         self.assertIn("Plugin configuration", text)
-        self.assertIn("Custom user fields", text)
         self.assertIn("native recurrence", text)
+        self.assertIn("task_add_tag", text)
+        self.assertIn("task_remove_tag", text)
+        self.assertIn("custom_fields", text)
 
     def test_runbook_documents_external_prerequisites_and_recovery(self) -> None:
         text = (REPO_ROOT / "docs" / "tasknotes-mcp.md").read_text(encoding="utf-8")
@@ -81,8 +83,8 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn("YYYY-MM-DD-HHmmss-slugified-title", text)
         self.assertIn("issues/3034", text)
         self.assertIn("Current limitations", text)
-        self.assertIn("Custom user fields", text)
         self.assertIn("Recurrence rules", text)
+        self.assertIn("Search/filter", text)
 
     def test_compose_passes_refresh_timeout(self) -> None:
         text = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")

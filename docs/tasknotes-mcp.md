@@ -13,9 +13,11 @@ the sole task writer. The MCP exposes only:
 - `task_update`
 - `task_complete`
 - `task_archive`
+- `task_add_tag`
+- `task_remove_tag`
 
 There is no unarchive, delete, search, rename/move, recurrence, bulk, raw
-Markdown/frontmatter, body edit, or arbitrary tag replacement API.
+Markdown/frontmatter, or body edit API.
 
 ## External prerequisites
 
@@ -158,13 +160,8 @@ plugin `taskFilenameFormat: "timestamp"` also produces gbrain-safe filenames.
 
 The adapter does not yet support:
 
-- **Custom user fields** (e.g. `pipeline_stage`): the plugin's `customUserFields`
-  are read from the profile but cannot be set via the MCP tools. This is planned.
 - **Recurrence rules**: TaskNotes supports native recurrence but the adapter
   does not yet pass recurrence data through `task_create`. This is planned.
-- **Tag add/remove**: only the task-identification tag and archive tag are
-  managed automatically. Custom tags (e.g. `#cliente`) cannot be added or
-  removed via the MCP tools. This is planned.
 - **Search/filter**: `task_list` returns bounded metadata but does not support
   filtering by tag, status, or custom field. This is planned.
 

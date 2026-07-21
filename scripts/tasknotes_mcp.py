@@ -95,6 +95,7 @@ def task_create(
     tags: Optional[list[str]] = None,
     body: str = "",
     slug: Optional[str] = None,
+    custom_fields: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Create one task. When slug is omitted, a timestamp-prefixed slug is auto-generated from the title (e.g. 2026-07-18-143000-buy-groceries). Dates use YYYY-MM-DD."""
     result = _engine_call(
@@ -109,6 +110,7 @@ def task_create(
         projects=projects,
         tags=tags,
         body=body,
+        custom_fields=custom_fields,
     )
     return _mutation_dict(result)
 
@@ -140,6 +142,7 @@ def task_update(
     clear_due: bool = False,
     clear_scheduled: bool = False,
     clear_projects: bool = False,
+    custom_fields: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Update status, priority, dates, or projects; cannot complete a task."""
     result = _engine_call(
@@ -154,6 +157,7 @@ def task_update(
         clear_due=clear_due,
         clear_scheduled=clear_scheduled,
         clear_projects=clear_projects,
+        custom_fields=custom_fields,
     )
     return _mutation_dict(result)
 
@@ -177,6 +181,20 @@ def task_complete(
 def task_archive(slug: str) -> dict[str, Any]:
     """Add the configured archive tag to one task idempotently."""
     result = _engine_call("task_archive", "archive", slug)
+    return _mutation_dict(result)
+
+
+@mcp.tool(structured_output=True)
+def task_add_tag(slug: str, tag: str) -> dict[str, Any]:
+    """Add a custom tag to one task idempotently. Rejects the task-identification and archive tags."""
+    result = _engine_call("task_add_tag", "add_tag", slug, tag)
+    return _mutation_dict(result)
+
+
+@mcp.tool(structured_output=True)
+def task_remove_tag(slug: str, tag: str) -> dict[str, Any]:
+    """Remove a custom tag from one task idempotently. Rejects the task-identification and archive tags."""
+    result = _engine_call("task_remove_tag", "remove_tag", slug, tag)
     return _mutation_dict(result)
 
 
