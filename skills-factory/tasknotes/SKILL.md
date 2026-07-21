@@ -134,7 +134,7 @@ put` or `gbrain capture` to create or modify TaskNotes task files. Native gbrain
 remains appropriate for non-task vault pages.
 
 This interface does not currently support unarchive, delete, search,
-rename/move, title or body edits, recurrence, bulk operations, raw frontmatter,
+rename/move, title or body edits, bulk operations, raw frontmatter,
 or inline-task conversion. Suggest Obsidian for an unsupported task edit rather
 than approximating it with another writer.
 

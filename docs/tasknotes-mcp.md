@@ -16,8 +16,13 @@ the sole task writer. The MCP exposes only:
 - `task_add_tag`
 - `task_remove_tag`
 
-There is no unarchive, delete, search, rename/move, recurrence, bulk, raw
+There is no unarchive, delete, search, rename/move, bulk, raw
 Markdown/frontmatter, or body edit API.
+
+`task_create` accepts an optional `recurrence` field (RFC 5545 RRULE string,
+e.g. `FREQ=WEEKLY;BYDAY=MO,WE,FR`) for native TaskNotes repeating tasks. The
+profile must declare a `recurrence` field mapping; otherwise `task_create`
+rejects the call before any Git or gbrain mutation.
 
 ## External prerequisites
 
