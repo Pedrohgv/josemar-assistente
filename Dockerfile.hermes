@@ -1,5 +1,5 @@
 ARG GO_IMAGE=golang:1.25.8
-ARG HERMES_BASE_IMAGE=nousresearch/hermes-agent:v2026.7.7.2
+ARG HERMES_BASE_IMAGE=nousresearch/hermes-agent:v2026.7.20
 
 # Stage 1: Build gogcli
 FROM ${GO_IMAGE} AS gogcli-builder

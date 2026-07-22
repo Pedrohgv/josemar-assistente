@@ -1,8 +1,8 @@
 # Josemar Hermes Agent authoritative configuration template.
 # Secrets are passed through environment variables or /opt/data/.env.
 
-# Matches the config schema bundled with nousresearch/hermes-agent:v2026.7.7.2.
-_config_version: 32
+# Matches the config schema bundled with nousresearch/hermes-agent:v2026.7.20.
+_config_version: 33
 
 model:
   default: "deepseek-v4-pro"
@@ -95,6 +95,16 @@ agent:
   reasoning_effort: "medium"
   verbose: false
   verify_on_stop: false
+
+# Restart-time default for Hermes approvals. This repo template is copied
+# into the runtime config on every container startup, so `manual` is the
+# restart-time default. It is intentionally NOT re-enforced by
+# josemar_skill_state/workspace sync, so Hermes Desktop v0.19 can change
+# the live gateway setting between restarts.
+approvals:
+  mode: manual
+  cron_mode: deny
+  deny: []
 
 # Remote browser control (optional). When the browser-control Compose profile
 # is enabled and a laptop has established the reverse SSH tunnel, Chrome's CDP

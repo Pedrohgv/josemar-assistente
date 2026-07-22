@@ -27,6 +27,10 @@ PATCH_PATH = REPO_ROOT / "scripts" / "patch-hermes-skills-config.py"
 INIT_PATH = REPO_ROOT / "docker-hermes-init.sh"
 CRON_PATH = REPO_ROOT / "scripts" / "hermes-workspace-sync-cron.sh"
 CONFIG_PATH = REPO_ROOT / "config" / "hermes-config.yaml"
+DOCKERFILE_PATH = REPO_ROOT / "Dockerfile.hermes"
+COMPOSE_PATH = REPO_ROOT / "docker-compose.yml"
+ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
+EXPECTED_IMAGE = "nousresearch/hermes-agent:v2026.7.20"
 LIVE_MANIFEST = REPO_ROOT / "agent-state" / ".sync-manifest"
 LIVE_GITIGNORE = REPO_ROOT / "agent-state" / ".gitignore"
 TEMPLATE_MANIFEST = REPO_ROOT / "templates" / "agent-state-template" / ".sync-manifest"
@@ -880,6 +884,66 @@ class DockerfileContractTests(unittest.TestCase):
 
     def test_dockerfile_py_compiles_helper(self) -> None:
         self.assertIn("josemar_skill_state.py", self.src.split("py_compile")[-1])
+
+
+class HermesUpgradeContractTests(unittest.TestCase):
+    """Narrow contract tests for the Hermes v2026.7.20 upgrade.
+
+    Four focused tests: image pins across the three source-of-truth files,
+    config schema version plus raw comment, approvals defaults, and the
+    patch docstring. These tests are intentionally surgical and do NOT
+    assert approvals are in POLICY_KEYS.
+    """
+
+    def test_all_image_pins_equal_expected_version(self) -> None:
+        """All three image-pin locations reference the expected image and no stale tag remains."""
+        stale = "nousresearch/hermes-agent:v2026.7.7.2"
+        for path, label in (
+            (DOCKERFILE_PATH, "Dockerfile.hermes"),
+            (COMPOSE_PATH, "docker-compose.yml"),
+            (ENV_EXAMPLE_PATH, ".env.example"),
+        ):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(
+                EXPECTED_IMAGE,
+                text,
+                f"{label} is missing expected image {EXPECTED_IMAGE}",
+            )
+            self.assertNotIn(
+                stale,
+                text,
+                f"{label} still references stale image {stale}",
+            )
+
+    def test_config_schema_and_comment_match_version(self) -> None:
+        """Parsed config schema is 33 and raw comment names v2026.7.20 with no stale tag."""
+        text = CONFIG_PATH.read_text(encoding="utf-8")
+        self.assertIn("nousresearch/hermes-agent:v2026.7.20", text)
+        self.assertNotIn("nousresearch/hermes-agent:v2026.7.7.2", text)
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not available")
+        data = yaml.safe_load(text)
+        self.assertEqual(data["_config_version"], 33)
+
+    def test_config_approvals_block_defaults(self) -> None:
+        """Root-level approvals block carries the chosen restart-time defaults."""
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not available")
+        data = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+        approvals = data["approvals"]
+        self.assertEqual(approvals["mode"], "manual")
+        self.assertEqual(approvals["cron_mode"], "deny")
+        self.assertEqual(approvals["deny"], [])
+
+    def test_patch_docstring_names_v2026_7_20(self) -> None:
+        """Build-time patch docstring names the new Hermes version and not the old one."""
+        text = PATCH_PATH.read_text(encoding="utf-8")
+        self.assertIn("Hermes v2026.7.20", text)
+        self.assertNotIn("Hermes v2026.7.7.2", text)
 
 
 if __name__ == "__main__":
