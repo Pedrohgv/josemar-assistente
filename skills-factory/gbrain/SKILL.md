@@ -37,6 +37,48 @@ activation (init/sync/extract/schema setup) is provided by the
 - **put is whole-page replacement.** `gbrain` upserts the entire page content.
   Rename, template instantiation, surgical section/frontmatter patching, and
   physical move are NOT offered natively; use Obsidian manually for those.
+- **Updating an existing note — always read-then-put.** There is no patch or
+  section-append API. To change any existing page (add a task, edit a section,
+  update frontmatter), you MUST: (1) read the full current page with
+  `gbrain get <slug>`, (2) apply the change in memory preserving all existing
+  frontmatter and sections, (3) write the complete result back with
+  `gbrain put <slug>`. Never edit vault note content through direct filesystem
+  tools (`write_file`, `open()`, `cp`) — that bypasses gbrain's index, leaves
+  the DB stale until the next 5-min refresh cron, and breaks link extraction.
+  If `gbrain get` fails or returns incomplete content, retry once; if it still
+  fails, stop and report rather than overwriting from partial content.
+  Direct filesystem access is reserved ONLY for operations gbrain genuinely
+  cannot do (rename with wikilink rewrites, template bootstrap) — never for
+  content creation or mutation.
+- **Page types are inferred from path.** gbrain assigns each page a `type`
+  (used by search, chronicle, link extraction). The type comes from
+  frontmatter `type:` if present, otherwise from the directory path. You do
+  not need to set `type` in frontmatter if the note lives under the right
+  directory — the path does it automatically. Do NOT override `type` in
+  frontmatter with a value that fights the path (e.g. `type: note` on a file
+  under `meetings/`).
+
+  Path-prefix → type inference table (gbrain-base schema pack):
+
+  | Path prefix | Inferred type |
+  |---|---|
+  | `people/`, `person/` | `person` |
+  | `companies/`, `company/` | `company` |
+  | `deals/`, `deal/` | `deal` |
+  | `projects/`, `project/` | `project` |
+  | `sources/`, `source/` | `source` |
+  | `notes/`, `note/` | `note` |
+  | `meetings/`, `meeting/` | `meeting` |
+  | `conversations/` | `conversation` |
+  | `cal/`, `calendar/` | `calendar-event` |
+  | `life/diary/` | `diary` |
+  | `life/events/` | `event` |
+  | `inbox/` | `concept` (default — no match) |
+  | (nothing matches) | `concept` (default) |
+
+  Where you write determines what gbrain sees. Choose the directory to match
+  the intended type; let path inference do the work instead of setting
+  frontmatter `type:` manually.
 - **Wikilinks and backlinks.** Obsidian `[[wikilinks]]` in page content are
   resolved automatically when a page is written (basename resolution is
   enabled). `gbrain backlinks` returns all incoming links, including
