@@ -13,7 +13,7 @@ GIT_NAME="${WORKSPACE_GIT_USER_NAME:-Josemar Agent}"
 SYNC_MODE="${WORKSPACE_SYNC_MODE:-}"
 SYNC_ON_START="${WORKSPACE_SYNC_ON_START:-true}"
 MANIFEST_PATH="${WORKSPACE_DIR}/.sync-manifest"
-PROTECTED_RUNTIME_PATHS="config.yaml credentials .config obsidian sessions logs .env auth.json .gbrain"
+PROTECTED_RUNTIME_PATHS="config.yaml credentials .config obsidian sessions logs .env auth.json .gbrain/config.json .gbrain/brain.pglite .gbrain/last-update-check .gbrain/readiness.json .gbrain/audit .gbrain/migrations"
 
 log_info() {
     echo "[workspace-sync] $1"
