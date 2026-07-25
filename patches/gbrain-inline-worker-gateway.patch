@@ -1,3 +1,31 @@
+diff --git a/src/commands/config.ts b/src/commands/config.ts
+index d4e0bb1..911f52f 100644
+--- a/src/commands/config.ts
++++ b/src/commands/config.ts
+@@ -152,7 +152,12 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
+       const { KNOWN_CONFIG_KEYS, KNOWN_CONFIG_KEY_PREFIXES } = await import('../core/config.ts');
+       const isKnown = KNOWN_CONFIG_KEYS.includes(key);
+       const matchesPrefix = KNOWN_CONFIG_KEY_PREFIXES.some(p => key.startsWith(p));
+-      if (!isKnown && !matchesPrefix) {
++      // JOSEMAR PATCH: accept any *_api_key suffix so any provider key can be
++      // set via `gbrain config set <provider>_api_key <key>` without --force.
++      // Upstream only lists openai/anthropic/zeroentropy; all other providers
++      // require --force. Upstream bug: #3387
++      const matchesApiKeySuffix = key.endsWith('_api_key');
++      if (!isKnown && !matchesPrefix && !matchesApiKeySuffix) {
+         const { suggestNearest } = await import('../core/levenshtein.ts');
+         const suggestion = suggestNearest(key, KNOWN_CONFIG_KEYS, 3);
+         console.error(`[config] Unknown config key "${key}".`);
+@@ -169,7 +174,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
+       const { KNOWN_CONFIG_KEYS, KNOWN_CONFIG_KEY_PREFIXES } = await import('../core/config.ts');
+       const isKnown = KNOWN_CONFIG_KEYS.includes(key);
+       const matchesPrefix = KNOWN_CONFIG_KEY_PREFIXES.some(p => key.startsWith(p));
+-      if (!isKnown && !matchesPrefix) {
++      const matchesApiKeySuffix = key.endsWith('_api_key');
++      if (!isKnown && !matchesPrefix && !matchesApiKeySuffix) {
+         console.error(`[config] WARN: writing unknown key "${key}" with --force. Nothing in gbrain reads this.`);
+       }
+     }
 diff --git a/src/commands/jobs.ts b/src/commands/jobs.ts
 index 64aaa6a..3e02535 100644
 --- a/src/commands/jobs.ts
@@ -25,21 +53,30 @@ index 64aaa6a..3e02535 100644
            queue: queueName, pollInterval: 100, healthCheckInterval: 0,
          });
 diff --git a/src/core/ai/build-gateway-config.ts b/src/core/ai/build-gateway-config.ts
-index c2b3f84..9b9af1e 100644
+index c2b3f84..0f5704c 100644
 --- a/src/core/ai/build-gateway-config.ts
 +++ b/src/core/ai/build-gateway-config.ts
-@@ -28,6 +28,11 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
-   const envFromConfig: Record<string, string> = {};
-   if (c.openai_api_key) envFromConfig.OPENAI_API_KEY = c.openai_api_key;
-   if (c.anthropic_api_key) envFromConfig.ANTHROPIC_API_KEY = c.anthropic_api_key;
-+  // JOSEMAR PATCH: map deepseek_api_key from config file to env so the gateway
-+  // can reach DeepSeek without depending on process.env reaching the subprocess.
-+  // Upstream only maps openai/anthropic/zeroentropy; other providers rely on
-+  // process.env which may not be inherited by subprocesses (e.g. Hermes spawning gbrain).
-+  if (c.deepseek_api_key) envFromConfig.DEEPSEEK_API_KEY = c.deepseek_api_key;
-   // v0.37 fix wave (CDX2-5+6): ZE became the default provider in v0.36 but
-   // the env-mapping at this seam never picked it up. `gbrain config set
-   // zeroentropy_api_key X` wrote DB plane (ignored by gateway). The file-
+@@ -34,6 +34,20 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
+   // plane field now exists (GBrainConfig type) and gets mapped here, so
+   // setting it via `~/.gbrain/config.json` propagates into the gateway.
+   if (c.zeroentropy_api_key) envFromConfig.ZEROENTROPY_API_KEY = c.zeroentropy_api_key;
++  // JOSEMAR PATCH: generic provider key bridge. Upstream only maps 3 specific
++  // providers (openai/anthropic/zeroentropy) from config file to gateway env.
++  // All other providers (deepseek, google, groq, together, etc.) rely on
++  // process.env, which may not reach subprocesses (e.g. Hermes spawning gbrain
++  // via s6-overlay — the gateway process has an empty env). This generic
++  // mapping folds any config key matching *_api_key into its uppercase
++  // *_API_KEY env var, so any provider key written to the config file reaches
++  // the gateway without depending on process.env propagation.
++  // Upstream bug: #3387
++  for (const [k, v] of Object.entries(c)) {
++    if (k.endsWith('_api_key') && typeof v === 'string' && v && !(k in envFromConfig)) {
++      envFromConfig[k.toUpperCase()] = v;
++    }
++  }
+ 
+   // v0.32 codex finding #4+#5 fix: thread local-server _BASE_URL env vars
+   // into base_urls so the gateway hits the user's configured port. Without
 diff --git a/src/core/chronicle/extract-events.ts b/src/core/chronicle/extract-events.ts
 index 4354614..514da6d 100644
 --- a/src/core/chronicle/extract-events.ts
@@ -54,30 +91,25 @@ index 4354614..514da6d 100644
        if (res.stopReason === 'refusal' || res.stopReason === 'content_filter') return { events: [] };
        text = res.text;
 diff --git a/src/core/config.ts b/src/core/config.ts
-index 8a79b0e..c5db65d 100644
+index 8a79b0e..d7d8a5f 100644
 --- a/src/core/config.ts
 +++ b/src/core/config.ts
-@@ -31,6 +31,7 @@ export interface GBrainConfig {
-   database_path?: string;
-   openai_api_key?: string;
-   anthropic_api_key?: string;
-+  deepseek_api_key?: string;
-   /**
-    * ZeroEntropy API key. v0.37 fix wave (CDX2-5+6): ZE became the default
-    * embedding + reranker provider in v0.36 but lacked a file-plane config
-@@ -525,6 +526,7 @@ export function loadConfig(): GBrainConfig | null {
-     ...(dbUrl ? { database_path: undefined } : {}),
+@@ -526,6 +526,18 @@ export function loadConfig(): GBrainConfig | null {
      ...(process.env.OPENAI_API_KEY ? { openai_api_key: process.env.OPENAI_API_KEY } : {}),
      ...(process.env.ANTHROPIC_API_KEY ? { anthropic_api_key: process.env.ANTHROPIC_API_KEY } : {}),
-+    ...(process.env.DEEPSEEK_API_KEY ? { deepseek_api_key: process.env.DEEPSEEK_API_KEY } : {}),
      ...(process.env.ZEROENTROPY_API_KEY ? { zeroentropy_api_key: process.env.ZEROENTROPY_API_KEY } : {}),
++    // JOSEMAR PATCH: generic *_API_KEY → *_api_key env merge.
++    // Upstream only merges 3 specific providers. All other provider keys
++    // (DEEPSEEK_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY, GROQ_API_KEY, etc.)
++    // are ignored by loadConfig, so they never reach the config object
++    // and buildGatewayConfig can't map them. This loop folds any *_API_KEY
++    // env var into its lowercase *_api_key config field.
++    // Upstream bug: #3387
++    ...Object.fromEntries(
++      Object.entries(process.env)
++        .filter(([k]) => k.endsWith('_API_KEY') && !['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'ZEROENTROPY_API_KEY'].includes(k))
++        .map(([k, v]) => [k.toLowerCase(), v])
++    ),
      ...(process.env.GBRAIN_EMBEDDING_MODEL ? { embedding_model: process.env.GBRAIN_EMBEDDING_MODEL } : {}),
      ...(process.env.GBRAIN_EMBEDDING_DIMENSIONS ? { embedding_dimensions: parseInt(process.env.GBRAIN_EMBEDDING_DIMENSIONS, 10) } : {}),
-@@ -815,6 +817,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
-   'database_path',
-   'openai_api_key',
-   'anthropic_api_key',
-+  'deepseek_api_key',
-   'embedding_model',
-   'embedding_dimensions',
-   'embedding_disabled',
+     ...(process.env.GBRAIN_EXPANSION_MODEL ? { expansion_model: process.env.GBRAIN_EXPANSION_MODEL } : {}),
