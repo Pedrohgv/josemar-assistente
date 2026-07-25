@@ -93,9 +93,10 @@ activation (init/sync/extract/schema setup) is provided by the
   is written under `meetings/`, the chronicle LLM judge segments it into
   discrete timeline atoms — each decision, commitment, or action item becomes
   its own event with a `kind` (meeting, decision, commitment, call, milestone,
-  etc.), `when`, `who`, and `what`. Events are stored as pages under
-  `life/events/` and indexed in the timeline_entries table, both backlinking
-  to the original meeting note.
+  etc.), `when`, `who`, and `what`. Events are stored in the gbrain DB (pages
+  table + timeline_entries index) and are queryable via gbrain commands, but
+  are NOT written as `.md` files to the vault filesystem — they are DB-only.
+  Each event backlinks to the original meeting note via the `depth` field.
 
   Chronicle processes these page types: `meeting` (or `meetings/` prefix),
   `conversation` (or `conversations/`), `calendar-event` (or `cal/` /
