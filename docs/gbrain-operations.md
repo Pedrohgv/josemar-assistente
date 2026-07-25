@@ -80,6 +80,19 @@ operator MUST verify the following after rebuild and before deploying:
 5. **Pinned values.** Update the version and ref in this section and in
    `skills-factory/gbrain/SKILL.md` if it references the version.
 
+6. **Local patches.** The Dockerfile applies two patches to gbrain source
+   after the git clone:
+   - `patches/gbrain-inline-worker-gateway.patch` (git apply) — configures the
+     AI gateway in the PGLite inline worker (`--follow`) path. If this patch
+     fails to apply, the build will fail loudly — re-create the patch against
+     the new gbrain source.
+   - `sed -i 's/maxTokens: 1500/maxTokens: 8000/'` on
+     `src/core/chronicle/extract-events.ts` — increases the chronicle judge
+     token limit for reasoning models. If gbrain changes the value (e.g. to
+     2000), the sed silently no-ops; verify the value is still 8000 after build.
+   Both patches are documented inline in `Dockerfile.hermes`. If either has
+   been fixed upstream, remove the patch from the Dockerfile.
+
 ## Environment Defaults
 
 | Variable | Default | Notes |
