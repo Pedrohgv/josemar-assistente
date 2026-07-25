@@ -177,6 +177,76 @@ gbrain backlinks people/b
 `gbrain history`, and `gbrain revert` are available natively where useful.
 Run `gbrain --help` for the full surface and per-command help.
 
+## gbrain Skillpack Reference (On-Demand)
+
+The installed gbrain source tree at `/opt/gbrain/skills/` ships ~50 skills
+documenting gbrain's conventions, workflows, and features. These are the
+canonical reference for how gbrain expects pages to be structured, how
+frontmatter should be written, and what features are available.
+
+**When to consult them:** Before writing skills, cron jobs, or prompts that
+use gbrain, read the relevant skillpack skill to understand if there is an
+established convention, frontmatter format, or workflow to follow. Use
+`read_file /opt/gbrain/skills/<skill>/SKILL.md` on demand — do NOT load all
+of them into context at once.
+
+**Priority:** These skills are reference material, not authoritative
+workflow overrides. If another Josemar skill (client-workflows, calendar-
+report, TaskNotes MCP, etc.) conflicts with a gbrain skillpack skill, the
+Josemar skill wins. The skillpack documents gbrain's generic model; Josemar
+skills document Pedro's specific setup.
+
+**Compatibility filter — what is safe vs. what requires disabled features:**
+
+### Safe to use as reference (works in our setup)
+
+| Skill | Path | What it documents |
+|---|---|---|
+| `meeting-ingestion` | `skills/meeting-ingestion/SKILL.md` | Meeting page frontmatter format (`date`, `attendees`, section structure), 6-phase ingest workflow |
+| `frontmatter-guard` | `skills/frontmatter-guard/SKILL.md` | YAML frontmatter writing conventions, array canonical form, quoting rules, 8 validation classes |
+| `capture` | `skills/capture/SKILL.md` | `gbrain capture` as single ingestion entrypoint, slug/idempotency contract, `--type` routing |
+| `brain-filing-rules` | `skills/_brain-filing-rules.md` | "File by primary subject, not format/source"; `sources/` is only for bulk data; notability gate |
+| `conventions/quality` | `skills/conventions/quality.md` | Citation format, source precedence, back-link iron law |
+| `conventions/brain-first` | `skills/conventions/brain-first.md` | 4-step brain-first lookup chain before external APIs |
+| `brain-ops` | `skills/brain-ops/SKILL.md` | Read→enrich→write loop, brain-first lookup protocol |
+| `repo-architecture` | `skills/repo-architecture/SKILL.md` | Where new brain files go, directory conventions |
+| `reports` | `skills/reports/SKILL.md` | Save/load timestamped reports |
+
+### Requires disabled features (embeddings / dream cycle / LLM synthesis)
+
+These document features that do NOT work in our keyword-only/no-embedding
+setup. Read for awareness, but do not attempt to invoke:
+
+| Skill | Requires |
+|---|---|
+| `query` | Semantic search (embeddings) |
+| `briefing` | `gbrain recall --since-last-run` (embeddings) |
+| `concept-synthesis` | Dream cycle + LLM synthesis |
+| `enrich`, `article-enrichment`, `book-mirror`, `strategic-reading` | LLM synthesis calls |
+| `idea-lineage` | Embeddings + graph traversal |
+| `perplexity-research`, `data-research`, `academic-verify` | External API keys not configured |
+| `gbrain-advisor` | Embeddings for full functionality |
+
+### Conflicts with Josemar's setup (do NOT use)
+
+| Skill | Why it conflicts |
+|---|---|
+| `daily-task-manager` | Uses `ops/tasks.md` model; Josemar uses TaskNotes MCP + daily notes |
+| `daily-task-prep` | Assumes calendar integration Josemar doesn't have |
+| `signal-detector` | Always-on ambient capture on every message — too aggressive for MVP |
+| `schema-author`, `schema-unify` | Chat-driven schema mutation; Josemar forbids this (issue #69) |
+| `soul-audit` | Generates SOUL.md/USER.md; Josemar has its own in agent-state |
+| `cron-scheduler`, `minion-orchestrator` | Assume gbrain's own scheduling, not Hermes cron |
+| `skill-creator`, `skillify`, `skill-optimizer`, `skillpack-harvest` | Auto skill creation; Josemar disables this (issue #69) |
+
+### Maintenance
+
+The skillpack files at `/opt/gbrain/skills/` are the exact copy from the
+pinned gbrain version. When upgrading gbrain (`GBRAIN_REF` in
+`Dockerfile.hermes`), the operator must verify this compatibility filter
+is still accurate — skills may be added, renamed, or change their feature
+requirements. See `docs/gbrain-operations.md` → "gbrain Upgrade Checklist".
+
 ## Operator-Only Activation
 
 `reindex` is not a chat action. It is a manual operator command run on the
