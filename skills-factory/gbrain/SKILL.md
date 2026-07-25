@@ -116,6 +116,11 @@ activation (init/sync/extract/schema setup) is provided by the
   --params '{"slug":"<meeting-slug>","sourceId":"default"}' --follow` to
   process inline). See `docs/gbrain-operations.md` for setup details.
 
+  For the full chronicle reference (event schema, kind taxonomy, ontology
+  model, the note→atom relationship, query output structure, common
+  workflows), load the reference on demand:
+  `skill_view("gbrain", file_path="references/chronicle.md")`.
+
 ## Actions
 
 All actions are invoked directly via the native `gbrain` CLI. Run `gbrain --help`
