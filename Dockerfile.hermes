@@ -53,23 +53,20 @@ RUN git clone https://github.com/garrytan/gbrain.git /opt/gbrain \
 
 # Josemar local patches to gbrain source:
 #
-# 1. (git apply) Configure AI gateway in PGLite inline worker (--follow) path.
-#    Without this, chronicle_extract and other LLM-backed jobs silently return
-#    no_events on PGLite because isAvailable('chat') is false (gateway singleton
-#    never configured). Uses git apply so the build FAILS LOUDLY if gbrain
-#    restructures the --follow path (forcing the operator to re-patch).
-#    Upstream bug report: pending
-#
-# 2. (sed) Increase chronicle judge maxTokens from 1500 to 8000.
-#    DeepSeek reasoning models consume all tokens on internal thinking before
-#    producing output. 1500 tokens produces empty responses (STOP REASON: length).
-#    8000 gives the model enough room to complete reasoning and emit the JSON array.
-#    Uses sed (simple string replacement) — silently no-ops if gbrain changes the value.
+# 1. (git apply) Three patches for chronicle + DeepSeek on PGLite:
+#    a. Configure AI gateway in PGLite inline worker (--follow) path.
+#       Without this, chronicle_extract and other LLM-backed jobs silently return
+#       no_events on PGLite (isAvailable('chat') is false). Upstream bug: #3387
+#    b. Increase chronicle judge maxTokens from 1500 to 8000.
+#       DeepSeek reasoning models need more tokens for the thinking chain.
+#    c. Map deepseek_api_key from config file to gateway env.
+#       Upstream only maps openai/anthropic/zeroentropy; other providers rely on
+#       process.env which may not reach subprocesses (e.g. Hermes spawning gbrain).
+#    Uses git apply so the build FAILS LOUDLY if gbrain restructures the patched files.
 COPY patches/gbrain-inline-worker-gateway.patch /tmp/gbrain-inline-worker-gateway.patch
 RUN cd /opt/gbrain \
     && git apply /tmp/gbrain-inline-worker-gateway.patch \
-    && rm /tmp/gbrain-inline-worker-gateway.patch \
-    && sed -i 's/maxTokens: 1500/maxTokens: 8000/' src/core/chronicle/extract-events.ts
+    && rm /tmp/gbrain-inline-worker-gateway.patch
 
 # Stage 4: Josemar-flavored Hermes image
 FROM ${HERMES_BASE_IMAGE}

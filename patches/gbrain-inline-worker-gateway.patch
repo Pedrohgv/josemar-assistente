@@ -24,3 +24,60 @@ index 64aaa6a..3e02535 100644
          const worker = new MinionWorker(engine, {
            queue: queueName, pollInterval: 100, healthCheckInterval: 0,
          });
+diff --git a/src/core/ai/build-gateway-config.ts b/src/core/ai/build-gateway-config.ts
+index c2b3f84..9b9af1e 100644
+--- a/src/core/ai/build-gateway-config.ts
++++ b/src/core/ai/build-gateway-config.ts
+@@ -28,6 +28,11 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
+   const envFromConfig: Record<string, string> = {};
+   if (c.openai_api_key) envFromConfig.OPENAI_API_KEY = c.openai_api_key;
+   if (c.anthropic_api_key) envFromConfig.ANTHROPIC_API_KEY = c.anthropic_api_key;
++  // JOSEMAR PATCH: map deepseek_api_key from config file to env so the gateway
++  // can reach DeepSeek without depending on process.env reaching the subprocess.
++  // Upstream only maps openai/anthropic/zeroentropy; other providers rely on
++  // process.env which may not be inherited by subprocesses (e.g. Hermes spawning gbrain).
++  if (c.deepseek_api_key) envFromConfig.DEEPSEEK_API_KEY = c.deepseek_api_key;
+   // v0.37 fix wave (CDX2-5+6): ZE became the default provider in v0.36 but
+   // the env-mapping at this seam never picked it up. `gbrain config set
+   // zeroentropy_api_key X` wrote DB plane (ignored by gateway). The file-
+diff --git a/src/core/chronicle/extract-events.ts b/src/core/chronicle/extract-events.ts
+index 4354614..514da6d 100644
+--- a/src/core/chronicle/extract-events.ts
++++ b/src/core/chronicle/extract-events.ts
+@@ -183,7 +183,7 @@ function defaultJudge(engine: BrainEngine): ChronicleJudge {
+             `${input.title}\n\n${body}\n</page>\n\n` +
+             `Known attendees: ${input.attendees.slice(0, 10).join(', ') || '(none)'}.\nExtract the events.`,
+         }],
+-        maxTokens: 1500,
++        maxTokens: 8000,
+       });
+       if (res.stopReason === 'refusal' || res.stopReason === 'content_filter') return { events: [] };
+       text = res.text;
+diff --git a/src/core/config.ts b/src/core/config.ts
+index 8a79b0e..c5db65d 100644
+--- a/src/core/config.ts
++++ b/src/core/config.ts
+@@ -31,6 +31,7 @@ export interface GBrainConfig {
+   database_path?: string;
+   openai_api_key?: string;
+   anthropic_api_key?: string;
++  deepseek_api_key?: string;
+   /**
+    * ZeroEntropy API key. v0.37 fix wave (CDX2-5+6): ZE became the default
+    * embedding + reranker provider in v0.36 but lacked a file-plane config
+@@ -525,6 +526,7 @@ export function loadConfig(): GBrainConfig | null {
+     ...(dbUrl ? { database_path: undefined } : {}),
+     ...(process.env.OPENAI_API_KEY ? { openai_api_key: process.env.OPENAI_API_KEY } : {}),
+     ...(process.env.ANTHROPIC_API_KEY ? { anthropic_api_key: process.env.ANTHROPIC_API_KEY } : {}),
++    ...(process.env.DEEPSEEK_API_KEY ? { deepseek_api_key: process.env.DEEPSEEK_API_KEY } : {}),
+     ...(process.env.ZEROENTROPY_API_KEY ? { zeroentropy_api_key: process.env.ZEROENTROPY_API_KEY } : {}),
+     ...(process.env.GBRAIN_EMBEDDING_MODEL ? { embedding_model: process.env.GBRAIN_EMBEDDING_MODEL } : {}),
+     ...(process.env.GBRAIN_EMBEDDING_DIMENSIONS ? { embedding_dimensions: parseInt(process.env.GBRAIN_EMBEDDING_DIMENSIONS, 10) } : {}),
+@@ -815,6 +817,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
+   'database_path',
+   'openai_api_key',
+   'anthropic_api_key',
++  'deepseek_api_key',
+   'embedding_model',
+   'embedding_dimensions',
+   'embedding_disabled',
