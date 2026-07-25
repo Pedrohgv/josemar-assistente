@@ -88,6 +88,32 @@ activation (init/sync/extract/schema setup) is provided by the
 - **Runtime state.** gbrain state lives under `/opt/data/.gbrain` (PGLite
   database, config, cache). It is runtime-only and never versioned by
   workspace sync.
+- **Life Chronicle (enabled).** gbrain chronicle auto-extracts structured
+  events from meeting/conversation/calendar-event pages. When a meeting note
+  is written under `meetings/`, the chronicle LLM judge segments it into
+  discrete timeline atoms — each decision, commitment, or action item becomes
+  its own event with a `kind` (meeting, decision, commitment, call, milestone,
+  etc.), `when`, `who`, and `what`. Events are stored as pages under
+  `life/events/` and indexed in the timeline_entries table, both backlinking
+  to the original meeting note.
+
+  Chronicle processes these page types: `meeting` (or `meetings/` prefix),
+  `conversation` (or `conversations/`), `calendar-event` (or `cal/` /
+  `calendar/`). Diary pages (`life/diary/`) are excluded by design (privacy).
+
+  Query the timeline with:
+  - `gbrain day <YYYY-MM-DD> [--week] [--narrative]` — events on a date (or ISO week)
+  - `gbrain since <YYYY-MM-DD> [--kind <kind>]` — events on/after a date
+  - `gbrain last-seen <entity-slug>` — when you last interacted with an entity
+  - `gbrain on-this-day` — prior-year events on this month-day
+  - `gbrain orient [--days 7] [--entities a,b]` — recent timeline + entity
+    ontology in one zero-LLM call (good for session startup context)
+
+  Chronicle auto-emission requires `auto_chronicle=true` (operator config).
+  To backfill existing meetings: `gbrain chronicle-backfill` (enqueues
+  extraction jobs; on PGLite, run `gbrain jobs submit chronicle_extract
+  --params '{"slug":"<meeting-slug>","sourceId":"default"}' --follow` to
+  process inline). See `docs/gbrain-operations.md` for setup details.
 
 ## Actions
 
