@@ -339,6 +339,56 @@ fi
 install_workspace_sync_cron
 install_gbrain_refresh_cron
 
+# Bridge provider API keys from the container env into gbrain's config file.
+# s6-overlay stores container env vars in /run/s6/container_environment/, but
+# the Hermes gateway process (spawned via s6) may not inherit them — so gbrain
+# subprocesses spawned by Hermes can't find provider keys in process.env.
+# This step copies any *_API_KEY from the container env into gbrain's config
+# file (/opt/data/.gbrain/config.json) so the generic *_api_key → *_API_KEY
+# mapping in buildGatewayConfig (gbrain patch) can reach the gateway.
+# Provider-agnostic: works for DeepSeek, Google, Groq, Together, etc.
+bridge_gbrain_api_keys() {
+    local gbrain_config="${HERMES_HOME}/.gbrain/config.json"
+    [ -f "$gbrain_config" ] || return 0
+
+    local env_dir="/run/s6/container_environment"
+    [ -d "$env_dir" ] || return 0
+
+    python3 - "$gbrain_config" "$env_dir" <<'PY'
+import json, os, sys
+
+config_path, env_dir = sys.argv[1], sys.argv[2]
+
+try:
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+except Exception:
+    sys.exit(0)
+
+changed = False
+for entry in os.listdir(env_dir):
+    if not entry.endswith("_API_KEY"):
+        continue
+    config_key = entry.lower()
+    try:
+        with open(os.path.join(env_dir, entry), "r") as f:
+            value = f.read().strip()
+    except Exception:
+        continue
+    if not value:
+        continue
+    if config.get(config_key) != value:
+        config[config_key] = value
+        changed = True
+
+if changed:
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+PY
+}
+bridge_gbrain_api_keys
+
 if [ -d "$CREDENTIALS_SOURCE_DIR" ]; then
     log "Copying mounted credentials into Hermes data volume"
     rm -rf "${CREDENTIALS_DIR:?}/"*

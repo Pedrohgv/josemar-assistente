@@ -91,6 +91,21 @@ When modifying user state, commit/push inside `agent-state` repo when requested.
 - Until issue #69 is resolved, intentional user-skill authoring must be explicit and use the flat `/opt/data/skills/<name>/SKILL.md` layout so workspace sync can version it. Never route runtime writes into `/opt/josemar/skills`.
 - Per-profile skill enable/disable choices are user state under `hermes/skill-toggles/`; never version the full Hermes `config.yaml`.
 
+### Skill Organization: SKILL.md vs. references/
+
+**Policy: main `SKILL.md` is core, `references/` is deep-dive.** All skills (repo-owned and user-owned) should follow this split:
+
+- **`SKILL.md`** — short, core content. Always loaded when the skill is active. Contains: the skill's purpose, core commands/operations, critical rules, the most-used reference paths, and a pointer to the references/ directory for full details. Target: under ~150 lines so it fits comfortably in always-loaded context.
+- **`references/<topic>.md`** — detailed, rarely-needed content. Invisible to the skill system — loaded on demand via `skill_view("<skill>", file_path="references/<topic>.md")`. Contains: full schemas, taxonomies, edge cases, command output structures, deep-dive material that would bloat the main skill if always loaded.
+
+This pattern keeps the always-loaded skill context small while making all information reachable when needed. The umbrella skill should state "for X details, load the reference" so the agent knows what's available.
+
+Examples in this repo:
+- `skills-factory/gbrain/SKILL.md` (compact) + `references/chronicle.md` (full event schema, kind taxonomy, ontology model)
+- `agent-state/skills/client-workflows/SKILL.md` (umbrella router) + `references/client-transcription.md` (detailed workflow)
+
+When adding or editing a skill, if a section exceeds ~30 lines of detail, consider moving it to `references/<topic>.md` and replacing it in the main skill with a brief summary + `skill_view` pointer.
+
 ## Security Rules
 
 1. Never commit secrets.

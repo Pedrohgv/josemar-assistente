@@ -45,6 +45,54 @@ The Josemar gbrain integration is intentionally minimal:
 - gbrain version: `0.42.57.0`
 - Schema pack: `gbrain-base-v2`
 
+## gbrain Upgrade Checklist
+
+When changing `GBRAIN_REF` in `Dockerfile.hermes` (upgrading gbrain), the
+operator MUST verify the following after rebuild and before deploying:
+
+1. **Skillpack compatibility filter.** The `gbrain` skill
+   (`skills-factory/gbrain/SKILL.md` → "gbrain Skillpack Reference") has a
+   compatibility filter listing which gbrain skills are safe, which require
+   disabled features, and which conflict with Josemar's setup. The installed
+   gbrain source tree at `/opt/gbrain/skills/` is the exact copy from the
+   pinned version. On upgrade, skills may be added, renamed, removed, or
+   change their feature requirements. Re-read `/opt/gbrain/skills/manifest.json`
+   and spot-check the skills listed in the filter to confirm the categorization
+   is still accurate. Update the filter if needed.
+
+2. **Path-prefix inference table.** The `gbrain` skill documents the
+   path-prefix → type inference table (from `src/core/markdown.ts`). On
+   upgrade, verify the table in `src/core/markdown.ts::GBRAIN_BASE_PATH_PREFIXES`
+   still matches what the skill documents. Update the skill if gbrain added,
+   removed, or changed any prefix mappings.
+
+3. **Chronicle / Life Chronicle features.** If chronicle is enabled by the
+   time of the upgrade, verify the `auto_chronicle` config key and the
+   chronicle commands (`gbrain day`, `gbrain since`, `gbrain last-seen`,
+   `gbrain orient`, `gbrain chronicle-backfill`) still exist and behave as
+   documented. Check if the `auto_chronicle` key was added to
+   `KNOWN_CONFIG_KEYS` (the `--force` workaround in v0.42.57.0 may be fixed).
+
+4. **Read-then-put behavior.** Verify `put_page` still re-runs auto-link
+   on updates (including `status='skipped'`). The read-then-put rule in the
+   gbrain skill and AGENTS.md depends on this behavior.
+
+5. **Pinned values.** Update the version and ref in this section and in
+   `skills-factory/gbrain/SKILL.md` if it references the version.
+
+6. **Local patches.** The Dockerfile applies two patches to gbrain source
+   after the git clone:
+   - `patches/gbrain-inline-worker-gateway.patch` (git apply) — configures the
+     AI gateway in the PGLite inline worker (`--follow`) path. If this patch
+     fails to apply, the build will fail loudly — re-create the patch against
+     the new gbrain source.
+   - `sed -i 's/maxTokens: 1500/maxTokens: 8000/'` on
+     `src/core/chronicle/extract-events.ts` — increases the chronicle judge
+     token limit for reasoning models. If gbrain changes the value (e.g. to
+     2000), the sed silently no-ops; verify the value is still 8000 after build.
+   Both patches are documented inline in `Dockerfile.hermes`. If either has
+   been fixed upstream, remove the patch from the Dockerfile.
+
 ## Environment Defaults
 
 | Variable | Default | Notes |
