@@ -83,7 +83,7 @@ class ComposeContractTests(unittest.TestCase):
         block = service_block(self.text, "hermes")
         self.assertIn("- GBRAIN_HOME=${GBRAIN_HOME:-/opt/data}", block)
         self.assertIn("- GBRAIN_BRAIN_REPO=${GBRAIN_BRAIN_REPO:-/opt/data/obsidian}", block)
-        self.assertIn("- GBRAIN_SCHEMA_PACK=${GBRAIN_SCHEMA_PACK:-gbrain-base-v2}", block)
+        self.assertIn("- GBRAIN_SCHEMA_PACK=${GBRAIN_SCHEMA_PACK:-josemar}", block)
         self.assertIn("- GBRAIN_SCHEMA_SOURCE_ROOT=${GBRAIN_SCHEMA_SOURCE_ROOT:-/opt/data/.gbrain/schema-packs}", block)
         self.assertIn("- GBRAIN_REFRESH_INTERVAL=${GBRAIN_REFRESH_INTERVAL:-5}", block)
 

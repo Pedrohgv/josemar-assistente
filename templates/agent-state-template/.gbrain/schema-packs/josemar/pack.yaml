@@ -1,0 +1,19 @@
+# Josemar custom schema pack — extends gbrain-base-v2 with user-defined types.
+# The base pack (gbrain-base-v2) ships with gbrain and provides the 15-type
+# canonical taxonomy. Add your own page types here to extend it.
+#
+# Examples:
+#   - name: meeting
+#     primitive: temporal
+#     path_prefixes: [meetings/, meeting/]
+#     aliases: []
+#     extractable: true
+#     expert_routing: false
+#     subtype_rules: []
+#
+# After editing, activate with:
+#   GBRAIN_SCHEMA_PACK=josemar  (in your .env)
+#   josemar-gbrain reindex      (operator command)
+api_version: "gbrain-schema-pack-v1"
+extends: gbrain-base-v2
+page_types: []
