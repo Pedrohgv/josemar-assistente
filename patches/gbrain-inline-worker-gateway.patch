@@ -1,0 +1,26 @@
+diff --git a/src/commands/jobs.ts b/src/commands/jobs.ts
+index 64aaa6a..3e02535 100644
+--- a/src/commands/jobs.ts
++++ b/src/commands/jobs.ts
+@@ -378,6 +378,21 @@ HANDLER TYPES (built in)
+         // 'unhealthy' listener, a DB blip would trip emitUnhealthy's
+         // no-listener fallback and call process.exit(1) from inside the
+         // library, killing the user's CLI session.
++        //
++        // JOSEMAR PATCH: configure the AI gateway before running handlers.
++        // The main CLI dispatch (cli.ts connectEngine) calls configureGateway,
++        // but the gateway singleton may not be set in this code path. Without
++        // this, isAvailable('chat') returns false and LLM-backed jobs
++        // (chronicle_extract, etc.) silently return no_events.
++        // Upstream bug: https://github.com/garrytan/gbrain/issues (pending)
++        try {
++          const { configureGateway } = await import('../core/ai/gateway.ts');
++          const { buildGatewayConfig } = await import('../core/ai/build-gateway-config.ts');
++          const { loadConfig } = await import('../core/config.ts');
++          const cfg = loadConfig();
++          if (cfg) configureGateway(buildGatewayConfig(cfg));
++        } catch { /* non-fatal: gateway stays unconfigured, same as upstream behavior */ }
++
+         const worker = new MinionWorker(engine, {
+           queue: queueName, pollInterval: 100, healthCheckInterval: 0,
+         });

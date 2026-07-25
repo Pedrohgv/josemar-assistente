@@ -51,6 +51,13 @@ RUN git clone https://github.com/garrytan/gbrain.git /opt/gbrain \
     && git checkout "$GBRAIN_REF" \
     && bun install --frozen-lockfile
 
+# Josemar local patch: configure AI gateway in PGLite inline worker (--follow) path.
+# Without this, chronicle_extract and other LLM-backed jobs silently return no_events
+# on PGLite because isAvailable('chat') is false (gateway singleton never configured).
+# Upstream bug report: pending
+COPY patches/gbrain-inline-worker-gateway.patch /tmp/gbrain-inline-worker-gateway.patch
+RUN cd /opt/gbrain && git apply /tmp/gbrain-inline-worker-gateway.patch && rm /tmp/gbrain-inline-worker-gateway.patch
+
 # Stage 4: Josemar-flavored Hermes image
 FROM ${HERMES_BASE_IMAGE}
 
