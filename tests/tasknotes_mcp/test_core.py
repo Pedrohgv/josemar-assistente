@@ -402,6 +402,25 @@ def _write_fake_gbrain(tmpdir: Path, behavior: Optional[dict] = None) -> Path:
             print(json.dumps({{"write_through": {{"written": True}}, "slug": slug}}))
             sys.exit(0)
 
+        if cmd == "delete" and len(argv) >= 2:
+            slug = argv[1]
+            if "--source" in argv:
+                pass  # accepted, ignored in fake
+            if slug in behavior.get("delete_fail", []):
+                sys.stderr.write("fake gbrain delete error\\n")
+                sys.exit(1)
+            page = pages.pop(slug, None)
+            if page is None:
+                # Page not found in DB. Gbrain returns the same shape as the
+                # real delete_page op: page_not_found error.
+                print(json.dumps({{"error": "page_not_found", "message": "not found"}}))
+                sys.exit(1)
+            with open(STATE, "w") as fobj:
+                json.dump(state, fobj)
+            print(json.dumps({{"status": "soft_deleted", "slug": slug,
+                               "recoverable_until": "now + 72h via restore_page"}}))
+            sys.exit(0)
+
         if cmd == "sync":
             if behavior.get("sync_fail"):
                 sys.stderr.write("sync failed\\n")
@@ -1905,6 +1924,62 @@ class EngineOperationTests(unittest.TestCase):
         self.engine.archive("t1")
         result = self.engine.archive("t1")
         self.assertEqual(result.state, self.core.NOT_APPLIED)
+
+    def test_delete_success(self) -> None:
+        self.engine.create("t1", "T", status="open", body="b")
+        target = self.vault / "tasks" / "t1.md"
+        self.assertTrue(target.exists())
+
+        result = self.engine.delete("t1")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertIsNotNone(result.commit_id)
+
+        # File must be gone from disk.
+        self.assertFalse(target.exists())
+        # Idempotent delete verifies both gbrain and disk agree on absence.
+        result2 = self.engine.delete("t1")
+        self.assertEqual(result2.state, self.core.NOT_APPLIED)
+        self.assertEqual(result2.detail, "task already deleted")
+
+    def test_delete_idempotent(self) -> None:
+        self.engine.create("t1", "T", status="open", body="b")
+        self.engine.delete("t1")
+        result = self.engine.delete("t1")
+        self.assertEqual(result.state, self.core.NOT_APPLIED)
+        self.assertEqual(result.detail, "task already deleted")
+
+    def test_delete_nonexistent(self) -> None:
+        result = self.engine.delete("t1")
+        self.assertEqual(result.state, self.core.NOT_APPLIED)
+        self.assertEqual(result.detail, "task already deleted")
+
+    def test_delete_dirty_target_refused(self) -> None:
+        self.engine.create("t1", "T", status="open", body="b")
+        target = self.vault / "tasks" / "t1.md"
+        target.write_text(target.read_text(encoding="utf-8") + "\ndirty edit\n", encoding="utf-8")
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.delete("t1")
+        # File must still exist.
+        self.assertTrue(target.exists())
+
+    def test_delete_archived_task(self) -> None:
+        """Delete also works on archived tasks (in the archive folder)."""
+        self.engine.create("t1", "T", status="open", body="b")
+        self.engine.archive("t1")
+        result = self.engine.delete("t1")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        # Original file must be gone.
+        target = self.vault / "tasks" / "t1.md"
+        self.assertFalse(target.exists())
+
+    def test_delete_gbrain_failure(self) -> None:
+        behavior = {"delete_fail": ["tasks/t1"]}
+        fail_tmpdir = Path(tempfile.mkdtemp(prefix="tnm_"))
+        self.addCleanup(lambda: shutil.rmtree(fail_tmpdir, ignore_errors=True))
+        engine, vault, gbrain_bin = _make_engine(self.core, fail_tmpdir, behavior)
+        engine.create("t1", "T", status="open", body="b")
+        with self.assertRaises(self.core.GbrainError):
+            engine.delete("t1")
 
     def test_preflight_commits_pending_manual_edit(self) -> None:
         (self.vault / "tasks" / "manual.md").write_text("---\ntitle: Manual\ntags:\n  - task\n---\nbody\n", encoding="utf-8")

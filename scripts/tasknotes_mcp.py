@@ -201,6 +201,13 @@ def task_archive(slug: str) -> dict[str, Any]:
 
 
 @mcp.tool(structured_output=True)
+def task_delete(slug: str) -> dict[str, Any]:
+    """Delete one task: gbrain soft-delete confirmation gate, git rm to remove the file from disk, git commit."""
+    result = _engine_call("task_delete", "delete", slug)
+    return _mutation_dict(result)
+
+
+@mcp.tool(structured_output=True)
 def task_add_tag(slug: str, tag: str) -> dict[str, Any]:
     """Add a custom tag to one task idempotently. Rejects the task-identification and archive tags."""
     result = _engine_call("task_add_tag", "add_tag", slug, tag)

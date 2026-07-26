@@ -2,8 +2,8 @@
 """TaskNotes MCP core engine.
 
 A stdlib+PyYAML core engine for a gbrain-backed TaskNotes lifecycle API.
-Importable without the MCP SDK. Exposes six operations (create/get/list/
-update/complete/archive) as plain methods for Phase 2 MCP wrappers.
+Importable without the MCP SDK. Exposes seven operations (create/get/list/
+update/complete/archive/delete) as plain methods for Phase 2 MCP wrappers.
 
 Design invariants (fixed, do not redesign):
   - gbrain is the sole writer; the core never writes task files directly.
@@ -181,6 +181,7 @@ _GIT_BAD_MARKERS = (
 # Generic content-free commit messages.
 PREFLIGHT_COMMIT_MSG = "tasknotes-mcp: preflight sync"
 POSTWRITE_COMMIT_MSG = "tasknotes-mcp: task update"
+POSTWRITE_DELETE_COMMIT_MSG = "tasknotes-mcp: task delete"
 
 # Mutation outcome states.
 NOT_APPLIED = "not_applied"
@@ -1360,6 +1361,37 @@ def git_head_id(vault: Path, git_env: Optional[Dict[str, str]] = None) -> Option
     return r.stdout.strip() or None
 
 
+def git_rm_and_commit(
+    vault: Path,
+    target_path: Path,
+    git_env: Optional[Dict[str, str]] = None,
+) -> bool:
+    """Remove target from working tree and index, then commit iff staged.
+
+    Uses ``git rm -- <path>`` to delete the file from disk and stage the
+    removal, then commits with the delete message. Hooks, signing, gc, and
+    maintenance are disabled command-locally.
+
+    Returns True if a commit was created, False if nothing was staged.
+    """
+    if git_env is None:
+        git_env = _build_git_env()
+    rel = target_path.relative_to(vault) if target_path.is_absolute() else target_path
+    r = _run_git(vault, git_env, ["rm", "--", str(rel)])
+    if r.returncode != 0:
+        raise GitError(f"git rm failed: {_redact(r.stderr)[:200]}")
+    r = _run_git(vault, git_env, ["diff", "--cached", "--quiet"])
+    if r.returncode == 0:
+        return False
+    r = _run_git(
+        vault, git_env,
+        ["commit", "-m", POSTWRITE_DELETE_COMMIT_MSG, "--", str(rel)],
+    )
+    if r.returncode != 0:
+        raise GitError(f"git post-delete commit failed: {_redact(r.stderr)[:200]}")
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Gbrain helpers (source-routed)
 # ---------------------------------------------------------------------------
@@ -1498,6 +1530,36 @@ def gbrain_sync_full(
     if result.returncode != 0:
         raise GbrainError(f"gbrain full sync failed: {_redact(result.stderr)[:200]}")
     return {}
+
+
+def gbrain_delete(
+    gbrain_bin: str,
+    env: Dict[str, str],
+    slug: str,
+    source_id: str,
+) -> Dict[str, Any]:
+    """Call ``gbrain delete <slug> --source <id>`` and return parsed JSON.
+
+    Gbrain delete is a soft-delete (sets ``deleted_at = NOW()``). The DB
+    row is hidden from search/get/list but recoverable for 72h via
+    ``restore_page``. The on-disk ``.md`` file is NOT touched by this
+    command — the caller (``task_delete``) must follow up with ``git rm``
+    and commit.
+    """
+    result = run_subprocess(
+        [gbrain_bin, "delete", slug, "--source", source_id],
+        env=env,
+        timeout=DEFAULT_TIMEOUT,
+    )
+    if result.returncode != 0:
+        raise GbrainError(f"gbrain delete failed: {_redact(result.stderr)[:200]}")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise GbrainError(f"gbrain delete returned invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise GbrainError("gbrain delete returned non-object")
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -2285,7 +2347,7 @@ class MutationResult:
 
 
 class TaskNotesEngine:
-    """Core engine for the six TaskNotes operations.
+    """Core engine for the seven TaskNotes operations.
 
     All operations that invoke gbrain (including get) take the shared
     lock. List is lock-free because it never invokes gbrain. Mutations
@@ -2849,6 +2911,107 @@ class TaskNotesEngine:
                 gbrain_slug,
                 put_result,
                 expected_document=expected_document,
+            )
+
+    def delete(self, slug: str) -> MutationResult:
+        """Delete a task: gbrain soft-delete, git rm the file, git commit.
+
+        This is the only mutation that removes a file from disk instead of
+        writing through ``gbrain put``. The gbrain delete is a soft-delete
+        confirmation gate; once confirmed, the file is removed via ``git
+        rm`` and the deletion committed. Idempotent: returns NOT_APPLIED if
+        the task is already absent from both gbrain and disk.
+
+        Target cleanliness is checked BEFORE preflight so manual edits are
+        not silently committed before a destructive operation.
+        """
+        validate_slug(slug)
+        with Lock(self.lock_path, timeout=self.lock_timeout):
+            self._check_recovery_marker()
+            profile = self.load_profile()
+            profile = self._verify_source(profile)
+            original_hash = profile.profile_hash
+
+            # Idempotency and pre-guard BEFORE preflight so dirty edits
+            # are not silently committed before deletion.
+            gbrain_slug = resolve_gbrain_slug(profile, slug)
+            target = resolve_task_path_any(self.vault, profile, slug)
+            if target is None:
+                try:
+                    gbrain_get_page(
+                        self.gbrain_bin, self._gbrain_env,
+                        gbrain_slug, profile.source_id,  # type: ignore[arg-type]
+                    )
+                except GbrainPageNotFound:
+                    return MutationResult(
+                        state=NOT_APPLIED, slug=slug,
+                        detail="task already deleted",
+                    )
+                raise CoreError(
+                    "task exists in gbrain but file is missing on disk"
+                )
+
+            # Target must be git-clean before we touch anything.
+            if not git_target_clean(self.vault, target, self._git_env):
+                raise ValidationError(
+                    f"target has uncommitted changes: {target}"
+                )
+
+            # Now safe: preflight commits pending unrelated edits and syncs.
+            self._preflight(profile)
+            profile = self._verify_profile_stable(original_hash)
+            profile = self._verify_source(profile)
+            # Re-resolve in case preflight changed things.
+            gbrain_slug = resolve_gbrain_slug(profile, slug)
+
+            # Gbrain soft-delete: confirmation gate.
+            try:
+                gbrain_delete(
+                    self.gbrain_bin, self._gbrain_env,
+                    gbrain_slug, profile.source_id,  # type: ignore[arg-type]
+                )
+            except GbrainError:
+                raise
+
+            # Git rm: remove file from disk + stage.
+            try:
+                git_rm_and_commit(self.vault, target, self._git_env)
+            except GitError:
+                # Gbrain soft-deleted, but file removal failed. The file
+                # remains on disk — next sync will re-import it, undoing
+                # the soft-delete. Conservative: mark recovery required.
+                return MutationResult(
+                    state=RECOVERY_REQUIRED, slug=slug,
+                    detail="gbrain deleted but git rm failed",
+                )
+            # Recreate the parent directory if git rm cleaned it up
+            # (happens when this was the last file in the directory).
+            target.parent.mkdir(exist_ok=True)
+
+            try:
+                commit_id = git_head_id(self.vault, self._git_env)
+            except Exception:
+                return MutationResult(
+                    state=APPLIED_UNCOMMITTED, slug=slug,
+                )
+
+            # Verify: gbrain get_page must now report page_not_found.
+            try:
+                gbrain_get_page(
+                    self.gbrain_bin, self._gbrain_env,
+                    gbrain_slug, profile.source_id,  # type: ignore[arg-type]
+                )
+                return MutationResult(
+                    state=RECOVERY_REQUIRED, slug=slug,
+                    detail="gbrain delete did not take effect",
+                )
+            except GbrainPageNotFound:
+                pass
+
+            return MutationResult(
+                state=APPLIED_AND_COMMITTED,
+                slug=slug,
+                commit_id=commit_id,
             )
 
     def _validate_tag_value(self, tag: Any) -> str:

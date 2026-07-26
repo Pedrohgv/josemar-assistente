@@ -13,10 +13,11 @@ the sole task writer. The MCP exposes only:
 - `task_update`
 - `task_complete`
 - `task_archive`
+- `task_delete`
 - `task_add_tag`
 - `task_remove_tag`
 
-There is no unarchive, delete, search, rename/move, bulk, raw
+There is no unarchive, search, rename/move, bulk, raw
 Markdown/frontmatter, or body edit API.
 
 `task_create` accepts an optional `recurrence` field (RFC 5545 RRULE string,
@@ -166,10 +167,30 @@ plugin `taskFilenameFormat: "timestamp"` also produces gbrain-safe filenames.
 The adapter does not yet support:
 
 - **Unarchive**: removing the archive tag without a full unarchive workflow.
-- **Delete, rename/move, title/body edits, bulk operations, raw frontmatter,
+- **Rename/move, title/body edits, bulk operations, raw frontmatter,
   inline-task conversion**: these operations are not exposed via the MCP tools.
 
 For these operations, suggest Obsidian or native gbrain (for non-task pages).
+
+### Task deletion
+
+`task_delete` is the only mutation that removes a file from the vault instead of
+writing through ``gbrain put``:
+
+1. **Gbrain soft-delete confirmation gate**: ``gbrain delete <slug>`` hides the
+   page from the gbrain index immediately. This call must succeed before the
+   adapter touches the file.
+2. **``git rm`` removes the file from disk** and stages the removal.
+3. **Git commit** records the deletion.
+
+The idempotency check runs before preflight commits any pending edits, so
+manual edits on the target file are not silently committed before a destructive
+operation. The deleted file is recoverable via ``git revert``; no data is
+permanently lost.
+
+If ``gbrain delete`` succeeds but ``git rm`` fails, the adapter returns
+``recovery_required`` — the gbrain index has been modified but the file remains
+on disk, and the next sync cycle will re-import it.
 
 ## Mutation outcomes
 
