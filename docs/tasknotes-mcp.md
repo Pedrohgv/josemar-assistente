@@ -160,7 +160,36 @@ via `gbrain put`. See <https://github.com/garrytan/gbrain/issues/3034>.
 
 The adapter avoids this mismatch by always generating gbrain-safe slugs
 (lowercase, hyphens, no spaces) for adapter-created tasks. The recommended
-plugin `taskFilenameFormat: "timestamp"` also produces gbrain-safe filenames.
+plugin ``taskFilenameFormat: "timestamp"`` also produces gbrain-safe filenames.
+
+## Task relationships (subtasks)
+
+There is no dedicated ``subtasks`` field in the TaskNotes 4.11.1 schema, and
+the adapter does not expose a separate subtask management API. However, the
+**``projects`` field serves as the idiomatic parent-child linking mechanism.**
+
+Set ``projects: ["[[parent-slug]]"]`` on a child task to establish a backlink
+to the parent. Obsidian's graph view resolves these wikilinks, and gbrain's
+backlink extraction surfaces the relationship. The adapter's ``task_create``
+and ``task_update`` tools both accept ``projects`` as a list of wikilink
+strings.
+
+**Conventions for subtask workflows:**
+
+- **Parent task as a project container.** Create one parent task (e.g.
+  ``2026-07-20-120000-plan-q3-launch``) that represents the project or
+  deliverable. It holds the scope, description, and deadline in its body.
+- **Child tasks link with ``[[slug]]``.** On each child task, set
+  ``projects: ["[[2026-07-20-120000-plan-q3-launch]]"]``. This creates a
+  backlink from child to parent.
+- **No cascading semantics.** Completing or archiving a parent does not
+  automatically affect children; each task remains independently mutable.
+- **Multiple parents are valid.** A task can reference several parent
+  projects via ``projects: ["[[parent-a]]", "[[parent-b]]"]``.
+
+For discovery, use ``task_list`` with tag or status filters to find all tasks
+linked to a parent project, or inspect the ``projects`` field in individual
+``task_get`` responses.
 
 ## Current limitations
 
