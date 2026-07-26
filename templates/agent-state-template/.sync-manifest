@@ -21,8 +21,7 @@ cron/jobs.json
 # User-owned gbrain schema pack source (narrow explicit paths only).
 # Do NOT use broad gbrain/** — runtime .gbrain is protected and must
 # never be versioned.
-gbrain/schema-packs/josemar-user/pack.yaml
-gbrain/schema-packs/josemar-user/README.md
+.gbrain/schema-packs/josemar/pack.yaml
 
 # Josemar state-backed Hermes skill toggles. Only the dedicated toggle JSON
 # sidecars are versioned, never the full config.yaml. default.json may be

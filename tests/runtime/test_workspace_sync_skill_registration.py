@@ -206,7 +206,7 @@ class WorkspaceSyncSkillRegistrationTests(unittest.TestCase):
         """The template .gitignore must allow the narrow schema pack source path."""
         (self.workspace / ".gitignore").write_text(TEMPLATE_GITIGNORE.read_text(encoding="utf-8"), encoding="utf-8")
 
-        result = self._run_git("check-ignore", "gbrain/schema-packs/josemar-user/pack.yaml", check=False)
+        result = self._run_git("check-ignore", ".gbrain/schema-packs/josemar/pack.yaml", check=False)
 
         self.assertNotEqual(0, result.returncode, "schema pack source path should NOT be ignored")
 
@@ -225,11 +225,11 @@ class WorkspaceSyncSkillRegistrationTests(unittest.TestCase):
     def test_template_manifest_includes_schema_pack(self) -> None:
         """The template .sync-manifest must include the schema pack source path."""
         manifest = (TEMPLATE_GITIGNORE.parent / ".sync-manifest").read_text(encoding="utf-8")
-        self.assertIn("gbrain/schema-packs/josemar-user/pack.yaml", manifest)
+        self.assertIn(".gbrain/schema-packs/josemar/pack.yaml", manifest)
 
     def test_template_pack_yaml_has_correct_api_version(self) -> None:
         """Fix 4: template pack.yaml must use gbrain-schema-pack-v1 api_version."""
-        pack_path = TEMPLATE_GITIGNORE.parent / "gbrain" / "schema-packs" / "josemar-user" / "pack.yaml"
+        pack_path = TEMPLATE_GITIGNORE.parent / ".gbrain" / "schema-packs" / "josemar" / "pack.yaml"
         content = pack_path.read_text(encoding="utf-8")
         self.assertIn("api_version: \"gbrain-schema-pack-v1\"", content,
                       "pack.yaml must use exact api_version: gbrain-schema-pack-v1")

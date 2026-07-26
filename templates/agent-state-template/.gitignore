@@ -31,11 +31,10 @@
 !avatars/**
 
 # User-owned gbrain schema pack source (narrow allowlist, not broad gbrain/**)
-!gbrain/
-!gbrain/schema-packs/
-!gbrain/schema-packs/josemar-user/
-!gbrain/schema-packs/josemar-user/pack.yaml
-!gbrain/schema-packs/josemar-user/README.md
+!.gbrain/
+!.gbrain/schema-packs/
+!.gbrain/schema-packs/josemar/
+!.gbrain/schema-packs/josemar/pack.yaml
 
 # Josemar state-backed Hermes skill toggles. Only the dedicated toggle JSON
 # sidecars are versioned, never the full config.yaml. The lock file and any

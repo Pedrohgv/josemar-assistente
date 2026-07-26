@@ -79,6 +79,16 @@ activation (init/sync/extract/schema setup) is provided by the
   Where you write determines what gbrain sees. Choose the directory to match
   the intended type; let path inference do the work instead of setting
   frontmatter `type:` manually.
+
+  **Caveat — type inference is not re-evaluated on idempotent re-upserts.**
+  gbrain short-circuits `put` when the new content hash matches the existing
+  page's hash (idempotency check in `import-file.ts`). In that case, the
+  type is NOT re-inferred from the path. If a page was created with the wrong
+  type (e.g. `concept` because it was first ingested before the path-prefix
+  table was added, or by a sync that didn't infer correctly), subsequent
+  `put` operations with the same content keep the old type forever. To fix:
+  either set `type: <correct-type>` in the frontmatter explicitly, or change
+  the content slightly so the hash differs and the inference re-runs.
 - **Wikilinks and backlinks.** Obsidian `[[wikilinks]]` in page content are
   resolved automatically when a page is written (basename resolution is
   enabled). `gbrain backlinks` returns all incoming links, including
