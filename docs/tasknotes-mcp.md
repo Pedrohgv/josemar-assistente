@@ -13,10 +13,11 @@ the sole task writer. The MCP exposes only:
 - `task_update`
 - `task_complete`
 - `task_archive`
+- `task_delete`
 - `task_add_tag`
 - `task_remove_tag`
 
-There is no unarchive, delete, search, rename/move, bulk, raw
+There is no unarchive, search, rename/move, bulk, raw
 Markdown/frontmatter, or body edit API.
 
 `task_create` accepts an optional `recurrence` field (RFC 5545 RRULE string,
@@ -159,17 +160,66 @@ via `gbrain put`. See <https://github.com/garrytan/gbrain/issues/3034>.
 
 The adapter avoids this mismatch by always generating gbrain-safe slugs
 (lowercase, hyphens, no spaces) for adapter-created tasks. The recommended
-plugin `taskFilenameFormat: "timestamp"` also produces gbrain-safe filenames.
+plugin ``taskFilenameFormat: "timestamp"`` also produces gbrain-safe filenames.
+
+## Task relationships (subtasks)
+
+There is no dedicated ``subtasks`` field in the TaskNotes 4.11.1 schema, and
+the adapter does not expose a separate subtask management API. However, the
+**``projects`` field serves as the idiomatic parent-child linking mechanism.**
+
+Set ``projects: ["[[parent-slug]]"]`` on a child task to establish a backlink
+to the parent. Obsidian's graph view resolves these wikilinks, and gbrain's
+backlink extraction surfaces the relationship. The adapter's ``task_create``
+and ``task_update`` tools both accept ``projects`` as a list of wikilink
+strings.
+
+**Conventions for subtask workflows:**
+
+- **Parent task as a project container.** Create one parent task (e.g.
+  ``2026-07-20-120000-plan-q3-launch``) that represents the project or
+  deliverable. It holds the scope, description, and deadline in its body.
+- **Child tasks link with ``[[slug]]``.** On each child task, set
+  ``projects: ["[[2026-07-20-120000-plan-q3-launch]]"]``. This creates a
+  backlink from child to parent.
+- **No cascading semantics.** Completing or archiving a parent does not
+  automatically affect children; each task remains independently mutable.
+- **Multiple parents are valid.** A task can reference several parent
+  projects via ``projects: ["[[parent-a]]", "[[parent-b]]"]``.
+
+For discovery, use ``task_list`` with tag or status filters to find all tasks
+linked to a parent project, or inspect the ``projects`` field in individual
+``task_get`` responses.
 
 ## Current limitations
 
 The adapter does not yet support:
 
 - **Unarchive**: removing the archive tag without a full unarchive workflow.
-- **Delete, rename/move, title/body edits, bulk operations, raw frontmatter,
+- **Rename/move, title/body edits, bulk operations, raw frontmatter,
   inline-task conversion**: these operations are not exposed via the MCP tools.
 
 For these operations, suggest Obsidian or native gbrain (for non-task pages).
+
+### Task deletion
+
+`task_delete` is the only mutation that removes a file from the vault instead of
+writing through ``gbrain put``:
+
+1. **Gbrain soft-delete confirmation gate**: ``gbrain delete <slug>`` hides the
+   page from the gbrain index immediately. This call must succeed before the
+   adapter touches the file.
+2. **``git rm`` removes the file from disk** and stages the removal.
+3. **Git commit** records the deletion.
+
+The idempotency check runs before preflight commits any pending edits, so
+manual edits on the target file are not silently committed before a destructive
+operation. The deleted file is recoverable via ``git revert``; no data is
+permanently lost.
+
+If ``gbrain delete`` succeeds but ``git rm`` fails, the adapter returns
+``recovery_required`` — the gbrain index has been modified but the file remains
+on disk, and the next sync cycle will re-import it.
 
 ## Mutation outcomes
 

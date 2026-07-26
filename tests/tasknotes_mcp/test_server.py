@@ -82,6 +82,7 @@ class ServerContractTests(unittest.TestCase):
                 "task_update",
                 "task_complete",
                 "task_archive",
+                "task_delete",
                 "task_add_tag",
                 "task_remove_tag",
             },
@@ -223,6 +224,17 @@ class ServerContractTests(unittest.TestCase):
         result = self.server.task_remove_tag("t1", "urgent")
         self.assertEqual(result, {"state": "not_applied", "slug": "t1"})
         self.engine.remove_tag.assert_called_once_with("t1", "urgent")
+
+    def test_delete_forwards_to_engine(self) -> None:
+        self.engine.delete.return_value = self.server.MutationResult(
+            state="applied_and_committed", slug="t1", commit_id="abc"
+        )
+        result = self.server.task_delete("t1")
+        self.assertEqual(
+            result,
+            {"state": "applied_and_committed", "slug": "t1", "commit_id": "abc"},
+        )
+        self.engine.delete.assert_called_once_with("t1")
 
     def test_expected_core_error_becomes_tool_error(self) -> None:
         self.engine.get.side_effect = self.server.ValidationError("invalid slug")
