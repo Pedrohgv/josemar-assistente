@@ -274,7 +274,7 @@ class TaskNotesProfile:
     raw_data: Mapping[str, Any]
     move_archived_tasks: bool = False
     archive_folder: Optional[str] = None
-    user_fields: Tuple[Dict[str, str], ...] = ()
+    user_fields: Tuple[Dict[str, Any], ...] = ()
 
 
 def _read_json_from_directory(directory_fd: int, name: str) -> Mapping[str, Any]:
@@ -479,21 +479,23 @@ _USER_FIELD_TYPES: Tuple[str, ...] = (
     "number",
     "boolean",
     "link",
+    "enum",
 )
 
 
-def _validate_user_fields(value: Any) -> Tuple[Dict[str, str], ...]:
+def _validate_user_fields(value: Any) -> Tuple[Dict[str, Any], ...]:
     """Validate ``userFields``: list of objects with id/key/type (and optional label).
 
     Each field must have a non-empty string ``id``, ``key``, and ``type``
     belonging to the allowed set. Returns a tuple of plain dicts with the
     keys ``id``, ``key``, ``type``, and ``label`` (label defaults to "").
+    Enum fields additionally carry an ``options`` key.
     """
     if value is None:
         return ()
     if not isinstance(value, list):
         raise ProfileIncompatible("userFields must be a list")
-    out: List[Dict[str, str]] = []
+    out: List[Dict[str, Any]] = []
     seen_keys: set = set()
     seen_ids: set = set()
     for entry in value:
@@ -513,6 +515,22 @@ def _validate_user_fields(value: Any) -> Tuple[Dict[str, str], ...]:
         label = entry.get("label", "")
         if not isinstance(label, str):
             raise ProfileIncompatible("userField label must be a string")
+        field: Dict[str, Any] = {"id": fid, "key": key, "type": ftype, "label": label}
+        if ftype == "enum":
+            options = entry.get("options")
+            if not isinstance(options, list) or not options:
+                raise ProfileIncompatible(
+                    f"userField {key!r} (enum) must have a non-empty 'options' list"
+                )
+            if not all(isinstance(o, str) and o for o in options):
+                raise ProfileIncompatible(
+                    f"userField {key!r} (enum) 'options' must be non-empty strings"
+                )
+            if len(set(options)) != len(options):
+                raise ProfileIncompatible(
+                    f"userField {key!r} (enum) 'options' must be unique"
+                )
+            field["options"] = list(options)
         if key in seen_keys:
             raise ProfileIncompatible(f"userField key {key!r} must be unique")
         if fid in seen_ids:
@@ -523,7 +541,7 @@ def _validate_user_fields(value: Any) -> Tuple[Dict[str, str], ...]:
             )
         seen_keys.add(key)
         seen_ids.add(fid)
-        out.append({"id": fid, "key": key, "type": ftype, "label": label})
+        out.append(field)
     return tuple(out)
 
 
@@ -2160,7 +2178,7 @@ def validate_custom_fields(
     if not isinstance(custom_fields, dict):
         raise ValidationError("custom_fields must be a dict")
     # Build a lookup by key.
-    by_key: Dict[str, Dict[str, str]] = {uf["key"]: uf for uf in profile.user_fields}
+    by_key: Dict[str, Dict[str, Any]] = {uf["key"]: uf for uf in profile.user_fields}
     out: Dict[str, Any] = {}
     for key, value in custom_fields.items():
         if not isinstance(key, str) or not key:
@@ -2218,6 +2236,14 @@ def validate_custom_fields(
                 raise ValidationError(f"custom field {key!r} (link) must be a string")
             if len(value) > 500:
                 raise ValidationError(f"custom field {key!r} (link) exceeds 500 chars")
+        elif ftype == "enum":
+            if not isinstance(value, str):
+                raise ValidationError(f"custom field {key!r} (enum) must be a string")
+            options = field.get("options", [])
+            if value not in options:
+                raise ValidationError(
+                    f"custom field {key!r} (enum) value {value!r} not in options {options}"
+                )
         else:  # pragma: no cover - guarded by profile validation
             raise ValidationError(f"custom field {key!r} has unknown type {ftype!r}")
         out[key] = value
