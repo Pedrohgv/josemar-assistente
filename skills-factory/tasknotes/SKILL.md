@@ -31,18 +31,20 @@ priority, dates, projects, completion, or archival.
   timestamp-prefixed slug is auto-generated from the title
   (e.g. `2026-07-18-143000-buy-groceries`). When provided, the slug must be
   lowercase with no spaces or special characters (hyphens and underscores
-  allowed). Slugs are immutable after creation. Supports `custom_fields` for
-  plugin-configured custom user fields (text, list, date, number, boolean,
-  link) and `recurrence` for native TaskNotes recurrence rules (RFC 5545 RRULE
-  string, e.g. `FREQ=WEEKLY;BYDAY=MO,WE,FR`).
+  allowed). Slugs are immutable after creation. Supports `recurrence` for
+  native TaskNotes recurrence rules (RFC 5545 RRULE string, e.g.
+  `FREQ=WEEKLY;BYDAY=MO,WE,FR`). Accepts `custom_fields` keyed by field key
+  from the profile's user field definitions; see
+  `references/custom-fields.md` for types, validation, and how to define
+  custom fields in the plugin configuration.
 - `task_get`: read one task by slug.
 - `task_list`: list structured task metadata with a bounded result count.
   Supports optional filters: `status`, `priority`, `tag`, and `archived`
   (combine with AND logic).
 - `task_update`: change only status, priority, due date, scheduled date,
   projects, or custom user fields. Use the explicit clear flags to remove
-  optional fields. Pass `custom_fields` with `None` values to clear custom
-  fields.
+  optional fields. Pass `custom_fields` with `null` values to clear custom
+  fields. Same dict shape as `task_create`; see `references/custom-fields.md`.
 - `task_complete`: complete a task. Omit the completion date to use today in the
   configured timezone.
 - `task_archive`: add the configured archive tag. This is idempotent.
@@ -71,10 +73,11 @@ gbrain-safe (lowercase, hyphens, no spaces).
 
 ## Plugin configuration
 
-The TaskNotes plugin is configured by the user via the Obsidian UI. All
-settings are stored in `<vault>/.obsidian/plugins/tasknotes/data.json`. The
-MCP server reads this profile dynamically on every operation and adapts to
-the configured values.
+The TaskNotes plugin is configured via `<vault>/.obsidian/plugins/tasknotes/data.json`.
+The MCP server reads this profile dynamically on every operation and adapts to
+the configured values. All settings can be edited directly in the JSON file or
+configured through the Obsidian UI. See `references/custom-fields.md` for
+defining custom user fields and their per-type constraints.
 
 ### Key configuration areas
 
@@ -82,7 +85,7 @@ the configured values.
 |---|---|---|
 | Task Properties → Status | Custom status labels and order | Settings → TaskNotes → Task Properties → Status |
 | Task Properties → Priority | Custom priority levels and order | Settings → TaskNotes → Task Properties → Priority |
-| Task Properties → Custom User Fields | Arbitrary fields (text, list, date, link) | Settings → TaskNotes → Task Properties → Custom User Fields |
+| Task Properties → Custom User Fields | Arbitrary fields (text, list, date, link, enum, number, boolean) | Settings → TaskNotes → Task Properties → Custom User Fields |
 | Task Defaults → Folder | Where task files are created (`tasksFolder`) | Settings → TaskNotes → Task Defaults |
 | Task Defaults → Filename | Format of task filenames | Settings → TaskNotes → Task Defaults |
 | Views | `.base` files in `TaskNotes/Views/` | Command palette or ribbon icon |

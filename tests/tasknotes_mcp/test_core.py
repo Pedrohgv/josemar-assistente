@@ -156,6 +156,8 @@ REAL_PROFILE_DATA = {
          "label": "Review date"},
         {"id": "related", "key": "related", "type": "link",
          "label": "Related note"},
+        {"id": "team", "key": "team", "type": "enum",
+         "label": "Team", "options": ["engineering", "design", "product", "marketing"]},
     ],
 }
 
@@ -2227,6 +2229,7 @@ class CustomFieldsTests(unittest.TestCase):
         keys = {uf["key"] for uf in self.profile.user_fields}
         self.assertIn("pipeline_stage", keys)
         self.assertIn("tags_extra", keys)
+        self.assertIn("team", keys)
         types = {uf["key"]: uf["type"] for uf in self.profile.user_fields}
         self.assertEqual(types["pipeline_stage"], "text")
         self.assertEqual(types["tags_extra"], "list")
@@ -2234,6 +2237,13 @@ class CustomFieldsTests(unittest.TestCase):
         self.assertEqual(types["blocked"], "boolean")
         self.assertEqual(types["review_date"], "date")
         self.assertEqual(types["related"], "link")
+        self.assertEqual(types["team"], "enum")
+        # Verify enum field carries options.
+        team_field = {uf["key"]: uf for uf in self.profile.user_fields}["team"]
+        self.assertIn("options", team_field)
+        self.assertEqual(
+            team_field["options"], ["engineering", "design", "product", "marketing"]
+        )
 
     def test_create_writes_custom_fields_to_frontmatter(self) -> None:
         result = self.engine.create(
@@ -2347,6 +2357,69 @@ class CustomFieldsTests(unittest.TestCase):
         )
         self.assertEqual(str(fm["review_date"])[:10], "2026-07-20")
         self.assertEqual(fm["related"], "[[Note]]")
+
+    def test_create_accepts_valid_enum_value(self) -> None:
+        result = self.engine.create(
+            "t1", "T", body="b",
+            custom_fields={"team": "engineering"},
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fm["team"], "engineering")
+
+    def test_create_rejects_invalid_enum_value(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create(
+                "t1", "T", body="b",
+                custom_fields={"team": "legal"},
+            )
+
+    def test_create_rejects_enum_value_wrong_type(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create(
+                "t1", "T", body="b",
+                custom_fields={"team": 123},
+            )
+
+    def test_update_accepts_valid_enum_value(self) -> None:
+        self.engine.create(
+            "t1", "T", body="b",
+            custom_fields={"team": "engineering"},
+        )
+        result = self.engine.update(
+            "t1", custom_fields={"team": "design"},
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fm["team"], "design")
+
+    def test_update_rejects_invalid_enum_value(self) -> None:
+        self.engine.create(
+            "t1", "T", body="b",
+            custom_fields={"team": "engineering"},
+        )
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.update(
+                "t1", custom_fields={"team": "legal"},
+            )
+
+    def test_update_none_clears_enum_field(self) -> None:
+        self.engine.create(
+            "t1", "T", body="b",
+            custom_fields={"team": "engineering"},
+        )
+        result = self.engine.update(
+            "t1", custom_fields={"team": None},
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("team", fm)
 
 
 @unittest.skipUnless(_has_yaml(), "PyYAML required")
