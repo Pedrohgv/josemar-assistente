@@ -44,24 +44,24 @@ Example `data.json` snippet:
 
 ### Adding fields
 
-Custom fields can be defined in two ways:
+Custom fields are defined in two ways:
 
-1. **Obsidian UI** — open Obsidian, go to Settings → TaskNotes → Task Properties
-   → Custom User Fields, and add fields via the plugin UI.
+1. **Obsidian UI (recommended)** — open Obsidian, go to Settings → TaskNotes →
+   Task Properties → Custom User Fields, and add fields via the plugin UI.
+   This is the normal path and keeps the profile consistent with the plugin's
+   own validation.
 
-2. **Directly edit `data.json`** — edit `<vault>/.obsidian/plugins/tasknotes/data.json`
-   and add entries to the `userFields` array. This is an Obsidian plugin
-   configuration file (NOT a task file), so it is safe to edit with native gbrain
-   or direct file writes. After editing, the MCP server picks up the new fields on
-   the next operation (the profile is re-read on every locked operation).
-
-   Example using gbrain (from within the vault directory):
-   ```bash
-   gbrain put .obsidian/plugins/tasknotes/data.json
-   ```
-
-   Josemar can add custom field definitions this way without requiring the user
-   to manually configure them in the Obsidian UI.
+2. **Directly edit `data.json`** — edit
+   `<vault>/.obsidian/plugins/tasknotes/data.json` and add entries to the
+   `userFields` array. This is an explicit operator action on an Obsidian
+   plugin configuration file (NOT a task file). Use a JSON-aware editor
+   (not a text editor that may corrupt JSON), back up the file first, and
+   validate the JSON after editing. **Do not use `gbrain put` or
+   `gbrain capture` to edit this file** — native gbrain is a vault-page
+   authoring tool, not a safe arbitrary JSON-file editor, and using it here
+   can corrupt the plugin profile. After editing, the MCP server picks up the
+   new fields on the next operation (the profile is re-read on every locked
+   operation).
 
 ## Using custom fields in tasks
 

@@ -48,6 +48,17 @@ priority, dates, projects, completion, or archival.
 - `task_complete`: complete a task. Omit the completion date to use today in the
   configured timezone.
 - `task_archive`: add the configured archive tag. This is idempotent.
+- `task_delete`: remove a task. This is the only mutation that deletes a file
+  from the vault rather than writing through the source-routed gbrain capture
+  path. It first runs `gbrain delete <slug>` (soft-delete from the gbrain
+  index) as a confirmation gate, then `git rm` removes the file from disk and
+  stages the removal, and a Git commit records the deletion. The deleted file
+  is recoverable via `git revert`; no data is permanently lost. If
+  `gbrain delete` succeeds but `git rm` fails, the adapter returns
+  `recovery_required` (the gbrain index is modified but the file remains on
+  disk and the next sync re-imports it). There is no `--force` path; the
+  gbrain soft-delete gate must succeed before the file is touched. See
+  `docs/tasknotes-mcp.md` for the full deletion and recovery model.
 - `task_add_tag`: add a custom tag to a task. Rejects the task-identification
   tag and the archive tag (use `task_archive` for archival). Idempotent.
 - `task_remove_tag`: remove a custom tag from a task. Rejects the
@@ -111,8 +122,8 @@ config-adaptive:
 The adapter does not yet support:
 
 - Unarchive (removing the archive tag without a full unarchive workflow).
-- Delete, rename/move, title or body edits, bulk operations, raw frontmatter,
-  or inline-task conversion.
+- Rename/move, title or body edits, bulk operations, raw frontmatter,
+  or inline-task conversion. (Delete is supported via `task_delete`.)
 
 ### Views (.base files)
 
@@ -136,10 +147,11 @@ Task task-file writes must go through these tools. Do not use native `gbrain
 put` or `gbrain capture` to create or modify TaskNotes task files. Native gbrain
 remains appropriate for non-task vault pages.
 
-This interface does not currently support unarchive, delete, search,
+This interface does not currently support unarchive, search,
 rename/move, title or body edits, bulk operations, raw frontmatter,
-or inline-task conversion. Suggest Obsidian for an unsupported task edit rather
-than approximating it with another writer.
+or inline-task conversion. (Delete is supported via `task_delete`.) Suggest
+Obsidian for an unsupported task edit rather than approximating it with
+another writer.
 
 One author at a time per task file is required. Do not run parallel mutations
 against the same task.

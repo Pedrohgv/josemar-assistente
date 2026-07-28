@@ -37,12 +37,15 @@ activation (init/sync/extract/schema setup) is provided by the
 - **put is whole-page replacement.** `gbrain` upserts the entire page content.
   Rename, template instantiation, surgical section/frontmatter patching, and
   physical move are NOT offered natively; use Obsidian manually for those.
-- **Updating an existing note — always read-then-put.** There is no patch or
+- **Updating an existing note — always read-then-write.** There is no patch or
   section-append API. To change any existing page (add a task, edit a section,
   update frontmatter), you MUST: (1) read the full current page with
   `gbrain get <slug>`, (2) apply the change in memory preserving all existing
-  frontmatter and sections, (3) write the complete result back with
-  `gbrain put <slug>`. Never edit vault note content through direct filesystem
+  frontmatter and sections, (3) write the complete result back. For inline
+  content use `gbrain put <slug> --content "<full page>"` (see the `gbrain put`
+  section below); for large or file-based content use
+  `gbrain capture --file PATH --slug SLUG` (works for existing pages too).
+  Never edit vault note content through direct filesystem
   tools (`write_file`, `open()`, `cp`) — that bypasses gbrain's index, leaves
   the DB stale until the next 5-min refresh cron, and breaks link extraction.
   If `gbrain get` fails or returns incomplete content, retry once; if it still
@@ -184,10 +187,13 @@ Common flags:
 
 ### `gbrain put`
 
-Whole-page upsert by slug. Supports stdin for longer content.
+Whole-page upsert by slug. Content is passed via `--content` (inline string).
+For large content or file-based updates, use
+`gbrain capture --file PATH --slug SLUG` instead — `capture --file` works for
+both new and existing pages.
 
 ```bash
-printf '%s' "$FULL_MARKDOWN" | gbrain put inbox/my-note
+gbrain put inbox/my-note --content "# Updated content"
 ```
 
 This is a whole-page replacement. There is no patch, section-append, or

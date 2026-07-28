@@ -209,8 +209,15 @@ mark_brain_repo_safe_directory() {
     fi
 }
 
+# $1 = "full" to force a full sync (reindex), empty/omitted for incremental
+# (refresh). All other flags are preserved: --no-embed --yes --no-pull --json
+# --repo "$GBRAIN_BRAIN_REPO".
 run_sync_extract_links() {
-    sync_output=$("$GBRAIN_BIN" sync --full --no-embed --yes --no-pull --json --repo "$GBRAIN_BRAIN_REPO" 2>&1) || {
+    sync_full_flag=""
+    if [ "${1:-}" = "full" ]; then
+        sync_full_flag="--full"
+    fi
+    sync_output=$("$GBRAIN_BIN" sync $sync_full_flag --no-embed --yes --no-pull --json --repo "$GBRAIN_BRAIN_REPO" 2>&1) || {
         emit_json "$(python3 - "$sync_output" <<'PY'
 import json, sys
 out = sys.argv[1]
@@ -389,7 +396,7 @@ PY
         return 1
     }
 
-    run_sync_extract_links || {
+    run_sync_extract_links full || {
         return 1
     }
 

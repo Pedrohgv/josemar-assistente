@@ -218,18 +218,19 @@ def _write_fake_gbrain(tmpdir: Path, behavior: Optional[dict] = None) -> Path:
       - call --source <id> get_page <json> returns a page dict with
         top-level type/title/tags, frontmatter WITHOUT structural fields,
         string compiled_truth, string timeline
-      - put <slug> --source <id> reads markdown stdin, parses frontmatter,
-        stores the page, writes the disk file WITH provenance injection
-        (ingested_via/ingested_at/source_kind) and date normalization,
-        returns {"write_through": {"written": true|false, ...}}
+      - capture --stdin --slug <slug> --source <id> --json reads markdown
+        stdin, parses frontmatter, stores the page, writes the disk file
+        WITH provenance injection (ingested_via/ingested_at/source_kind
+        and captured_via/captured_at) and date normalization, returns
+        {"written": true|false, ...}
       - sync --source <id> ... returns {"status": "ok"}
 
     behavior overrides (all optional):
       - "sources": list of source dicts (default: one matching vault)
-      - "put_fail": set of slugs that fail write-through (written=false)
-      - "put_nonzero": set of slugs where put exits nonzero
-      - "put_invalid_json": set of slugs where put writes invalid JSON
-      - "put_timeout": set of slugs where put sleeps past timeout
+      - "capture_fail": set of slugs that fail write-through (written=false)
+      - "capture_nonzero": set of slugs where capture exits nonzero
+      - "capture_invalid_json": set of slugs where capture writes invalid JSON
+      - "capture_timeout": set of slugs where capture sleeps past timeout
       - "get_not_found": set of slugs where get_page returns page_not_found
       - "sync_fail": bool
       - "no_source": bool (sources list returns empty)
@@ -322,24 +323,27 @@ def _write_fake_gbrain(tmpdir: Path, behavior: Optional[dict] = None) -> Path:
             print(json.dumps(out))
             sys.exit(0)
 
-        if cmd == "put" and len(argv) >= 2:
-            slug = argv[1]
-            # --source <id>
+        if cmd == "capture" and "--stdin" in argv:
+            # argv: capture --stdin --slug <slug> --source <id> --json
+            slug = None
             source_id = None
+            if "--slug" in argv:
+                idx = argv.index("--slug")
+                slug = argv[idx + 1] if idx + 1 < len(argv) else None
             if "--source" in argv:
                 idx = argv.index("--source")
                 source_id = argv[idx + 1] if idx + 1 < len(argv) else None
-            if slug in behavior.get("put_timeout", []):
+            if slug in behavior.get("capture_timeout", []):
                 time.sleep(30)
                 sys.exit(0)
-            if slug in behavior.get("put_nonzero", []):
-                sys.stderr.write("fake gbrain put error\\n")
+            if slug in behavior.get("capture_nonzero", []):
+                sys.stderr.write("fake gbrain capture error\\n")
                 sys.exit(1)
-            if slug in behavior.get("put_invalid_json", []):
+            if slug in behavior.get("capture_invalid_json", []):
                 print("not valid json{{")
                 sys.exit(0)
-            if slug in behavior.get("put_fail", []):
-                print(json.dumps({{"write_through": {{"written": False, "error": "EACCES"}}}}))
+            if slug in behavior.get("capture_fail", []):
+                print(json.dumps({{"written": False, "error": "EACCES"}}))
                 sys.exit(0)
             # Parse markdown.
             fm = {{}}
@@ -383,10 +387,12 @@ def _write_fake_gbrain(tmpdir: Path, behavior: Optional[dict] = None) -> Path:
                 disk_fm = dict(fm)
                 disk_fm["type"] = ptype
                 disk_fm["title"] = title
-                # Provenance injection (operations.ts).
+                # Provenance injection (operations.ts put_page + capture).
                 disk_fm["ingested_via"] = "put_page"
                 disk_fm["ingested_at"] = "2026-07-18T00:00:00.000Z"
                 disk_fm["source_kind"] = "put_page"
+                disk_fm["captured_via"] = "capture_stdin"
+                disk_fm["captured_at"] = "2026-07-18T00:00:00.000Z"
                 disk_fm["tags"] = tags
                 import yaml
                 fm_text = yaml.safe_dump(disk_fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
@@ -399,7 +405,7 @@ def _write_fake_gbrain(tmpdir: Path, behavior: Optional[dict] = None) -> Path:
                     fobj.write(disk_content)
             with open(STATE, "w") as fobj:
                 json.dump(state, fobj)
-            print(json.dumps({{"write_through": {{"written": True}}, "slug": slug}}))
+            print(json.dumps({{"written": True, "slug": slug}}))
             sys.exit(0)
 
         if cmd == "delete" and len(argv) >= 2:
@@ -456,7 +462,8 @@ def _write_fake_gbrain(tmpdir: Path, behavior: Optional[dict] = None) -> Path:
                         ptype = fm.pop("type", "note")
                         title = fm.pop("title", "")
                         tags = fm.pop("tags", [])
-                        for key in ("slug", "ingested_via", "ingested_at", "source_kind"):
+                        for key in ("slug", "ingested_via", "ingested_at", "source_kind",
+                                    "captured_via", "captured_at"):
                             fm.pop(key, None)
                         for key, value in list(fm.items()):
                             fm[key] = normalize_date(value)
@@ -1167,7 +1174,7 @@ class SourceRoutingTests(unittest.TestCase):
                 self.engine._verify_source(profile)
 
     def test_no_source_no_git_side_effects(self) -> None:
-        # When source verification fails, no sync/put should run.
+        # When source verification fails, no sync/capture should run.
         _set_behavior(self.tmpdir, {"vault": str(self.vault), "no_source": True})
         with self.assertRaises(self.core.GbrainError):
             self.engine.create("t1", "T", body="b")
@@ -1175,7 +1182,7 @@ class SourceRoutingTests(unittest.TestCase):
         cmds = [c["argv"][0] if c["argv"] else "" for c in calls]
         self.assertIn("sources", cmds)
         self.assertNotIn("sync", cmds)
-        self.assertNotIn("put", cmds)
+        self.assertNotIn("capture", cmds)
 
     def test_get_routes_with_source(self) -> None:
         self.engine.create("t1", "T", body="b")
@@ -1189,12 +1196,66 @@ class SourceRoutingTests(unittest.TestCase):
         self.assertTrue(get_call, "get must route with --source")
         self.assertIn("default", get_call[0]["argv"])
 
-    def test_put_routes_with_source(self) -> None:
+    def test_capture_routes_with_source(self) -> None:
         self.engine.create("t1", "T", body="b")
         calls = _read_calls(self.tmpdir)
-        put_calls = [c for c in calls if c["argv"][0] == "put"]
-        self.assertTrue(put_calls)
-        self.assertIn("--source", put_calls[0]["argv"])
+        capture_calls = [c for c in calls if c["argv"][0] == "capture"]
+        self.assertTrue(capture_calls)
+        argv = capture_calls[0]["argv"]
+        # Exact documented command path and required flags.
+        self.assertEqual(argv[1], "--stdin")
+        self.assertIn("--slug", argv)
+        self.assertEqual(argv[argv.index("--slug") + 1], "tasks/t1")
+        self.assertIn("--source", argv)
+        self.assertEqual(argv[argv.index("--source") + 1], "default")
+        self.assertIn("--json", argv)
+
+    def test_capture_sends_body_through_stdin_not_argv(self) -> None:
+        unique_body = "UNIQUE_STDIN_BODY_MARKER_42"
+        self.engine.create("t1", "T", body=unique_body)
+        calls = _read_calls(self.tmpdir)
+        capture_calls = [c for c in calls if c["argv"][0] == "capture"]
+        self.assertTrue(capture_calls)
+        # The full body must travel through stdin, never argv.
+        argv_joined = " ".join(capture_calls[0]["argv"])
+        self.assertNotIn(unique_body, argv_joined)
+        # stdin_len recorded by the fake must be non-trivial (frontmatter +
+        # body), proving the body was piped through stdin.
+        self.assertGreater(capture_calls[0]["stdin_len"], len(unique_body))
+        # The body must be present on disk after capture write-through.
+        disk_text = (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        self.assertIn(unique_body, disk_text)
+
+    def test_capture_top_level_written_false_is_hard_failure(self) -> None:
+        _set_behavior(self.tmpdir, {"vault": str(self.vault), "capture_fail": ["tasks/fail"]})
+        result = self.engine.create("fail", "T", body="b")
+        # A structured written:false must remain a hard failure before any
+        # post-write Git operation: recovery_required, no commit attempted.
+        self.assertEqual(result.state, self.core.RECOVERY_REQUIRED)
+        # No git commit for the failed slug (no applied_and_committed).
+        log = subprocess.run(
+            ["git", "log", "--oneline"], cwd=str(self.vault),
+            capture_output=True, text=True,
+        )
+        self.assertNotIn("tasknotes-mcp: task update", log.stdout)
+
+    def test_large_multibyte_body_rejected_before_mutation(self) -> None:
+        # A body whose UTF-8 byte length exceeds MAX_MARKDOWN_LEN must be
+        # rejected up front (ValidationError) before any gbrain side effect.
+        # Use a 4-byte-per-char sequence so character count stays under the
+        # body character cap while the constructed markdown exceeds the byte
+        # cap. Each emoji is 4 UTF-8 bytes.
+        char_cap = self.core.MAX_BODY_LEN
+        # Build a body just under the character cap but whose byte length
+        # pushes the constructed markdown past MAX_MARKDOWN_LEN bytes.
+        emoji = "\U0001F600"  # 4 bytes per char
+        body = emoji * char_cap  # 100_000 chars => 400_000 bytes
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "T", body=body)
+        # No capture subprocess should have been invoked.
+        calls = _read_calls(self.tmpdir)
+        capture_calls = [c for c in calls if c["argv"][0] == "capture"]
+        self.assertEqual(capture_calls, [])
 
     def test_sync_routes_with_source(self) -> None:
         self.engine.create("t1", "T", body="b")
@@ -1993,14 +2054,14 @@ class EngineOperationTests(unittest.TestCase):
         r = subprocess.run(["git", "status", "--porcelain", "--", "tasks/unrelated.md"], cwd=str(self.vault), capture_output=True, text=True)
         self.assertIn("unrelated.md", r.stdout)
 
-    def test_gbrain_sync_called_before_put(self) -> None:
+    def test_gbrain_sync_called_before_capture(self) -> None:
         self.engine.create("t1", "T", body="b")
         calls = _read_calls(self.tmpdir)
         cmds = [c["argv"][0] if c["argv"] else "" for c in calls]
         self.assertIn("sync", cmds)
         sync_idx = cmds.index("sync")
-        put_idx = cmds.index("put")
-        self.assertLess(sync_idx, put_idx)
+        capture_idx = cmds.index("capture")
+        self.assertLess(sync_idx, capture_idx)
 
     def test_get_takes_lock(self) -> None:
         # get invokes gbrain, so it must take the lock. Verify by holding the
@@ -2034,8 +2095,8 @@ class EngineOperationTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_has_yaml(), "PyYAML required")
-class PrePutGuardTests(unittest.TestCase):
-    """Mutation pre-put guard tests with race hooks."""
+class PreCaptureGuardTests(unittest.TestCase):
+    """Mutation pre-capture guard tests with race hooks."""
 
     def setUp(self) -> None:
         self.core = _load_core()
@@ -2055,20 +2116,20 @@ class PrePutGuardTests(unittest.TestCase):
         self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
         self.assertIn("manual edit", target.read_text(encoding="utf-8"))
 
-    def test_update_profile_drift_before_put_refused(self) -> None:
+    def test_update_profile_drift_before_capture_refused(self) -> None:
         self.engine.create("t1", "T", body="b")
         # Install a race hook that modifies the profile after get/reconstruct.
         def hook(eng, slug, profile):
             d = copy.deepcopy(REAL_PROFILE_DATA)
             d["defaultTaskStatus"] = "none"
             _write_profile(eng.vault, data=d)
-        self.engine._pre_put_hook = hook
+        self.engine._pre_capture_hook = hook
         with self.assertRaises(self.core.ProfileIncompatible):
             self.engine.update("t1", status="in-progress")
-        # No put for the update.
+        # No capture for the update.
         calls = _read_calls(self.tmpdir)
-        put_calls = [c for c in calls if c["argv"][0] == "put"]
-        self.assertEqual(len(put_calls), 1)  # only the create
+        capture_calls = [c for c in calls if c["argv"][0] == "capture"]
+        self.assertEqual(len(capture_calls), 1)  # only the create
 
     def test_update_target_modified_after_get_refused(self) -> None:
         self.engine.create("t1", "T", body="b")
@@ -2076,41 +2137,41 @@ class PrePutGuardTests(unittest.TestCase):
         def hook(eng, slug, profile):
             target = eng.vault / "tasks" / f"{slug}.md"
             target.write_text(target.read_text(encoding="utf-8") + "\nrace\n", encoding="utf-8")
-        self.engine._pre_put_hook = hook
+        self.engine._pre_capture_hook = hook
         with self.assertRaises(self.core.ValidationError):
             self.engine.update("t1", status="in-progress")
         calls = _read_calls(self.tmpdir)
-        put_calls = [c for c in calls if c["argv"][0] == "put"]
-        self.assertEqual(len(put_calls), 1)
+        capture_calls = [c for c in calls if c["argv"][0] == "capture"]
+        self.assertEqual(len(capture_calls), 1)
 
     def test_complete_dirty_target_refused(self) -> None:
         self.engine.create("t1", "T", body="b")
         def hook(eng, slug, profile):
             target = eng.vault / "tasks" / f"{slug}.md"
             target.write_text(target.read_text(encoding="utf-8") + "\nrace\n", encoding="utf-8")
-        self.engine._pre_put_hook = hook
+        self.engine._pre_capture_hook = hook
         with self.assertRaises(self.core.ValidationError):
             self.engine.complete("t1")
         calls = _read_calls(self.tmpdir)
-        put_calls = [c for c in calls if c["argv"][0] == "put"]
-        self.assertEqual(len(put_calls), 1)
+        capture_calls = [c for c in calls if c["argv"][0] == "capture"]
+        self.assertEqual(len(capture_calls), 1)
 
     def test_archive_dirty_target_refused(self) -> None:
         self.engine.create("t1", "T", body="b")
         def hook(eng, slug, profile):
             target = eng.vault / "tasks" / f"{slug}.md"
             target.write_text(target.read_text(encoding="utf-8") + "\nrace\n", encoding="utf-8")
-        self.engine._pre_put_hook = hook
+        self.engine._pre_capture_hook = hook
         with self.assertRaises(self.core.ValidationError):
             self.engine.archive("t1")
         calls = _read_calls(self.tmpdir)
-        put_calls = [c for c in calls if c["argv"][0] == "put"]
-        self.assertEqual(len(put_calls), 1)
+        capture_calls = [c for c in calls if c["argv"][0] == "capture"]
+        self.assertEqual(len(capture_calls), 1)
 
 
 @unittest.skipUnless(_has_yaml(), "PyYAML required")
 class FailureRecoveryTests(unittest.TestCase):
-    """Consolidated post-put failure recovery and marker tests."""
+    """Consolidated post-capture failure recovery and marker tests."""
 
     def setUp(self) -> None:
         self.core = _load_core()
@@ -2120,37 +2181,37 @@ class FailureRecoveryTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_write_through_false_triggers_recovery(self) -> None:
-        _set_behavior(self.tmpdir, {"vault": str(self.vault), "put_fail": ["tasks/fail"]})
+    def test_written_false_triggers_recovery(self) -> None:
+        _set_behavior(self.tmpdir, {"vault": str(self.vault), "capture_fail": ["tasks/fail"]})
         result = self.engine.create("fail", "T", body="b")
         # Recovery: full sync + read-back. The file does not exist (write
         # failed), so read-back fails => recovery marker + recovery_required.
         self.assertEqual(result.state, self.core.RECOVERY_REQUIRED)
         self.assertTrue(self.engine.recovery_marker.exists())
 
-    def test_put_nonzero_returns_structured_outcome(self) -> None:
-        _set_behavior(self.tmpdir, {"vault": str(self.vault), "put_nonzero": ["tasks/t1"]})
+    def test_capture_nonzero_returns_structured_outcome(self) -> None:
+        _set_behavior(self.tmpdir, {"vault": str(self.vault), "capture_nonzero": ["tasks/t1"]})
         result = self.engine.create("t1", "T", body="b")
-        # Put invocation failed after starting; reconcile. No page in DB,
+        # Capture invocation failed after starting; reconcile. No page in DB,
         # no disk file => recovery_required.
         self.assertEqual(result.state, self.core.RECOVERY_REQUIRED)
 
-    def test_put_invalid_json_returns_structured_outcome(self) -> None:
-        _set_behavior(self.tmpdir, {"vault": str(self.vault), "put_invalid_json": ["tasks/t1"]})
+    def test_capture_invalid_json_returns_structured_outcome(self) -> None:
+        _set_behavior(self.tmpdir, {"vault": str(self.vault), "capture_invalid_json": ["tasks/t1"]})
         result = self.engine.create("t1", "T", body="b")
         self.assertEqual(result.state, self.core.RECOVERY_REQUIRED)
 
-    def test_put_timeout_returns_structured_outcome(self) -> None:
+    def test_capture_timeout_returns_structured_outcome(self) -> None:
         with mock.patch(
-            "tasknotes_mcp_core.gbrain_put",
+            "tasknotes_mcp_core.gbrain_capture",
             side_effect=self.core.SubprocessError("subprocess timed out"),
         ):
             result = self.engine.create("t1", "T", body="b")
         self.assertIn(result.state, (self.core.RECOVERY_REQUIRED,))
 
-    def test_unexpected_put_error_returns_structured_outcome(self) -> None:
+    def test_unexpected_capture_error_returns_structured_outcome(self) -> None:
         with mock.patch(
-            "tasknotes_mcp_core.gbrain_put",
+            "tasknotes_mcp_core.gbrain_capture",
             side_effect=RuntimeError("unexpected"),
         ):
             result = self.engine.create("t1", "T", body="b")
@@ -2169,7 +2230,7 @@ class FailureRecoveryTests(unittest.TestCase):
         self.assertEqual(result.state, self.core.APPLIED_UNCOMMITTED)
 
     def test_unexpected_recovery_error_returns_recovery_required(self) -> None:
-        _set_behavior(self.tmpdir, {"vault": str(self.vault), "put_fail": ["tasks/fail"]})
+        _set_behavior(self.tmpdir, {"vault": str(self.vault), "capture_fail": ["tasks/fail"]})
         with mock.patch(
             "tasknotes_mcp_core.gbrain_sync_full",
             side_effect=RuntimeError("unexpected"),
@@ -2190,7 +2251,7 @@ class FailureRecoveryTests(unittest.TestCase):
             self.engine.archive("t1")
 
     def test_marker_write_failure_still_returns_recovery_required(self) -> None:
-        _set_behavior(self.tmpdir, {"vault": str(self.vault), "put_fail": ["tasks/fail"]})
+        _set_behavior(self.tmpdir, {"vault": str(self.vault), "capture_fail": ["tasks/fail"]})
         # Simulate an I/O failure only when the engine tries to persist the
         # recovery marker. The marker must not exist before the operation,
         # otherwise the fail-closed preflight correctly blocks the mutation.
@@ -2234,11 +2295,15 @@ class SemanticVerificationTests(unittest.TestCase):
         # comparison must exclude them.
         disk_text = (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
         self.assertIn("ingested_via", disk_text)
+        # capture provenance is also injected on disk and must be excluded.
+        self.assertIn("captured_via", disk_text)
         profile = self.engine.load_profile()
         disk_doc = self.core.semantic_from_disk(self.vault, profile, "t1")
         self.assertNotIn("ingested_via", disk_doc.frontmatter)
         self.assertNotIn("ingested_at", disk_doc.frontmatter)
         self.assertNotIn("source_kind", disk_doc.frontmatter)
+        self.assertNotIn("captured_via", disk_doc.frontmatter)
+        self.assertNotIn("captured_at", disk_doc.frontmatter)
 
     def test_semantic_preserves_unknown_frontmatter(self) -> None:
         # Create a task with a custom field via the fake gbrain by writing
@@ -2259,6 +2324,23 @@ class SemanticVerificationTests(unittest.TestCase):
         self.engine.create("t1", "T", body="my unique body text")
         disk_text = (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
         self.assertIn("my unique body text", disk_text)
+
+    def test_create_body_preserved_in_immediate_readback(self) -> None:
+        # Body must be preserved immediately after create, not only later.
+        unique = "immediate readback body marker"
+        result = self.engine.create("t1", "T", body=unique)
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fetched = self.engine.get("t1")
+        self.assertEqual(fetched["body"].strip(), unique)
+
+    def test_update_preserves_body_through_capture(self) -> None:
+        # An update must not drop the body through the capture write-through.
+        self.engine.create("t1", "T", body="original body kept")
+        result = self.engine.update("t1", status="in-progress")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fetched = self.engine.get("t1")
+        self.assertEqual(fetched["body"].strip(), "original body kept")
+        self.assertEqual(fetched["status"], "in-progress")
 
 
 @unittest.skipUnless(_has_yaml(), "PyYAML required")
