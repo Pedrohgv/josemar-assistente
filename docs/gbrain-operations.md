@@ -18,9 +18,12 @@ The Josemar gbrain integration is intentionally minimal:
   the only specialized exception; it uses short-lived native gbrain commands
   and is the required interface for TaskNotes task-file mutations.
 - `scripts/josemar-gbrain` (installed at `/usr/local/bin/josemar-gbrain`) is
-  retained only as an operator maintenance convenience. It exposes a single
-  `reindex` subcommand that performs init, config, full sync, content/link
-  extraction, and schema setup. It is not used from chat.
+  retained only as an operator maintenance convenience. It exposes two
+  operator-only subcommands: `reindex` (init, config, full sync, content/link
+  extraction, and schema setup) and `refresh` (incremental reconciliation of
+  manual Obsidian/Syncthing edits via `gbrain sync --no-embed`, stale
+  extraction, and link extraction, without init/schema work). Neither is used
+  from chat.
 - **Keyword-only native gbrain search.** Activation configures
   `search.mcp_keyword_only=true` and runs with `--no-embedding`, so search uses
   `engine.searchKeyword` and never the vector/hybrid provider path.
@@ -73,14 +76,25 @@ operator MUST verify the following after rebuild and before deploying:
    documented. Check if the `auto_chronicle` key was added to
    `KNOWN_CONFIG_KEYS` (the `--force` workaround in v0.42.57.0 may be fixed).
 
-4. **Read-then-put behavior.** Verify `put_page` still re-runs auto-link
-   on updates (including `status='skipped'`). The read-then-put rule in the
+4. **Read-then-write behavior.** Verify `put_page` still re-runs auto-link
+   on updates (including `status='skipped'`). The read-then-write rule in the
    gbrain skill and AGENTS.md depends on this behavior.
 
-5. **Pinned values.** Update the version and ref in this section and in
+5. **TaskNotes mutation path.** Verify
+   `gbrain capture --stdin --slug <slug> --source <id> --json` remains the
+   documented source-routed write path, preserves the complete body on both
+   create and update, returns a top-level boolean `written` field, and injects
+   only the provenance fields excluded by TaskNotes semantic verification
+   (`captured_via`, `captured_at`, `ingested_via`, `ingested_at`, and
+   `source_kind`). If this contract changes, update
+   `scripts/tasknotes_mcp_core.py` and its focused tests before deployment.
+   Run `python3 -m unittest tests.tasknotes_mcp.test_core -v` and the opt-in
+   real-gbrain TaskNotes E2E against the rebuilt image.
+
+6. **Pinned values.** Update the version and ref in this section and in
    `skills-factory/gbrain/SKILL.md` if it references the version.
 
-6. **Local patches.** The Dockerfile applies two patches to gbrain source
+7. **Local patches.** The Dockerfile applies two patches to gbrain source
    after the git clone:
    - `patches/gbrain-inline-worker-gateway.patch` (git apply) — configures the
      AI gateway in the PGLite inline worker (`--follow`) path. If this patch
@@ -100,7 +114,7 @@ operator MUST verify the following after rebuild and before deploying:
 | `GBRAIN_HOME` | `/opt/data` | Parent directory; gbrain stores state under `$GBRAIN_HOME/.gbrain` (PGLite DB, config, cache). Lives inside the existing writable `/opt/data` volume. |
 | `GBRAIN_BRAIN_REPO` | `/opt/data/obsidian` | Vault path gbrain indexes. |
 | `GBRAIN_SCHEMA_PACK` | `gbrain-base-v2` | Schema pack selector. Set to `josemar-user` to use the custom user-owned pack. |
-| `GBRAIN_SCHEMA_SOURCE_ROOT` | `/opt/data/gbrain/schema-packs` | Source root for custom schema packs. The source pack for the selected `GBRAIN_SCHEMA_PACK` must exist at `<root>/<pack>/pack.yaml`. |
+| `GBRAIN_SCHEMA_SOURCE_ROOT` | `/opt/data/.gbrain/schema-packs` | Source root for custom schema packs. The source pack for the selected `GBRAIN_SCHEMA_PACK` must exist at `<root>/<pack>/pack.yaml`. |
 | `GBRAIN_REFRESH_INTERVAL` | `5` | Hermes cron interval, in minutes, for `josemar-gbrain refresh`. Set to `0` to disable. Refresh deliberately uses `gbrain sync --no-embed` while embeddings are deferred; revisit when issue #65 enables embeddings. |
 | `GBRAIN_REFRESH_TIMEOUT` | `240` | Maximum seconds for the refresh child while it holds the shared TaskNotes/gbrain lock. |
 
@@ -184,8 +198,11 @@ josemar-gbrain refresh
 ```
 
 `refresh` is intentionally lighter than `reindex`: it assumes activation already
-happened and runs only native sync, stale extraction, and link extraction. It
-does **not** run init, schema install, or schema sync.
+happened and runs only an incremental `gbrain sync --no-embed` (reconciling
+vault files changed since the stored `last_commit` bookmark), plus stale
+content extraction and link extraction. It does **not** run init, schema
+install, or schema sync. `reindex` remains the only full activation/rebuild
+path (init, config, full sync, content/link extraction, schema setup).
 
 Refresh acquires `/opt/data/.locks/tasknotes.lock` nonblockingly through the
 repo-owned lock runner. If a task operation is active, the cron logs a skip and
@@ -204,13 +221,25 @@ For TaskNotes task files, use the bounded `task_*` MCP tools rather than direct
 native capture/put. The tools preserve TaskNotes fields and add Git/profile/read-
 back guards. The native commands below remain valid for general vault pages.
 
-Native gbrain writes (`gbrain capture`, `gbrain put`) update both the database
-and the on-disk vault files. If a write-through fails (disk error, permission
-issue), the command returns a non-zero exit and an error message; the vault
-files remain the user-facing artifact. Native write-through does not commit the
-changed file. TaskNotes MCP supplies bounded local preflight and target commits;
-general native gbrain writes still follow their caller's normal Git workflow.
-Operators should inspect the vault if a write-through failure is reported.
+Native gbrain writes (`gbrain capture`, `gbrain put`) aim to update both the
+database and the on-disk vault files, but a successful process exit does NOT
+by itself guarantee the on-disk write-through completed. A write-through can
+fail or be skipped (disk error, permission issue, or config) even when the
+command returns a successful exit. Structured callers should inspect the
+result status rather than relying on exit code alone:
+
+- For `gbrain put`, inspect `write_through.written` in the result envelope.
+- For `gbrain capture`, inspect the top-level `written` field in the result
+  envelope.
+
+Treat the write as durable only when the corresponding status field reports a
+successful write-through. A failure may present as either a non-zero exit OR
+a structured result whose write-through status is unsuccessful — both must be
+checked. The vault files remain the user-facing artifact. Native
+write-through does not commit the changed file. TaskNotes MCP supplies
+bounded local preflight and target commits; general native gbrain writes
+still follow their caller's normal Git workflow. Operators should inspect the
+vault if a write-through failure is reported.
 
 ### Optional native source hardening
 
@@ -255,7 +284,7 @@ Schema editing is **never** done silently or from chat. The workflow is:
 1. Set `GBRAIN_SCHEMA_PACK=josemar-user` in `.env`.
 2. Ensure the source pack exists at
    `$GBRAIN_SCHEMA_SOURCE_ROOT/josemar-user/pack.yaml` (default:
-   `/opt/data/gbrain/schema-packs/josemar-user/pack.yaml`, which maps to the
+   `/opt/data/.gbrain/schema-packs/josemar-user/pack.yaml`, which maps to the
    agent-state `gbrain/schema-packs/josemar-user/` path).
 3. Run `josemar-gbrain reindex`.
 

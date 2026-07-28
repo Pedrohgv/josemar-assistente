@@ -95,7 +95,8 @@ to `$GBRAIN_BRAIN_REPO`:
 docker compose exec hermes su -s /bin/sh hermes -c 'gbrain sources list --json'
 ```
 
-The adapter passes that source ID explicitly to every get, put, and sync.
+The adapter passes that source ID explicitly to every gbrain read, capture,
+delete/tag mutation, and sync that it invokes.
 
 ## Runtime behavior
 
@@ -104,8 +105,9 @@ sync boundary. Native gbrain write-through updates the database and Markdown
 file but does not create a Git commit. The TaskNotes adapter fills that local
 commit gap: before a mutation, it takes `/opt/data/.locks/tasknotes.lock`,
 commits pending vault edits, and runs incremental source-scoped gbrain sync. It
-then performs one whole-page gbrain put, verifies both gbrain and the on-disk
-task, and commits only the target task file.
+then performs one source-routed write via
+`gbrain capture --stdin --slug <slug> --source <source-id> --json`, verifies
+both gbrain and the on-disk task, and commits only the target task file.
 
 The periodic `gbrain-refresh` cron uses the same lock nonblockingly. If a task
 operation holds the lock, refresh logs a skip and exits successfully rather
@@ -134,8 +136,9 @@ strategies, but both produce gbrain-safe filenames that sort chronologically:
   `YYYY-MM-DD-HHmmss-slugified-title` (e.g.
   `2026-07-18-143000-buy-groceries.md`). The timestamp prefix ensures
   chronological ordering. The slugified title (lowercased, hyphens, no spaces
-  or special characters) provides human readability and is safe for gbrain's
-  `put` command, which does not slugify the slug argument.
+  or special characters) provides human readability and is safe for the
+  source-routed `gbrain capture --stdin --slug` write path, which does not
+  slugify the slug argument.
 
 - **Plugin-created tasks** (with `taskFilenameFormat: "timestamp"`):
   `YYYY-MM-DD-HHmmss` (e.g. `2026-07-18-143000.md`). The plugin's `timestamp`
@@ -151,12 +154,14 @@ regardless of the filename.
 
 ### Known gbrain slug limitation
 
-Gbrain's `put` command does not slugify the explicit slug argument — it only
-lowercases and rejects unsafe characters. Gbrain's `sync` command, however,
-does slugify file paths (lowercases, replaces spaces with hyphens, strips
-special characters). This means a file created by the plugin with spaces in its
-filename would be indexed under a different slug than the same content written
-via `gbrain put`. See <https://github.com/garrytan/gbrain/issues/3034>.
+Gbrain's slug argument (used by both `put` and `capture --slug`) is not
+slugified — it is only lowercased and unsafe characters are rejected.
+Gbrain's `sync` command, however, does slugify file paths (lowercases, replaces
+spaces with hyphens, strips special characters). This means a file created by
+the plugin with spaces in its filename would be indexed under a different slug
+than the same content written via the adapter's source-routed
+`gbrain capture --stdin --slug` path. See
+<https://github.com/garrytan/gbrain/issues/3034>.
 
 The adapter avoids this mismatch by always generating gbrain-safe slugs
 (lowercase, hyphens, no spaces) for adapter-created tasks. The recommended
@@ -204,7 +209,7 @@ For these operations, suggest Obsidian or native gbrain (for non-task pages).
 ### Task deletion
 
 `task_delete` is the only mutation that removes a file from the vault instead of
-writing through ``gbrain put``:
+writing through the source-routed `gbrain capture --stdin` path:
 
 1. **Gbrain soft-delete confirmation gate**: ``gbrain delete <slug>`` hides the
    page from the gbrain index immediately. This call must succeed before the

@@ -140,6 +140,12 @@ def prepare(root: Path) -> tuple[Path, dict[str, str]]:
     matching = [source for source in sources["sources"] if source.get("local_path") == str(vault)]
     if len(matching) != 1:
         raise AssertionError(f"expected one matching source, got {matching!r}")
+    # Test-level limitation: source routing is pinned to the single default
+    # source id here. Asserting a non-default source would require a second
+    # isolated gbrain source/vault, which this disposable harness does not
+    # provision. The exact argv source-routing contract (``--source <id>``)
+    # is instead pinned by the focused unit test
+    # ``test_capture_routes_with_source`` in test_core.py.
     return vault, env
 
 
@@ -170,6 +176,7 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
                 "task_update",
                 "task_complete",
                 "task_archive",
+                "task_delete",
                 "task_add_tag",
                 "task_remove_tag",
             ], names
@@ -195,6 +202,10 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
             assert fetched["title"] == "Disposable lifecycle task", fetched
             assert fetched["status"] == "open", fetched
             assert fetched["priority"] == "high", fetched
+            # Body preservation is asserted immediately after create, not
+            # only at the end of the lifecycle, so a capture write-through
+            # regression that drops the body is caught at the earliest point.
+            assert fetched["body"].strip() == "Disposable body preserved by gbrain.", fetched
 
             tasks = await call(session, "task_list", {"max_results": 10})
             assert [item["slug"] for item in tasks["result"]] == ["20260719t120000"], tasks

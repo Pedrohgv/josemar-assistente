@@ -11,7 +11,7 @@ This repository is the public/platform layer. Personal identity, memories, priva
 - **Independent agent state**: private git-backed Hermes state tree for context files, cron jobs, avatars, and user-owned skills.
 - **Two-scope skills model**: repo-owned platform skills in `skills-factory/`, user-owned skills in `agent-state/skills/`.
 - **Obsidian vault infrastructure**: dedicated Docker volume synchronized with Syncthing over a Tailscale sidecar.
-- **TaskNotes lifecycle MCP**: bounded create/get/list/update/complete/archive tools backed by native gbrain, with fail-closed profile and Git transaction guards.
+- **TaskNotes lifecycle MCP**: bounded create/get/list/update/complete/archive/delete/tag tools backed by native gbrain, with fail-closed profile and Git transaction guards.
 - **Google Drive vault backups**: daily rotating backup slots via rclone.
 - **Optional auxiliary ML service**: internal `aux-ml` container for FIFO, one-at-a-time long-running OCR jobs through llama.cpp.
 - **Multi-provider LLM config**: Ollama Cloud, Z.AI/GLM, DeepSeek, and other OpenAI-compatible providers can be configured.

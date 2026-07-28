@@ -136,12 +136,12 @@ Auto-emission (on every new `put_page` of an eligible page) requires `auto_chron
 
 Events are stored **in the gbrain database only** — NOT as `.md` files in the vault filesystem. They are queryable via `gbrain day`, `gbrain get`, etc., but are not visible in Obsidian as files. This is by design (write-through doesn't fire for chronicle jobs running in the worker context).
 
-If you need filesystem-visible notes for an event, you must create them manually via `gbrain put` (the chronicle judge does not create filesystem files).
+If you need filesystem-visible notes for an event, you must create them manually via `gbrain put <slug> --content "<full page>"` for inline content, or `gbrain capture --file PATH --slug SLUG` for file-based content (the chronicle judge does not create filesystem files).
 
 ## Common Workflows
 
 **"What happened this week?"** → `gbrain day <monday> --week` or `gbrain since <monday>`
 **"When did I last talk to X?"** → `gbrain last-seen people/<slug>`
-**"What decisions were made about Y?"** → `gbrain day <date> --kind decision` filtered to relevant depth pages, or read the depth page directly
+**"What decisions were made about Y?"** → `gbrain since <date> --kind decision` then filter results to the same day and the relevant depth pages (or `gbrain day <date>` then filter the returned atoms by `kind: decision` and the relevant depth page). Do not pass `--kind` to `gbrain day`: pinned gbrain 0.42.57.0 silently ignores that unsupported flag instead of rejecting it.
 **"Session startup context"** → `gbrain orient --days 7 --entities people/x,people/y` (zero-LLM, fast)
-**"Ingest a new meeting"** → Write to `meetings/<date>-<slug>` via `gbrain put`. Chronicle auto-extracts if `auto_chronicle=true`. Events appear in `gbrain day` for that date after processing.
+**"Ingest a new meeting"** → Write to `meetings/<date>-<slug>` via `gbrain put <slug> --content "<full meeting note>"` for inline content, or `gbrain capture --file PATH --slug meetings/<date>-<slug>` for file-based meeting ingestion. Chronicle auto-extracts if `auto_chronicle=true`. Events appear in `gbrain day` for that date after processing.

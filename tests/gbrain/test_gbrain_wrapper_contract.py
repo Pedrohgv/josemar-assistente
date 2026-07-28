@@ -125,8 +125,15 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         self.assertIn("config set search.mcp_keyword_only true", body)
 
     def test_reindex_runs_full_sync(self) -> None:
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn("run_sync_extract_links full", body)
+
+    def test_reindex_full_sync_helper_passes_full_flag(self) -> None:
+        """The shared helper must invoke sync with --full when called with 'full'."""
         body = _extract_function(self.src, "run_sync_extract_links")
-        self.assertIn("sync --full --no-embed", body)
+        self.assertIn('"full"', body)
+        self.assertIn("sync_full_flag=\"--full\"", body)
+        self.assertIn("sync $sync_full_flag --no-embed --yes --no-pull --json", body)
         self.assertIn("--repo", body)
         self.assertIn("$GBRAIN_BRAIN_REPO", body)
 
@@ -279,9 +286,31 @@ class GbrainRefreshContractTests(unittest.TestCase):
         body = _extract_function(self.src, "do_refresh")
         self.assertIn("run_sync_extract_links", body)
 
-    def test_shared_sync_uses_no_embed_for_current_keyword_only_mode(self) -> None:
+    def test_refresh_runs_incremental_sync(self) -> None:
+        """refresh must call the shared helper WITHOUT the 'full' flag."""
+        body = _extract_function(self.src, "do_refresh")
+        self.assertIn("run_sync_extract_links", body)
+        self.assertNotIn("run_sync_extract_links full", body)
+
+    def test_refresh_helper_omits_full_flag_by_default(self) -> None:
+        """The shared helper must default to incremental sync (no --full)."""
         body = _extract_function(self.src, "run_sync_extract_links")
-        self.assertIn("sync --full --no-embed", body)
+        # The full flag must only be set when $1 == "full"; default is empty.
+        self.assertIn('"${1:-}" = "full"', body)
+        self.assertIn('sync_full_flag=""', body)
+
+    def test_refresh_helper_does_not_hardcode_full(self) -> None:
+        """Regression: the shared sync helper must not hardcode --full for refresh.
+
+        A previous defect had run_sync_extract_links always pass --full, making
+        the lightweight five-minute refresh a full sync. This guards against any
+        shared helper reintroducing --full unconditionally.
+        """
+        body = _extract_function(self.src, "run_sync_extract_links")
+        # The only literal --full in the helper must be the conditional assignment.
+        self.assertEqual(body.count('"--full"'), 1, "exactly one '--full' literal expected")
+        self.assertNotIn("sync --full ", body, "sync must not hardcode --full")
+        self.assertNotIn("sync --full--no-embed", body)
 
     def test_refresh_message_mentions_embeddings_skipped(self) -> None:
         body = _extract_function(self.src, "do_refresh")

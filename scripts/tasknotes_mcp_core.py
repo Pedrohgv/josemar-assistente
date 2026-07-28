@@ -9,8 +9,8 @@ Design invariants (fixed, do not redesign):
   - gbrain is the sole writer; the core never writes task files directly.
   - Mutations fail closed before side effects unless the exact TaskNotes
     4.11.1 profile is compatible and stable (re-checked immediately before
-    put). gbrain source routing is verified under the shared lock before
-    any side effect.
+    capture). gbrain source routing is verified under the shared lock
+    before any side effect.
   - All operations that invoke gbrain (including get) run under a shared
     ``fcntl.flock`` exclusive lock with a bounded wait at a configurable
     runtime-only path. List is lock-free only because it never invokes
@@ -28,10 +28,10 @@ Design invariants (fixed, do not redesign):
     with ``O_NOFOLLOW`` and ``fstat`` on the opened fd; no check-then-read.
   - Partial failures return structured outcomes (``not_applied``,
     ``applied_and_committed``, ``applied_uncommitted``,
-    ``db_updated_disk_failed``, ``recovery_required``). Pre-put failures
-    raise typed core errors. Once put begins, the handler always returns a
-    structured outcome and never escapes generically. A recovery marker
-    blocks all later mutations until operator recovery.
+    ``db_updated_disk_failed``, ``recovery_required``). Pre-capture
+    failures raise typed core errors. Once capture begins, the handler
+    always returns a structured outcome and never escapes generically. A
+    recovery marker blocks all later mutations until operator recovery.
   - Completion date defaults to today in the configured TZ; explicit dates
     must be valid ``YYYY-MM-DD``. Already-completed tasks preserve the
     existing completion date.
@@ -76,7 +76,9 @@ REQUIRED_MAPPINGS: Tuple[str, ...] = (
 
 # Structural/provenance keys that mapped field values must not collide with.
 # Collisions would corrupt canonical reconstruction (gbrain re-injects
-# type/tags/slug at top level and provenance on disk).
+# type/tags/slug at top level and provenance on disk). Includes both the
+# legacy ``put_page`` provenance keys and the ``capture`` provenance keys
+# (``captured_via``/``captured_at``) injected by ``gbrain capture --stdin``.
 RESERVED_FRONTMATTER_KEYS: Tuple[str, ...] = (
     "type",
     "tags",
@@ -84,6 +86,8 @@ RESERVED_FRONTMATTER_KEYS: Tuple[str, ...] = (
     "ingested_via",
     "ingested_at",
     "source_kind",
+    "captured_via",
+    "captured_at",
 )
 
 # Locking defaults (runtime-only, under /opt/data/.locks/).
@@ -191,12 +195,15 @@ DB_UPDATED_DISK_FAILED = "db_updated_disk_failed"
 RECOVERY_REQUIRED = "recovery_required"
 
 # Documented write-through provenance keys injected on disk by gbrain
-# put_page (operations.ts). These appear on disk but NOT in get_page JSON
-# frontmatter, so disk semantic comparison excludes them.
+# put_page (operations.ts) and capture (capture --stdin). These appear on
+# disk but NOT in get_page JSON frontmatter, so disk semantic comparison
+# excludes them. ``captured_via``/``captured_at`` are added by capture.
 WRITE_THROUGH_PROVENANCE_KEYS: Tuple[str, ...] = (
     "ingested_via",
     "ingested_at",
     "source_kind",
+    "captured_via",
+    "captured_at",
 )
 
 
@@ -1444,28 +1451,36 @@ def gbrain_get_page(
     return data
 
 
-def gbrain_put(
+def gbrain_capture(
     gbrain_bin: str,
     env: Dict[str, str],
     slug: str,
     source_id: str,
     markdown: str,
 ) -> Dict[str, Any]:
-    """Call ``gbrain put <slug> --source <id>`` with markdown on stdin; return parsed JSON."""
+    """Call ``gbrain capture --stdin --slug <slug> --source <id> --json`` with markdown on stdin; return parsed JSON.
+
+    Body content is sent through stdin (never argv) so it stays out of the
+    process argument vector and any process-table/audit surface. ``--slug``,
+    ``--source``, ``--stdin`` and ``--json`` are all documented by live
+    ``gbrain capture --help``. Capture reports write-through success as a
+    top-level ``written`` boolean (unlike the legacy ``put`` shape which
+    nested it under ``write_through.written``).
+    """
     result = run_subprocess(
-        [gbrain_bin, "put", slug, "--source", source_id],
+        [gbrain_bin, "capture", "--stdin", "--slug", slug, "--source", source_id, "--json"],
         stdin=markdown,
         env=env,
         timeout=DEFAULT_TIMEOUT,
     )
     if result.returncode != 0:
-        raise GbrainError(f"gbrain put failed: {_redact(result.stderr)[:200]}")
+        raise GbrainError(f"gbrain capture failed: {_redact(result.stderr)[:200]}")
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise GbrainError(f"gbrain put returned invalid JSON: {exc}") from exc
+        raise GbrainError(f"gbrain capture returned invalid JSON: {exc}") from exc
     if not isinstance(data, dict):
-        raise GbrainError("gbrain put returned non-object")
+        raise GbrainError("gbrain capture returned non-object")
     return data
 
 
@@ -1478,9 +1493,10 @@ def gbrain_untag(
 ) -> None:
     """Call ``gbrain untag <slug> <tag> --source <id>`` to remove a tag from the DB.
 
-    Gbrain's ``put_page`` reconciles tags additively and does not remove tags
-    that are absent from the new frontmatter. After a ``put`` that removes a
-    tag from frontmatter, this call is needed to sync the DB tag index.
+    Gbrain's write-through (put_page/capture) reconciles tags additively
+    and does not remove tags that are absent from the new frontmatter.
+    After a capture that removes a tag from frontmatter, this call is
+    needed to sync the DB tag index.
     """
     result = run_subprocess(
         [gbrain_bin, "untag", slug, tag, "--source", source_id],
@@ -1813,8 +1829,8 @@ class SemanticDocument:
 
     Contains type, title, tags, and full frontmatter excluding only the
     documented write-through provenance keys (``ingested_via``,
-    ``ingested_at``, ``source_kind``) and the body/timeline (which are
-    verified separately when relevant).
+    ``ingested_at``, ``source_kind``, ``captured_via``, ``captured_at``)
+    and the body/timeline (which are verified separately when relevant).
     """
 
     type: str
@@ -2135,6 +2151,20 @@ def validate_body(body: Any) -> str:
     return body
 
 
+def _validate_markdown_bound(markdown: str) -> None:
+    """Reject constructed markdown that exceeds the stdin byte bound before any gbrain mutation.
+
+    The subprocess stdin cap (``MAX_MARKDOWN_LEN``) is byte-limited, while
+    earlier field validation is character-based. For multibyte Unicode a
+    string within the character count can still exceed the byte cap when
+    encoded as UTF-8. This check makes the accepted-input contract
+    deterministic: too-large content is rejected up front with the existing
+    ``ValidationError`` taxonomy, before any gbrain side effect.
+    """
+    if len(markdown.encode("utf-8")) > MAX_MARKDOWN_LEN:
+        raise ValidationError("constructed markdown exceeds length bound")
+
+
 def validate_status_value(value: Any, profile: TaskNotesProfile) -> str:
     if not isinstance(value, str) or value not in profile.statuses:
         raise ValidationError(f"status {value!r} not in status set")
@@ -2353,8 +2383,8 @@ class TaskNotesEngine:
     lock. List is lock-free because it never invokes gbrain. Mutations
     verify the profile, verify the gbrain source under the lock, run
     preflight (commit pending + incremental sync), re-check the profile
-    immediately before put, execute the gbrain put, verify read-back
-    against a strict disk parse, and commit the target path.
+    immediately before capture, execute the gbrain capture, verify
+    read-back against a strict disk parse, and commit the target path.
     """
 
     def __init__(
@@ -2378,8 +2408,8 @@ class TaskNotesEngine:
         self._gbrain_env = _build_gbrain_env(self.gbrain_home, self.vault)
         self._git_env = _build_git_env()
         # Test seam: callable invoked after get_page/reconstruct and before
-        # the pre-put target/profile re-check, to simulate races.
-        self._pre_put_hook: Optional[Callable[["TaskNotesEngine", str, TaskNotesProfile], None]] = None
+        # the pre-capture target/profile re-check, to simulate races.
+        self._pre_capture_hook: Optional[Callable[["TaskNotesEngine", str, TaskNotesProfile], None]] = None
 
     # -- profile ----------------------------------------------------------
 
@@ -2431,10 +2461,10 @@ class TaskNotesEngine:
             )
         return current
 
-    # -- pre-put guards ---------------------------------------------------
+    # -- pre-capture guards ------------------------------------------------
 
-    def _create_pre_put_guard(self, profile: TaskNotesProfile, slug: str) -> None:
-        """Create pre-put guard: target must be absent (no-follow) and get_page must report page_not_found."""
+    def _create_pre_capture_guard(self, profile: TaskNotesProfile, slug: str) -> None:
+        """Create pre-capture guard: target must be absent (no-follow) and get_page must report page_not_found."""
         target = resolve_task_path(self.vault, profile, slug)
         # lstat/no-follow: any disk entry (including symlink) => failure.
         try:
@@ -2453,8 +2483,8 @@ class TaskNotesEngine:
         except GbrainPageNotFound:
             pass
 
-    def _mutation_pre_put_guard(self, profile: TaskNotesProfile, slug: str) -> None:
-        """Update/complete/archive pre-put guard: target must exist and be Git-clean; profile hash re-read."""
+    def _mutation_pre_capture_guard(self, profile: TaskNotesProfile, slug: str) -> None:
+        """Update/complete/archive pre-capture guard: target must exist and be Git-clean; profile hash re-read."""
         target = resolve_task_path_any(self.vault, profile, slug)
         # Target must exist (no-follow).
         if target is None:
@@ -2465,10 +2495,10 @@ class TaskNotesEngine:
         # Re-read profile manifest/data and verify hash.
         current = self.load_profile()
         if current.profile_hash != profile.profile_hash:
-            raise ProfileIncompatible("TaskNotes profile drifted before put")
+            raise ProfileIncompatible("TaskNotes profile drifted before capture")
         current = self._verify_source(current)
         if current.source_id != profile.source_id:
-            raise ProfileIncompatible("gbrain source routing drifted before put")
+            raise ProfileIncompatible("gbrain source routing drifted before capture")
 
     # -- read-back verification ------------------------------------------
 
@@ -2491,30 +2521,36 @@ class TaskNotesEngine:
         ):
             raise CoreError("read-back does not match the intended task document")
 
-    # -- consolidated post-put handling -----------------------------------
+    # -- consolidated post-capture handling -----------------------------------
 
-    def _handle_post_put(
+    def _handle_post_capture(
         self,
         profile: TaskNotesProfile,
         slug: str,
         gbrain_slug: str,
-        put_result: Dict[str, Any],
+        capture_result: Dict[str, Any],
         *,
         expected_document: Optional[SemanticDocument] = None,
     ) -> MutationResult:
-        """Consolidated post-put handling.
+        """Consolidated post-capture handling.
 
-        Once put begins, this method always returns a MutationResult and
+        Once capture begins, this method always returns a MutationResult and
         never escapes generically. Reconciles gbrain + disk against the
-        pre-put snapshot and intended state. Outcomes:
+        pre-capture snapshot and intended state. Outcomes:
           - verified applied + commit ok => applied_and_committed
           - verified applied + commit fail => applied_uncommitted
           - DB changed + disk unchanged => full sync recovery; if verified
             => db_updated_disk_failed; if not => recovery marker + recovery_required
           - uncertain/mismatch => recovery marker + recovery_required
+
+        ``gbrain capture --json`` reports write-through success as a
+        top-level ``written`` boolean (not nested under ``write_through``).
+        A structured ``written: false`` remains a hard failure before any
+        post-write Git operations.
         """
-        write_through = put_result.get("write_through", {})
-        written = write_through.get("written", False) if isinstance(write_through, dict) else False
+        written = capture_result.get("written", False)
+        if not isinstance(written, bool):
+            written = False
         if not written:
             # DB updated, disk failed: run immediate locked full sync from
             # unchanged disk and verify recovery.
@@ -2620,8 +2656,8 @@ class TaskNotesEngine:
             # Re-check profile stability.
             profile = self._verify_profile_stable(original_hash)
             profile = self._verify_source(profile)
-            # Pre-put guard: target absent + DB page_not_found.
-            self._create_pre_put_guard(profile, slug)
+            # Pre-capture guard: target absent + DB page_not_found.
+            self._create_pre_capture_guard(profile, slug)
             profile = self._verify_profile_stable(original_hash)
             profile = self._verify_source(profile)
             # Build markdown.
@@ -2629,23 +2665,22 @@ class TaskNotesEngine:
                 profile, title, st, pr, due_v, scheduled_v, projects_v, tags_v, body,
                 custom_fields_v, recurrence_v,
             )
-            if len(markdown) > MAX_MARKDOWN_LEN:
-                raise ValidationError("constructed markdown exceeds length bound")
+            _validate_markdown_bound(markdown)
             expected_document = semantic_from_markdown(markdown, profile)
             gbrain_slug = resolve_gbrain_slug(profile, slug)
-            # PUT-STARTED BOUNDARY: from here on, always return a MutationResult.
+            # CAPTURE-STARTED BOUNDARY: from here on, always return a MutationResult.
             try:
-                put_result = gbrain_put(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
+                capture_result = gbrain_capture(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
             except Exception as exc:
-                # Put invocation failed after starting; reconcile.
-                return self._reconcile_after_put_failure(
+                # Capture invocation failed after starting; reconcile.
+                return self._reconcile_after_capture_failure(
                     profile, slug, gbrain_slug, exc, expected_document
                 )
-            return self._handle_post_put(
+            return self._handle_post_capture(
                 profile,
                 slug,
                 gbrain_slug,
-                put_result,
+                capture_result,
                 expected_document=expected_document,
             )
 
@@ -2781,28 +2816,27 @@ class TaskNotesEngine:
             if not updates:
                 return MutationResult(state=NOT_APPLIED, slug=slug)
             markdown = reconstruct_markdown(page, profile, updates)
-            if len(markdown) > MAX_MARKDOWN_LEN:
-                raise ValidationError("constructed markdown exceeds length bound")
+            _validate_markdown_bound(markdown)
             expected_document = semantic_from_markdown(markdown, profile)
-            # Pre-put guard: target exists + Git-clean + profile hash re-read.
-            self._mutation_pre_put_guard(profile, slug)
+            # Pre-capture guard: target exists + Git-clean + profile hash re-read.
+            self._mutation_pre_capture_guard(profile, slug)
             # Test seam: race hook.
-            if self._pre_put_hook is not None:
-                self._pre_put_hook(self, slug, profile)
+            if self._pre_capture_hook is not None:
+                self._pre_capture_hook(self, slug, profile)
                 # Re-verify after hook.
-                self._mutation_pre_put_guard(profile, slug)
-            # PUT-STARTED BOUNDARY.
+                self._mutation_pre_capture_guard(profile, slug)
+            # CAPTURE-STARTED BOUNDARY.
             try:
-                put_result = gbrain_put(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
+                capture_result = gbrain_capture(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
             except Exception as exc:
-                return self._reconcile_after_put_failure(
+                return self._reconcile_after_capture_failure(
                     profile, slug, gbrain_slug, exc, expected_document
                 )
-            return self._handle_post_put(
+            return self._handle_post_capture(
                 profile,
                 slug,
                 gbrain_slug,
-                put_result,
+                capture_result,
                 expected_document=expected_document,
             )
 
@@ -2847,26 +2881,25 @@ class TaskNotesEngine:
                 "completedDate": final_date,
             }
             markdown = reconstruct_markdown(page, profile, updates)
-            if len(markdown) > MAX_MARKDOWN_LEN:
-                raise ValidationError("constructed markdown exceeds length bound")
+            _validate_markdown_bound(markdown)
             expected_document = semantic_from_markdown(markdown, profile)
-            # Pre-put guard.
-            self._mutation_pre_put_guard(profile, slug)
-            if self._pre_put_hook is not None:
-                self._pre_put_hook(self, slug, profile)
-                self._mutation_pre_put_guard(profile, slug)
-            # PUT-STARTED BOUNDARY.
+            # Pre-capture guard.
+            self._mutation_pre_capture_guard(profile, slug)
+            if self._pre_capture_hook is not None:
+                self._pre_capture_hook(self, slug, profile)
+                self._mutation_pre_capture_guard(profile, slug)
+            # CAPTURE-STARTED BOUNDARY.
             try:
-                put_result = gbrain_put(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
+                capture_result = gbrain_capture(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
             except Exception as exc:
-                return self._reconcile_after_put_failure(
+                return self._reconcile_after_capture_failure(
                     profile, slug, gbrain_slug, exc, expected_document
                 )
-            return self._handle_post_put(
+            return self._handle_post_capture(
                 profile,
                 slug,
                 gbrain_slug,
-                put_result,
+                capture_result,
                 expected_document=expected_document,
             )
 
@@ -2890,26 +2923,25 @@ class TaskNotesEngine:
             new_tags = sorted(set(current_tags) | {profile.archive_tag})
             updates: Dict[str, Any] = {"tags": new_tags}
             markdown = reconstruct_markdown(page, profile, updates)
-            if len(markdown) > MAX_MARKDOWN_LEN:
-                raise ValidationError("constructed markdown exceeds length bound")
+            _validate_markdown_bound(markdown)
             expected_document = semantic_from_markdown(markdown, profile)
-            # Pre-put guard.
-            self._mutation_pre_put_guard(profile, slug)
-            if self._pre_put_hook is not None:
-                self._pre_put_hook(self, slug, profile)
-                self._mutation_pre_put_guard(profile, slug)
-            # PUT-STARTED BOUNDARY.
+            # Pre-capture guard.
+            self._mutation_pre_capture_guard(profile, slug)
+            if self._pre_capture_hook is not None:
+                self._pre_capture_hook(self, slug, profile)
+                self._mutation_pre_capture_guard(profile, slug)
+            # CAPTURE-STARTED BOUNDARY.
             try:
-                put_result = gbrain_put(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
+                capture_result = gbrain_capture(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
             except Exception as exc:
-                return self._reconcile_after_put_failure(
+                return self._reconcile_after_capture_failure(
                     profile, slug, gbrain_slug, exc, expected_document
                 )
-            return self._handle_post_put(
+            return self._handle_post_capture(
                 profile,
                 slug,
                 gbrain_slug,
-                put_result,
+                capture_result,
                 expected_document=expected_document,
             )
 
@@ -2917,7 +2949,7 @@ class TaskNotesEngine:
         """Delete a task: gbrain soft-delete, git rm the file, git commit.
 
         This is the only mutation that removes a file from disk instead of
-        writing through ``gbrain put``. The gbrain delete is a soft-delete
+        writing through ``gbrain capture``. The gbrain delete is a soft-delete
         confirmation gate; once confirmed, the file is removed via ``git
         rm`` and the deletion committed. Idempotent: returns NOT_APPLIED if
         the task is already absent from both gbrain and disk.
@@ -3055,24 +3087,23 @@ class TaskNotesEngine:
             new_tags = sorted(set(current_tags) | {tag})
             updates: Dict[str, Any] = {"tags": new_tags}
             markdown = reconstruct_markdown(page, profile, updates)
-            if len(markdown) > MAX_MARKDOWN_LEN:
-                raise ValidationError("constructed markdown exceeds length bound")
+            _validate_markdown_bound(markdown)
             expected_document = semantic_from_markdown(markdown, profile)
-            self._mutation_pre_put_guard(profile, slug)
-            if self._pre_put_hook is not None:
-                self._pre_put_hook(self, slug, profile)
-                self._mutation_pre_put_guard(profile, slug)
+            self._mutation_pre_capture_guard(profile, slug)
+            if self._pre_capture_hook is not None:
+                self._pre_capture_hook(self, slug, profile)
+                self._mutation_pre_capture_guard(profile, slug)
             try:
-                put_result = gbrain_put(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
+                capture_result = gbrain_capture(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
             except Exception as exc:
-                return self._reconcile_after_put_failure(
+                return self._reconcile_after_capture_failure(
                     profile, slug, gbrain_slug, exc, expected_document
                 )
-            return self._handle_post_put(
+            return self._handle_post_capture(
                 profile,
                 slug,
                 gbrain_slug,
-                put_result,
+                capture_result,
                 expected_document=expected_document,
             )
 
@@ -3105,36 +3136,35 @@ class TaskNotesEngine:
             new_tags = sorted(set(current_tags) - {tag})
             updates: Dict[str, Any] = {"tags": new_tags}
             markdown = reconstruct_markdown(page, profile, updates)
-            if len(markdown) > MAX_MARKDOWN_LEN:
-                raise ValidationError("constructed markdown exceeds length bound")
+            _validate_markdown_bound(markdown)
             expected_document = semantic_from_markdown(markdown, profile)
-            self._mutation_pre_put_guard(profile, slug)
-            if self._pre_put_hook is not None:
-                self._pre_put_hook(self, slug, profile)
-                self._mutation_pre_put_guard(profile, slug)
-            # Gbrain's put_page reconciles tags additively: it re-adds all
-            # DB tags to the file even if the new frontmatter omits them.
-            # We must untag from the DB FIRST, then put the new markdown
+            self._mutation_pre_capture_guard(profile, slug)
+            if self._pre_capture_hook is not None:
+                self._pre_capture_hook(self, slug, profile)
+                self._mutation_pre_capture_guard(profile, slug)
+            # Gbrain's write-through reconciles tags additively: it re-adds
+            # all DB tags to the file even if the new frontmatter omits them.
+            # We must untag from the DB FIRST, then capture the new markdown
             # so the write-through picks up the updated DB tag set.
             try:
                 gbrain_untag(self.gbrain_bin, self._gbrain_env, gbrain_slug, tag, profile.source_id)  # type: ignore[arg-type]
             except GbrainError:
-                pass  # Best-effort; continue with put.
+                pass  # Best-effort; continue with capture.
             try:
-                put_result = gbrain_put(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
+                capture_result = gbrain_capture(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
             except Exception as exc:
-                return self._reconcile_after_put_failure(
+                return self._reconcile_after_capture_failure(
                     profile, slug, gbrain_slug, exc, expected_document
                 )
-            return self._handle_post_put(
+            return self._handle_post_capture(
                 profile,
                 slug,
                 gbrain_slug,
-                put_result,
+                capture_result,
                 expected_document=expected_document,
             )
 
-    def _reconcile_after_put_failure(
+    def _reconcile_after_capture_failure(
         self,
         profile: TaskNotesProfile,
         slug: str,
@@ -3142,7 +3172,7 @@ class TaskNotesEngine:
         exc: Exception,
         expected_document: SemanticDocument,
     ) -> MutationResult:
-        """Reconcile after a put invocation failed (nonzero/timeout/invalid JSON).
+        """Reconcile after a capture invocation failed (nonzero/timeout/invalid JSON).
 
         Attempts a read-back; if the DB was updated and disk matches,
         treat as applied_uncommitted (commit not attempted). Otherwise
@@ -3159,4 +3189,4 @@ class TaskNotesEngine:
         except Exception:
             pass
         self._write_recovery_marker()
-        return MutationResult(state=RECOVERY_REQUIRED, slug=slug, detail="put invocation failed")
+        return MutationResult(state=RECOVERY_REQUIRED, slug=slug, detail="capture invocation failed")
