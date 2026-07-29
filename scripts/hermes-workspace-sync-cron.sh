@@ -23,7 +23,7 @@ JOSEMAR_SKILL_STATE="${JOSEMAR_SKILL_STATE:-/opt/hermes/hermes_cli/josemar_skill
 if [ ! -f "$JOSEMAR_SKILL_STATE" ]; then
     # Helper missing: fall back to sync-only so periodic git sync still runs.
     set +e
-    WORKSPACE_SYNC_MODE=periodic WORKSPACE_SYNC_INTERVAL=0 /usr/local/bin/workspace-sync.sh >"$log_file" 2>&1
+    WORKSPACE_SYNC_MODE=periodic WORKSPACE_SYNC_INTERVAL=0 /usr/local/bin/workspace-sync periodic >"$log_file" 2>&1
     status=$?
     set -e
     if [ "$status" -ne 0 ]; then
@@ -38,7 +38,7 @@ fi
 set +e
 WORKSPACE_SYNC_MODE=periodic WORKSPACE_SYNC_INTERVAL=0 \
     /opt/hermes/.venv/bin/python3 "$JOSEMAR_SKILL_STATE" sync-and-apply -- \
-    /usr/local/bin/workspace-sync.sh >"$log_file" 2>&1
+    /usr/local/bin/workspace-sync periodic >"$log_file" 2>&1
 status=$?
 set -e
 

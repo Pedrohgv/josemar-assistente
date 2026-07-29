@@ -295,7 +295,7 @@ if [ -n "${WORKSPACE_STATE_REPO:-}" ]; then
         export WORKSPACE_DIR WORKSPACE_STATE_REPO WORKSPACE_REPO_TOKEN
         export WORKSPACE_GIT_BRANCH WORKSPACE_GIT_USER_EMAIL WORKSPACE_GIT_USER_NAME
         export WORKSPACE_SYNC_ON_START
-        /usr/local/bin/workspace-sync.sh
+        /usr/local/bin/workspace-sync startup
     " || log "WARNING: workspace git sync failed; continuing"
 elif [ ! -d "${WORKSPACE_DIR}/.git" ]; then
     seed_workspace_from_manifest

@@ -139,11 +139,14 @@ COPY skills-factory/tasknotes /opt/josemar/skills/tasknotes
 # is instruction-only (SKILL.md + SETUP.md, no executable); the overlay still
 # gates the tunnel sidecar and network, not the skill registration.
 COPY skills-factory/browser-control /opt/josemar/skills/browser-control
-RUN chmod +x /opt/josemar/skills/aux-ml/aux-ml \
-    /opt/josemar/skills/workspace-sync/workspace-sync
+RUN chmod +x /opt/josemar/skills/aux-ml/aux-ml
 
-COPY scripts/workspace-sync.sh /usr/local/bin/workspace-sync.sh
-RUN chmod +x /usr/local/bin/workspace-sync.sh
+# Canonical workspace-sync implementation (standard-library Python).
+COPY scripts/workspace_sync.py /usr/local/bin/workspace-sync
+RUN chmod +x /usr/local/bin/workspace-sync \
+    && ln -s /usr/local/bin/workspace-sync /usr/local/bin/workspace-sync.sh \
+    && rm -f /opt/josemar/skills/workspace-sync/workspace-sync \
+    && ln -s /usr/local/bin/workspace-sync /opt/josemar/skills/workspace-sync/workspace-sync
 
 COPY scripts/josemar-gbrain /usr/local/bin/josemar-gbrain
 RUN chmod +x /usr/local/bin/josemar-gbrain
