@@ -159,8 +159,9 @@ def task_update(
     clear_scheduled: bool = False,
     clear_projects: bool = False,
     custom_fields: Optional[dict[str, Any]] = None,
+    body: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Update status, priority, dates, or projects; cannot complete a task."""
+    """Update status, priority, dates, projects, or body; cannot complete a task. ``body=None`` leaves the body unchanged, ``body=""`` clears it, and a string replaces the body content. Title edits are not supported."""
     result = _engine_call(
         "task_update",
         "update",
@@ -174,6 +175,7 @@ def task_update(
         clear_scheduled=clear_scheduled,
         clear_projects=clear_projects,
         custom_fields=custom_fields,
+        body=body,
     )
     return _mutation_dict(result)
 

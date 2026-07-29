@@ -163,6 +163,7 @@ class ServerContractTests(unittest.TestCase):
             clear_scheduled=False,
             clear_projects=False,
             custom_fields=None,
+            body=None,
         )
 
     def test_create_forwards_custom_fields(self) -> None:
@@ -204,6 +205,45 @@ class ServerContractTests(unittest.TestCase):
             clear_scheduled=False,
             clear_projects=False,
             custom_fields={"pipeline_stage": None},
+            body=None,
+        )
+
+    def test_update_forwards_body(self) -> None:
+        self.engine.update.return_value = self.server.MutationResult(
+            state="applied_and_committed", slug="t1", commit_id="abc"
+        )
+        self.server.task_update("t1", body="new body")
+        self.engine.update.assert_called_once_with(
+            "t1",
+            status=None,
+            priority=None,
+            due=None,
+            scheduled=None,
+            projects=None,
+            clear_due=False,
+            clear_scheduled=False,
+            clear_projects=False,
+            custom_fields=None,
+            body="new body",
+        )
+
+    def test_update_forwards_empty_body(self) -> None:
+        self.engine.update.return_value = self.server.MutationResult(
+            state="applied_and_committed", slug="t1", commit_id="abc"
+        )
+        self.server.task_update("t1", body="")
+        self.engine.update.assert_called_once_with(
+            "t1",
+            status=None,
+            priority=None,
+            due=None,
+            scheduled=None,
+            projects=None,
+            clear_due=False,
+            clear_scheduled=False,
+            clear_projects=False,
+            custom_fields=None,
+            body="",
         )
 
     def test_add_tag_forwards_to_engine(self) -> None:

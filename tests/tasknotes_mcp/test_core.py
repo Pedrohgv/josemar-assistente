@@ -1452,6 +1452,60 @@ class ReconstructionTests(unittest.TestCase):
         fm, _ = self.core._parse_frontmatter(md)
         self.assertNotIn("due", fm)
 
+    def test_reconstruct_body_override_replaces_body(self) -> None:
+        page = {
+            "type": "note", "title": "T", "tags": ["task"],
+            "frontmatter": {"status": "open", "custom_field": "keep"},
+            "compiled_truth": "old body", "timeline": "",
+        }
+        md = self.core.reconstruct_markdown(
+            page, self.profile, {}, body_override="new body"
+        )
+        fm, body = self.core._parse_frontmatter(md)
+        self.assertEqual(fm["status"], "open")
+        self.assertEqual(fm["custom_field"], "keep")
+        self.assertIn("new body", body)
+        self.assertNotIn("old body", md)
+
+    def test_reconstruct_body_override_empty_clears_body(self) -> None:
+        page = {
+            "type": "note", "title": "T", "tags": ["task"],
+            "frontmatter": {"status": "open"},
+            "compiled_truth": "old body", "timeline": "",
+        }
+        md = self.core.reconstruct_markdown(
+            page, self.profile, {}, body_override=""
+        )
+        fm, body = self.core._parse_frontmatter(md)
+        self.assertEqual(fm["status"], "open")
+        self.assertNotIn("old body", body)
+
+    def test_reconstruct_body_override_none_preserves_body(self) -> None:
+        page = {
+            "type": "note", "title": "T", "tags": ["task"],
+            "frontmatter": {"status": "open"},
+            "compiled_truth": "keep me", "timeline": "",
+        }
+        md = self.core.reconstruct_markdown(
+            page, self.profile, {}, body_override=None
+        )
+        self.assertIn("keep me", md)
+
+    def test_reconstruct_body_override_preserves_timeline(self) -> None:
+        page = {
+            "type": "note", "title": "T", "tags": ["task"],
+            "frontmatter": {"status": "open"},
+            "compiled_truth": "old body",
+            "timeline": "timeline event 1\ntimeline event 2",
+        }
+        md = self.core.reconstruct_markdown(
+            page, self.profile, {}, body_override="new body"
+        )
+        self.assertIn("new body", md)
+        self.assertIn("<!-- timeline -->", md)
+        self.assertIn("timeline event 1", md)
+        self.assertIn("timeline event 2", md)
+
     def test_build_create_markdown_injects_task_tag(self) -> None:
         md = self.core.build_create_markdown(
             self.profile, "Title", "open", "normal", None, None, None, None, "body"
@@ -1943,6 +1997,80 @@ class EngineOperationTests(unittest.TestCase):
         self.engine.create("t1", "T", body="b")
         with self.assertRaises(self.core.ValidationError):
             self.engine.update("t1", due="2026-07-25", clear_due=True)
+
+    def test_update_body_only_replaces_body(self) -> None:
+        self.engine.create("t1", "T", status="open", body="original body")
+        result = self.engine.update("t1", body="replaced body")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fetched = self.engine.get("t1")
+        self.assertEqual(fetched["body"].strip(), "replaced body")
+        # Status and title untouched.
+        self.assertEqual(fetched["status"], "open")
+        self.assertEqual(fetched["title"], "T")
+
+    def test_update_body_empty_string_clears_body(self) -> None:
+        self.engine.create("t1", "T", status="open", body="original body")
+        result = self.engine.update("t1", body="")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fetched = self.engine.get("t1")
+        self.assertEqual(fetched["body"].strip(), "")
+
+    def test_update_body_none_preserves_existing_body(self) -> None:
+        self.engine.create("t1", "T", status="open", body="keep me")
+        result = self.engine.update("t1", status="in-progress")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fetched = self.engine.get("t1")
+        self.assertEqual(fetched["body"].strip(), "keep me")
+        self.assertEqual(fetched["status"], "in-progress")
+
+    def test_update_body_only_is_not_no_op(self) -> None:
+        # A body-only update must not hit the no-op guard.
+        self.engine.create("t1", "T", status="open", body="original")
+        result = self.engine.update("t1", body="changed")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+
+    def test_update_body_empty_only_is_not_no_op(self) -> None:
+        self.engine.create("t1", "T", status="open", body="original")
+        result = self.engine.update("t1", body="")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+
+    def test_update_combined_body_and_metadata(self) -> None:
+        self.engine.create(
+            "t1", "T", status="open", priority="normal",
+            due="2026-07-25", body="original body",
+        )
+        result = self.engine.update(
+            "t1", status="in-progress", priority="high", body="new body"
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fetched = self.engine.get("t1")
+        self.assertEqual(fetched["status"], "in-progress")
+        self.assertEqual(fetched["priority"], "high")
+        self.assertEqual(fetched["body"].strip(), "new body")
+        self.assertEqual(str(fetched["due"])[:10], "2026-07-25")
+
+    def test_update_oversized_body_rejected(self) -> None:
+        self.engine.create("t1", "T", status="open", body="b")
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.update("t1", body="x" * (self.core.MAX_BODY_LEN + 1))
+
+    def test_update_body_preserves_frontmatter_and_timeline(self) -> None:
+        self.engine.create(
+            "t1", "T", status="open", body="original body",
+            custom_fields={"pipeline_stage": "drafting"},
+        )
+        # Complete to seed a timeline event, then reopen is not allowed; so
+        # just verify a body update preserves frontmatter (incl. custom field)
+        # and the existing timeline (if any) verbatim.
+        result = self.engine.update("t1", body="new body")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        disk_text = (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        fm, body = self.core._parse_frontmatter(disk_text)
+        self.assertEqual(fm["status"], "open")
+        self.assertEqual(fm["pipeline_stage"], "drafting")
+        self.assertIn("new body", body)
+        # Title remains in frontmatter (title edits are unsupported).
+        self.assertEqual(fm["title"], "T")
 
     def test_complete_success_sets_completion_date(self) -> None:
         self.engine.create("t1", "T", status="open", body="b")
