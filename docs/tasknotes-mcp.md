@@ -18,7 +18,10 @@ the sole task writer. The MCP exposes only:
 - `task_remove_tag`
 
 There is no unarchive, search, rename/move, bulk, raw
-Markdown/frontmatter, or body edit API.
+Markdown/frontmatter, or title edit API. `task_update` accepts an optional
+`body` field: `body=None` (default) leaves the body unchanged, `body=""`
+clears the body, and a string replaces the body content. Title edits remain
+unsupported.
 
 `task_create` accepts an optional `recurrence` field (RFC 5545 RRULE string,
 e.g. `FREQ=WEEKLY;BYDAY=MO,WE,FR`) for native TaskNotes repeating tasks. The
@@ -201,8 +204,9 @@ linked to a parent project, or inspect the ``projects`` field in individual
 The adapter does not yet support:
 
 - **Unarchive**: removing the archive tag without a full unarchive workflow.
-- **Rename/move, title/body edits, bulk operations, raw frontmatter,
+- **Rename/move, title edits, bulk operations, raw frontmatter,
   inline-task conversion**: these operations are not exposed via the MCP tools.
+  Body edits are supported via `task_update`'s optional `body` field.
 
 For these operations, suggest Obsidian or native gbrain (for non-task pages).
 

@@ -41,10 +41,13 @@ priority, dates, projects, completion, or archival.
 - `task_list`: list structured task metadata with a bounded result count.
   Supports optional filters: `status`, `priority`, `tag`, and `archived`
   (combine with AND logic).
-- `task_update`: change only status, priority, due date, scheduled date,
-  projects, or custom user fields. Use the explicit clear flags to remove
+- `task_update`: change status, priority, due date, scheduled date,
+  projects, custom user fields, or the body. Use the explicit clear flags to remove
   optional fields. Pass `custom_fields` with `null` values to clear custom
   fields. Same dict shape as `task_create`; see `references/custom-fields.md`.
+  The optional `body` field edits the task body: `body=None` (default) leaves
+  the body unchanged, `body=""` clears it, and a string replaces the body
+  content. Title edits are not supported.
 - `task_complete`: complete a task. Omit the completion date to use today in the
   configured timezone.
 - `task_archive`: add the configured archive tag. This is idempotent.
@@ -122,8 +125,9 @@ config-adaptive:
 The adapter does not yet support:
 
 - Unarchive (removing the archive tag without a full unarchive workflow).
-- Rename/move, title or body edits, bulk operations, raw frontmatter,
-  or inline-task conversion. (Delete is supported via `task_delete`.)
+- Rename/move, title edits, bulk operations, raw frontmatter,
+  or inline-task conversion. (Delete is supported via `task_delete`;
+  body edits are supported via `task_update`'s `body` field.)
 
 ### Views (.base files)
 
@@ -148,8 +152,9 @@ put` or `gbrain capture` to create or modify TaskNotes task files. Native gbrain
 remains appropriate for non-task vault pages.
 
 This interface does not currently support unarchive, search,
-rename/move, title or body edits, bulk operations, raw frontmatter,
-or inline-task conversion. (Delete is supported via `task_delete`.) Suggest
+rename/move, title edits, bulk operations, raw frontmatter,
+or inline-task conversion. (Delete is supported via `task_delete`;
+body edits are supported via `task_update`'s `body` field.) Suggest
 Obsidian for an unsupported task edit rather than approximating it with
 another writer.
 

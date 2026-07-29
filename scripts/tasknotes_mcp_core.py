@@ -1688,6 +1688,8 @@ def reconstruct_markdown(
     page: Dict[str, Any],
     profile: TaskNotesProfile,
     updates: Mapping[str, Any],
+    *,
+    body_override: Optional[str] = None,
 ) -> str:
     """Reconstruct semantic markdown preserving unknown frontmatter and body/timeline.
 
@@ -1698,6 +1700,14 @@ def reconstruct_markdown(
     ``timeline`` are preserved verbatim. Emits the pinned gbrain
     timeline sentinel ``<!-- timeline -->`` exactly when timeline is
     non-empty.
+
+    ``body_override`` is a narrow optional body replacement. When
+    ``None`` (the default) the existing body is preserved verbatim,
+    including the empty-body case. When a string (including the empty
+    string), it replaces only the body content; frontmatter, unknown
+    frontmatter, and the timeline are preserved exactly as without it.
+    The caller is responsible for validating the override (e.g. via
+    :func:`validate_body`) before passing it.
     """
     decoded = decode_page(page)
     fm: Dict[str, Any] = dict(decoded["frontmatter"])
@@ -1752,6 +1762,8 @@ def reconstruct_markdown(
         fm["tags"] = list(decoded["tags"])
 
     body = decoded["compiled_truth"]
+    if body_override is not None:
+        body = body_override
     timeline = decoded["timeline"]
 
     parts = [_serialize_frontmatter(fm)]
@@ -2736,10 +2748,18 @@ class TaskNotesEngine:
         clear_scheduled: bool = False,
         clear_projects: bool = False,
         custom_fields: Optional[Dict[str, Any]] = None,
+        body: Optional[str] = None,
     ) -> MutationResult:
-        """Update only status/priority/due/scheduled/projects/custom fields. No completion transition."""
+        """Update status/priority/dates/projects/custom fields and optionally the body.
+
+        ``body`` semantics: ``None`` (default) leaves the body unchanged;
+        ``""`` clears the body; a non-empty string replaces the body
+        content. Body edits do not affect the title (title edits remain
+        unsupported). No completion transition.
+        """
         validate_slug(slug)
         # Input validation BEFORE preflight.
+        body_v = validate_body(body) if body is not None else None
         if status is not None:
             status_v: Optional[str] = status
         else:
@@ -2813,9 +2833,11 @@ class TaskNotesEngine:
             # Custom field updates (None means clear).
             for key, value in custom_fields_v.items():
                 updates[key] = value
-            if not updates:
+            if not updates and body_v is None:
                 return MutationResult(state=NOT_APPLIED, slug=slug)
-            markdown = reconstruct_markdown(page, profile, updates)
+            markdown = reconstruct_markdown(
+                page, profile, updates, body_override=body_v
+            )
             _validate_markdown_bound(markdown)
             expected_document = semantic_from_markdown(markdown, profile)
             # Pre-capture guard: target exists + Git-clean + profile hash re-read.
