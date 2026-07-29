@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Any, cast
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKSPACE_SYNC_SKILL = REPO_ROOT / "skills-factory" / "workspace-sync" / "workspace-sync"
+WORKSPACE_SYNC_SKILL = REPO_ROOT / "scripts" / "workspace_sync.py"
 TEMPLATE_GITIGNORE = REPO_ROOT / "templates" / "agent-state-template" / ".gitignore"
 TEST_GIT_EMAIL = "test" + "@example.invalid"
 REMOTE_GIT_EMAIL = "remote" + "@example.invalid"
@@ -486,7 +487,7 @@ class WorkspaceSyncSkillRegistrationTests(unittest.TestCase):
         if extra_env:
             env.update(extra_env)
         return subprocess.run(
-            [str(WORKSPACE_SYNC_SKILL)],
+            [sys.executable, str(WORKSPACE_SYNC_SKILL)],
             input=json.dumps(payload),
             text=True,
             capture_output=True,

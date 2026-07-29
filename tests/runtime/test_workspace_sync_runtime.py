@@ -4,13 +4,14 @@ import fcntl
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKSPACE_SYNC_SCRIPT = REPO_ROOT / "scripts" / "workspace-sync.sh"
+WORKSPACE_SYNC_SCRIPT = REPO_ROOT / "scripts" / "workspace_sync.py"
 CRON_WRAPPER_SCRIPT = REPO_ROOT / "scripts" / "hermes-workspace-sync-cron.sh"
 GBRAIN_REFRESH_CRON_SCRIPT = REPO_ROOT / "scripts" / "hermes-gbrain-refresh-cron.sh"
 TASKNOTES_LOCK_RUNNER = REPO_ROOT / "scripts" / "tasknotes_lock_run.py"
@@ -223,7 +224,7 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
             }
         )
         return subprocess.run(
-            ["bash", str(WORKSPACE_SYNC_SCRIPT)],
+            [sys.executable, str(WORKSPACE_SYNC_SCRIPT), "startup"],
             env=env,
             capture_output=True,
             text=True,
@@ -381,7 +382,7 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
         fake_sync: Path,
         *,
         source: Path = CRON_WRAPPER_SCRIPT,
-        hardcoded_path: str = "/usr/local/bin/workspace-sync.sh",
+        hardcoded_path: str = "/usr/local/bin/workspace-sync periodic",
     ) -> Path:
         """Return a copy of the cron wrapper with the hardcoded sync path replaced.
 

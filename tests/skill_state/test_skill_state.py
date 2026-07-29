@@ -687,7 +687,7 @@ class CronLockSyncApplyTests(unittest.TestCase):
 
     def test_cron_falls_back_to_sync_only_when_helper_missing(self) -> None:
         self.assertIn("JOSEMAR_SKILL_STATE", self.src)
-        self.assertIn("/usr/local/bin/workspace-sync.sh", self.src)
+        self.assertIn("/usr/local/bin/workspace-sync", self.src)
 
     def test_cron_uses_hermes_venv_python(self) -> None:
         self.assertIn("/opt/hermes/.venv/bin/python3", self.src)
