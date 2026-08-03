@@ -46,6 +46,9 @@ jobs:
           BROWSER_CONTROL_HERMES_IP: ${{ vars.BROWSER_CONTROL_HERMES_IP }}
           BROWSER_CONTROL_TAILSCALE_IP: ${{ vars.BROWSER_CONTROL_TAILSCALE_IP }}
           BROWSER_TUNNEL_AUTHORIZED_KEY: ${{ secrets.BROWSER_TUNNEL_AUTHORIZED_KEY }}
+          MNEMOSYNE_DEPLOY_MODE_INPUT: ${{ vars.MNEMOSYNE_DEPLOY_MODE }}
+          MNEMOSYNE_BACKUP_EXPORT_INTERVAL_INPUT: ${{ vars.MNEMOSYNE_BACKUP_EXPORT_INTERVAL }}
+          RCLONE_CONFIG_B64_SECRET: ${{ secrets.RCLONE_CONFIG_B64 }}
         run: |
           if [ -z "$WORKSPACE_STATE_REPO" ]; then
             echo "ERROR: Repository variable WORKSPACE_STATE_REPO is required"
@@ -163,6 +166,60 @@ jobs:
           PY
           fi
 
+          # ---- Mnemosyne deploy mode (default off) ----
+          # Allowed values: off, pilot, backup. Any other value is rejected
+          # BEFORE any volume mutation or service teardown. There is no
+          # embeddings-only mode: pilot = base+embeddings+mnemosyne, backup =
+          # those plus the backup overlay.
+          MNEMOSYNE_DEPLOY_MODE="$MNEMOSYNE_DEPLOY_MODE_INPUT"
+          if [ -z "$MNEMOSYNE_DEPLOY_MODE" ]; then
+            MNEMOSYNE_DEPLOY_MODE="off"
+          fi
+          case "$MNEMOSYNE_DEPLOY_MODE" in
+            off|pilot|backup) ;;
+            *)
+              echo "ERROR: MNEMOSYNE_DEPLOY_MODE must be one of: off, pilot, backup (got: $MNEMOSYNE_DEPLOY_MODE)"
+              exit 1
+              ;;
+          esac
+
+          # backup-mode prerequisites: positive-integer export interval AND a
+          # base64 rclone config secret. Validate before mutating volumes or
+          # stopping services. Reject leading-zero forms (e.g. 007) and values
+          # exceeding 10080 minutes (1 week).
+          if [ "$MNEMOSYNE_DEPLOY_MODE" = "backup" ]; then
+            EXPORT_INTERVAL="$MNEMOSYNE_BACKUP_EXPORT_INTERVAL_INPUT"
+            if [ -z "$EXPORT_INTERVAL" ]; then
+              echo "ERROR: MNEMOSYNE_BACKUP_EXPORT_INTERVAL repo variable is required when MNEMOSYNE_DEPLOY_MODE=backup"
+              exit 1
+            fi
+            # Reject leading zeros: "007", "00", "01" are not canonical.
+            case "$EXPORT_INTERVAL" in
+              0*)
+                echo "ERROR: MNEMOSYNE_BACKUP_EXPORT_INTERVAL must be a positive integer without leading zeros (got: $EXPORT_INTERVAL)"
+                exit 1
+                ;;
+            esac
+            if ! printf '%s' "$EXPORT_INTERVAL" | grep -Eq '^[0-9]+$'; then
+              echo "ERROR: MNEMOSYNE_BACKUP_EXPORT_INTERVAL must be a positive integer (got: $EXPORT_INTERVAL)"
+              exit 1
+            fi
+            if [ "$EXPORT_INTERVAL" -le 0 ]; then
+              echo "ERROR: MNEMOSYNE_BACKUP_EXPORT_INTERVAL must be a positive integer (got: $EXPORT_INTERVAL)"
+              exit 1
+            fi
+            if [ "$EXPORT_INTERVAL" -gt 10080 ]; then
+              echo "ERROR: MNEMOSYNE_BACKUP_EXPORT_INTERVAL must not exceed 10080 minutes (1 week) (got: $EXPORT_INTERVAL)"
+              exit 1
+            fi
+            if [ -z "$RCLONE_CONFIG_B64_SECRET" ]; then
+              echo "ERROR: RCLONE_CONFIG_B64 secret is required when MNEMOSYNE_DEPLOY_MODE=backup"
+              exit 1
+            fi
+          fi
+
+          echo "MNEMOSYNE_DEPLOY_MODE=$MNEMOSYNE_DEPLOY_MODE" >> "$GITHUB_ENV"
+
       - name: Create .env file
         env:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
@@ -210,6 +267,8 @@ jobs:
           BROWSER_CONTROL_HERMES_IP: ${{ vars.BROWSER_CONTROL_HERMES_IP }}
           BROWSER_CONTROL_TAILSCALE_IP: ${{ vars.BROWSER_CONTROL_TAILSCALE_IP }}
           BROWSER_TUNNEL_AUTHORIZED_KEY: ${{ secrets.BROWSER_TUNNEL_AUTHORIZED_KEY }}
+          MNEMOSYNE_DEPLOY_MODE_INPUT: ${{ vars.MNEMOSYNE_DEPLOY_MODE }}
+          MNEMOSYNE_BACKUP_EXPORT_INTERVAL_INPUT: ${{ vars.MNEMOSYNE_BACKUP_EXPORT_INTERVAL }}
         run: |
           AUX_ML_ENABLED="$AUX_ML_ENABLED_INPUT"
           if [ -z "$AUX_ML_ENABLED" ]; then
@@ -419,21 +478,206 @@ jobs:
             write_env BROWSER_CONTROL_TAILSCALE_IP "$BC_TS"
           fi
 
+          # ---- Mnemosyne deploy mode (default off) ----
+          # off    -> no Mnemosyne overlays (baseline behavior preserved).
+          # pilot  -> base + embeddings + mnemosyne overlays.
+          # backup -> pilot + mnemosyne-backup overlay; export interval must be
+          #           a positive integer and RCLONE_CONFIG_B64 must be present
+          #           (validated in the prior step).
+          MNEMOSYNE_DEPLOY_MODE="$MNEMOSYNE_DEPLOY_MODE_INPUT"
+          if [ -z "$MNEMOSYNE_DEPLOY_MODE" ]; then
+            MNEMOSYNE_DEPLOY_MODE="off"
+          fi
+
+          if [ "$MNEMOSYNE_DEPLOY_MODE" = "backup" ]; then
+            MNEMOSYNE_BACKUP_EXPORT_INTERVAL="$MNEMOSYNE_BACKUP_EXPORT_INTERVAL_INPUT"
+          else
+            # Off/pilot: keep the overlay default (0 = cron disabled). The
+            # pilot overlay does not include the backup overlay, so the export
+            # cron is not installed regardless of this value.
+            MNEMOSYNE_BACKUP_EXPORT_INTERVAL="${MNEMOSYNE_BACKUP_EXPORT_INTERVAL_INPUT:-0}"
+          fi
+          # Write the export interval so the backup overlay's interpolation
+          # resolves deterministically. Inert when the backup overlay is not
+          # applied (off/pilot).
+          write_env MNEMOSYNE_BACKUP_EXPORT_INTERVAL "$MNEMOSYNE_BACKUP_EXPORT_INTERVAL"
+          # Hardcode the crypt remote name in .env so the deploy validation
+          # (which hardcodes mnemosyne-crypt) and the runtime Compose overlay
+          # cannot diverge. This matches the overlay default and the value
+          # validated in the "Decode and validate rclone config" step.
+          write_env MNEMOSYNE_BACKUP_RCLONE_REMOTE "mnemosyne-crypt"
+
           chmod 600 .env
           echo "COMPOSE_PROFILES=$COMPOSE_PROFILES_VALUE" >> "$GITHUB_ENV"
           echo "JOSEMAR_CONTAINER_PREFIX=$JOSEMAR_CONTAINER_PREFIX" >> "$GITHUB_ENV"
           echo "BROWSER_CONTROL_ENABLED=$BROWSER_CONTROL_ENABLED" >> "$GITHUB_ENV"
           echo "BC_HERMES_IP=$BC_HERMES" >> "$GITHUB_ENV"
+          echo "MNEMOSYNE_DEPLOY_MODE=$MNEMOSYNE_DEPLOY_MODE" >> "$GITHUB_ENV"
+          echo "MNEMOSYNE_BACKUP_EXPORT_INTERVAL=$MNEMOSYNE_BACKUP_EXPORT_INTERVAL" >> "$GITHUB_ENV"
 
       - name: Set compose profiles
         run: |
           echo "COMPOSE_PROFILES=${COMPOSE_PROFILES}"
           echo "BROWSER_CONTROL_ENABLED=${BROWSER_CONTROL_ENABLED}"
 
+      - name: Derive compose file and validate config
+        # Derive COMPOSE_FILE with strict ordering and render it with
+        # `docker compose config --quiet` BEFORE any volume mutation, volume
+        # write, or service teardown. This is the fail-closed preflight: an
+        # invalid overlay combination exits non-zero without touching state.
+        # Ordering: base; optional browser-control; embeddings; mnemosyne;
+        # backup last. browser-control is the only overlay whose presence
+        # depends on a separate repo variable (BROWSER_CONTROL_ENABLED). The
+        # Mnemosyne overlays are appended in fixed order based on
+        # MNEMOSYNE_DEPLOY_MODE. There is no embeddings-only mode.
+        run: |
+          set -euo pipefail
+          COMPOSE_FILE_VALUE="docker-compose.yml"
+          if [ "${BROWSER_CONTROL_ENABLED}" = "true" ]; then
+            COMPOSE_FILE_VALUE="${COMPOSE_FILE_VALUE}:docker-compose.browser-control.yml"
+          fi
+          case "${MNEMOSYNE_DEPLOY_MODE:-off}" in
+            backup)
+              COMPOSE_FILE_VALUE="${COMPOSE_FILE_VALUE}:docker-compose.embeddings.yml:docker-compose.mnemosyne.yml:docker-compose.mnemosyne-backup.yml"
+              ;;
+            pilot)
+              COMPOSE_FILE_VALUE="${COMPOSE_FILE_VALUE}:docker-compose.embeddings.yml:docker-compose.mnemosyne.yml"
+              ;;
+            off) ;;
+            *)
+              echo "ERROR: MNEMOSYNE_DEPLOY_MODE must be one of: off, pilot, backup (got: ${MNEMOSYNE_DEPLOY_MODE:-unset})"
+              exit 1
+              ;;
+          esac
+          echo "COMPOSE_FILE=$COMPOSE_FILE_VALUE" >> "$GITHUB_ENV"
+          # Render the selected COMPOSE_FILE with --quiet so an invalid
+          # overlay combination fails closed without mutating volumes or
+          # stopping services. Build the -f list explicitly from the derived
+          # value (do not rely on the runner shell honoring COMPOSE_FILE).
+          IFS=':' read -ra FILES <<< "$COMPOSE_FILE_VALUE"
+          ARGS=()
+          for f in "${FILES[@]}"; do
+            ARGS+=("-f" "$f")
+          done
+          docker compose "${ARGS[@]}" config --quiet
+
+      - name: Decode and validate rclone config
+        # Decode RCLONE_CONFIG_B64 to a 0600 temp file and validate the
+        # required remotes BEFORE any volume mutation or service teardown.
+        # In backup mode: require a `crypt` remote named `mnemosyne-crypt`
+        # (hardcoded — must match the Compose overlay default) with type=crypt,
+        # a nonempty remote, and a nonempty password, AND require the baseline
+        # `gdrive` remote so replacing the shared volume does not break
+        # obsidian-backup. The pinned rclone image entrypoint is `["rclone"]`,
+        # so we invoke rclone directly (no `sh -c`). No config/secrets are
+        # printed. The temp file path is exported for the later publish step.
+        # Non-backup with RCLONE_CONFIG_B64 set: decode only (no crypt
+        # validation); the baseline publish behavior is preserved later.
+        env:
+          RCLONE_CONFIG_B64_SECRET: ${{ secrets.RCLONE_CONFIG_B64 }}
+        run: |
+          set -euo pipefail
+          RCLONE_PINNED_IMAGE="rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548"
+          # Hardcoded remote name — must match the Compose overlay default
+          # and the value written to .env. Do NOT interpolate from an env var
+          # that could diverge from Compose.
+          REMOTE_NAME="mnemosyne-crypt"
+          BASELINE_REMOTE="gdrive"
+
+          if [ -z "$RCLONE_CONFIG_B64_SECRET" ]; then
+            if [ "${MNEMOSYNE_DEPLOY_MODE:-off}" = "backup" ]; then
+              echo "ERROR: RCLONE_CONFIG_B64 secret is required for MNEMOSYNE_DEPLOY_MODE=backup"
+              exit 1
+            fi
+            echo "WARNING: RCLONE_CONFIG_B64 secret not set. Obsidian backups will fail until configured."
+            echo "RCLONE_TEMP_CONF=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          TMP_RCLONE_CONF="$(mktemp)"
+          # Persist the temp path to GITHUB_ENV so the later publish step can
+          # use it. The trap removes it on exit; the publish step will clear
+          # it after a successful copy.
+          trap 'rm -f "$TMP_RCLONE_CONF"' EXIT
+          if ! printf '%s' "$RCLONE_CONFIG_B64_SECRET" | base64 --decode > "$TMP_RCLONE_CONF" 2>/dev/null; then
+            echo "ERROR: RCLONE_CONFIG_B64 is not valid base64"
+            rm -f "$TMP_RCLONE_CONF"
+            trap - EXIT
+            exit 1
+          fi
+          if [ ! -s "$TMP_RCLONE_CONF" ]; then
+            echo "ERROR: RCLONE_CONFIG_B64 decoded to an empty config"
+            rm -f "$TMP_RCLONE_CONF"
+            trap - EXIT
+            exit 1
+          fi
+          chmod 600 "$TMP_RCLONE_CONF"
+
+          if [ "${MNEMOSYNE_DEPLOY_MODE:-off}" = "backup" ]; then
+            # Validate the crypt remote exists. The pinned image entrypoint is
+            # `["rclone"]`, so we invoke rclone directly (no `sh -c`).
+            if ! docker run --rm \
+                -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+                "$RCLONE_PINNED_IMAGE" \
+                --config /tmp/rclone.conf config show "${REMOTE_NAME}:" \
+                >/dev/null 2>&1; then
+              echo "ERROR: rclone remote '${REMOTE_NAME}' not found in RCLONE_CONFIG_B64"
+              rm -f "$TMP_RCLONE_CONF"
+              trap - EXIT
+              exit 1
+            fi
+            REMOTE_SHOW="$(docker run --rm \
+              -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+              "$RCLONE_PINNED_IMAGE" \
+              --config /tmp/rclone.conf config show "${REMOTE_NAME}:" 2>/dev/null || true)"
+            # THREE independent field checks (not OR). Parse each field
+            # separately. We never print REMOTE_SHOW.
+            # 1. type must be exactly crypt.
+            REMOTE_TYPE="$(printf '%s\n' "$REMOTE_SHOW" | sed -n 's/^type[[:space:]]*=[[:space:]]*//p' | tr -d '[:space:]')"
+            if [ "$REMOTE_TYPE" != "crypt" ]; then
+              echo "ERROR: rclone remote '${REMOTE_NAME}' is not type crypt (got: '${REMOTE_TYPE}')"
+              rm -f "$TMP_RCLONE_CONF"
+              trap - EXIT
+              exit 1
+            fi
+            # 2. remote must be present and nonempty (the underlying storage).
+            CRYPT_REMOTE="$(printf '%s\n' "$REMOTE_SHOW" | sed -n 's/^remote[[:space:]]*=[[:space:]]*//p' | tr -d '[:space:]')"
+            if [ -z "$CRYPT_REMOTE" ]; then
+              echo "ERROR: rclone crypt remote '${REMOTE_NAME}' must have a nonempty remote"
+              rm -f "$TMP_RCLONE_CONF"
+              trap - EXIT
+              exit 1
+            fi
+            # 3. password must be present and nonempty (obscured by rclone).
+            CRYPT_PASSWORD="$(printf '%s\n' "$REMOTE_SHOW" | sed -n 's/^password[[:space:]]*=[[:space:]]*//p' | tr -d '[:space:]')"
+            if [ -z "$CRYPT_PASSWORD" ]; then
+              echo "ERROR: rclone crypt remote '${REMOTE_NAME}' must have a nonempty password"
+              rm -f "$TMP_RCLONE_CONF"
+              trap - EXIT
+              exit 1
+            fi
+            # Also require the baseline gdrive remote so obsidian-backup is
+            # not broken by replacing the shared volume.
+            if ! docker run --rm \
+                -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+                "$RCLONE_PINNED_IMAGE" \
+                --config /tmp/rclone.conf config show "${BASELINE_REMOTE}:" \
+                >/dev/null 2>&1; then
+              echo "ERROR: baseline rclone remote '${BASELINE_REMOTE}' not found in RCLONE_CONFIG_B64; obsidian-backup would break"
+              rm -f "$TMP_RCLONE_CONF"
+              trap - EXIT
+              exit 1
+            fi
+            echo "rclone crypt remote '${REMOTE_NAME}' and baseline '${BASELINE_REMOTE}' validated"
+          fi
+
+          echo "RCLONE_TEMP_CONF=$TMP_RCLONE_CONF" >> "$GITHUB_ENV"
+
       - name: Populate browser-control persistent volumes
         env:
           BROWSER_TUNNEL_AUTHORIZED_KEY: ${{ secrets.BROWSER_TUNNEL_AUTHORIZED_KEY }}
         run: |
+          set -euo pipefail
           # Populate the tailscale-serve-config and browser-tunnel-authorized-keys
           # named volumes using a pinned Alpine image (same Docker-only pattern
           # as the rclone config step). No host bind mounts of checkout files;
@@ -489,14 +733,6 @@ jobs:
               sh -c 'rm -f /authorized-keys/authorized_keys 2>/dev/null || true'
           fi
 
-          # Set COMPOSE_FILE for subsequent steps: base only when disabled,
-          # base + overlay when enabled.
-          if [ "${BROWSER_CONTROL_ENABLED}" = "true" ]; then
-            echo "COMPOSE_FILE=docker-compose.yml:docker-compose.browser-control.yml" >> "$GITHUB_ENV"
-          else
-            echo "COMPOSE_FILE=docker-compose.yml" >> "$GITHUB_ENV"
-          fi
-
       - name: Validate aux-ml model source
         if: vars.AUX_ML_ENABLED != 'false'
         run: |
@@ -512,27 +748,35 @@ jobs:
             echo "No local mmproj model found; compose default URL will be used"
           fi
 
-      - name: Create rclone config for backup container
+      - name: Publish rclone config into shared volume
+        # Publish the already-decoded/validated rclone config into the shared
+        # obsidian-rclone-config volume atomically. The temp file was created
+        # and validated in the "Decode and validate rclone config" step. This
+        # step only performs the volume write (no decode/validation here).
         run: |
-          if [ -n "${{ secrets.RCLONE_CONFIG_B64 }}" ]; then
-            COMPOSE_PROJECT=$(basename "$PWD")
-            RCLONE_VOLUME="${COMPOSE_PROJECT}_obsidian-rclone-config"
-            TMP_RCLONE_CONF=$(mktemp)
-            trap 'rm -f "$TMP_RCLONE_CONF"' EXIT
-            echo "${{ secrets.RCLONE_CONFIG_B64 }}" | base64 --decode > "$TMP_RCLONE_CONF"
-            chmod 600 "$TMP_RCLONE_CONF"
-            docker volume create "$RCLONE_VOLUME" >/dev/null
-            docker run --rm \
-              -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
-              -v "$RCLONE_VOLUME:/config/rclone" \
-              alpine:3.20 \
-              sh -c 'cp /tmp/rclone.conf /config/rclone/rclone.conf && chmod 600 /config/rclone/rclone.conf'
-            rm -f "$TMP_RCLONE_CONF"
-            trap - EXIT
-            echo "rclone config loaded into Docker volume"
-          else
-            echo "WARNING: RCLONE_CONFIG_B64 secret not set. Obsidian backups will fail until configured."
+          set -euo pipefail
+          TMP_RCLONE_CONF="${RCLONE_TEMP_CONF:-}"
+          if [ -z "$TMP_RCLONE_CONF" ]; then
+            # No rclone config to publish (secret was unset and mode was not
+            # backup — already warned in the decode step).
+            exit 0
           fi
+          if [ ! -s "$TMP_RCLONE_CONF" ]; then
+            echo "ERROR: rclone temp config missing or empty at publish time"
+            rm -f "$TMP_RCLONE_CONF"
+            exit 1
+          fi
+          COMPOSE_PROJECT="$(basename "$PWD")"
+          RCLONE_VOLUME="${COMPOSE_PROJECT}_obsidian-rclone-config"
+          docker volume create "$RCLONE_VOLUME" >/dev/null
+          # Atomic publish into the shared obsidian-rclone-config volume.
+          docker run --rm \
+            -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+            -v "$RCLONE_VOLUME:/config/rclone" \
+            alpine:3.20 \
+            sh -c 'cp /tmp/rclone.conf /config/rclone/rclone.conf.new && chmod 600 /config/rclone/rclone.conf.new && mv /config/rclone/rclone.conf.new /config/rclone/rclone.conf'
+          rm -f "$TMP_RCLONE_CONF"
+          echo "rclone config loaded into Docker volume"
 
       - name: FRESH START - Remove Hermes data volume
         if: github.event.inputs.fresh_start == 'true'
@@ -542,15 +786,34 @@ jobs:
           exit 1
 
       - name: Stop existing services
-        # Always tear down with base + overlay + browser-control profile first,
-        # so a previously-enabled browser-tunnel sidecar and the browser-control
-        # network are removed even when this deploy is disabling the overlay.
-        # Then tear down with the selected config for this deploy.
+        # Maximal, fail-closed teardown. We tear down with the SUPERSET of
+        # overlays (base + browser-control + embeddings + mnemosyne + backup,
+        # plus the aux-ml, browser-control, and recovery profiles — recovery
+        # only to remove a stale recovery service) so any prior
+        # overlay-enabled service is removed even when this deploy is
+        # switching to off or dropping an overlay. NO -v: named volumes are
+        # always preserved. Both the superset teardown and the
+        # selected-config teardown fail closed (set -euo pipefail, no || true).
         run: |
-          echo "Tearing down any previous overlay-enabled stack..."
-          docker compose -f docker-compose.yml -f docker-compose.browser-control.yml --profile browser-control down --remove-orphans 2>/dev/null || true
-          echo "Tearing down with selected config..."
-          docker compose down --remove-orphans
+          set -euo pipefail
+          echo "Tearing down any prior overlay-enabled stack (maximal superset, no -v)..."
+          docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.browser-control.yml \
+            -f docker-compose.embeddings.yml \
+            -f docker-compose.mnemosyne.yml \
+            -f docker-compose.mnemosyne-backup.yml \
+            --profile aux-ml \
+            --profile browser-control \
+            --profile recovery \
+            down --remove-orphans
+          echo "Tearing down with selected config (no -v)..."
+          IFS=':' read -ra FILES <<< "$COMPOSE_FILE"
+          ARGS=()
+          for f in "${FILES[@]}"; do
+            ARGS+=("-f" "$f")
+          done
+          docker compose "${ARGS[@]}" down --remove-orphans
 
       - name: Clean up old Docker images
         run: |
@@ -690,6 +953,252 @@ jobs:
           if [ "$SERVE_OK" -ne 1 ]; then
             echo "WARNING: could not confirm Tailscale Serve status; verify manually"
           fi
+
+      - name: Verify Mnemosyne off (overlays absent, provider disabled)
+        if: vars.MNEMOSYNE_DEPLOY_MODE != 'pilot' && vars.MNEMOSYNE_DEPLOY_MODE != 'backup'
+        run: |
+          set -euo pipefail
+          # off: no Mnemosyne overlay services should be present, and the
+          # Hermes-side provider must be disabled. The Hermes init logs
+          # activation failures nonfatally, so container health alone is not
+          # enough — we explicitly assert the overlays are absent and the
+          # provider is not mnemosyne in the rendered config.
+          #
+          # Stale overlay services are queried using the MAXIMAL compose file
+          # set (base + browser-control + embeddings + mnemosyne + backup),
+          # NOT the selected off-mode config, so orphan containers from a
+          # failed teardown are detected.
+          echo "Confirming no Mnemosyne overlay services are running (maximal compose set)..."
+          MAXIMAL_ARGS=(-f docker-compose.yml -f docker-compose.browser-control.yml \
+            -f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml \
+            -f docker-compose.mnemosyne-backup.yml)
+          for svc in embeddings mnemosyne-backup-uploader mnemosyne-backup-recover; do
+            if docker compose "${MAXIMAL_ARGS[@]}" ps --format json "$svc" 2>/dev/null | grep -q '"Name"'; then
+              echo "ERROR: Mnemosyne overlay service '$svc' is still running in off mode (stale teardown)"
+              docker compose "${MAXIMAL_ARGS[@]}" ps
+              exit 1
+            fi
+          done
+          echo "No Mnemosyne overlay services running"
+
+          echo "Confirming Hermes provider is disabled via hermes_cli.config.load_config()..."
+          # Use the Hermes venv python with hermes_cli.config.load_config() to
+          # load /opt/data/config.yaml and assert the exact memory subtree.
+          # The Hermes init logs activation failures nonfatally, so container
+          # health alone is not enough.
+          docker compose exec -T hermes /opt/hermes/.venv/bin/python3 - <<'PY'
+          import sys
+          try:
+              from hermes_cli.config import load_config
+          except Exception as exc:
+              print(f"ERROR: could not import hermes_cli.config: {exc}", file=sys.stderr)
+              sys.exit(1)
+          config = load_config()
+          if config is None:
+              print("ERROR: /opt/data/config.yaml is missing or empty", file=sys.stderr)
+              sys.exit(1)
+          memory = config.get("memory")
+          if not isinstance(memory, dict):
+              print("ERROR: memory subtree is not a dict", file=sys.stderr)
+              sys.exit(1)
+          provider = memory.get("provider", "") or ""
+          if provider == "mnemosyne":
+              print("ERROR: memory.provider is 'mnemosyne' in off mode", file=sys.stderr)
+              sys.exit(1)
+          # Static memory flags must be restored to base template values.
+          if memory.get("memory_enabled") is not True:
+              print("ERROR: memory_enabled is not true in off mode (static injection not restored)", file=sys.stderr)
+              sys.exit(1)
+          if memory.get("user_profile_enabled") is not True:
+              print("ERROR: user_profile_enabled is not true in off mode (static injection not restored)", file=sys.stderr)
+              sys.exit(1)
+          # Nested mnemosyne config must be absent.
+          if "mnemosyne" in memory:
+              print("ERROR: nested memory.mnemosyne config lingers in off mode", file=sys.stderr)
+              sys.exit(1)
+          print("OFF_PROVIDER_DISABLED_OK")
+          PY
+
+          echo "Confirming no mnemosyne-backup-export cron job is installed..."
+          docker compose exec -T hermes /opt/hermes/.venv/bin/python3 - <<'PY'
+          import json, sys
+          try:
+              with open("/opt/data/cron/jobs.json", encoding="utf-8") as fh:
+                  data = json.load(fh)
+              jobs = data.get("jobs", [])
+          except Exception as exc:
+              print(f"ERROR: could not read /opt/data/cron/jobs.json: {exc}", file=sys.stderr)
+              sys.exit(1)
+          export_jobs = [j for j in jobs if isinstance(j, dict) and j.get("name") == "mnemosyne-backup-export"]
+          if export_jobs:
+              print("ERROR: mnemosyne-backup-export cron job is installed in off mode", file=sys.stderr)
+              sys.exit(1)
+          print("OFF_NO_EXPORT_CRON_OK")
+          PY
+          echo "Mnemosyne off confirmed (overlays absent, provider disabled, no export cron)"
+
+      - name: Verify Mnemosyne pilot (TEI healthy + provider/policy active)
+        if: vars.MNEMOSYNE_DEPLOY_MODE == 'pilot' || vars.MNEMOSYNE_DEPLOY_MODE == 'backup'
+        run: |
+          set -euo pipefail
+          # pilot (and backup, which includes pilot): the embeddings service
+          # must be healthy, and the Hermes provider must be mnemosyne with the
+          # pilot policy active. The Hermes init logs activation failures
+          # nonfatally, so container health alone is not enough — we explicitly
+          # assert the provider/policy via hermes_cli.config.load_config() and
+          # that the init did not log an activation failure.
+          echo "Checking embeddings service health..."
+          # Wait budget: 120 iterations x 5s = 600s (>= 450s), enough for a
+          # cold first model download. Fail immediately if the embeddings
+          # container exits.
+          HEALTHY=0
+          for i in $(seq 1 120); do
+            STATUS="$(docker compose ps embeddings --format json 2>/dev/null | python3 -c '
+          import json, sys
+          try:
+              line = sys.stdin.read().strip()
+              if not line:
+                  print(""); sys.exit(0)
+              obj = json.loads(line)
+              print(obj.get("State", "") or obj.get("Status", ""))
+          except Exception:
+              print("")
+          ' 2>/dev/null || true)"
+            case "$STATUS" in
+              exited|Exit*)
+                echo "ERROR: embeddings container exited before becoming healthy"
+                docker compose ps
+                docker compose logs --tail=120 embeddings
+                exit 1
+                ;;
+            esac
+            if docker compose ps embeddings 2>/dev/null | grep -q "healthy"; then
+              HEALTHY=1
+              break
+            fi
+            echo "   Waiting for embeddings health... ($i/120)"
+            sleep 5
+          done
+          if [ "$HEALTHY" -ne 1 ]; then
+            echo "ERROR: embeddings service is not healthy after 600s"
+            docker compose ps
+            docker compose logs --tail=120 embeddings
+            exit 1
+          fi
+          echo "embeddings service is healthy"
+
+          echo "Confirming Hermes provider/policy via hermes_cli.config.load_config()..."
+          # Use the Hermes venv python with hermes_cli.config.load_config() to
+          # load /opt/data/config.yaml and assert the exact memory subtree.
+          docker compose exec -T hermes /opt/hermes/.venv/bin/python3 - <<'PY'
+          import sys
+          try:
+              from hermes_cli.config import load_config
+          except Exception as exc:
+              print(f"ERROR: could not import hermes_cli.config: {exc}", file=sys.stderr)
+              sys.exit(1)
+          config = load_config()
+          if config is None:
+              print("ERROR: /opt/data/config.yaml is missing or empty", file=sys.stderr)
+              sys.exit(1)
+          memory = config.get("memory")
+          if not isinstance(memory, dict):
+              print("ERROR: memory subtree is not a dict", file=sys.stderr)
+              sys.exit(1)
+          provider = memory.get("provider", "") or ""
+          if provider != "mnemosyne":
+              print(f"ERROR: memory.provider is not 'mnemosyne' (got: '{provider}')", file=sys.stderr)
+              sys.exit(1)
+          if memory.get("memory_enabled") is not False:
+              print("ERROR: memory_enabled is not false in pilot mode", file=sys.stderr)
+              sys.exit(1)
+          if memory.get("user_profile_enabled") is not False:
+              print("ERROR: user_profile_enabled is not false in pilot mode", file=sys.stderr)
+              sys.exit(1)
+          nested = memory.get("mnemosyne")
+          if not isinstance(nested, dict):
+              print("ERROR: nested memory.mnemosyne config is absent in pilot mode", file=sys.stderr)
+              sys.exit(1)
+          print("PILOT_PROVIDER_POLICY_OK")
+          PY
+
+          echo "Confirming init did not log a nonfatal activation failure..."
+          if docker compose logs --tail=400 hermes 2>/dev/null | grep -q "mnemosyne runtime config activation failed"; then
+            echo "ERROR: Hermes init logged a Mnemosyne activation failure"
+            docker compose logs --tail=400 hermes
+            exit 1
+          fi
+          echo "Mnemosyne pilot verified"
+
+      - name: Verify Mnemosyne backup (uploader running + exactly one export cron)
+        if: vars.MNEMOSYNE_DEPLOY_MODE == 'backup'
+        run: |
+          set -euo pipefail
+          # backup adds: the uploader service must be running, and there must
+          # be exactly one mnemosyne-backup-export cron job whose interval
+          # matches MNEMOSYNE_BACKUP_EXPORT_INTERVAL. The Hermes init logs
+          # activation failures nonfatally, so container health alone is not
+          # enough.
+          echo "Checking mnemosyne-backup-uploader is running..."
+          if ! docker compose ps mnemosyne-backup-uploader 2>/dev/null | grep -q "Up"; then
+            echo "ERROR: mnemosyne-backup-uploader service is not running"
+            docker compose ps
+            docker compose logs --tail=120 mnemosyne-backup-uploader
+            exit 1
+          fi
+          echo "mnemosyne-backup-uploader is running"
+
+          echo "Confirming exactly one mnemosyne-backup-export cron job with the real schema..."
+          EXPECTED_INTERVAL="${MNEMOSYNE_BACKUP_EXPORT_INTERVAL}"
+          # The actual jobs.json shape is {"jobs": [...], "updated_at": ...}
+          # with schedule objects {"kind":"interval","minutes":N,"display":"every Nm"},
+          # script="mnemosyne-backup-export.sh", no_agent=true, workdir=/opt/data.
+          docker compose exec -T hermes /opt/hermes/.venv/bin/python3 - "$EXPECTED_INTERVAL" <<'PY'
+          import json, sys, os
+          expected = int(sys.argv[1])
+          try:
+              with open("/opt/data/cron/jobs.json", encoding="utf-8") as fh:
+                  data = json.load(fh)
+          except Exception as exc:
+              print(f"ERROR: could not read /opt/data/cron/jobs.json: {exc}", file=sys.stderr)
+              sys.exit(1)
+          jobs = data.get("jobs")
+          if not isinstance(jobs, list):
+              print("ERROR: jobs.json 'jobs' is not a list", file=sys.stderr)
+              sys.exit(1)
+          export_jobs = [j for j in jobs if isinstance(j, dict) and j.get("name") == "mnemosyne-backup-export"]
+          if len(export_jobs) != 1:
+              print(f"ERROR: expected exactly 1 mnemosyne-backup-export cron job, got {len(export_jobs)}", file=sys.stderr)
+              sys.exit(1)
+          job = export_jobs[0]
+          schedule = job.get("schedule")
+          if not isinstance(schedule, dict):
+              print("ERROR: schedule is not an object", file=sys.stderr)
+              sys.exit(1)
+          if schedule.get("kind") != "interval":
+              print(f"ERROR: schedule.kind is not 'interval' (got: {schedule.get('kind')!r})", file=sys.stderr)
+              sys.exit(1)
+          minutes = schedule.get("minutes")
+          # Reject bool (True/False are ints in Python) and non-int.
+          if not isinstance(minutes, int) or isinstance(minutes, bool):
+              print(f"ERROR: schedule.minutes is not an integer (got: {minutes!r})", file=sys.stderr)
+              sys.exit(1)
+          if minutes != expected:
+              print(f"ERROR: schedule.minutes {minutes} does not match MNEMOSYNE_BACKUP_EXPORT_INTERVAL {expected}", file=sys.stderr)
+              sys.exit(1)
+          if job.get("script") != "mnemosyne-backup-export.sh":
+              print(f"ERROR: script is not 'mnemosyne-backup-export.sh' (got: {job.get('script')!r})", file=sys.stderr)
+              sys.exit(1)
+          if job.get("no_agent") is not True:
+              print(f"ERROR: no_agent is not true (got: {job.get('no_agent')!r})", file=sys.stderr)
+              sys.exit(1)
+          workdir = job.get("workdir")
+          if not workdir:
+              print("ERROR: workdir is not set", file=sys.stderr)
+              sys.exit(1)
+          print(f"BACKUP_CRON_OK minutes={minutes} workdir={workdir}")
+          PY
+          echo "Mnemosyne backup verified"
 
       - name: Cleanup sensitive files
         if: always()

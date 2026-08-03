@@ -16,9 +16,12 @@
 #     short-lived recover step, mounted transiently into hermes runs),
 #   - hermes overlay: staging RW mount + uploader-state RO mount + backup env.
 #
-# NO host ports, NO live state mount in the uploader, NO deployment workflow
-# changes. Backup is DISABLED BY DEFAULT: the overlay is opt-in and the
-# Hermes-side export cron defaults to 0 (off).
+# NO host ports, NO live state mount in the uploader. Backup is
+# DISABLED BY DEFAULT: the overlay is opt-in (selected by the
+# MNEMOSYNE_DEPLOY_MODE repo variable in the deploy workflow; default `off`)
+# and the Hermes-side export cron defaults to 0 (off). See
+# docs/mnemosyne-operations.md and .github/workflows/deploy-to-home-server.yml
+# for the deployment integration.
 #
 # SEQUENCE / DEPENDENCIES:
 #   - The uploader depends on `hermes` (so the staging volume exists), but it
@@ -81,7 +84,9 @@ services:
 
   mnemosyne-backup-uploader:
     # Separate rclone uploader service. NEVER mounts hermes-data or /opt/data.
-    image: rclone/rclone:latest
+    # Pinned by digest for supply-chain integrity (matches the deploy workflow
+    # validation image).
+    image: rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548
     container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-mnemosyne-backup-uploader
     restart: unless-stopped
     depends_on:
@@ -128,7 +133,9 @@ services:
     # RECOVERY_READY handoff sentinel. The Hermes-side verify/install step
     # (short-lived `docker compose run hermes`) consumes the handoff and never
     # sees rclone credentials.
-    image: rclone/rclone:latest
+    # Pinned by digest for supply-chain integrity (matches the deploy workflow
+    # validation image and the uploader service).
+    image: rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548
     profiles: ["recovery"]
     environment:
       - RCLONE_CONFIG=/config/rclone/rclone.conf

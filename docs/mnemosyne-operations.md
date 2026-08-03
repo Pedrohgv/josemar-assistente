@@ -306,9 +306,117 @@ It adds only:
   `mnemosyne-backup-recovery` (disposable handoff) named volumes,
 - hermes overlay: staging RW + uploader-state RO mounts + backup env.
 
-No host ports, no live state mount in the uploader/recover services, no
-deployment workflow changes. The recovery volume is mounted into hermes only
-transiently via `docker compose run`, never into the long-running service.
+No host ports, no live state mount in the uploader/recover services. The
+recovery volume is mounted into hermes only transiently via
+`docker compose run`, never into the long-running service.
+
+## Deployment Integration
+
+The deploy workflow (`.github/workflows/deploy-to-home-server.yml`) selects the
+Mnemosyne overlays via a single repository variable,
+`MNEMOSYNE_DEPLOY_MODE`. It is **default `off`** so baseline deploys are
+unchanged until the operator explicitly opts in.
+
+| Value | Overlays applied (in fixed order) | Prerequisites |
+| --- | --- | --- |
+| `off` (default / unset) | base only | none |
+| `pilot` | base + embeddings + mnemosyne | none beyond the base deploy secrets |
+| `backup` | base + embeddings + mnemosyne + mnemosyne-backup | `MNEMOSYNE_BACKUP_EXPORT_INTERVAL` (positive integer, no leading zeros, <= 10080 minutes) and `RCLONE_CONFIG_B64` (base64 rclone config with a `crypt` remote named `mnemosyne-crypt` and the baseline `gdrive` remote) |
+
+There is **no embeddings-only mode**: `pilot` is the smallest Mnemosyne-enabled
+mode and always includes the embeddings overlay (the mnemosyne overlay requires
+`embeddings-net`). Any value other than `off`, `pilot`, or `backup` is rejected
+**before** any volume mutation or service teardown.
+
+### Validation before state mutation
+
+The deploy workflow runs ALL preflight validation before any `docker volume
+create`, volume write, or service teardown, in this order:
+
+1. Input validation (repo variables, secrets, mode, interval).
+2. `COMPOSE_FILE` derivation with strict ordering.
+3. `docker compose config --quiet` on the selected files (fail-closed on
+   invalid overlay combinations).
+4. RCLONE_CONFIG_B64 strict base64 decode to a `0600` temp file + crypt/baseline
+   remote validation (backup mode).
+
+Only after all four pass does the workflow create/populate volumes and tear
+down prior services.
+
+### Compose-file ordering
+
+The deploy workflow builds `COMPOSE_FILE` with strict ordering:
+`base; optional browser-control; embeddings; mnemosyne; backup last`.
+`browser-control` is the only overlay whose presence depends on a separate
+repo variable (`BROWSER_CONTROL_ENABLED`); the Mnemosyne overlays are appended
+in fixed order based on `MNEMOSYNE_DEPLOY_MODE`.
+
+### Maximal fail-closed teardown
+
+Before rebuild/start, the deploy workflow tears down with the **superset** of
+overlays (base + browser-control + embeddings + mnemosyne + backup, plus the
+`aux-ml`, `browser-control`, and `recovery` profiles — recovery only to remove
+a stale recovery service) so any prior overlay service is removed even when
+switching to `off` or dropping an overlay. The teardown is **fail-closed**
+(`set -euo pipefail`, no `|| true`): a teardown failure stops the deploy rather
+than proceeding against unknown state. **No `-v`**: named volumes are always
+preserved. The selected config is rendered with `docker compose config --quiet`
+before teardown so an invalid overlay combination fails closed without mutating
+volumes or stopping services.
+
+### Backup-mode rclone validation
+
+In `backup` mode the deploy workflow strict-base64-decodes `RCLONE_CONFIG_B64`
+to a `0600` temp file and validates the `mnemosyne-crypt` remote using the
+pinned rclone image
+`rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548`
+(direct `rclone --config ... config show mnemosyne-crypt:` invocation — the
+image entrypoint is `["rclone"]`, no `sh -c`) **before** any volume mutation
+or teardown. It requires THREE independent field checks:
+- `type` is exactly `crypt`,
+- `remote` is present and nonempty (the underlying storage remote),
+- `password` is present and nonempty (the crypt remote password).
+
+It also requires the baseline `gdrive` remote so replacing the shared
+`obsidian-rclone-config` volume does not break `obsidian-backup`. The crypt
+remote name `mnemosyne-crypt` is hardcoded in the workflow validation and
+written explicitly to `.env` as `MNEMOSYNE_BACKUP_RCLONE_REMOTE=mnemosyne-crypt`
+so validation and runtime cannot diverge. No config or secrets are printed.
+The config is published atomically into the shared volume (temp file + cp +
+chmod + mv) only after all validation passes. The existing non-backup behavior
+for the shared rclone config (publishing for the obsidian-backup container
+without crypt validation) remains supported when `MNEMOSYNE_DEPLOY_MODE` is not
+`backup`.
+
+### Mode-specific post-start verification
+
+Because the Hermes init logs Mnemosyne activation failures **nonfatally**,
+container health alone is not enough. The deploy workflow adds mode-specific
+checks after start, using `hermes_cli.config.load_config()` to load
+`/opt/data/config.yaml` and assert the exact `memory` subtree (not grep):
+
+- **off**: confirms the `embeddings`, `mnemosyne-backup-uploader`, and
+  `mnemosyne-backup-recover` services are absent (queried with the MAXIMAL
+  compose file set so orphan containers from a failed teardown are detected),
+  `memory.provider` is blank/empty, static memory flags restored
+  (`memory_enabled=true`, `user_profile_enabled=true`), nested `memory.mnemosyne`
+  config absent, and no `mnemosyne-backup-export` cron job installed.
+- **pilot** (and **backup**, which includes pilot): confirms the `embeddings`
+  service is healthy (120x5s = 600s wait budget, with immediate failure if the
+  embeddings container exits), `memory.provider == "mnemosyne"`,
+  `memory_enabled == false`, `user_profile_enabled == false`, nested
+  `memory.mnemosyne` config present, and the init did not log
+  `mnemosyne runtime config activation failed`.
+- **backup**: adds that `mnemosyne-backup-uploader` is running and there is
+  exactly one `mnemosyne-backup-export` cron job matching the real
+  `jobs.json` schema: `{"jobs": [...]}` with
+  `schedule.kind == "interval"`, integer `schedule.minutes` matching
+  `MNEMOSYNE_BACKUP_EXPORT_INTERVAL`, `script == "mnemosyne-backup-export.sh"`,
+  `no_agent == true`, and a nonempty `workdir`.
+
+The `recovery` profile is never enabled for a normal deploy; it is only
+passed to the teardown superset to remove a stale recovery service, and to
+on-demand `docker compose run` recovery invocations.
 
 ## Environment Variables
 
