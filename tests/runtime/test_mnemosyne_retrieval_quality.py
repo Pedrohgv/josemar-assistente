@@ -444,6 +444,8 @@ class PublicActivationBoundaryTests(unittest.TestCase):
 
     def test_nested_repo_has_no_old_eval_path_or_allowlist(self) -> None:
         nested = REPO_ROOT / "agent-state"
+        if not nested.is_dir():
+            self.skipTest("agent-state is a local-only nested repository")
         self.assertFalse((nested / "eval").exists())
         self.assertNotIn("eval/mnemosyne-retrieval", (nested / ".gitignore").read_text())
         self.assertNotIn("eval/mnemosyne-retrieval", (nested / ".sync-manifest").read_text())
