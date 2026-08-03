@@ -1,0 +1,20 @@
+{"id": "pub-c-001", "content": "O gato dorme sobre o sofá da sala de estar todas as tardes.", "source": "synthetic", "scope": "global", "notes": "synthetic household scene"}
+{"id": "pub-c-002", "content": "A receita de bolo de fubá leva milho, açúcar, farinha e três ovos.", "source": "synthetic", "scope": "global", "notes": "synthetic recipe"}
+{"id": "pub-c-003", "content": "A capital da Bahia é Salvador, conhecida pelo Pelourinho e pelo carnaval.", "source": "synthetic", "scope": "global", "notes": "synthetic geography"}
+{"id": "pub-c-004", "content": "Para reiniciar o roteador, desconecte da tomada por trinta segundos e ligue novamente.", "source": "synthetic", "scope": "global", "notes": "synthetic procedure"}
+{"id": "pub-c-005", "content": "O pagamento da fatura do cartão vence no dia quinze de cada mês.", "source": "synthetic", "scope": "global", "notes": "synthetic finance"}
+{"id": "pub-c-006", "content": "O cachorro late quando ouve campainha à noite.", "source": "synthetic", "scope": "global", "notes": "synthetic household scene, paraphrase target of pub-c-001"}
+{"id": "pub-c-007", "content": "O bolo de milho da vovó é feito com fubá, açúcar e ovos batidos.", "source": "synthetic", "scope": "global", "notes": "synthetic recipe paraphrase of pub-c-002"}
+{"id": "pub-c-008", "content": "Salvador fica no nordeste do Brasil e tem um carnaval famoso.", "source": "synthetic", "scope": "global", "notes": "synthetic geography paraphrase of pub-c-003"}
+{"id": "pub-c-009", "content": "Desligue o modem da energia por meio minuto e reconecte para restaurar a internet.", "source": "synthetic", "scope": "global", "notes": "synthetic procedure paraphrase of pub-c-004"}
+{"id": "pub-c-010", "content": "A conta do cartão de crédito tem vencimento no dia quinze.", "source": "synthetic", "scope": "global", "notes": "synthetic finance paraphrase of pub-c-005"}
+{"id": "pub-c-011", "content": "O gato preto costuma cochilar no sofá durante a tarde.", "source": "synthetic", "scope": "global", "notes": "synthetic semantic near-duplicate of pub-c-001"}
+{"id": "pub-c-012", "content": "A receita de milho requer fubá, açúcar e ovos para o bolo.", "source": "synthetic", "scope": "global", "notes": "synthetic semantic near-duplicate of pub-c-002"}
+{"id": "pub-c-013", "content": "Pelourinho é um bairro histórico de Salvador no nordeste brasileiro.", "source": "synthetic", "scope": "global", "notes": "synthetic semantic near-duplicate of pub-c-003"}
+{"id": "pub-c-014", "content": "Restaurar a conexão exige reiniciar o roteador tirando da tomada por trinta segundos.", "source": "synthetic", "scope": "global", "notes": "synthetic semantic near-duplicate of pub-c-004"}
+{"id": "pub-c-015", "content": "O vencimento da fatura do cartão cai no dia quinze do mês.", "source": "synthetic", "scope": "global", "notes": "synthetic semantic near-duplicate of pub-c-005"}
+{"id": "pub-c-016", "content": "O pomar tem laranjeiras e limoeiros plantados em fileiras.", "source": "synthetic", "scope": "global", "notes": "synthetic distractor"}
+{"id": "pub-c-017", "content": "A reunião de condomínio acontece na primeira segunda-feira do mês.", "source": "synthetic", "scope": "global", "notes": "synthetic distractor"}
+{"id": "pub-c-018", "content": "O carro precisa de troca de óleo a cada dez mil quilômetros.", "source": "synthetic", "scope": "global", "notes": "synthetic distractor"}
+{"id": "pub-c-019", "content": "A planta regada três vezes por semana floresce no verão.", "source": "synthetic", "scope": "global", "notes": "synthetic distractor"}
+{"id": "pub-c-020", "content": "O livro emprestado deve ser devolvido à biblioteca em duas semanas.", "source": "synthetic", "scope": "global", "notes": "synthetic distractor"}

@@ -12,3 +12,13 @@ docker-compose\.yml:\d+:phone:.*be111dd28e6228fc4cb6a6ec41f03a67947ab61f315a3d22
 
 # Official llama.cpp b9585 commit hash; its numeric run can resemble a phone number.
 (?:\.env\.example|aux-ml/models/README\.md|docs/aux-ml\.md):\d+:phone:44[8]6904469:.*d73cd076740db9c111d0e58ddd44[8]6904469e75e
+
+# FaQuAD-IR uses deterministic faquad-q: MD5 identifiers. Permit only numeric
+# runs that are demonstrably part of those identifiers in the pinned fixture.
+tests/runtime/fixtures/mnemosyne-retrieval/faquad-ir/(?:qrels|queries)\.jsonl:\d+:(?:phone|credit_card):([0-9]{10,}):.*"(?:query_id|id)": "faquad-q:[0-9a-f]*\1[0-9a-f]*"
+
+# Numeric runs inside the pinned public FaQuAD-IR artifact SHA-256 constants.
+(?:scripts/mnemosyne_retrieval_eval/(?:schema|vendor_faquad_ir)\.py|tests/runtime/fixtures/mnemosyne-retrieval/faquad-ir/manifest\.json):\d+:phone:(?:118154056[0]|191950233[2]):
+
+# Literal test-only SSH remote, not a personal email address.
+tests/runtime/test_mnemosyne_(?:backup|pilot)\.py:\d+:email:git@github\.com:.*git@github\.com

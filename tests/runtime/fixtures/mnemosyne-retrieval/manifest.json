@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "dataset_kind": "public-synthetic-smoke",
+  "language": "pt-BR",
+  "purpose": "Public synthetic smoke fixtures for the Mnemosyne Portuguese vector retrieval quality gate. These are NOT activation evidence. They exist to validate the harness wiring, schema, E5 prefix behavior, and metric math against tiny synthetic PT-BR content with no PII and no real user content.",
+  "provenance": "Synthetic, authored for the josemar-assistente public repo. Contains no private user data, no vault content, no real conversation excerpts. All names, places, and facts are fabricated.",
+  "pii_policy": "No PII. All entities are fictional. Any resemblance to real persons, places, or events is coincidental.",
+  "activation_evidence": false,
+  "review_status": "NOT_READY",
+  "review_status_detail": "n/a (synthetic smoke; public fixtures are never activation evidence)",
+  "corpus_path": "corpus.jsonl",
+  "queries_path": "queries.jsonl",
+  "minimum_queries_for_activation": 50,
+  "notes": "Public smoke thresholds are deliberately lower than the activation gate. See docs/mnemosyne-retrieval-quality.md and the harness activation policy."
+}

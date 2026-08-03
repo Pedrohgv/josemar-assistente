@@ -4,21 +4,31 @@ import asyncio
 from pathlib import Path
 import sys
 import tempfile
-import types
 import unittest
 from unittest.mock import patch
+
+try:  # package context (discovery)
+    from ._stub_import import stubbed_app_import
+except ImportError:  # direct execution: tests/aux_ml/ is sys.path[0]
+    from _stub_import import stubbed_app_import
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "aux-ml"))
-# Stub optional deps so the service module can be imported without the
-# full aux-ml runtime installed (mirrors test_transcribe_granite approach).
-sys.modules.setdefault("pymupdf", types.ModuleType("pymupdf"))
-sys.modules.setdefault("httpx", types.ModuleType("httpx"))
-
-from app.model_registry import ModelRegistry, ModelSpec
-from app.service import AuxMLService, JobCancelledError
-from app.settings import Settings
+# Stub optional deps ONLY around the application import so the stubs do not
+# persist for the whole test process (a persistent fake httpx would poison
+# real httpx for other test modules, e.g. the Mnemosyne DR seam imports —
+# issue #91). The shared helper fully restores sys.modules AND the app
+# package's __dict__ attributes, so neither `import app.child` nor
+# `from app import child` can reuse fake-bound objects. The bound objects
+# (AuxMLService, ModelRegistry, Settings, _service_module) remain valid and
+# are used directly by `patch.object(_service_module, ...)` — no string-path
+# patching that would require app.service to stay cached.
+with stubbed_app_import("pymupdf", "httpx"):
+    from app.model_registry import ModelRegistry, ModelSpec
+    from app.settings import Settings
+    from app.service import AuxMLService, JobCancelledError
+    import app.service as _service_module
 
 
 class FakeRouter:
@@ -130,7 +140,7 @@ class ServiceCancelQueuedJobTests(unittest.IsolatedAsyncioTestCase):
             )
             gate = asyncio.Event()
             started = asyncio.Event()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
                 await service.start()
                 try:
                     first = await service.submit_job(
@@ -175,7 +185,7 @@ class ServiceCancelRunningJobTests(unittest.IsolatedAsyncioTestCase):
             )
             gate = asyncio.Event()
             started = asyncio.Event()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
                 await service.start()
                 try:
                     submitted = await service.submit_job(
@@ -215,7 +225,7 @@ class ServiceCancelRunningJobTests(unittest.IsolatedAsyncioTestCase):
             )
             gate = asyncio.Event()
             started = asyncio.Event()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
                 await service.start()
                 try:
                     first = await service.submit_job(
@@ -257,7 +267,7 @@ class ServiceCancelRunningJobTests(unittest.IsolatedAsyncioTestCase):
             )
             gate = asyncio.Event()
             started = asyncio.Event()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
                 await service.start()
                 try:
                     submitted = await service.submit_job(
@@ -324,7 +334,7 @@ class ServiceCancelRunningJobTests(unittest.IsolatedAsyncioTestCase):
                 ocr_started.set()
                 return {"text": "should-not-run"}
 
-            with patch("app.service.run_ocr_task", side_effect=ocr_should_not_run):
+            with patch.object(_service_module, "run_ocr_task", side_effect=ocr_should_not_run):
                 service._run_job_lifecycle = gated_lifecycle  # type: ignore[method-assign]
                 await service.start()
                 try:
@@ -402,7 +412,7 @@ class ServiceCancelVsSuccessCASTests(unittest.IsolatedAsyncioTestCase):
             async def fast_ocr(**kwargs):
                 return {"text": "ok", "page_count": 1}
 
-            with patch("app.service.run_ocr_task", side_effect=fast_ocr):
+            with patch.object(_service_module, "run_ocr_task", side_effect=fast_ocr):
                 await service.start()
                 try:
                     submitted = await service.submit_job(
@@ -433,7 +443,7 @@ class ServiceCancelIdempotencyTests(unittest.IsolatedAsyncioTestCase):
             )
             gate = asyncio.Event()
             started = asyncio.Event()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
                 await service.start()
                 try:
                     first = await service.submit_job(
@@ -469,7 +479,7 @@ class ServiceCancelIdempotencyTests(unittest.IsolatedAsyncioTestCase):
             )
             gate = asyncio.Event()
             started = asyncio.Event()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
                 await service.start()
                 try:
                     first = await service.submit_job(
@@ -536,7 +546,7 @@ class ServiceConcurrentRunningCancelCASTests(unittest.IsolatedAsyncioTestCase):
             async def ocr_should_not_run(**kwargs):
                 return {"text": "should-not-run"}
 
-            with patch("app.service.run_ocr_task", side_effect=ocr_should_not_run):
+            with patch.object(_service_module, "run_ocr_task", side_effect=ocr_should_not_run):
                 service._run_job_lifecycle = gated_lifecycle  # type: ignore[method-assign]
                 await service.start()
                 try:
@@ -613,7 +623,7 @@ class ServiceRepeatedCancelNoDoubleTaskCancelTests(unittest.IsolatedAsyncioTestC
                 await asyncio.wait_for(gate.wait(), timeout=30)
                 return {"text": "ok", "page_count": 1}
 
-            with patch("app.service.run_ocr_task", side_effect=blocking_ocr):
+            with patch.object(_service_module, "run_ocr_task", side_effect=blocking_ocr):
                 await service.start()
                 try:
                     submitted = await service.submit_job(
@@ -686,7 +696,7 @@ class ServiceCancelTerminalJobTests(unittest.IsolatedAsyncioTestCase):
             )
             gate = asyncio.Event()
             gate.set()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr_factory(gate)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr_factory(gate)):
                 await service.start()
                 try:
                     submitted = await service.submit_job(
@@ -712,7 +722,7 @@ class ServiceCancelTerminalJobTests(unittest.IsolatedAsyncioTestCase):
                 registry=_make_registry(tmp),
                 router=router,
             )
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr_factory()):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr_factory()):
                 await service.start()
                 try:
                     with self.assertRaises(KeyError):
@@ -754,7 +764,7 @@ class ServiceCancelDuringLoadTests(unittest.IsolatedAsyncioTestCase):
             async def fake_ocr(**kwargs):
                 return {"text": "ok"}
 
-            with patch("app.service.run_ocr_task", side_effect=fake_ocr):
+            with patch.object(_service_module, "run_ocr_task", side_effect=fake_ocr):
                 await service.start()
                 try:
                     submitted = await service.submit_job(
@@ -798,7 +808,7 @@ class ServiceUnloadFailureBlocksDispatchTests(unittest.IsolatedAsyncioTestCase):
             )
             gate = asyncio.Event()
             started = asyncio.Event()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
                 await service.start()
                 try:
                     submitted = await service.submit_job(
@@ -837,7 +847,7 @@ class ServiceUnloadFailureBlocksDispatchTests(unittest.IsolatedAsyncioTestCase):
             )
             gate = asyncio.Event()
             started = asyncio.Event()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr_factory(gate, started=started)):
                 await service.start()
                 try:
                     first = await service.submit_job(
@@ -909,7 +919,7 @@ class ServiceTaskCancelledBeforeUnloadTests(unittest.IsolatedAsyncioTestCase):
                 router=tracking_router,
             )
 
-            with patch("app.service.run_ocr_task", side_effect=blocking_ocr):
+            with patch.object(_service_module, "run_ocr_task", side_effect=blocking_ocr):
                 await service.start()
                 try:
                     submitted = await service.submit_job(

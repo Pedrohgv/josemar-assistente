@@ -1,0 +1,166 @@
+# Optional Mnemosyne encrypted-backup overlay (Phase 3).
+#
+# Apply AFTER base + embeddings + Mnemosyne pilot:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.embeddings.yml:docker-compose.mnemosyne.yml:docker-compose.mnemosyne-backup.yml
+#
+# This overlay is truly opt-in and layered last: the base docker-compose.yml,
+# the embeddings overlay, and the Mnemosyne pilot overlay are unchanged and a
+# base/embeddings/mnemosyne-only deploy is unaffected. It adds ONLY:
+#   - the `mnemosyne-backup-uploader` service (separate rclone uploader),
+#   - the `mnemosyne-backup-recover` service (short-lived operator recovery
+#     download step, `recovery` profile only; never part of `docker compose up`),
+#   - the `mnemosyne-backup-staging` named volume (read-only in uploader,
+#     read-write in hermes),
+#   - the `mnemosyne-backup-state` named volume (writable in uploader only),
+#   - the `mnemosyne-backup-recovery` disposable handoff volume (written by the
+#     short-lived recover step, mounted transiently into hermes runs),
+#   - hermes overlay: staging RW mount + uploader-state RO mount + backup env.
+#
+# NO host ports, NO live state mount in the uploader, NO deployment workflow
+# changes. Backup is DISABLED BY DEFAULT: the overlay is opt-in and the
+# Hermes-side export cron defaults to 0 (off).
+#
+# SEQUENCE / DEPENDENCIES:
+#   - The uploader depends on `hermes` (so the staging volume exists), but it
+#     does NOT mount hermes-data or /opt/data. It only reads the staging
+#     volume (read-only) and writes its own state volume.
+#   - The uploader polls the staging mount for new generations (idempotent;
+#     does not depend on deleting sentinels). It reuses the existing
+#     secret-managed `obsidian-rclone-config` volume because that volume can
+#     hold a separate `mnemosyne-crypt` remote.
+#   - The exporter (scripts/mnemosyne-backup-export.sh) runs Hermes-side and
+#     writes generations to the staging volume. It is scheduled by the opt-in
+#     Hermes no-agent export cron (interval in minutes; 0 = disabled).
+#   - RECOVERY: operators run `mnemosyne-backup-recover <slot>` on demand in
+#     the rclone image (`--profile recovery`) to download one immutable slot
+#     into the disposable recovery volume and verify it; then a short-lived
+#     two separate short-lived `docker compose run hermes` invocations verify
+#     then install from that handoff without
+#     any rclone credentials. The recovery volume is NEVER mounted into the
+#     long-running hermes service.
+#
+# SECURITY:
+#   - The uploader and recover steps NEVER mount hermes-data or /opt/data.
+#   - The staging mount is READ-ONLY in the uploader.
+#   - The rclone config is READ-ONLY in the uploader and recover services.
+#   - Only the uploader state volume (uploader) and the disposable recovery
+#     volume (recover) are writable; they are distinct.
+#   - The remote MUST be rclone type `crypt` (validated before any transfer).
+#   - Hermes NEVER gets the rclone config; the recovery lane hands off an
+#     already-decrypted, SHA-verified artifact through the recovery volume.
+
+services:
+  hermes:
+    # Augment hermes with the staging RW mount, uploader-state RO mount, and
+    # backup env. The staging volume is where the exporter writes generations;
+    # the uploader-state RO mount lets the exporter observe which generations
+    # the uploader has acknowledged for safe conservative pruning.
+    volumes:
+      # Staging volume: exporter writes generations here (RW in hermes). The
+      # staging path is in HERMES_WRITABLE_VOLUMES (activation/init).
+      - mnemosyne-backup-staging:/opt/data/mnemosyne-backup/staging
+      # Uploader state mounted READ-ONLY so the exporter can observe what has
+      # been uploaded. The uploader owns writes.
+      - mnemosyne-backup-state:/opt/data/mnemosyne-backup/uploader-state:ro
+    environment:
+      # ---- Backup exporter env (Hermes-side) ----
+      # Staging volume root for generations.
+      - MNEMOSYNE_BACKUP_STAGING_DIR=/opt/data/mnemosyne-backup/staging
+      # Uploader state path (read-only here; exporter observes for pruning).
+      - MNEMOSYNE_BACKUP_UPLOADER_STATE_DIR=/opt/data/mnemosyne-backup/uploader-state
+      # Local staging generations to retain (minimum; exporter-owned). The
+      # exporter only prunes generations explicitly acknowledged as uploaded
+      # in the uploader's ledger (observed read-only here), and only beyond
+      # this retained window. If the ledger is unavailable/empty, no
+      # automatic deletion occurs (safety over convenience).
+      - MNEMOSYNE_BACKUP_GENERATIONS_KEEP=${MNEMOSYNE_BACKUP_GENERATIONS_KEEP:-5}
+      # Export interval in MINUTES. DISABLED by default (0). The opt-in Hermes
+      # no-agent export cron invokes scripts/mnemosyne-backup-export.sh on an
+      # `every ${interval}m` schedule. 0 = cron disabled.
+      - MNEMOSYNE_BACKUP_EXPORT_INTERVAL=${MNEMOSYNE_BACKUP_EXPORT_INTERVAL:-0}
+
+  mnemosyne-backup-uploader:
+    # Separate rclone uploader service. NEVER mounts hermes-data or /opt/data.
+    image: rclone/rclone:latest
+    container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-mnemosyne-backup-uploader
+    restart: unless-stopped
+    depends_on:
+      - hermes
+    environment:
+      - TZ=${TZ:-America/Sao_Paulo}
+      - RCLONE_CONFIG=/config/rclone/rclone.conf
+      # Staging mount is READ-ONLY (see volumes below).
+      - MNEMOSYNE_BACKUP_STAGING_DIR=/staging
+      # State volume is the ONLY writable mount in this service.
+      - MNEMOSYNE_BACKUP_STATE_DIR=/state
+      # REQUIRED crypt remote name. Must be rclone type 'crypt' (validated
+      # before upload). Configure a separate mnemosyne-crypt remote in the
+      # obsidian-rclone-config volume.
+      - MNEMOSYNE_BACKUP_RCLONE_REMOTE=${MNEMOSYNE_BACKUP_RCLONE_REMOTE:-mnemosyne-crypt}
+      - MNEMOSYNE_BACKUP_RCLONE_PATH=${MNEMOSYNE_BACKUP_RCLONE_PATH:-Josemar/mnemosyne-backups}
+      - MNEMOSYNE_BACKUP_SLOTS=${MNEMOSYNE_BACKUP_SLOTS:-5}
+      - MNEMOSYNE_BACKUP_POLL_INTERVAL=${MNEMOSYNE_BACKUP_POLL_INTERVAL:-300}
+      - MNEMOSYNE_BACKUP_RUN_ON_START=${MNEMOSYNE_BACKUP_RUN_ON_START:-true}
+    volumes:
+      # Reuse the existing secret-managed obsidian-rclone-config volume
+      # (read-only). It can hold a separate mnemosyne-crypt remote.
+      - obsidian-rclone-config:/config/rclone:ro
+      # Staging mount is READ-ONLY. The uploader never writes here and never
+      # deletes READY/latest/artifacts.
+      - mnemosyne-backup-staging:/staging:ro
+      # State volume is the ONLY writable mount. Slot rotation and
+      # last-uploaded-generation live here.
+      - mnemosyne-backup-state:/state
+      # Mount the uploader script read-only.
+      - ./scripts/mnemosyne-backup-uploader.sh:/scripts/mnemosyne-backup-uploader.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/mnemosyne-backup-uploader.sh"]
+    networks:
+      - josemar-network
+
+  mnemosyne-backup-recover:
+    # Short-lived operator RECOVERY DOWNLOAD step (rclone image). Runs ONLY on
+    # demand via:
+    #   docker compose --profile recovery run --rm mnemosyne-backup-recover <slot>
+    # It is profile-gated so a plain `docker compose up` never starts it.
+    # Least privilege: read-only rclone crypt config + a disposable recovery
+    # handoff volume; NEVER mounts hermes-data or /opt/data. Downloads the
+    # selected immutable slot, verifies its manifest/SHA, and writes the
+    # RECOVERY_READY handoff sentinel. The Hermes-side verify/install step
+    # (short-lived `docker compose run hermes`) consumes the handoff and never
+    # sees rclone credentials.
+    image: rclone/rclone:latest
+    profiles: ["recovery"]
+    environment:
+      - RCLONE_CONFIG=/config/rclone/rclone.conf
+      # Disposable recovery handoff volume (writable here only).
+      - MNEMOSYNE_BACKUP_RECOVERY_DIR=/recovery
+      # REQUIRED crypt remote name. Must be rclone type 'crypt' (validated
+      # before download).
+      - MNEMOSYNE_BACKUP_RCLONE_REMOTE=${MNEMOSYNE_BACKUP_RCLONE_REMOTE:-mnemosyne-crypt}
+      - MNEMOSYNE_BACKUP_RCLONE_PATH=${MNEMOSYNE_BACKUP_RCLONE_PATH:-Josemar/mnemosyne-backups}
+      - MNEMOSYNE_BACKUP_SLOTS=${MNEMOSYNE_BACKUP_SLOTS:-5}
+    volumes:
+      # Reuse the existing secret-managed obsidian-rclone-config volume
+      # (read-only). It can hold a separate mnemosyne-crypt remote.
+      - obsidian-rclone-config:/config/rclone:ro
+      # Disposable recovery handoff volume. This is NEVER mounted into the
+      # long-running hermes service; only short-lived `docker compose run`
+      # invocations mount it (transiently).
+      - mnemosyne-backup-recovery:/recovery
+      # Mount the recovery script read-only.
+      - ./scripts/mnemosyne-backup-recover.sh:/scripts/mnemosyne-backup-recover.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/mnemosyne-backup-recover.sh"]
+    networks:
+      - josemar-network
+
+networks:
+  josemar-network:
+    driver: bridge
+
+volumes:
+  mnemosyne-backup-staging:
+    driver: local
+  mnemosyne-backup-state:
+    driver: local
+  mnemosyne-backup-recovery:
+    driver: local

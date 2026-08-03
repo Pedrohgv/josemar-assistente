@@ -202,6 +202,7 @@ josemar-assistente/
 ├── .github/workflows/              # Deploy, stop, runner test, privacy scan
 ├── docker-compose.yml              # Service topology and persistent volumes
 ├── docker-compose.browser-control.yml # Optional browser-control overlay
+├── docker-compose.embeddings.yml   # Optional local embedding service (TEI) overlay; NOT enabled by default. See docs/memory-embeddings-evaluation.md.
 ├── Dockerfile.hermes               # Custom Hermes image
 └── .env.example                    # Environment template
 ```
@@ -212,6 +213,7 @@ josemar-assistente/
 | --- | --- |
 | `hermes` | Main Hermes gateway, Telegram channel, dashboard/API, agent runtime. |
 | `aux-ml` | Optional internal queue API for long-running OCR jobs. |
+| `embeddings` | Optional local Hugging Face Text Embeddings Inference (TEI) service for semantic memory/gbrain embeddings. NOT enabled by default; only present when the `docker-compose.embeddings.yml` overlay is applied. See `docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation. |
 | `tailscale` | Private-network sidecar for Syncthing connectivity and (optionally) Tailscale Serve for browser control. |
 | `syncthing` | Syncs the Obsidian vault to trusted devices. |
 | `obsidian-backup` | Runs daily rclone backups into rotating Google Drive slots. |
@@ -227,6 +229,7 @@ josemar-assistente/
 | `obsidian-rclone-config` | rclone config used by vault backup container. |
 | `obsidian-backup-state` | Rotating backup slot pointer. |
 | `browser-tunnel-state` | Persistent Ed25519 SSH host key for the optional `browser-tunnel` sidecar so laptop `known_hosts` stays stable across redeploys. |
+| `embedding-model-cache` | Public embedding model weights cache for the optional `embeddings` service. Contains only downloaded public model weights; no private data. Only present with the `docker-compose.embeddings.yml` overlay. |
 
 ## Skills
 
@@ -367,6 +370,7 @@ Credentials go under `credentials/<service>/` and are mounted read-only into Her
 - `docs/aux-ml.md`: auxiliary ML API, queue, model lifecycle, and OCR operations.
 - `docs/obsidian-operations.md`: Syncthing, Tailscale, rclone backup, and restore runbook.
 - `docs/gbrain-operations.md`: gbrain activation, reindex, vault swap, schema pack workflow, and troubleshooting.
+- `docs/memory-embeddings-evaluation.md`: issue #86/#65 evaluation of the optional local embedding service and Mnemosyne memory layer (not enabled by default).
 - `docs/tasknotes-mcp.md`: TaskNotes profile gate, local Git/Syncthing prerequisites, tool outcomes, locking, and recovery.
 - `docs/browser-control.md`: optional remote browser control via a reverse SSH tunnel over Tailscale.
 - `.github/workflows/AGENTS.md`: deployment, stop, privacy scan, and runner workflow documentation.

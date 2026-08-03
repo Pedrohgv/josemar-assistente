@@ -9,12 +9,20 @@ repos:
       # When adding/removing hook IDs, update scripts/setup-pre-commit.sh skip guidance.
       - id: pii-guard
         name: pii-guard
-        entry: python3 scripts/pii_guard.py --staged --fail-on medium
+        # Use the repository venv interpreter explicitly so hook execution does
+        # not depend on commit-time PATH (issue #91). Setup:
+        #   scripts/setup-pre-commit.sh
+        entry: >-
+          sh -c 'test -x venv/bin/python3 || { echo "ERROR: venv/bin/python3 not found. Run scripts/setup-pre-commit.sh to create the venv and install requirements-test.txt." >&2; exit 1; }; exec venv/bin/python3 scripts/pii_guard.py --staged --fail-on medium'
         language: system
         pass_filenames: false
 
       - id: josemar-fast-tests
         name: josemar-fast-tests
-        entry: python3 -m unittest discover -s tests -v
+        # Use the repository venv interpreter explicitly so the fast-test hook
+        # runs against the pinned requirements-test.txt environment regardless
+        # of commit-time PATH (issue #91). Setup: scripts/setup-pre-commit.sh
+        entry: >-
+          sh -c 'test -x venv/bin/python3 || { echo "ERROR: venv/bin/python3 not found. Run scripts/setup-pre-commit.sh to create the venv and install requirements-test.txt." >&2; exit 1; }; exec venv/bin/python3 -m unittest discover -s tests -v'
         language: system
         pass_filenames: false

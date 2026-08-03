@@ -2,15 +2,22 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
-import types
 import unittest
+
+try:  # package context (discovery)
+    from ._stub_import import stubbed_app_import
+except ImportError:  # direct execution: tests/aux_ml/ is sys.path[0]
+    from _stub_import import stubbed_app_import
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "aux-ml"))
-sys.modules.setdefault("httpx", types.ModuleType("httpx"))
-
-from app.llama_router import LlamaRouterClient
+# Stub optional deps ONLY around the application import so the fake httpx does
+# not persist for the whole test process (issue #91). The shared helper fully
+# restores sys.modules AND the app package's __dict__ attributes, so neither
+# `import app.child` nor `from app import child` can reuse fake-bound objects.
+with stubbed_app_import("httpx"):
+    from app.llama_router import LlamaRouterClient
 
 
 class BinaryResponse:

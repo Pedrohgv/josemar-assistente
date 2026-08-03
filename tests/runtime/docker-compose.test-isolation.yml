@@ -1,0 +1,26 @@
+# Dedicated test-only Compose overlay (never used by production deploys).
+#
+# Guarantees the disposable Hermes runtime started by gated Docker tests can
+# NEVER mount the repository's real agent-state or credentials bind mounts,
+# regardless of the caller's environment or the repo `.env` file.
+#
+# The base docker-compose.yml declares:
+#   - ./agent-state:/opt/josemar/source-agent-state:ro
+#   - ./credentials:/opt/josemar/credentials-source:ro
+#
+# docker compose merges per-service `volumes` by container target path and
+# later files win, so the two entries below REPLACE the base bind mounts with
+# disposable EMPTY directories provided by the test runtime via
+# JOSEMAR_TEST_STATE_DIR / JOSEMAR_TEST_CREDENTIALS_DIR (see
+# tests/runtime/helpers.py ComposeRuntime and the Mnemosyne retrieval eval
+# runner). All other base volumes (hermes-data, aux-ml-shared, obsidian-vault)
+# are preserved unchanged.
+#
+# The `:?` interpolation makes any accidental use of this overlay without the
+# test runtime fail loudly at render time instead of silently mounting the
+# repository state.
+services:
+  hermes:
+    volumes:
+      - ${JOSEMAR_TEST_STATE_DIR:?test runtime must set JOSEMAR_TEST_STATE_DIR}:/opt/josemar/source-agent-state:ro
+      - ${JOSEMAR_TEST_CREDENTIALS_DIR:?test runtime must set JOSEMAR_TEST_CREDENTIALS_DIR}:/opt/josemar/credentials-source:ro

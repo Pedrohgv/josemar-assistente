@@ -5,19 +5,28 @@ from pathlib import Path
 import re
 import sys
 import tempfile
-import types
 import unittest
 from unittest.mock import patch
+
+try:  # package context (discovery)
+    from ._stub_import import stubbed_app_import
+except ImportError:  # direct execution: tests/aux_ml/ is sys.path[0]
+    from _stub_import import stubbed_app_import
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "aux-ml"))
-sys.modules.setdefault("pymupdf", types.ModuleType("pymupdf"))
-sys.modules.setdefault("httpx", types.ModuleType("httpx"))
-
-from app.adapters import transcribe_granite
-from app.model_registry import ModelSpec
-from app import settings as settings_module
+# Stub optional deps ONLY around the application import so the stubs do not
+# persist for the whole test process (a persistent fake httpx would poison
+# real httpx for other test modules — issue #91). The shared helper fully
+# restores sys.modules AND the app package's __dict__ attributes, so neither
+# `import app.child` nor `from app import child` can reuse fake-bound objects.
+# The bound `transcribe_granite` and `settings_module` objects remain valid for
+# `patch.object(...)` regardless.
+with stubbed_app_import("pymupdf", "httpx"):
+    from app.adapters import transcribe_granite
+    from app.model_registry import ModelSpec
+    from app import settings as settings_module
 
 
 # ---------------------------------------------------------------------------

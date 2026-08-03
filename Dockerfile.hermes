@@ -92,8 +92,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # `docker compose exec` and Hermes-spawned subprocesses) and system Python
 # (fallback for shells that reset PATH). The venv already has Markdown; only
 # pymupdf is added there. System Python gets both.
+#
+# Mnemosyne pilot packages are pinned into the Hermes venv using the
+# supported full dependency closure (no --no-deps). Remote TEI is the
+# configured runtime embedding path; local FastEmbed/sqlite-vec extras may
+# be pulled in by the dependency closure and are harmless when present. The
+# package's supported dependency closure is preferred over a manual override
+# for compatibility and package integrity. Provider activation is gated to
+# runtime (docker-hermes-init.sh) so the image install alone does NOT enable
+# Mnemosyne.
 RUN /opt/hermes/.venv/bin/python3 -m ensurepip --upgrade \
     && /opt/hermes/.venv/bin/python3 -m pip install --no-cache-dir pymupdf \
+    && /opt/hermes/.venv/bin/python3 -m pip install --no-cache-dir \
+        mnemosyne-hermes==0.5.0 \
+        mnemosyne-memory==3.15.1 \
     && /usr/bin/python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore \
        pymupdf Markdown==3.7
 
@@ -154,14 +166,23 @@ RUN chmod +x /usr/local/bin/josemar-gbrain
 COPY scripts/hermes-workspace-sync-cron.sh /opt/josemar/scripts/hermes-workspace-sync-cron.sh
 COPY scripts/hermes-gbrain-refresh-cron.sh /opt/josemar/scripts/hermes-gbrain-refresh-cron.sh
 COPY scripts/tasknotes_mcp_core.py scripts/tasknotes_mcp.py scripts/tasknotes_lock_run.py /opt/josemar/scripts/
+# Mnemosyne encrypted-backup core (Phase 2): Hermes-side exporter + restore
+# helper. The separate rclone uploader service runs in its own container
+# (docker-compose.mnemosyne-backup.yml) and mounts these scripts read-only.
+COPY scripts/mnemosyne_backup_core.py /opt/josemar/scripts/mnemosyne_backup_core.py
+COPY scripts/mnemosyne-backup-export.sh /opt/josemar/scripts/mnemosyne-backup-export.sh
+COPY scripts/mnemosyne-backup-restore.sh /opt/josemar/scripts/mnemosyne-backup-restore.sh
 RUN chmod +x /opt/josemar/scripts/hermes-workspace-sync-cron.sh \
     /opt/josemar/scripts/hermes-gbrain-refresh-cron.sh \
     /opt/josemar/scripts/tasknotes_mcp.py \
     /opt/josemar/scripts/tasknotes_lock_run.py \
+    /opt/josemar/scripts/mnemosyne-backup-export.sh \
+    /opt/josemar/scripts/mnemosyne-backup-restore.sh \
     && /opt/hermes/.venv/bin/python3 -m compileall -q \
         /opt/josemar/scripts/tasknotes_mcp_core.py \
         /opt/josemar/scripts/tasknotes_mcp.py \
-        /opt/josemar/scripts/tasknotes_lock_run.py
+        /opt/josemar/scripts/tasknotes_lock_run.py \
+        /opt/josemar/scripts/mnemosyne_backup_core.py
 
 COPY config/hermes-config.yaml /opt/josemar/hermes/config.yaml
 COPY docker-hermes-init.sh /etc/cont-init.d/00-josemar-setup

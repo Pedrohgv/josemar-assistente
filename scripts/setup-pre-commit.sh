@@ -14,9 +14,20 @@ else
     echo "Using existing virtual environment at $VENV_DIR"
 fi
 
-echo "Installing pre-commit..."
+echo "Installing tracked test requirements (authoritative: requirements-test.txt)..."
 source "$VENV_DIR/bin/activate"
-pip install --upgrade pre-commit
+# requirements-test.txt is the single reproducible manifest for the local
+# fast-test/pre-commit environment. It pins pre-commit and the fast-test
+# dependencies (mcp, httpx, httpx-sse, pydantic, pydantic-settings, PyYAML,
+# sqlite-vec). This venv is NOT a production Docker dependency (Dockerfile.hermes
+# and aux-ml/Dockerfile install their own production requirements). Do not
+# upgrade an unpinned pre-commit separately — the pinned version here wins.
+if [ -f "$REPO_ROOT/requirements-test.txt" ]; then
+    pip install -r "$REPO_ROOT/requirements-test.txt"
+else
+    echo "ERROR: requirements-test.txt not found at $REPO_ROOT/requirements-test.txt" >&2
+    exit 1
+fi
 
 echo "Installing git hooks..."
 pre-commit install

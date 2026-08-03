@@ -77,6 +77,106 @@ index c2b3f84..0f5704c 100644
  
    // v0.32 codex finding #4+#5 fix: thread local-server _BASE_URL env vars
    // into base_urls so the gateway hits the user's configured port. Without
+diff --git a/src/core/ai/gateway.ts b/src/core/ai/gateway.ts
+index cf41b1a..02a0f9a 100644
+--- a/src/core/ai/gateway.ts
++++ b/src/core/ai/gateway.ts
+@@ -1260,6 +1260,77 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
+ /** Minimum sub-batch size before we give up splitting and just throw. */
+ const MIN_SUB_BATCH = 1;
+
++// ---- JOSEMAR PATCH: E5 query/passage preprocessing -------------------------
++// E5-family embedding models (e.g. `intfloat/multilingual-e5-small`) require
++// each input to be prefixed with `query: ` or `passage: ` before embedding.
++// Without the prefix, E5 produces a degraded / wrong vector space. This is a
++// minimal, model-gated preprocessing helper applied in the `embed()` seam,
++// BEFORE truncation / token accounting / batching / retry, so:
++//   - each raw input is transformed exactly once (no double prefix across
++//     batch split / recursive halving / SDK retry — the prefix lives above
++//     the transport, so sub-batches and retries operate on already-prefixed
++//     texts),
++//   - non-E5 models see zero behavioral change,
++//   - the multimodal path is untouched (it does not route through `embed()`).
++//
++// Detection keys off the modelId (the part after the provider prefix), so it
++// works regardless of which openai-compatible provider hosts the GGUF (e.g.
++// `llama-server:intfloat/multilingual-e5-small` → modelId
++// `intfloat/multilingual-e5-small`). gbrain stores embedding models as
++// `provider:modelId` (colon-separated; the modelId may itself contain a
++// slash, e.g. `intfloat/multilingual-e5-small`).
++//
++// Upstream bug: gbrain has no model-gated text preprocessing seam; this is a
++// local-only proof. See patches/gbrain-inline-worker-gateway.patch.
++
++/** Preprocessing version stamped into the E5 embedding signature. */
++export const E5_PREPROCESS_VERSION = 'e5-query-passage-v1';
++
++/**
++ * Recognized E5 embedding model ids (the short form after the provider prefix
++ * is stripped). At minimum the exact `intfloat/multilingual-e5-small`; the
++ * broader `intfloat/` E5 family prefix is matched too so the proof generalizes
++ * without per-model churn, but stays narrow enough that unrelated models are
++ * untouched.
++ */
++const E5_MODEL_ID_PREFIXES = ['intfloat/multilingual-e5-', 'intfloat/e5-'];
++
++/**
++ * True iff `modelStr` (a `provider:modelId` string, or a bare modelId) refers
++ * to a recognized E5 embedding model. Pure; no module state.
++ *
++ * @internal exported for the signature seam + tests.
++ */
++export function isE5EmbeddingModel(modelStr: string): boolean {
++  if (!modelStr || typeof modelStr !== 'string') return false;
++  // Strip a leading `provider:` prefix if present (colon is the provider
++  // separator; the modelId may contain a slash, so we only split on the
++  // FIRST colon). Bare modelIds (no colon) are also accepted.
++  const colon = modelStr.indexOf(':');
++  const modelId = colon !== -1 ? modelStr.slice(colon + 1) : modelStr;
++  return E5_MODEL_ID_PREFIXES.some(p => modelId === p.slice(0, -1) || modelId.startsWith(p));
++}
++
++/**
++ * Apply E5 query/passage preprocessing to a single raw input text. Returns
++ * the text unchanged for non-E5 models. For E5:
++ *   - inputType 'query'    → `query: ${text}`
++ *   - anything else (the  → `passage: ${text}`
++ *     document / default)
++ * Pure; no module state. Exported for tests.
++ *
++ * @internal
++ */
++export function preprocessE5Input(
++  modelStr: string,
++  text: string,
++  inputType?: 'query' | 'document',
++): string {
++  if (!isE5EmbeddingModel(modelStr)) return text;
++  const prefix = inputType === 'query' ? 'query: ' : 'passage: ';
++  return prefix + text;
++}
++
+ /**
+  * Embed many texts. Truncates to MAX_CHARS, then dispatches based on whether
+  * the recipe declares a per-batch token budget.
+@@ -1364,7 +1435,16 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
+   const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
+   const tracker = __budgetStore.getStore() ?? null;
+   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
+-  const truncated = texts.map(t => (t ?? '').slice(0, MAX_CHARS));
++  // JOSEMAR PATCH: E5 query/passage preprocessing runs BEFORE truncation,
++  // token accounting, batching, and retry — so each raw input is transformed
++  // exactly once and the prefix survives at the head of any truncated value.
++  // Non-E5 models: preprocessE5Input is a no-op (returns the text unchanged),
++  // so behavior is byte-identical to the pre-patch path.
++  const e5 = isE5EmbeddingModel(resolveTarget);
++  const preprocessed = e5
++    ? texts.map(t => preprocessE5Input(resolveTarget, t ?? '', opts?.inputType))
++    : texts;
++  const truncated = preprocessed.map(t => (t ?? '').slice(0, MAX_CHARS));
+
+   // Reserve up front for the worst-case batch token count. Embeddings have
+   // no output rate, so maxOutputTokens=0. record() at the end uses the
 diff --git a/src/core/chronicle/extract-events.ts b/src/core/chronicle/extract-events.ts
 index 4354614..514da6d 100644
 --- a/src/core/chronicle/extract-events.ts
@@ -113,3 +213,375 @@ index 8a79b0e..d7d8a5f 100644
      ...(process.env.GBRAIN_EMBEDDING_MODEL ? { embedding_model: process.env.GBRAIN_EMBEDDING_MODEL } : {}),
      ...(process.env.GBRAIN_EMBEDDING_DIMENSIONS ? { embedding_dimensions: parseInt(process.env.GBRAIN_EMBEDDING_DIMENSIONS, 10) } : {}),
      ...(process.env.GBRAIN_EXPANSION_MODEL ? { expansion_model: process.env.GBRAIN_EXPANSION_MODEL } : {}),
+diff --git a/src/core/embedding.ts b/src/core/embedding.ts
+index 108b854..35194a5 100644
+--- a/src/core/embedding.ts
++++ b/src/core/embedding.ts
+@@ -11,6 +11,8 @@ import {
+   embedQuery as gatewayEmbedQuery,
+   getEmbeddingModel as gatewayGetModel,
+   getEmbeddingDimensions as gatewayGetDims,
++  isE5EmbeddingModel,
++  E5_PREPROCESS_VERSION,
+ } from './ai/gateway.ts';
+ import { lookupEmbeddingPrice } from './embedding-pricing.ts';
+
+@@ -177,7 +179,11 @@ export function estimateEmbeddingCostUsd(tokens: number): number {
+  */
+ export function currentEmbeddingSignature(): string {
+   try {
+-    return `${gatewayGetModel()}:${gatewayGetDims()}`;
++    const base = `${gatewayGetModel()}:${gatewayGetDims()}`;
++    // JOSEMAR PATCH: append the E5 preprocessing version so raw (un-prefixed)
++    // and prefixed vectors are detected as stale / incompatible. Non-E5
++    // models keep the exact pre-patch signature (no version segment).
++    return isE5EmbeddingModel(gatewayGetModel()) ? `${base}#${E5_PREPROCESS_VERSION}` : base;
+   } catch {
+     return `${EMBEDDING_MODEL}:${EMBEDDING_DIMENSIONS}`;
+   }
+diff --git a/test/ai/e5-preprocess.test.ts b/test/ai/e5-preprocess.test.ts
+new file mode 100644
+index 0000000..af23d86
+--- /dev/null
++++ b/test/ai/e5-preprocess.test.ts
+@@ -0,0 +1,339 @@
++/**
++ * JOSEMAR PATCH (local-only E5 preprocessing proof) — pins the
++ * `query:`/`passage:` prefixing seam for recognized E5 embedding models.
++ *
++ * Why this file exists: E5-family models (e.g. `intfloat/multilingual-e5-small`)
++ * require each input to be prefixed with `query: ` or `passage: ` before
++ * embedding. Without the prefix, E5 produces a degraded / wrong vector space.
++ * gbrain's gateway had no model-gated text preprocessing; this patch adds a
++ * minimal one in the `embed()` seam, BEFORE truncation / token accounting /
++ * batching / retry, so:
++ *   - each raw input is transformed exactly once (no double prefix across
++ *     batch split / recursive halving / SDK retry),
++ *   - non-E5 models see zero behavioral change,
++ *   - the multimodal path is untouched,
++ *   - the embedding signature gains a preprocessing-version segment for E5
++ *     so raw (un-prefixed) and prefixed vectors are detected as stale /
++ *     incompatible, while non-E5 signatures stay byte-identical.
++ *
++ * Test strategy:
++ *   - The transport seam (`__setEmbedTransportForTests`) captures the
++ *     `values` array that reaches the AI SDK `embedMany()` call — the shared
++ *     lowest seam below truncation, batching, and retry. This is decisive for
++ *     the exactly-once and prefix-before-truncation properties: the values
++ *     the SDK receives are exactly what would be serialized to the wire.
++ *   - The wire-level test (`embed-input-type-wire.serial.test.ts` pattern)
++ *     mocks global fetch and asserts the outbound HTTP `input` body for the
++ *     E5 query / document-default cases — proving the prefix reaches the
++ *     actual HTTP/AI SDK boundary.
++ *   - No real provider / key / network calls: the transport is faked and
++ *     fetch is mocked.
++ *
++ * Model representation note: gbrain stores embedding models as
++ * `provider:modelId` (colon-separated; the modelId may itself contain a
++ * slash, e.g. `llama-server:intfloat/multilingual-e5-small`). E5 detection
++ * keys off the modelId (the part after the provider prefix), so it works
++ * regardless of which openai-compatible provider hosts the GGUF.
++ */
++
++import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
++import {
++  configureGateway,
++  embed,
++  embedQuery,
++  resetGateway,
++  __setEmbedTransportForTests,
++} from '../../src/core/ai/gateway.ts';
++import { currentEmbeddingSignature } from '../../src/core/embedding.ts';
++
++// ---- Transport-seam capture ------------------------------------------------
++
++interface TransportCall {
++  values: string[];
++  providerOptions: Record<string, unknown>;
++}
++const calls: TransportCall[] = [];
++
++function installCaptureTransport(dims: number): void {
++  calls.length = 0;
++  __setEmbedTransportForTests(async ({ values, providerOptions }: any) => {
++    calls.push({ values: [...values], providerOptions: { ...(providerOptions ?? {}) } });
++    return {
++      embeddings: values.map(() => new Array(dims).fill(0.1)),
++      usage: { tokens: 0 },
++    } as any;
++  });
++}
++
++// ---- Wire-seam capture (real SDK transport, mocked fetch) -------------------
++
++type FetchHandler = (url: string, init: RequestInit) => Promise<Response>;
++let fetchHandler: FetchHandler | null = null;
++const origFetch = globalThis.fetch;
++
++function openAIShapedResponse(dims: number, count: number): Response {
++  const vec = Array.from({ length: dims }, () => 0.1);
++  return new Response(
++    JSON.stringify({
++      data: Array.from({ length: count }, (_, i) => ({ object: 'embedding', index: i, embedding: vec })),
++      usage: { prompt_tokens: 3, total_tokens: 3 },
++    }),
++    { status: 200, headers: { 'Content-Type': 'application/json' } },
++  );
++}
++
++// ---- Config helpers ---------------------------------------------------------
++
++const E5_MODEL = 'llama-server:intfloat/multilingual-e5-small';
++const E5_DIMS = 384; // multilingual-e5-small native dim
++const OPENAI_MODEL = 'openai:text-embedding-3-large';
++const OPENAI_DIMS = 1536;
++
++function configureE5(): void {
++  configureGateway({
++    embedding_model: E5_MODEL,
++    embedding_dimensions: E5_DIMS,
++    env: {},
++  });
++}
++
++function configureOpenAI(): void {
++  configureGateway({
++    embedding_model: OPENAI_MODEL,
++    embedding_dimensions: OPENAI_DIMS,
++    env: { OPENAI_API_KEY: 'sk-fake' },
++  });
++}
++
++beforeEach(() => {
++  calls.length = 0;
++  resetGateway();
++});
++
++afterEach(() => {
++  __setEmbedTransportForTests(null);
++  globalThis.fetch = origFetch;
++  fetchHandler = null;
++  resetGateway();
++});
++
++// ---- Transport seam: prefixing reaches the SDK values ----------------------
++
++describe('E5 preprocessing — transport seam (values reaching embedMany)', () => {
++  test('E5 query: each value is prefixed with "query: " exactly once', async () => {
++    configureE5();
++    installCaptureTransport(E5_DIMS);
++
++    await embedQuery('what is foo?');
++    expect(calls.length).toBe(1);
++    expect(calls[0].values).toEqual(['query: what is foo?']);
++  });
++
++  test('E5 document default (embed, no inputType): each value is prefixed with "passage: "', async () => {
++    configureE5();
++    installCaptureTransport(E5_DIMS);
++
++    await embed(['a document', 'another document']);
++    expect(calls.length).toBe(1);
++    expect(calls[0].values).toEqual(['passage: a document', 'passage: another document']);
++  });
++
++  test('E5 explicit inputType=document also prefixes with "passage: "', async () => {
++    configureE5();
++    installCaptureTransport(E5_DIMS);
++
++    await embed(['d1', 'd2'], { inputType: 'document' });
++    expect(calls[0].values).toEqual(['passage: d1', 'passage: d2']);
++  });
++
++  test('E5 explicit inputType=query prefixes with "query: "', async () => {
++    configureE5();
++    installCaptureTransport(E5_DIMS);
++
++    await embed(['q1', 'q2'], { inputType: 'query' });
++    expect(calls[0].values).toEqual(['query: q1', 'query: q2']);
++  });
++
++  test('E5 model override via embeddingModel is detected and prefixed', async () => {
++    // Global default is OpenAI; the per-call override routes through E5 and
++    // must therefore be prefixed.
++    configureOpenAI();
++    installCaptureTransport(E5_DIMS);
++
++    await embed(['override doc'], { embeddingModel: E5_MODEL, dimensions: E5_DIMS });
++    expect(calls.length).toBe(1);
++    expect(calls[0].values).toEqual(['passage: override doc']);
++  });
++
++  test('non-E5 model (OpenAI): values are UNCHANGED (no prefix)', async () => {
++    configureOpenAI();
++    installCaptureTransport(OPENAI_DIMS);
++
++    await embed(['plain doc one', 'plain doc two']);
++    await embedQuery('plain query');
++    expect(calls[0].values).toEqual(['plain doc one', 'plain doc two']);
++    expect(calls[1].values).toEqual(['plain query']);
++  });
++
++  test('prefix is applied BEFORE truncation (long input keeps the prefix head)', async () => {
++    configureE5();
++    installCaptureTransport(E5_DIMS);
++    // MAX_CHARS = 8000. Build an input longer than the cap so truncation
++    // fires. The prefix must survive at the head of the truncated value —
++    // proving preprocessing runs before truncation, not after.
++    const longBody = 'x'.repeat(9000);
++    await embed([longBody]);
++    expect(calls.length).toBe(1);
++    const sent = calls[0].values[0];
++    expect(sent.startsWith('passage: ')).toBe(true);
++    // Truncated to MAX_CHARS (8000), so the prefix head is preserved and
++    // the tail is dropped.
++    expect(sent.length).toBe(8000);
++    expect(sent).toBe('passage: ' + 'x'.repeat(8000 - 'passage: '.length));
++  });
++
++  test('batch split / recursive halving: prefix applied EXACTLY ONCE (no double prefix)', async () => {
++    configureE5();
++    // Force a tiny per-batch token budget so splitByTokenBudget fires and
++    // embedSubBatch recurses. We do this by installing a transport that
++    // throws a token-limit error on the first call (triggering recursive
++    // halving), then succeeds — and asserting the values seen on BOTH the
++    // failing and succeeding calls are prefixed exactly once.
++    const seen: string[][] = [];
++    let attempt = 0;
++    __setEmbedTransportForTests(async ({ values }: any) => {
++      seen.push([...values]);
++      attempt++;
++      if (attempt === 1) {
++        // Simulate a provider batch-token-limit error to trigger halving.
++        const err = new Error('Invalid \'input\': maximum request size is 300000 tokens per request.');
++        throw err;
++      }
++      return {
++        embeddings: values.map(() => new Array(E5_DIMS).fill(0.1)),
++        usage: { tokens: 0 },
++      } as any;
++    });
++
++    // Two distinct documents; the halving will split them across sub-batches.
++    await embed(['doc alpha', 'doc beta']);
++    // Every value ever sent to the transport must be prefixed exactly once.
++    for (const batch of seen) {
++      for (const v of batch) {
++        expect(v.startsWith('passage: ')).toBe(true);
++        // No double prefix.
++        expect(v.startsWith('passage: passage: ')).toBe(false);
++      }
++    }
++  });
++
++  test('SDK retry does not re-prefix (prefix lives above the transport)', async () => {
++    configureE5();
++    const seen: string[][] = [];
++    let attempt = 0;
++    __setEmbedTransportForTests(async ({ values }: any) => {
++      seen.push([...values]);
++      attempt++;
++      if (attempt === 1) {
++        // A transient error (NOT a token-limit error) — the SDK/wrapper
++        // retry path. We assert the retried call sees the SAME already-
++        // prefixed value, not a re-prefixed one.
++        throw new Error('transient network blip');
++      }
++      return {
++        embeddings: values.map(() => new Array(E5_DIMS).fill(0.1)),
++        usage: { tokens: 0 },
++      } as any;
++    });
++
++    // embedSubBatch does not itself retry non-token errors; it normalizes
++    // and rethrows. So we instead drive a second embed() call (the higher-
++    // level retry equivalent) and assert idempotency of the prefix across
++    // two independent calls on the same input.
++    await embed(['retry me']).catch(() => {});
++    await embed(['retry me']).catch(() => {});
++    for (const batch of seen) {
++      for (const v of batch) {
++        expect(v).toBe('passage: retry me');
++      }
++    }
++  });
++});
++
++// ---- Wire seam: prefix reaches the actual HTTP body ------------------------
++
++describe('E5 preprocessing — wire body (real SDK transport, mocked fetch)', () => {
++  beforeEach(() => {
++    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
++      if (!fetchHandler) throw new Error('fetch called but no handler installed');
++      return fetchHandler(typeof url === 'string' ? url : url.toString(), init ?? {});
++    }) as typeof fetch;
++  });
++
++  test('E5 query: outbound HTTP body input is "query: <text>"', async () => {
++    configureE5();
++    let capturedBody: any = null;
++    fetchHandler = async (_url, init) => {
++      capturedBody = JSON.parse(init.body as string);
++      return openAIShapedResponse(E5_DIMS, 1);
++    };
++
++    await embedQuery('what does foo bar do?');
++    expect(capturedBody).not.toBeNull();
++    // OpenAI-shaped /v1/embeddings sends `input` as a string or array.
++    const input = capturedBody.input;
++    const inputs = Array.isArray(input) ? input : [input];
++    expect(inputs).toEqual(['query: what does foo bar do?']);
++  });
++
++  test('E5 document default: outbound HTTP body input is "passage: <text>"', async () => {
++    configureE5();
++    let capturedBody: any = null;
++    fetchHandler = async (_url, init) => {
++      capturedBody = JSON.parse(init.body as string);
++      return openAIShapedResponse(E5_DIMS, 2);
++    };
++
++    await embed(['a document being indexed', 'second document']);
++    expect(capturedBody).not.toBeNull();
++    const input = capturedBody.input;
++    const inputs = Array.isArray(input) ? input : [input];
++    expect(inputs).toEqual(['passage: a document being indexed', 'passage: second document']);
++  });
++
++  test('non-E5 (OpenAI): outbound HTTP body input is UNCHANGED', async () => {
++    configureOpenAI();
++    let capturedBody: any = null;
++    fetchHandler = async (_url, init) => {
++      capturedBody = JSON.parse(init.body as string);
++      return openAIShapedResponse(OPENAI_DIMS, 1);
++    };
++
++    await embed(['plain wire doc']);
++    const input = capturedBody.input;
++    const inputs = Array.isArray(input) ? input : [input];
++    expect(inputs).toEqual(['plain wire doc']);
++  });
++});
++
++// ---- Signature version ------------------------------------------------------
++
++describe('E5 preprocessing — embedding signature version', () => {
++  test('E5 signature carries the e5-query-passage-v1 preprocessing version', () => {
++    configureE5();
++    const sig = currentEmbeddingSignature();
++    // Base shape is `<provider:modelId>:<dims>`; the E5 preprocessing version
++    // is appended so raw (un-prefixed) and prefixed vectors are incompatible.
++    expect(sig).toContain('intfloat/multilingual-e5-small');
++    expect(sig).toContain(`${E5_DIMS}`);
++    expect(sig).toContain('e5-query-passage-v1');
++  });
++
++  test('non-E5 signature is UNCHANGED (no preprocessing version segment)', () => {
++    configureOpenAI();
++    const sig = currentEmbeddingSignature();
++    // Exact pre-patch shape: `<provider:modelId>:<dims>` with no version suffix.
++    expect(sig).toBe(`${OPENAI_MODEL}:${OPENAI_DIMS}`);
++    expect(sig).not.toContain('e5-query-passage');
++  });
++});
+\ No newline at end of file

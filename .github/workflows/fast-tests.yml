@@ -15,5 +15,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up local test venv
+        # Create (or reuse) the repo venv and install the tracked fast-test
+        # requirements (requirements-test.txt). This venv is the local
+        # fast-test/pre-commit environment only; production Docker images
+        # (Dockerfile.hermes, aux-ml/Dockerfile) are unaffected.
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install --upgrade pip
+          venv/bin/pip install -r requirements-test.txt
+
       - name: Run verification
-        run: make verify
+        # Put the venv Python first on PATH so `make verify` (which calls
+        # `python3 -m unittest ...` and `docker compose config`) runs with
+        # the venv interpreter and its installed test dependencies.
+        run: |
+          echo "$PWD/venv/bin" >> "$GITHUB_PATH"
+          export PATH="$PWD/venv/bin:$PATH"
+          make verify

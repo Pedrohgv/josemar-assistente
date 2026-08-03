@@ -1,0 +1,7 @@
+{
+  "review_status": "NOT_READY",
+  "reviewer": "",
+  "reviewed_at": "",
+  "review_method": "",
+  "notes": "AI-drafted labels have NOT been operator-reviewed yet. The activation gate will fail (NOT READY) until this file is updated with review_status=REVIEWED, a non-empty reviewer, and a non-empty reviewed_at ISO date. See README.md for the checklist."
+}
