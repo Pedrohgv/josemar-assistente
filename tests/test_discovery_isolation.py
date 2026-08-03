@@ -148,10 +148,17 @@ class DiscoveryHttpxIsolationTests(unittest.TestCase):
 
     def test_each_aux_module_leaves_app_llama_router_using_real_httpx(self) -> None:
         # After importing each aux test module, a subsequent fresh import of
-        # app.llama_router AND app.service must bind the REAL httpx (with
-        # TransportError), not a fake stub cached during the aux module's
-        # stubbed application import (issue #91). aux-ml/ must be on sys.path
-        # for the app.* import.
+        # app.llama_router must bind the REAL httpx (with TransportError), not a
+        # fake stub cached during the aux module's stubbed application import
+        # (issue #91). app.llama_router is the relevant contamination path for
+        # MCP/Mnemosyne (mcp -> httpx_sse -> real httpx.TransportError).
+        #
+        # We deliberately do NOT import app.service here: it transitively pulls
+        # the optional `pymupdf` production dependency, which is excluded from
+        # requirements-test.txt. The required invariant — no fake-loaded
+        # app/app.* modules remain cached after each aux import — is verified
+        # independently by test_aux_modules_do_not_cache_app_modules_with_fake_deps.
+        # aux-ml/ must be on sys.path for the app.* import.
         aux_ml = str(REPO_ROOT / "aux-ml")
         for dotted in self.AUX_STUB_MODULES:
             self._import_fresh(dotted)
@@ -162,7 +169,6 @@ class DiscoveryHttpxIsolationTests(unittest.TestCase):
             sys.path.insert(0, aux_ml)
             try:
                 import app.llama_router as lr  # noqa: E402
-                import app.service as svc  # noqa: E402
             finally:
                 while aux_ml in sys.path:
                     sys.path.remove(aux_ml)
@@ -171,10 +177,6 @@ class DiscoveryHttpxIsolationTests(unittest.TestCase):
                 f"{dotted}: app.llama_router.httpx is not real httpx after aux import: "
                 f"{getattr(lr, 'httpx', None)!r}",
             )
-            # app.service must be a freshly imported module (real deps), not a
-            # stale stub-bound cached module.
-            self.assertIsNotNone(svc)
-            self.assertIn("app.service", sys.modules)
             # Clean up for the next iteration.
             for _k in [k for k in list(sys.modules) if k == "app" or k.startswith("app.")]:
                 sys.modules.pop(_k, None)

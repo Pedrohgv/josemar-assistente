@@ -376,8 +376,9 @@ class ServiceCancelRunningJobTests(unittest.IsolatedAsyncioTestCase):
                     gate2.set()
                     started2 = asyncio.Event()
                     service._run_job_lifecycle = original_lifecycle  # type: ignore[method-assign]
-                    with patch(
-                        "app.service.run_ocr_task",
+                    with patch.object(
+                        _service_module,
+                        "run_ocr_task",
                         side_effect=_patched_ocr_factory(gate2, started=started2),
                     ):
                         second = await service.submit_job(
