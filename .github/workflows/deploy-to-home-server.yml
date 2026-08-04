@@ -1088,9 +1088,14 @@ jobs:
           echo "embeddings service is healthy"
 
           echo "Confirming Hermes provider/policy via hermes_cli.config.load_config()..."
-          # Use the Hermes venv python with hermes_cli.config.load_config() to
-          # load /opt/data/config.yaml and assert the exact memory subtree.
-          docker compose exec -T hermes /opt/hermes/.venv/bin/python3 - <<'PY'
+          # The hermes cont-init script (00-josemar-setup) runs AFTER the
+          # container's cheap healthcheck (hermes version) passes, so the
+          # Mnemosyne config may not be written yet when this step starts.
+          # Poll up to 60s (12 x 5s) for the init to write memory.provider and
+          # the pilot policy, then fail with the last error.
+          PROVIDER_OK=0
+          for i in $(seq 1 12); do
+            if docker compose exec -T hermes /opt/hermes/.venv/bin/python3 - <<'PY' 2>/dev/null
           import sys
           try:
               from hermes_cli.config import load_config
@@ -1121,6 +1126,30 @@ jobs:
               sys.exit(1)
           print("PILOT_PROVIDER_POLICY_OK")
           PY
+            then
+              PROVIDER_OK=1
+              break
+            fi
+            echo "   Waiting for Hermes init to write Mnemosyne config... ($i/12)"
+            sleep 5
+          done
+          if [ "$PROVIDER_OK" -ne 1 ]; then
+            echo "ERROR: Hermes memory.provider/mnemosyne policy not active after 60s"
+            docker compose exec -T hermes /opt/hermes/.venv/bin/python3 - <<'PY'
+          import sys
+          try:
+              from hermes_cli.config import load_config
+          except Exception as exc:
+              print(f"could not import hermes_cli.config: {exc}", file=sys.stderr)
+              sys.exit(1)
+          config = load_config()
+          if config is not None:
+              import json
+              print(json.dumps(config.get("memory", {}), indent=2, default=str))
+          PY
+            docker compose logs --tail=200 hermes
+            exit 1
+          fi
 
           echo "Confirming init did not log a nonfatal activation failure..."
           if docker compose logs --tail=400 hermes 2>/dev/null | grep -q "mnemosyne runtime config activation failed"; then

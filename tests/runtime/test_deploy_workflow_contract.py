@@ -456,6 +456,24 @@ class DeployWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("mnemosyne runtime config activation failed", pilot)
 
+    def test_pilot_check_waits_for_init_to_write_config(self) -> None:
+        # The hermes cont-init (00-josemar-setup) finishes after the cheap
+        # healthcheck passes, so the provider check must poll (bounded retry)
+        # instead of reading the config once. Regression: run 30866789430 saw
+        # provider '' because the verify step read the config 1s after the init
+        # started.
+        pilot = _step_text(
+            self.workflow,
+            "Verify Mnemosyne pilot (TEI healthy + provider/policy active)",
+        )
+        # The provider check is wrapped in a retry loop that waits for the init.
+        self.assertIn("Waiting for Hermes init to write Mnemosyne config", pilot)
+        self.assertIn("PROVIDER_OK", pilot)
+        self.assertIn("seq 1 12", pilot)
+        # The single-shot check must NOT be used (regression guard): the
+        # success sentinel must only print after the retry loop.
+        self.assertIn("PILOT_PROVIDER_POLICY_OK", pilot)
+
     def test_tei_wait_budget_at_least_450_seconds(self) -> None:
         pilot = _step_text(
             self.workflow,
