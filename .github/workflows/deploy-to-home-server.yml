@@ -596,9 +596,9 @@ jobs:
 
           TMP_RCLONE_CONF="$(mktemp)"
           # Persist the temp path to GITHUB_ENV so the later publish step can
-          # use it. The trap removes it on exit; the publish step will clear
-          # it after a successful copy.
-          trap 'rm -f "$TMP_RCLONE_CONF"' EXIT
+          # use it. Do NOT trap-rm on EXIT here: the publish step owns cleanup
+          # (rm -f after a successful copy). Error paths below rm explicitly
+          # before exiting.
           if ! printf '%s' "$RCLONE_CONFIG_B64_SECRET" | base64 --decode > "$TMP_RCLONE_CONF" 2>/dev/null; then
             echo "ERROR: RCLONE_CONFIG_B64 is not valid base64"
             rm -f "$TMP_RCLONE_CONF"
