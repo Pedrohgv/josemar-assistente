@@ -7,7 +7,7 @@ Josemar tests are split into fast unit/contract tests and opt-in Docker runtime 
 Run the default suite with:
 
 ```bash
-python3 -m unittest discover -s tests -v
+venv/bin/python3 -m unittest discover -s tests -v
 ```
 
 Or use the repository target:

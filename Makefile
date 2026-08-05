@@ -4,7 +4,7 @@
 	test-mnemosyne-retrieval-activation-reviewed
 
 test:
-	python3 -m unittest discover -s tests -v
+	venv/bin/python3 -m unittest discover -s tests -v
 
 test-runtime:
 	RUN_DOCKER_TESTS=1 python3 -m unittest discover -s tests/runtime -v
