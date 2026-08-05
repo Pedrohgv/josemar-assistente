@@ -7,13 +7,22 @@ Josemar tests are split into fast unit/contract tests and opt-in Docker runtime 
 Run the default suite with:
 
 ```bash
-venv/bin/python3 -m unittest discover -s tests -v
+make test
 ```
 
-Or use the repository target:
+The `test` target uses a Makefile-resolved interpreter (`PYTHON`) that prefers
+`venv/bin/python3` when a local virtualenv exists and otherwise falls back to
+`python3`. This keeps `make test` working both in a developer checkout with a
+venv and in CI, where there is no venv and dependencies are injected via
+`TEST_DEPS_DIR`/`PYTHONPATH`. To run the suite directly without `make`, use
+whichever interpreter applies to your environment:
 
 ```bash
-make test
+# with a local venv
+venv/bin/python3 -m unittest discover -s tests -v
+
+# venv-less (e.g. CI)
+python3 -m unittest discover -s tests -v
 ```
 
 ## Development Cycle
