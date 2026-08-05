@@ -15,6 +15,7 @@ from pathlib import Path
 
 PROFILES_PATH = Path("/opt/hermes/hermes_cli/profiles.py")
 WEB_SERVER_PATH = Path("/opt/hermes/hermes_cli/web_server.py")
+WEB_PROFILES_PATH = Path("/opt/hermes/hermes_cli/web_routers/profiles.py")
 
 
 def replace_once(path: Path, old: str, new: str) -> None:
@@ -98,7 +99,7 @@ replace_once(
 )
 
 replace_once(
-    WEB_SERVER_PATH,
+    WEB_PROFILES_PATH,
     '    return {"active": active, "current": current}\n',
     '    display_name = getattr(profiles_mod, "_default_profile_display_name", lambda: "default")()\n'
     '    def public_name(name: str) -> str:\n'
