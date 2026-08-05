@@ -1,0 +1,48 @@
+version: 1
+
+# Josemar state-owned Hermes model selections.
+#
+# Strict selection-only v1 contract. Single root-only configuration; no
+# profiles or multiplexing. ONLY provider/model selection is allowed here.
+# State changes are validated before sync commit; invalid files are rejected.
+#
+# Allowed keys:
+#   model.{provider, default}            default model for primary agent turns
+#   fallback_providers[].{provider, model} ordered fallback list
+#   auxiliary.vision.{provider, model}    vision/OCR task model routing
+#   cron.{model, model_provider}          fleet cron defaults (blank = inherit default)
+#
+# Individual cron job overrides remain in cron/jobs.json (per-job
+# model/provider fields) and are NOT duplicated here.
+#
+# Forbidden in this file (validation rejects the file if present):
+#   base_url, api_mode, extra_body, timeouts, token limits, fallback_chain,
+#   credentials/secret keys, provider definitions, deployment topology, or
+#   any other Hermes config. Those stay in config.yaml / .env and are never
+#   versioned here.
+#
+# Source of truth: this file. Dashboard model changes are NOT source of
+# truth — they live only in the untracked runtime config.yaml and are
+# overwritten on the next sync/restart. To change the model durably, edit
+# this file, commit, and let sync/restart apply it.
+#
+# Rollback: delete or revert this file, then sync/restart. The runtime
+# config restores the repo model defaults from config/hermes-config.yaml
+# on the next start.
+
+model:
+  provider: deepseek
+  default: deepseek-v4-pro
+
+fallback_providers:
+  - provider: ollama-cloud
+    model: glm-5.2:cloud
+
+auxiliary:
+  vision:
+    provider: ollama-cloud
+    model: kimi-k2.7-code
+
+cron:
+  model: ""
+  model_provider: ""

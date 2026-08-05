@@ -73,6 +73,7 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 | `skills/` | Agent skills (SKILL.md + executables) | Agent / manual |
 | `cron/jobs.json` | Cron job definitions loaded by Hermes | Manual / agent |
 | `avatars/` | Agent avatar images | Manual |
+| `hermes/models.yaml` | State-owned Hermes model selections (strict selection-only v1: default, fallback, auxiliary vision, cron defaults) | Manual |
 
 ## Mnemosyne Pilot: Archive Status of Memory Files
 
@@ -101,6 +102,39 @@ Full native Mnemosyne tools are available; this is upstream-native behavior.
 LLM consolidation can infer summaries/facts but is intentionally off pending a
 later explicit user decision on LLM provider, privacy, and cost. That decision
 and the future option are documented in `docs/memory-embeddings-evaluation.md`.
+
+## State-Owned Model Selections
+
+`hermes/models.yaml` is the canonical state file for the agent's model
+selections. It is a single root-only configuration — no profiles or
+multiplexing.
+
+- **Strict selection-only v1 contract.** ONLY `provider`/`model` selection is
+  allowed. The file carries exactly:
+  - `model.{provider, default}` — default model for primary agent turns
+  - `fallback_providers[].{provider, model}` — ordered fallback list
+  - `auxiliary.vision.{provider, model}` — vision/OCR task model routing
+  - `cron.{model, model_provider}` — fleet cron defaults (blank = inherit default)
+  Individual cron job overrides stay in `cron/jobs.json` (per-job
+  `model`/`provider` fields) and are NOT duplicated here.
+- **Forbidden in this file.** `base_url`, `api_mode`, `extra_body`, timeouts,
+  token limits, `fallback_chain`, credentials/secret keys, provider
+  definitions, deployment topology, or any other Hermes config. Those live in
+  `config.yaml` / `.env` and are never versioned here.
+- **Validation.** State changes are validated before sync commit; invalid
+  files (unknown keys, forbidden fields, or schema violations) are rejected
+  and never reach the runtime config.
+- **Source of truth.** This file is the source of truth for model selections.
+  Dashboard model changes are NOT source of truth — they live only in the
+  untracked runtime `config.yaml` and are overwritten on the next
+  sync/restart. To change the model durably, edit this file, commit, and let
+  sync/restart apply it.
+- **Persistence timing.** State changes are applied at sync/start. The
+  workspace sync mirrors `hermes/models.yaml` to `/opt/data/hermes/models.yaml`
+  and the container init applies it to the runtime config on startup.
+- **Rollback.** Delete or revert this file, then sync/restart. The runtime
+  config restores the repo model defaults from `config/hermes-config.yaml`
+  on the next start.
 
 ## Security
 

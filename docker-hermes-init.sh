@@ -108,13 +108,29 @@ migrate_existing_toggles() {
 
 apply_sidecars_and_policy() {
     if [ ! -f "$JOSEMAR_SKILL_STATE" ]; then
-        log "josemar_skill_state helper missing; skipping toggle apply/policy"
+        log "josemar_skill_state helper missing"
+        # Fail-closed: if a models.yaml is present, init must fail nonzero
+        # because the overlay cannot be validated/applied. Absence of
+        # models.yaml is valid (rollback — no overlay to apply). Do NOT
+        # silently boot the template configuration when a present
+        # models.yaml cannot be validated/applied.
+        if [ -f "${WORKSPACE_DIR}/hermes/models.yaml" ]; then
+            log "ERROR: models.yaml present but helper unavailable; cannot validate/apply"
+            return 1
+        fi
+        log "No models.yaml present; skipping toggle apply/policy"
         return 0
     fi
 
-    log "Applying skill toggle sidecars and enforcing policy"
-    WORKSPACE_DIR="$WORKSPACE_DIR" /opt/hermes/.venv/bin/python3 "$JOSEMAR_SKILL_STATE" apply-all \
-        || log "WARNING: skill toggle apply/policy failed; continuing"
+    log "Applying skill toggle sidecars, models.yaml overlay, and enforcing policy"
+    # Fail-closed: a models.yaml validation failure (or any apply error) must
+    # NOT silently boot the template configuration. The helper validates the
+    # full models.yaml before mutating config (last-known-good preserved on
+    # failure). Propagate the nonzero exit so container startup surfaces the
+    # error instead of silently continuing with template defaults.
+    WORKSPACE_DIR="$WORKSPACE_DIR" \
+    JOSEMAR_TEMPLATE_CONFIG="$SOURCE_CONFIG" \
+    /opt/hermes/.venv/bin/python3 "$JOSEMAR_SKILL_STATE" apply-all
 }
 
 migrate_existing_toggles
@@ -480,7 +496,20 @@ fi
 # After the template overwrite and workspace clone/sync/seed, apply the
 # canonical sidecars back to default/named configs and enforce the Josemar
 # skill policy (creation_nudge_interval=0, write_approval=true,
-# curator.enabled=false) while preserving unrelated config keys.
+# curator.enabled=false) while preserving unrelated config keys. The same
+# apply-all step also layers the state-owned model authoring overlay
+# (agent-state/hermes/models.yaml) onto the default runtime config AFTER
+# the template copy + workspace sync, so the operator's git-backed model
+# selection wins over template defaults. models.yaml is validated fully
+# before mutating config (fail-closed); a malformed file leaves the
+# config untouched (last-known-good preserved) and the helper returns
+# nonzero so init does NOT silently boot the template configuration after
+# invalid state. When models.yaml is absent/empty, state-owned keys are
+# restored to the repo template defaults (rollback) using the template
+# config passed via JOSEMAR_TEMPLATE_CONFIG. Application happens only
+# through the shared advisory lock so dashboard writes and sync never
+# race; no unrelated-field loss and no changes occur from validation
+# failures.
 apply_sidecars_and_policy
 
 # The migration/seed/apply steps above can create the dedicated

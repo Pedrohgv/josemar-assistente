@@ -28,3 +28,11 @@ cron/jobs.json
 # absent on a pre-feature deployment; absence is acceptable.
 hermes/skill-toggles/default.json
 hermes/skill-toggles/profiles/*.json
+
+# Josemar state-owned Hermes model selections. Strict selection-only v1
+# contract (no profiles/multiplexing). ONLY provider/model selection is
+# versioned — no base_url, api_mode, extra_body, timeouts, token limits,
+# fallback_chain, credentials, provider definitions, or topology. State
+# changes are validated before sync commit; invalid files are rejected.
+# Dashboard model changes are not source of truth.
+hermes/models.yaml

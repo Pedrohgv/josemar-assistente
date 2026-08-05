@@ -809,11 +809,15 @@ class SyncAndApplyBehavioralTests(unittest.TestCase):
         # The sync command's own probe output must also report blocked.
         self.assertIn("LOCK-BLOCKED", stdout)
 
-    def test_apply_failure_after_sync_does_not_change_exit_status(self) -> None:
-        """If apply raises after a successful sync, exit status stays 0.
+    def test_apply_failure_after_sync_fails_nonzero(self) -> None:
+        """If apply raises after a successful sync, exit status is nonzero.
 
-        Sync succeeded and that fact is reported faithfully; the apply
-        failure is captured in the statuses list with an ``error:`` segment.
+        Fail-closed: an apply failure (including a models overlay validation
+        failure) must make sync-and-apply fail nonzero so the cron run does
+        not silently boot the template configuration. The apply failure is
+        captured in the statuses list with an ``error:`` segment. The runtime
+        config is left untouched (last-known-good preserved) because the
+        overlay validates fully before mutating.
         """
         script = self._make_sync_script(body="echo SYNC_OK\n")
         with mock.patch.dict(os.environ, {"WORKSPACE_DIR": str(self.workspace)}):
@@ -821,7 +825,7 @@ class SyncAndApplyBehavioralTests(unittest.TestCase):
                 self.m, "_apply_all_sidecars_and_policy_unlocked", side_effect=RuntimeError("boom")
             ):
                 exit_status, statuses, output = self.m.sync_and_apply([str(script)])
-        self.assertEqual(exit_status, 0)
+        self.assertNotEqual(exit_status, 0)
         self.assertTrue(any("error:" in s for s in statuses))
 
 
