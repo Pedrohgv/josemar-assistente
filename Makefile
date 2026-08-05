@@ -3,8 +3,14 @@
 	test-mnemosyne-retrieval-synthetic-regression test-mnemosyne-retrieval-activation test-mnemosyne-retrieval-activation-evidence \
 	test-mnemosyne-retrieval-activation-reviewed
 
+# Python interpreter used by the default test target.
+# Prefer the local virtualenv when present; otherwise fall back to `python3`
+# so CI (which has no venv and injects deps via TEST_DEPS_DIR/PYTHONPATH) and
+# other venv-less environments can run `make test` unchanged.
+PYTHON ?= $(shell test -x venv/bin/python3 && echo venv/bin/python3 || echo python3)
+
 test:
-	python3 -m unittest discover -s tests -v
+	$(PYTHON) -m unittest discover -s tests -v
 
 test-runtime:
 	RUN_DOCKER_TESTS=1 python3 -m unittest discover -s tests/runtime -v

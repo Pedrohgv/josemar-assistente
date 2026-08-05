@@ -30,7 +30,7 @@ CONFIG_PATH = REPO_ROOT / "config" / "hermes-config.yaml"
 DOCKERFILE_PATH = REPO_ROOT / "Dockerfile.hermes"
 COMPOSE_PATH = REPO_ROOT / "docker-compose.yml"
 ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
-EXPECTED_IMAGE = "nousresearch/hermes-agent:v2026.7.20"
+EXPECTED_IMAGE = "nousresearch/hermes-agent:v2026.8.3"
 LIVE_MANIFEST = REPO_ROOT / "agent-state" / ".sync-manifest"
 LIVE_GITIGNORE = REPO_ROOT / "agent-state" / ".gitignore"
 TEMPLATE_MANIFEST = REPO_ROOT / "templates" / "agent-state-template" / ".sync-manifest"
@@ -889,7 +889,7 @@ class DockerfileContractTests(unittest.TestCase):
 
 
 class HermesUpgradeContractTests(unittest.TestCase):
-    """Narrow contract tests for the Hermes v2026.7.20 upgrade.
+    """Narrow contract tests for the Hermes v2026.8.3 upgrade.
 
     Four focused tests: image pins across the three source-of-truth files,
     config schema version plus raw comment, approvals defaults, and the
@@ -918,9 +918,9 @@ class HermesUpgradeContractTests(unittest.TestCase):
             )
 
     def test_config_schema_and_comment_match_version(self) -> None:
-        """Parsed config schema is 33 and raw comment names v2026.7.20 with no stale tag."""
+        """Parsed config schema is 33 and raw comment names v2026.8.3 with no stale tag."""
         text = CONFIG_PATH.read_text(encoding="utf-8")
-        self.assertIn("nousresearch/hermes-agent:v2026.7.20", text)
+        self.assertIn("nousresearch/hermes-agent:v2026.8.3", text)
         self.assertNotIn("nousresearch/hermes-agent:v2026.7.7.2", text)
         try:
             import yaml
@@ -941,10 +941,10 @@ class HermesUpgradeContractTests(unittest.TestCase):
         self.assertEqual(approvals["cron_mode"], "deny")
         self.assertEqual(approvals["deny"], [])
 
-    def test_patch_docstring_names_v2026_7_20(self) -> None:
+    def test_patch_docstring_names_v2026_8_3(self) -> None:
         """Build-time patch docstring names the new Hermes version and not the old one."""
         text = PATCH_PATH.read_text(encoding="utf-8")
-        self.assertIn("Hermes v2026.7.20", text)
+        self.assertIn("Hermes v2026.8.3", text)
         self.assertNotIn("Hermes v2026.7.7.2", text)
 
 
