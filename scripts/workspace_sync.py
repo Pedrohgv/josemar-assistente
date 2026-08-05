@@ -84,6 +84,10 @@ BARE_GBRAIN_FORMS: tuple[str, ...] = (".gbrain", ".gbrain/", ".gbrain/*", ".gbra
 ALLOWED_SCHEMA_PACK = ".gbrain/schema-packs/josemar/pack.yaml"
 
 # Intentional template wildcard pathspecs (the only allowed globs).
+# ``hermes/models.yaml`` is a plain explicit path (no glob chars), so it
+# does not need to be allowlisted here — it is validated as a normal
+# manifest entry. The manifest/gitignore/template files that un-ignore it
+# are owned by another worker.
 ALLOWED_WILDCARD_PATHSPECS: frozenset[str] = frozenset({
     "avatars/*",
     "hermes/skill-toggles/profiles/*.json",
@@ -93,6 +97,21 @@ VALID_ACTIONS = ("status", "diff", "log", "commit", "push", "pull", "sync", "gh"
 
 LOCK_DIR = WORKSPACE_DIR / ".locks"
 LOCK_FILE = LOCK_DIR / "workspace-sync.lock"
+
+# Canonical models.yaml path inside the workspace (state-owned model
+# selections). Validated locally before staging/commit and remotely before
+# merge so invalid/malformed/secret model state never reaches the runtime
+# config. Validation reuses the canonical helper (no duplicated rules).
+MODELS_YAML_REL = "hermes/models.yaml"
+MODELS_YAML_PATH = WORKSPACE_DIR / MODELS_YAML_REL
+# Helper path: the josemar_skill_state module. In the container it is
+# installed at /opt/hermes/hermes_cli/josemar_skill_state.py; for tests it
+# is the repo's scripts/josemar_skill_state.py. Resolved lazily so the
+# import only happens when models.yaml is actually present.
+JOSEMAR_SKILL_STATE_PATH = os.environ.get(
+    "JOSEMAR_SKILL_STATE",
+    "/opt/hermes/hermes_cli/josemar_skill_state.py",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -580,10 +599,113 @@ def _validate_manifest_if_present() -> list[str]:
     return []
 
 
+# ---------------------------------------------------------------------------
+# models.yaml validation — reuse canonical helper (no duplicated rules)
+# ---------------------------------------------------------------------------
+
+
+def _load_models_validator():
+    """Import the canonical models.yaml validator from the helper.
+
+    Returns ``validate_models_state_from_text`` from
+    ``josemar_skill_state``, or ``None`` if the helper is unavailable.
+    Callers MUST treat ``None`` as fail-closed when a local or remote
+    ``hermes/models.yaml`` exists (validation cannot be skipped for a
+    present file). Absence of models.yaml remains valid regardless.
+    """
+    helper = os.environ.get("JOSEMAR_SKILL_STATE", JOSEMAR_SKILL_STATE_PATH)
+    if not helper or not os.path.exists(helper):
+        return None
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("josemar_skill_state", helper)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return getattr(module, "validate_models_state_from_text", None)
+
+
+def _validate_models_yaml_text(text: str) -> None:
+    """Validate models.yaml content using the canonical helper.
+
+    Raises ``SyncError`` on any validation failure (malformed YAML, schema
+    violation, secret keys, forbidden fields). An empty document (YAML
+    null) is valid (rollback semantics). Fail-closed: when the helper is
+    unavailable, validation MUST NOT be skipped — a present models.yaml
+    that cannot be validated is an error (nonzero, working/runtime config
+    unchanged). Absence of models.yaml is the only valid skip condition
+    and is handled by callers before invoking this function.
+    """
+    validator = _load_models_validator()
+    if validator is None:
+        # Fail-closed: a present models.yaml that cannot be validated
+        # (helper unavailable) is an error, not a skip.
+        raise SyncError(
+            "models.yaml validation required but josemar_skill_state helper "
+            "is unavailable (JOSEMAR_SKILL_STATE path missing or unreadable)"
+        )
+    try:
+        validator(text)
+    except ValueError as exc:
+        raise SyncError(f"models.yaml validation failed: {exc}") from exc
+
+
+def _validate_local_models_yaml() -> None:
+    """Validate the local working-copy models.yaml before staging/commit.
+
+    Fail-closed: invalid/malformed/secret model state must make sync fail
+    nonzero and leave the working/runtime config unchanged. Skipped when
+    models.yaml is absent (rollback — no state to validate). When the
+    helper is unavailable but models.yaml is present, raises SyncError
+    (fail-closed — validation cannot be skipped for a present file).
+    """
+    if not MODELS_YAML_PATH.exists():
+        return
+    _validate_models_yaml_text(MODELS_YAML_PATH.read_text(encoding="utf-8"))
+
+
+def _validate_head_models_yaml() -> None:
+    """Validate the HEAD-committed models.yaml before pushing.
+
+    Covers commits made by other paths (e.g. manual ``git commit``) so
+    invalid/malformed/secret model state never reaches the remote via a
+    pure push. Reads the HEAD file content via ``git show`` and validates
+    it with the canonical helper. Fail-closed: raises SyncError (nonzero)
+    if HEAD carries an invalid models.yaml or if a present models.yaml
+    cannot be validated. Skipped when HEAD does not carry models.yaml.
+    """
+    proc = _git("show", f"HEAD:{MODELS_YAML_REL}", cwd=WORKSPACE_DIR, check=False)
+    if proc.returncode != 0:
+        # HEAD does not carry models.yaml — acceptable.
+        return
+    _validate_models_yaml_text(proc.stdout)
+
+
+def _validate_remote_models_yaml(remote_ref: str) -> None:
+    """Validate the candidate remote models.yaml before accepting/merging.
+
+    Reads the remote file content via ``git show`` and validates it with
+    the canonical helper. Fail-closed: invalid remote model state must
+    make sync fail nonzero and leave the working/runtime config unchanged.
+    Skipped when the remote does not carry models.yaml (rollback — absent
+    remote means restore template defaults on merge).
+    """
+    proc = _git("show", f"{remote_ref}:{MODELS_YAML_REL}", cwd=WORKSPACE_DIR, check=False)
+    if proc.returncode != 0:
+        # Remote does not carry models.yaml — acceptable (rollback).
+        return
+    _validate_models_yaml_text(proc.stdout)
+
+
 def _stage_manifest_files() -> None:
     if not MANIFEST_PATH.exists():
         _warn("No .sync-manifest found, skipping selective staging")
         return
+    # Validate the local models.yaml before staging so invalid/malformed/
+    # secret model state never reaches the remote. Fail-closed: raises
+    # SyncError (nonzero) and leaves the working copy unchanged.
+    _validate_local_models_yaml()
     _register_user_skill_files()
     validated = _validate_manifest()
     _git("add", "-A", "--", ".gitignore", ".sync-manifest", cwd=WORKSPACE_DIR, check=False)
@@ -619,6 +741,11 @@ def _assert_remote_tree_safe(remote_ref: str) -> None:
       files/descendants, and broad roots.
     - Reject all other protected runtime entries and their descendants.
 
+    Also validates the candidate remote ``hermes/models.yaml`` content
+    using the canonical helper so invalid/malformed/secret model state is
+    rejected before merge (fail-closed: nonzero, working/runtime config
+    unchanged).
+
     Fail-closed: if ``git ls-tree`` fails for a ref that is expected to
     exist after a successful fetch, raises SyncError (not RemoteTreeError)
     rather than returning as safe.
@@ -638,6 +765,8 @@ def _assert_remote_tree_safe(remote_ref: str) -> None:
                 raise RemoteTreeError(f"State repo tracks protected runtime path: {path}")
         if path == ".gbrain":
             raise RemoteTreeError("State repo tracks protected runtime path: .gbrain")
+    # Validate the candidate remote models.yaml before accepting/merging.
+    _validate_remote_models_yaml(remote_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +865,15 @@ def _do_commit(payload: dict[str, Any], command_payload: str, action_source: str
 
 def _do_push(payload: dict[str, Any]) -> None:
     branch = _git_output("branch", "--show-current", cwd=WORKSPACE_DIR) or "main"
+    # Validate the HEAD-committed models.yaml before pushing so invalid/
+    # malformed/secret model state never reaches the remote, including
+    # commits made by other paths (e.g. manual git commit, lifecycle
+    # auto-commit). This re-checks the HEAD file content, not just the
+    # working copy, so a models.yaml committed by an external path is
+    # still gated. Fail-closed: raises SyncError (nonzero) if HEAD
+    # carries an invalid models.yaml or if a present models.yaml cannot
+    # be validated.
+    _validate_head_models_yaml()
     proc = _checked_push(f"HEAD:{branch}")
     if proc.returncode == 0:
         _emit_json({"success": True, "action": "push", "branch": branch})
@@ -786,6 +924,9 @@ def _do_sync(payload: dict[str, Any], command_payload: str, action_source: str) 
         head_sha = _rev_parse("HEAD")
         # Only retry push if origin/{branch} exists and differs from HEAD.
         if remote_sha and head_sha and remote_sha != head_sha:
+            # Validate HEAD models.yaml before pushing (covers commits by
+            # other paths). Fail-closed: raises SyncError on invalid content.
+            _validate_head_models_yaml()
             push_proc = _checked_push(f"HEAD:{branch}")
             if push_proc.returncode == 0:
                 _emit_json({"success": True, "action": "sync", "push": True, "branch": branch})
@@ -798,6 +939,9 @@ def _do_sync(payload: dict[str, Any], command_payload: str, action_source: str) 
     _git("commit", "-m", message, cwd=WORKSPACE_DIR)
     commit_sha = _git_output("rev-parse", "--short", "HEAD", cwd=WORKSPACE_DIR)
     branch = _git_output("branch", "--show-current", cwd=WORKSPACE_DIR) or "main"
+    # Validate HEAD models.yaml before pushing (covers commits by other
+    # paths). Fail-closed: raises SyncError on invalid content.
+    _validate_head_models_yaml()
     push_proc = _checked_push(f"HEAD:{branch}")
     if push_proc.returncode == 0:
         _emit_json({"success": True, "action": "sync", "commit": commit_sha,
@@ -975,6 +1119,9 @@ def _do_sync_start() -> None:
     if ref_proc.returncode != 0:
         # Remote branch doesn't exist after fetch — push local state.
         _log("Remote branch has no commits yet, pushing local state")
+        # Validate HEAD models.yaml before pushing (covers commits by
+        # other paths). Fail-closed: raises SyncError on invalid content.
+        _validate_head_models_yaml()
         push_proc = _checked_push(f"HEAD:{BRANCH}")
         if push_proc.returncode != 0:
             raise SyncError(f"Failed to push to remote: {push_proc.stderr.strip()}")
@@ -993,6 +1140,9 @@ def _do_sync_start() -> None:
     _safe_merge(f"origin/{BRANCH}", "Merge remote with conflict resolution")
 
     _log("Pushing merged result...")
+    # Validate HEAD models.yaml before pushing (covers commits by other
+    # paths). Fail-closed: raises SyncError on invalid content.
+    _validate_head_models_yaml()
     push_proc = _checked_push(f"HEAD:{BRANCH}")
     if push_proc.returncode != 0:
         raise SyncError(f"Failed to push to remote: {push_proc.stderr.strip()}")
@@ -1029,6 +1179,9 @@ def _do_periodic_sync() -> None:
 
     if committed or local_sha != remote_sha:
         _log("Pushing to remote...")
+        # Validate HEAD models.yaml before pushing (covers commits by
+        # other paths). Fail-closed: raises SyncError on invalid content.
+        _validate_head_models_yaml()
         push_proc = _checked_push(f"HEAD:{BRANCH}")
         if push_proc.returncode != 0:
             raise SyncError(f"Failed to push to remote: {push_proc.stderr.strip()}")

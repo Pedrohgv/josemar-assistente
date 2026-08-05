@@ -69,6 +69,75 @@ LOCK_FILENAME = ".skill-toggles.lock"
 
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
+# ---------------------------------------------------------------------------
+# State-owned model authoring overlay
+# ---------------------------------------------------------------------------
+#
+# The canonical tracked state file ``agent-state/hermes/models.yaml``
+# (version: 1) lets the operator author the model/fallback/auxiliary/cron
+# model selection in git-backed state, layered onto the runtime config
+# AFTER the repo template is copied and workspace sync has run. Only
+# root-level model selection is supported (no named profiles/multiplexing).
+#
+# Strict selection-only v1 schema (every unknown nested key is rejected):
+#   version: 1
+#   model:                       # root model selection
+#     provider: "<id>"           # required, nonempty
+#     default: "<model>"         # required, nonempty
+#   fallback_providers:         # optional list
+#     - provider: "<id>"         # required, nonempty
+#       model: "<model>"         # required, nonempty
+#   auxiliary:                   # optional mapping of task configs
+#     vision:                    # allowlisted task (at minimum)
+#       provider: "<id>"         # required, nonempty
+#       model: "<model>"         # required, nonempty
+#   cron:                        # optional
+#     model: "<model>"           # optional string (blank = inherit default)
+#     model_provider: "<id>"    # optional string (blank = inherit default)
+#
+# Forbidden in this file (validation rejects the file if present):
+#   base_url, api_mode, extra_body, context_length, max_tokens, timeouts,
+#   token limits, fallback_chain, credentials/secret keys, provider
+#   definitions, deployment topology, or any other Hermes config. Those
+#   stay in config.yaml / .env and are never versioned here.
+#
+# The overlay validates the full file BEFORE mutating the runtime config
+# and leaves the config untouched on any validation failure (fail-closed).
+# When models.yaml is absent/empty, state-owned keys are restored to the
+# repo template defaults (rollback), preserving unrelated runtime keys.
+# Application happens only through the shared advisory lock so dashboard
+# writes and sync never race; no unrelated-field loss and no changes
+# occur from validation failures.
+
+MODELS_SCHEMA_VERSION = 1
+MODELS_SIDECAR_NAME = "models.yaml"
+# Allowlisted auxiliary task names. ``vision`` is the minimum; the operator
+# may extend this set in code if new task configs are added upstream.
+ALLOWED_AUXILIARY_TASKS: Tuple[str, ...] = ("vision",)
+# State-owned config keys (owned by the overlay). Used for rollback: when
+# models.yaml is absent/empty, these keys are restored to template defaults.
+# Only provider/model selection is owned — template-owned sibling fields
+# (api_key, download_timeout, base_url, etc.) are preserved by deep merge.
+MODEL_SELECTION_KEYS: Tuple[str, ...] = ("provider", "default")
+FALLBACK_SELECTION_KEYS: Tuple[str, ...] = ("provider", "model")
+AUXILIARY_SELECTION_KEYS: Tuple[str, ...] = ("provider", "model")
+CRON_SELECTION_KEYS: Tuple[str, ...] = ("model", "model_provider")
+# Default repo template config path (copied to runtime config at init).
+# Used for rollback when models.yaml is absent/empty. May be overridden via
+# the JOSEMAR_TEMPLATE_CONFIG env var or the --template-config CLI flag.
+DEFAULT_TEMPLATE_CONFIG_PATH = "/opt/josemar/hermes/config.yaml"
+# Secret-looking key substrings that must never appear in models.yaml.
+_SECRET_KEY_RES = (
+    re.compile(r"(?:^|_)key$", re.IGNORECASE),
+    re.compile(r"(?:^|_)token$", re.IGNORECASE),
+    re.compile(r"^secret", re.IGNORECASE),
+    re.compile(r"_secret$", re.IGNORECASE),
+)
+# Explicitly rejected key names (api_key/key_env/api_key_env and friends).
+_EXPLICIT_REJECTED_KEYS: Tuple[str, ...] = (
+    "api_key", "key_env", "api_key_env", "apikey", "secret", "token",
+)
+
 
 # ---------------------------------------------------------------------------
 # Path resolution
@@ -103,6 +172,23 @@ def _profile_sidecar_path(canonical: str) -> Path:
     if canonical == "default":
         return _default_sidecar_path()
     return _profiles_sidecar_dir() / f"{canonical}.json"
+
+
+def _models_sidecar_path() -> Path:
+    """Return ``<workspace>/hermes/models.yaml`` (canonical tracked state)."""
+    return _workspace_root() / SIDECAR_DIR_NAME / MODELS_SIDECAR_NAME
+
+
+def _template_config_path() -> Path:
+    """Return the repo template config path (for rollback defaults).
+
+    Honors the ``JOSEMAR_TEMPLATE_CONFIG`` env var; defaults to the
+    container's mounted template path.
+    """
+    value = os.environ.get("JOSEMAR_TEMPLATE_CONFIG", "").strip()
+    if value:
+        return Path(value)
+    return Path(DEFAULT_TEMPLATE_CONFIG_PATH)
 
 
 def _canonical_profile_name(name: Optional[str]) -> str:
@@ -476,6 +562,487 @@ def policy_violations(config: Dict[str, Any]) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# State-owned model authoring overlay (models.yaml)
+# ---------------------------------------------------------------------------
+
+
+def _is_secret_looking_key(key: str) -> bool:
+    """Return True for keys that look like secrets (api_key, token, etc.)."""
+    if key in _EXPLICIT_REJECTED_KEYS:
+        return True
+    return any(pattern.search(key) for pattern in _SECRET_KEY_RES)
+
+
+def _validate_no_secret_keys(node: Any, path: str) -> None:
+    """Recursively reject any secret-looking keys anywhere in ``node``."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{path}: non-string key {key!r}")
+            if _is_secret_looking_key(key):
+                raise ValueError(f"{path}: secret-looking key {key!r} is not allowed")
+            _validate_no_secret_keys(value, f"{path}.{key}")
+    elif isinstance(node, list):
+        for idx, item in enumerate(node):
+            _validate_no_secret_keys(item, f"{path}[{idx}]")
+
+
+def _validate_str(value: Any, path: str, *, required: bool = False) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{path}: must be a string, got {type(value).__name__}")
+    if required and not value.strip():
+        raise ValueError(f"{path}: must be a non-empty string")
+    return value
+
+
+def _reject_unknown_keys(node: Dict[str, Any], allowed: Set[str], path: str) -> None:
+    extra = set(node.keys()) - allowed
+    if extra:
+        raise ValueError(f"{path}: unknown key(s) {sorted(extra)!r}")
+
+
+def _validate_root_model(node: Any) -> None:
+    if not isinstance(node, dict):
+        raise ValueError(f"model: must be a mapping, got {type(node).__name__}")
+    # Strict selection-only: only provider + default.
+    _reject_unknown_keys(node, set(MODEL_SELECTION_KEYS), "model")
+    _validate_str(node.get("provider"), "model.provider", required=True)
+    _validate_str(node.get("default"), "model.default", required=True)
+
+
+def _validate_fallback_entry(node: Any, path: str) -> None:
+    if not isinstance(node, dict):
+        raise ValueError(f"{path}: must be a mapping, got {type(node).__name__}")
+    # Strict selection-only: only provider + model.
+    _reject_unknown_keys(node, set(FALLBACK_SELECTION_KEYS), path)
+    _validate_str(node.get("provider"), f"{path}.provider", required=True)
+    _validate_str(node.get("model"), f"{path}.model", required=True)
+
+
+def _validate_fallback_providers(node: Any) -> None:
+    if node is None:
+        return
+    if not isinstance(node, list):
+        raise ValueError(f"fallback_providers: must be a list, got {type(node).__name__}")
+    for idx, entry in enumerate(node):
+        _validate_fallback_entry(entry, f"fallback_providers[{idx}]")
+
+
+def _validate_auxiliary_task(node: Any, task: str) -> None:
+    path = f"auxiliary.{task}"
+    if not isinstance(node, dict):
+        raise ValueError(f"{path}: must be a mapping, got {type(node).__name__}")
+    # Strict selection-only: only provider + model. Template-owned sibling
+    # fields (api_key, download_timeout, base_url, etc.) are NOT allowed
+    # here — they stay in config.yaml and are preserved by deep merge.
+    _reject_unknown_keys(node, set(AUXILIARY_SELECTION_KEYS), path)
+    _validate_str(node.get("provider"), f"{path}.provider", required=True)
+    _validate_str(node.get("model"), f"{path}.model", required=True)
+
+
+def _validate_auxiliary(node: Any) -> None:
+    if node is None:
+        return
+    if not isinstance(node, dict):
+        raise ValueError(f"auxiliary: must be a mapping, got {type(node).__name__}")
+    _reject_unknown_keys(node, set(ALLOWED_AUXILIARY_TASKS), "auxiliary")
+    for task in ALLOWED_AUXILIARY_TASKS:
+        if task in node:
+            _validate_auxiliary_task(node[task], task)
+
+
+def _validate_cron(node: Any) -> None:
+    if node is None:
+        return
+    if not isinstance(node, dict):
+        raise ValueError(f"cron: must be a mapping, got {type(node).__name__}")
+    # Only model + model_provider (blank = inherit default).
+    _reject_unknown_keys(node, set(CRON_SELECTION_KEYS), "cron")
+    if "model" in node:
+        _validate_str(node["model"], "cron.model")
+    if "model_provider" in node:
+        _validate_str(node["model_provider"], "cron.model_provider")
+
+
+def validate_models_state(data: Any) -> Dict[str, Any]:
+    """Validate a parsed models.yaml document against the strict v1 schema.
+
+    Returns the validated dict. Raises ``ValueError`` on any violation so
+    callers can surface a clear error and leave the runtime config untouched
+    (fail-closed). Rejects unknown keys, secret-looking keys, forbidden
+    fields (base_url/api_mode/extra_body/timeouts/fallback_chain/credentials),
+    and invalid shapes anywhere in the document.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"models.yaml: must be a mapping, got {type(data).__name__}")
+    if data.get("version") != MODELS_SCHEMA_VERSION:
+        raise ValueError(
+            f"models.yaml: unsupported version {data.get('version')!r} "
+            f"(expected {MODELS_SCHEMA_VERSION})"
+        )
+    # Reject unknown top-level keys.
+    _reject_unknown_keys(
+        data, {"version", "model", "fallback_providers", "auxiliary", "cron"},
+        "models.yaml",
+    )
+    # Reject secret-looking keys anywhere in the document (deep scan).
+    _validate_no_secret_keys(data, "models.yaml")
+    if "model" in data:
+        _validate_root_model(data["model"])
+    _validate_fallback_providers(data.get("fallback_providers"))
+    _validate_auxiliary(data.get("auxiliary"))
+    _validate_cron(data.get("cron"))
+    return data
+
+
+def load_models_state(path: Path) -> Optional[Dict[str, Any]]:
+    """Load and validate ``models.yaml``. Returns ``None`` if absent.
+
+    Malformed YAML or schema violations raise ``ValueError`` so callers can
+    surface a clear error and leave the runtime config untouched. An empty
+    file (YAML null) returns ``None`` (rollback semantics: restore template
+    defaults).
+    """
+    if not path.exists():
+        return None
+    return validate_models_state_from_text(path.read_text(encoding="utf-8"))
+
+
+def validate_models_state_from_text(text: str) -> Optional[Dict[str, Any]]:
+    """Parse and validate a models.yaml document from raw text.
+
+    Returns the validated dict, or ``None`` for an empty document (YAML
+    null). Raises ``ValueError`` on malformed YAML or schema violations.
+    This is the canonical single validation entry point reused by
+    workspace_sync (local staging + remote candidate validation) so the
+    rules are never duplicated.
+    """
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "PyYAML is required for the models overlay but is not available "
+            "in this Python environment"
+        ) from exc
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"models.yaml: invalid YAML: {exc}") from exc
+    if data is None:
+        return None
+    return validate_models_state(data)
+
+
+def _merge_fallback_by_provider(
+    state_entries: List[Dict[str, Any]],
+    existing_entries: List[Any],
+) -> List[Dict[str, Any]]:
+    """Provider-matched fallback merge with consumed-entry semantics.
+
+    For each state entry (in order), find the first unconsumed existing
+    entry with the SAME provider. If found, preserve that existing entry's
+    runtime-only sibling fields (base_url/api_mode/api_key/extra_body) and
+    update only the state-owned provider/model. If no match (new provider,
+    duplicate beyond available count, or existing list exhausted), create a
+    minimal ``{provider, model}`` dict — runtime-only siblings are NEVER
+    transferred from one provider to another. Existing entries beyond the
+    state list length are dropped (the overlay owns the full chain length).
+
+    This handles duplicate providers (each state entry consumes one
+    matching existing entry) and reordering (siblings follow the provider
+    match, not the index).
+    """
+    # Build a list of (index, entry) for consumable existing entries.
+    consumable: List[Tuple[int, Dict[str, Any]]] = [
+        (i, e) for i, e in enumerate(existing_entries) if isinstance(e, dict)
+    ]
+    new_fb: List[Dict[str, Any]] = []
+    for state_entry in state_entries:
+        state_provider = state_entry.get("provider")
+        # Find the first unconsumed existing entry with the same provider.
+        match_idx: Optional[int] = None
+        for ci, (orig_idx, existing_entry) in enumerate(consumable):
+            if existing_entry.get("provider") == state_provider:
+                match_idx = ci
+                break
+        if match_idx is not None:
+            _, existing_entry = consumable.pop(match_idx)
+            merged = dict(existing_entry)
+            # Update only state-owned keys present in the state entry.
+            for key in FALLBACK_SELECTION_KEYS:
+                if key in state_entry:
+                    merged[key] = state_entry[key]
+            new_fb.append(merged)
+        else:
+            # No matching provider — minimal dict with only state-owned
+            # keys present in the state entry. No sibling transfer.
+            minimal = {k: state_entry[k] for k in FALLBACK_SELECTION_KEYS if k in state_entry}
+            new_fb.append(minimal)
+    return new_fb
+
+
+def apply_models_to_config(
+    config: Dict[str, Any], models: Dict[str, Any]
+) -> bool:
+    """Merge a validated models.yaml state into a runtime config dict.
+
+    Overlays ``model.{provider,default}``, ``fallback_providers`` (full
+    list replacement — the overlay owns the chain), ``auxiliary.<task>``
+    (deep merge — only provider/model are set, template-owned sibling
+    fields like api_key/download_timeout are preserved), and
+    ``cron.{model,model_provider}`` onto ``config``, preserving every
+    unrelated key. Returns True if any key was changed. Only the keys
+    present in ``models`` are written; absent keys in ``models`` do NOT
+    clear the corresponding config key (overlay semantics, not full
+    replacement). Rollback (absent/empty models) is handled by
+    :func:`restore_template_models_defaults`, not this function.
+    """
+    changed = False
+
+    def _set_nested(path: Tuple[str, ...], value: Any) -> None:
+        nonlocal changed
+        node: Any = config
+        for key in path[:-1]:
+            child = node.get(key)
+            if not isinstance(child, dict):
+                child = {}
+                node[key] = child
+            node = child
+        if node.get(path[-1]) != value:
+            node[path[-1]] = value
+            changed = True
+
+    if "model" in models:
+        model = models["model"]
+        _set_nested(("model", "provider"), model["provider"])
+        _set_nested(("model", "default"), model["default"])
+
+    if "fallback_providers" in models:
+        fb = models["fallback_providers"]
+        if fb is None:
+            fb = []
+        # Provider-matched merge: preserve runtime-only sibling fields
+        # (base_url/api_mode/api_key/extra_body) ONLY when the state entry's
+        # provider matches an existing entry's provider. This prevents
+        # transferring credentials/base_url from one provider to another.
+        # A consumed-entry mechanism handles duplicate providers and
+        # reordering: each existing entry is consumed at most once. State
+        # entries with no matching unconsumed existing entry (new provider,
+        # or a duplicate beyond the available count) become minimal
+        # {provider, model} dicts. Existing entries beyond the state list
+        # length are removed (the overlay owns the full chain length).
+        existing = config.get("fallback_providers")
+        if not isinstance(existing, list):
+            existing = []
+        new_fb = _merge_fallback_by_provider(fb, existing)
+        if config.get("fallback_providers") != new_fb:
+            config["fallback_providers"] = new_fb
+            changed = True
+
+    if "auxiliary" in models and models["auxiliary"] is not None:
+        for task in ALLOWED_AUXILIARY_TASKS:
+            if task in models["auxiliary"]:
+                task_state = models["auxiliary"][task]
+                # Deep merge: set only provider/model, preserve sibling
+                # template-owned fields (api_key, download_timeout, etc.).
+                _set_nested(("auxiliary", task, "provider"), task_state["provider"])
+                _set_nested(("auxiliary", task, "model"), task_state["model"])
+
+    if "cron" in models and models["cron"] is not None:
+        cron = models["cron"]
+        if "model" in cron:
+            _set_nested(("cron", "model"), cron["model"])
+        if "model_provider" in cron:
+            _set_nested(("cron", "model_provider"), cron["model_provider"])
+
+    return changed
+
+
+def restore_template_models_defaults(
+    config: Dict[str, Any], template_config: Dict[str, Any]
+) -> bool:
+    """Restore state-owned model keys to repo template defaults.
+
+    Used when models.yaml is absent/empty (rollback). Resets only the
+    state-owned selection keys to the template values, preserving every
+    unrelated runtime key. When the template does not define a state-owned
+    key, that key is removed from the runtime config (restored to absent,
+    which is the template default). Returns True if any key was changed.
+
+    State-owned keys (the overlay owns these; rollback resets them):
+      - model.provider, model.default
+      - fallback_providers (full list)
+      - auxiliary.<task>.provider, auxiliary.<task>.model (per allowlisted task)
+      - cron.model, cron.model_provider
+    Template-owned sibling fields (api_key, download_timeout, base_url, etc.)
+    are preserved — only the selection keys above are reset.
+    """
+    changed = False
+
+    def _set_nested(path: Tuple[str, ...], value: Any) -> None:
+        nonlocal changed
+        node: Any = config
+        for key in path[:-1]:
+            child = node.get(key)
+            if not isinstance(child, dict):
+                child = {}
+                node[key] = child
+            node = child
+        if node.get(path[-1]) != value:
+            node[path[-1]] = value
+            changed = True
+
+    def _del_nested(path: Tuple[str, ...]) -> None:
+        """Remove a nested key if present (restore to absent)."""
+        nonlocal changed
+        node: Any = config
+        for key in path[:-1]:
+            if not isinstance(node, dict) or key not in node:
+                return
+            node = node[key]
+        if isinstance(node, dict) and path[-1] in node:
+            del node[path[-1]]
+            changed = True
+
+    # model.provider, model.default
+    tmpl_model = template_config.get("model")
+    if isinstance(tmpl_model, dict):
+        for key in MODEL_SELECTION_KEYS:
+            if key in tmpl_model:
+                _set_nested(("model", key), tmpl_model[key])
+            else:
+                _del_nested(("model", key))
+    else:
+        # Template has no model section — remove state-owned model keys.
+        for key in MODEL_SELECTION_KEYS:
+            _del_nested(("model", key))
+    # fallback_providers (provider-matched merge; absent in template = remove)
+    # Restore template state-owned selection (provider/model) while
+    # preserving runtime-only sibling fields (base_url/api_mode/api_key/
+    # extra_body) ONLY when the template entry's provider matches an
+    # existing entry's provider. This prevents transferring credentials/
+    # base_url from one provider to another during rollback. Uses the
+    # same consumed-entry mechanism as apply (handles duplicates and
+    # reordering). Template entries with no match become minimal dicts.
+    # Existing entries beyond the template list length are removed.
+    tmpl_fb = template_config.get("fallback_providers")
+    if tmpl_fb is not None:
+        existing_fb = config.get("fallback_providers")
+        if not isinstance(existing_fb, list):
+            existing_fb = []
+        # Filter template entries to dicts with provider/model keys for
+        # the merge; the rollback restores only state-owned keys.
+        tmpl_entries: List[Dict[str, Any]] = [
+            e for e in tmpl_fb if isinstance(e, dict)
+        ]
+        new_fb = _merge_fallback_by_provider(tmpl_entries, existing_fb)
+        # For matched entries, _merge_fallback_by_provider already set
+        # provider/model from the template entry. For unmatched entries
+        # it created minimal {provider, model} dicts. But rollback must
+        # also handle the case where a template entry lacks a state-owned
+        # key (e.g. template has provider but no model) — remove that key
+        # from the merged entry. Re-process to enforce template key set.
+        # Build a provider->template-keys map for the removal pass.
+        tmpl_key_sets: Dict[str, set] = {}
+        for te in tmpl_entries:
+            p = te.get("provider")
+            if p is not None:
+                tmpl_key_sets.setdefault(p, set()).update(
+                    k for k in FALLBACK_SELECTION_KEYS if k in te
+                )
+        for entry in new_fb:
+            p = entry.get("provider")
+            if p is None:
+                continue
+            allowed = tmpl_key_sets.get(p, set(FALLBACK_SELECTION_KEYS))
+            for key in FALLBACK_SELECTION_KEYS:
+                if key not in allowed and key in entry:
+                    del entry[key]
+        if config.get("fallback_providers") != new_fb:
+            config["fallback_providers"] = new_fb
+            changed = True
+    else:
+        if "fallback_providers" in config:
+            del config["fallback_providers"]
+            changed = True
+    # auxiliary.<task>.provider/model (deep merge — preserve siblings)
+    tmpl_aux = template_config.get("auxiliary")
+    for task in ALLOWED_AUXILIARY_TASKS:
+        tmpl_task = tmpl_aux.get(task) if isinstance(tmpl_aux, dict) else None
+        if isinstance(tmpl_task, dict):
+            for key in AUXILIARY_SELECTION_KEYS:
+                if key in tmpl_task:
+                    _set_nested(("auxiliary", task, key), tmpl_task[key])
+                else:
+                    _del_nested(("auxiliary", task, key))
+        else:
+            for key in AUXILIARY_SELECTION_KEYS:
+                _del_nested(("auxiliary", task, key))
+    # cron.model, cron.model_provider
+    tmpl_cron = template_config.get("cron")
+    if isinstance(tmpl_cron, dict):
+        for key in CRON_SELECTION_KEYS:
+            if key in tmpl_cron:
+                _set_nested(("cron", key), tmpl_cron[key])
+            else:
+                _del_nested(("cron", key))
+    else:
+        for key in CRON_SELECTION_KEYS:
+            _del_nested(("cron", key))
+    return changed
+
+
+def apply_models_overlay(
+    config_path: Path,
+    *,
+    template_config_path: Optional[Path] = None,
+) -> str:
+    """Apply the models.yaml overlay to ``config_path`` under the shared lock.
+
+    Loads ``<workspace>/hermes/models.yaml``, validates it fully, and only
+    then merges it into the runtime config at ``config_path``. On any
+    validation failure the config is left untouched (fail-closed — no
+    mutation until complete validation succeeds).
+
+    When models.yaml is absent/empty (rollback), state-owned keys are
+    restored to the repo template defaults from ``template_config_path``
+    when provided, preserving unrelated runtime keys. When no template
+    path is provided, rollback is a no-op (the init template-copy step
+    already restored defaults).
+
+    Returns a short status string for logging:
+      - ``applied-models``: overlay applied
+      - ``no-models-sidecar``: absent and no template path (no-op)
+      - ``restored-template-defaults``: absent, restored from template
+    """
+    models_path = _models_sidecar_path()
+    models = load_models_state(models_path)  # raises on malformed
+    if models is None:
+        # Rollback: restore state-owned keys to template defaults.
+        if template_config_path is not None and template_config_path.exists():
+            template_config = _load_yaml(template_config_path)
+            if not isinstance(template_config, dict):
+                raise ValueError(
+                    f"{template_config_path} does not contain a YAML mapping"
+                )
+            config = _load_yaml(config_path) if config_path.exists() else {}
+            if not isinstance(config, dict):
+                raise ValueError(f"{config_path} does not contain a YAML mapping")
+            restore_template_models_defaults(config, template_config)
+            _dump_yaml(config_path, config)
+            return "restored-template-defaults"
+        return "no-models-sidecar"
+
+    config = _load_yaml(config_path) if config_path.exists() else {}
+    if not isinstance(config, dict):
+        raise ValueError(f"{config_path} does not contain a YAML mapping")
+
+    apply_models_to_config(config, models)
+    _dump_yaml(config_path, config)
+    return "applied-models"
+
+
+# ---------------------------------------------------------------------------
 # Hermes config load/save (runtime, uses PyYAML from Hermes venv)
 # ---------------------------------------------------------------------------
 
@@ -718,6 +1285,22 @@ def _apply_all_sidecars_and_policy_unlocked() -> List[str]:
             continue
         statuses.append(f"{canonical}:{status}")
 
+    # Apply the state-owned model authoring overlay (models.yaml) to the
+    # default profile config only — root-only model selection, no named
+    # profile multiplexing. Layered AFTER sidecar+policy so the operator's
+    # model choices win over the template defaults. Fail-closed: a
+    # malformed models.yaml raises ValueError (propagated to make apply-all
+    # fail nonzero) and leaves the runtime config untouched (last-known-good
+    # preserved — no mutation until complete validation succeeds). When
+    # models.yaml is absent/empty, state-owned keys are restored to the
+    # repo template defaults (rollback), preserving unrelated runtime keys.
+    default_config = workspace / "config.yaml"
+    if default_config.exists():
+        models_status = apply_models_overlay(
+            default_config, template_config_path=_template_config_path()
+        )
+        statuses.append(f"models:{models_status}")
+
     # Report orphan sidecars: a named-profile sidecar with no matching
     # config.yaml. The default sidecar is always reconciled when the
     # default config exists, so it is not orphaned here.
@@ -761,12 +1344,14 @@ def sync_and_apply(
     all happen inside one critical section.
 
     Returns ``(sync_exit_status, apply_statuses, sync_output)``. The sync
-    command's exit status is preserved exactly. If apply fails after a
-    successful sync, the failure is captured in ``apply_statuses`` (each
-    entry carries an ``error:`` segment) but does NOT change the returned
-    exit status — sync succeeded and that fact is reported faithfully.
-    Callers that want apply failures to fail the cron run can inspect
-    ``apply_statuses`` for ``error:`` segments.
+    command's exit status is preserved exactly when sync fails. When sync
+    succeeds but apply fails (including a models overlay validation
+    failure), the returned exit status is nonzero (``1``) so the cron run
+    fails closed — invalid model state must not silently boot the template
+    configuration. The apply failure is captured in ``apply_statuses`` (each
+    entry carries an ``error:`` segment). The runtime config is left
+    untouched (last-known-good preserved) because the overlay validates
+    fully before mutating.
 
     The lock is acquired BEFORE the sync command runs, so a concurrent
     dashboard toggle write is blocked for the whole sync+apply window.
@@ -793,7 +1378,14 @@ def sync_and_apply(
         try:
             statuses = _apply_all_sidecars_and_policy_unlocked()
         except Exception as exc:
-            statuses = [f"apply:error:{exc}"]
+            # Apply failure (including models overlay validation failure)
+            # must fail the cron run nonzero. The runtime config is left
+            # untouched (last-known-good preserved) because the overlay
+            # validates fully before mutating.
+            return 1, [f"apply:error:{exc}"], sync_output
+        # If any apply status carries an error segment, fail nonzero.
+        if any(":error:" in s for s in statuses):
+            return 1, statuses, sync_output
         return 0, statuses, sync_output
 
 
@@ -819,11 +1411,93 @@ def _cli_apply(args: argparse.Namespace) -> int:
 
 
 def _cli_apply_all(args: argparse.Namespace) -> int:
-    statuses = apply_all_sidecars_and_policy()
+    try:
+        statuses = apply_all_sidecars_and_policy()
+    except ValueError as exc:
+        # Models overlay validation failure must fail nonzero (fail-closed).
+        print(f"apply-all: error: {exc}", file=sys.stderr)
+        return 1
     if not statuses:
         print("apply-all: no profiles to reconcile")
     for entry in statuses:
         print(f"apply-all: {entry}")
+    # Any error segment in statuses means fail-closed nonzero.
+    if any(":error:" in s for s in statuses):
+        return 1
+    return 0
+
+
+def _cli_apply_models(args: argparse.Namespace) -> int:
+    hermes_home = Path(args.hermes_home) if args.hermes_home else _workspace_root()
+    # Root-only: reject named profiles or any hermes home other than the
+    # workspace root. The overlay does not support profile multiplexing.
+    workspace = _workspace_root()
+    try:
+        home_resolved = hermes_home.resolve()
+        workspace_resolved = workspace.resolve()
+    except OSError as exc:
+        print(f"apply-models: error: cannot resolve paths: {exc}", file=sys.stderr)
+        return 2
+    if home_resolved != workspace_resolved:
+        print(
+            "apply-models: error: models overlay is root-only; "
+            "rejecting named profile or non-workspace hermes home",
+            file=sys.stderr,
+        )
+        return 2
+    # Root-only config path: --config-path must be exactly
+    # <workspace-root>/config.yaml. Reject profile, arbitrary, symlink,
+    # and path-alias config paths so the overlay never writes outside the
+    # workspace root. The check is on the LITERAL/non-resolved path (not
+    # just resolved equivalence) so a symlink that resolves to the root
+    # config is still rejected.
+    expected_config = workspace / "config.yaml"
+    config_path = Path(args.config_path) if args.config_path else expected_config
+    # Literal path check: the non-resolved string must equal the expected
+    # path. This rejects path aliases and relative paths that resolve to
+    # the same target but are not the canonical literal path.
+    if str(config_path) != str(expected_config):
+        print(
+            "apply-models: error: --config-path must be exactly "
+            f"{expected_config} for the root-only overlay; rejecting "
+            f"{config_path}",
+            file=sys.stderr,
+        )
+        return 2
+    # Symlink check: reject if the config path (or any parent component)
+    # is a symlink. A symlink that resolves to the root config is still
+    # rejected — do not rely only on resolved equivalence.
+    try:
+        if config_path.is_symlink():
+            print(
+                "apply-models: error: --config-path must not be a symlink; "
+                f"rejecting {config_path}",
+                file=sys.stderr,
+            )
+            return 2
+    except OSError as exc:
+        print(f"apply-models: error: cannot stat config path: {exc}", file=sys.stderr)
+        return 2
+    # Also resolve to confirm the final target matches the workspace root
+    # config (catches parent-directory symlinks and other aliases).
+    try:
+        config_resolved = config_path.resolve()
+        expected_resolved = expected_config.resolve()
+    except OSError as exc:
+        print(f"apply-models: error: cannot resolve config path: {exc}", file=sys.stderr)
+        return 2
+    if config_resolved != expected_resolved:
+        print(
+            "apply-models: error: --config-path must resolve to "
+            f"{expected_config} for the root-only overlay; rejecting "
+            f"{config_path}",
+            file=sys.stderr,
+        )
+        return 2
+    template_path = Path(args.template_config) if args.template_config else _template_config_path()
+    with SkillStateLock():
+        status = apply_models_overlay(config_path, template_config_path=template_path)
+    print(f"apply-models: {status} {config_path}")
     return 0
 
 
@@ -893,6 +1567,16 @@ def build_cli() -> argparse.ArgumentParser:
         help="Apply all present sidecars + policy (init, under one lock).",
     )
     p_apply_all.set_defaults(func=_cli_apply_all)
+
+    p_apply_models = sub.add_parser(
+        "apply-models",
+        help="Apply the state-owned models.yaml overlay to the default config (init post-sync).",
+    )
+    p_apply_models.add_argument("--hermes-home", default=None)
+    p_apply_models.add_argument("--config-path", default=None)
+    p_apply_models.add_argument("--template-config", default=None,
+                                help="Repo template config path for rollback defaults.")
+    p_apply_models.set_defaults(func=_cli_apply_models)
 
     p_sync = sub.add_parser(
         "sync-and-apply",

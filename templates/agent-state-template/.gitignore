@@ -44,3 +44,10 @@
 !hermes/skill-toggles/default.json
 !hermes/skill-toggles/profiles/
 !hermes/skill-toggles/profiles/*.json
+
+# Josemar state-owned Hermes model selections. Strict selection-only v1
+# contract (no profiles/multiplexing). ONLY provider/model selection is
+# versioned — no base_url, api_mode, extra_body, timeouts, token limits,
+# fallback_chain, credentials, provider definitions, or topology. The lock
+# file and any other hermes/ artifacts stay ignored by deny-by-default.
+!hermes/models.yaml

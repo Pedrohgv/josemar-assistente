@@ -348,6 +348,41 @@ policy are backed by git-tracked state instead of the noisy, sensitive
   contain only toggle state, so they are safe to version and survive
   redeploys without dragging unrelated config along.
 
+### State-owned model selections
+
+Josemar pins Hermes so the agent's model selections are backed by
+git-tracked state instead of the sensitive, untracked `/opt/data/config.yaml`.
+
+- **Canonical state file.** `agent-state/hermes/models.yaml` is the single
+  root-only configuration. There are no profiles or multiplexing in this PR.
+  The template ships a matching `templates/agent-state-template/hermes/models.yaml`.
+- **Strict selection-only v1 contract.** ONLY `provider`/`model` selection is
+  allowed. The file carries exactly:
+  - `model.{provider, default}` — default model for primary agent turns
+  - `fallback_providers[].{provider, model}` — ordered fallback list
+  - `auxiliary.vision.{provider, model}` — vision/OCR task model routing
+  - `cron.{model, model_provider}` — fleet cron defaults (blank = inherit default)
+  Individual cron job overrides remain in `cron/jobs.json` (per-job
+  `model`/`provider` fields) and are NOT duplicated here.
+- **Forbidden in this file.** `base_url`, `api_mode`, `extra_body`, timeouts,
+  token limits, `fallback_chain`, credentials/secret keys, provider
+  definitions, deployment topology, or any other Hermes config. Those stay in
+  `config.yaml` / `.env` and are never versioned here.
+- **Validation.** State changes are validated before sync commit; invalid
+  files (unknown keys, forbidden fields, or schema violations) are rejected
+  and never reach the runtime config.
+- **Source of truth.** This file is the source of truth for model selections.
+  Dashboard model changes are NOT source of truth — they live only in the
+  untracked runtime `config.yaml` and are overwritten on the next
+  sync/restart. To change the model durably, edit
+  `agent-state/hermes/models.yaml`, commit, and let sync/restart apply it.
+- **Persistence timing.** State changes are applied at sync/start. The
+  workspace sync mirrors `hermes/models.yaml` to `/opt/data/hermes/models.yaml`
+  and the container init applies it to the runtime config on startup.
+- **Rollback.** Delete or revert `hermes/models.yaml` in the state repo, then
+  sync/restart. The runtime config restores the repo model defaults from
+  `config/hermes-config.yaml` on the next start.
+
 Current repo-shipped skills:
 
 - `gbrain`: native gbrain vault interface (search, get, capture, put, link, backlinks) used directly via the pinned `gbrain` CLI. Keyword-only search, no embeddings. Operator activation via `josemar-gbrain reindex`; periodic manual-edit reconciliation via `josemar-gbrain refresh` every 5 minutes by default.
