@@ -1,0 +1,61 @@
+{
+  "schema_version": 2,
+  "dataset_kind": "public-standard-activation",
+  "language": "pt-BR",
+  "provenance": "Official MTEB-BR/faquad-ir benchmark, converted deterministically from pinned Parquet artifacts.",
+  "activation_evidence": true,
+  "review_status": "NOT_APPLICABLE",
+  "source": {
+    "dataset_id": "MTEB-BR/faquad-ir",
+    "revision": "c081a26d706764f1d09de17792f5eb995f51b124",
+    "split": "test",
+    "official_split_names": [
+      "test"
+    ],
+    "urls": {
+      "corpus": "https://huggingface.co/datasets/MTEB-BR/faquad-ir/resolve/c081a26d706764f1d09de17792f5eb995f51b124/corpus/test-00000-of-00001.parquet",
+      "queries": "https://huggingface.co/datasets/MTEB-BR/faquad-ir/resolve/c081a26d706764f1d09de17792f5eb995f51b124/queries/test-00000-of-00001.parquet",
+      "qrels": "https://huggingface.co/datasets/MTEB-BR/faquad-ir/resolve/c081a26d706764f1d09de17792f5eb995f51b124/qrels/test-00000-of-00001.parquet"
+    },
+    "license": "CC-BY-4.0",
+    "attribution": "MTEB-BR/faquad-ir, repackaged from FaQuAD; source https://github.com/liafacom/faquad.",
+    "citation": "Sayama, H. F., Araujo, A. V., & Fernandes, E. R. (2019). FaQuAD: Reading Comprehension Dataset in the Domain of Brazilian Higher Education. BRACIS 2019, 443-448. DOI: 10.1109/BRACIS.2019.00084.",
+    "retrieved_at": "2026-08-02",
+    "artifact_sha256": {
+      "corpus": "ffcef36585e9ccdebc6f054b92a8692b34d222c45f6d0bfc0e46481b329435bd",
+      "queries": "03c5d5907f6d1b75551e761f30d8ee7ad8c05d3ce45593141bf6b037c5ecd053",
+      "qrels": "546b931a4f4ade81a17ce1181540560c5b2d7b67b42f0c8d4ae974b1d613a768"
+    }
+  },
+  "counts": {
+    "corpus": 244,
+    "queries": 900,
+    "qrels": 900
+  },
+  "generated_sha256": {
+    "corpus_jsonl": "80a62cefe1a654c8aa3385708b330737081b8be0c01fe207af4b114f41493f91",
+    "queries_jsonl": "d2edcb8f1fde3240246f7e5e15965229b8c708029f337373071086e48e072885",
+    "qrels_jsonl": "aeaf4278f44c9fb2cfde9067d95a0f2b1919502332af62b6876992a3272bdfd5"
+  },
+  "threshold_policy_version": "faquad-ir-v1",
+  "threshold_policy_digest": "49b1b984a767082a7fb61131790da1239e35af404a8ccec8d136858c1fc9030e",
+  "qrels": {
+    "positive_score_policy": "All 900 source judgments have score=1; every judgment is preserved in qrels.jsonl and expected_ids."
+  },
+  "difficulty_proxy": {
+    "name": "query_word_count",
+    "rule": "<=5 easy, 6-10 medium, >10 hard",
+    "human_difficulty": false,
+    "used_for_thresholds": false
+  },
+  "thresholds": {
+    "min_queries": 900,
+    "min_recall_at_1": 0.35,
+    "min_recall_at_3": 0.55,
+    "min_mrr": 0.45,
+    "min_ndcg_at_10": 0.55,
+    "min_macro_recall_at_3": 0.2,
+    "max_regression_vs_keyword_recall_at_3": 0.1
+  },
+  "notes": "Public standard activation evidence. No review.json is required; READY still requires all vector, metric, macro, and regression criteria."
+}

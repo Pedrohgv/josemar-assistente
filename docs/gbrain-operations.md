@@ -115,7 +115,7 @@ operator MUST verify the following after rebuild and before deploying:
 | `GBRAIN_BRAIN_REPO` | `/opt/data/obsidian` | Vault path gbrain indexes. |
 | `GBRAIN_SCHEMA_PACK` | `gbrain-base-v2` | Schema pack selector. Set to `josemar-user` to use the custom user-owned pack. |
 | `GBRAIN_SCHEMA_SOURCE_ROOT` | `/opt/data/.gbrain/schema-packs` | Source root for custom schema packs. The source pack for the selected `GBRAIN_SCHEMA_PACK` must exist at `<root>/<pack>/pack.yaml`. |
-| `GBRAIN_REFRESH_INTERVAL` | `5` | Hermes cron interval, in minutes, for `josemar-gbrain refresh`. Set to `0` to disable. Refresh deliberately uses `gbrain sync --no-embed` while embeddings are deferred; revisit when issue #65 enables embeddings. |
+| `GBRAIN_REFRESH_INTERVAL` | `5` | Hermes cron interval, in minutes, for `josemar-gbrain refresh`. Set to `0` to disable. Refresh deliberately uses `gbrain sync --no-embed` while embeddings are deferred; revisit only after issue #65 activation. See `docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation (not enabled in this branch). |
 | `GBRAIN_REFRESH_TIMEOUT` | `240` | Maximum seconds for the refresh child while it holds the shared TaskNotes/gbrain lock. |
 
 No new Docker volume is added. `GBRAIN_HOME` (`/opt/data`) is the parent;
@@ -211,9 +211,12 @@ exits successfully. The refresh child is bounded by `GBRAIN_REFRESH_TIMEOUT`
 recovery model.
 
 Refresh currently calls `gbrain sync --no-embed` because Josemar is in
-keyword-only/no-embedding mode. When embeddings are enabled (see issue #65),
-revisit whether refresh should drop `--no-embed` or whether embeddings should
-remain a separate scheduled job.
+keyword-only/no-embedding mode. Issue #65 (gbrain embeddings) is **not
+complete** and embeddings are not enabled in this branch. When embeddings are
+eventually activated, refresh must **remain** `--no-embed`; embedding stale
+pages is a separate scheduled job, not folded into the periodic refresh. See
+`docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation, the
+shared embedding service design, and the staged activation/rollback plan.
 
 ## Native Write-Through
 
@@ -257,6 +260,10 @@ provider key, `embedding_disabled` mode). This is expected and intentional in
 MVP. Activation configures keyword-only native gbrain search via
 `search.mcp_keyword_only=true`, which calls `engine.searchKeyword` and never
 the vector/hybrid provider path. Do not attempt to enable embeddings in MVP.
+Issue #65 (gbrain embeddings) is not complete; see
+`docs/memory-embeddings-evaluation.md` for the evaluation and the prerequisites
+landed in this branch (the optional `docker-compose.embeddings.yml` overlay and
+the pinned gbrain E5 preprocessing patch are present but inert).
 
 ## User-Owned Schema Pack Workflow
 

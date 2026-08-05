@@ -15,19 +15,29 @@ import asyncio
 from pathlib import Path
 import sys
 import tempfile
-import types
 import unittest
 from unittest.mock import patch
+
+try:  # package context (discovery)
+    from ._stub_import import stubbed_app_import
+except ImportError:  # direct execution: tests/aux_ml/ is sys.path[0]
+    from _stub_import import stubbed_app_import
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "aux-ml"))
-sys.modules.setdefault("pymupdf", types.ModuleType("pymupdf"))
-sys.modules.setdefault("httpx", types.ModuleType("httpx"))
-
-from app.model_registry import ModelRegistry, ModelSpec
-from app.service import AuxMLService
-from app.settings import Settings
+# Stub optional deps ONLY around the application import so the stubs do not
+# persist for the whole test process (a persistent fake httpx would poison
+# real httpx for other test modules — issue #91). The shared helper fully
+# restores sys.modules AND the app package's __dict__ attributes, so neither
+# `import app.child` nor `from app import child` can reuse fake-bound objects.
+# The bound objects (AuxMLService, ModelRegistry, Settings, _service_module)
+# remain valid and are used directly by `patch.object(_service_module, ...)`.
+with stubbed_app_import("pymupdf", "httpx"):
+    from app.model_registry import ModelRegistry, ModelSpec
+    from app.settings import Settings
+    from app.service import AuxMLService
+    import app.service as _service_module
 
 
 def _map_status_code(status: str) -> int:
@@ -101,7 +111,7 @@ class CancelHttpCodeTests(unittest.IsolatedAsyncioTestCase):
             service = AuxMLService(settings=_make_settings(tmp), registry=_make_registry(tmp), router=FakeRouter())
             gate = asyncio.Event()
             started = asyncio.Event()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr(gate, started)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr(gate, started)):
                 await service.start()
                 try:
                     first = await service.submit_job(
@@ -126,7 +136,7 @@ class CancelHttpCodeTests(unittest.IsolatedAsyncioTestCase):
             service = AuxMLService(settings=_make_settings(tmp), registry=_make_registry(tmp), router=FakeRouter())
             gate = asyncio.Event()
             started = asyncio.Event()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr(gate, started)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr(gate, started)):
                 await service.start()
                 try:
                     submitted = await service.submit_job(
@@ -147,7 +157,7 @@ class CancelHttpCodeTests(unittest.IsolatedAsyncioTestCase):
             service = AuxMLService(settings=_make_settings(tmp), registry=_make_registry(tmp), router=FakeRouter())
             gate = asyncio.Event()
             started = asyncio.Event()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr(gate, started)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr(gate, started)):
                 await service.start()
                 try:
                     submitted = await service.submit_job(
@@ -172,7 +182,7 @@ class CancelHttpCodeTests(unittest.IsolatedAsyncioTestCase):
             service = AuxMLService(settings=_make_settings(tmp), registry=_make_registry(tmp), router=FakeRouter())
             gate = asyncio.Event()
             started = asyncio.Event()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr(gate, started)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr(gate, started)):
                 await service.start()
                 try:
                     first = await service.submit_job(
@@ -199,7 +209,7 @@ class CancelHttpCodeTests(unittest.IsolatedAsyncioTestCase):
             service = AuxMLService(settings=_make_settings(tmp), registry=_make_registry(tmp), router=FakeRouter())
             gate = asyncio.Event()
             gate.set()
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr(gate)):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr(gate)):
                 await service.start()
                 try:
                     submitted = await service.submit_job(
@@ -221,7 +231,7 @@ class CancelHttpCodeTests(unittest.IsolatedAsyncioTestCase):
             async def failing_ocr(**kwargs):
                 raise RuntimeError("boom")
 
-            with patch("app.service.run_ocr_task", side_effect=failing_ocr):
+            with patch.object(_service_module, "run_ocr_task", side_effect=failing_ocr):
                 await service.start()
                 try:
                     submitted = await service.submit_job(
@@ -240,7 +250,7 @@ class CancelHttpCodeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
             service = AuxMLService(settings=_make_settings(tmp), registry=_make_registry(tmp), router=FakeRouter())
-            with patch("app.service.run_ocr_task", side_effect=_patched_ocr(asyncio.Event())):
+            with patch.object(_service_module, "run_ocr_task", side_effect=_patched_ocr(asyncio.Event())):
                 await service.start()
                 try:
                     with self.assertRaises(KeyError):

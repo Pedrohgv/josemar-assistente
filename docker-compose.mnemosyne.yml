@@ -1,0 +1,88 @@
+# Optional Mnemosyne pilot overlay (Phase 1).
+#
+# Apply together with docker-compose.embeddings.yml ONLY when the operator
+# opts into the Mnemosyne pilot:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.embeddings.yml:docker-compose.mnemosyne.yml
+#
+# This overlay is truly opt-in, mirroring docker-compose.browser-control.yml
+# and docker-compose.embeddings.yml: the base docker-compose.yml is unchanged
+# and base-only deploys are unaffected. It defines NO new service, NO host port,
+# NO new data volume, NO deployment setting, and NO gbrain activation.
+#
+# REQUIRES the embeddings overlay in the Compose-file sequence: it attaches
+# hermes to the `embeddings-net` network and relies on the remote E5 env vars
+# (MNEMOSYNE_EMBEDDINGS_VIA_API, MNEMOSYNE_EMBEDDING_MODEL, MNEMOSYNE_EMBEDDING_DIM,
+# MNEMOSYNE_EMBEDDING_QUERY_PREFIX, MNEMOSYNE_EMBEDDING_DOC_PREFIX,
+# MNEMOSYNE_EMBEDDING_API_URL) that are wired by docker-compose.embeddings.yml.
+# This overlay does NOT duplicate/redefine those remote E5 settings. Rendering
+# it without the embeddings overlay fails because `embeddings-net` is undefined.
+#
+# POLICY (Phase 1 pivot): upstream-native Mnemosyne, NOT curated-static
+# coexistence. When this overlay is enabled, the container init sets
+# memory.provider=mnemosyne, memory.memory_enabled=false,
+# memory.user_profile_enabled=false (disabling static MEMORY.md/USER.md
+# injection), and the nested memory.mnemosyne config block (default_scope
+# global, profile_isolation false, auto_sleep false, reflect disabled_for_cron
+# true / max_calls_per_session 0, sync_roles [user], skip contexts, explicit
+# sync turn limits 500/800). The tools key is intentionally OMITTED so the
+# provider exposes all upstream-native tools (including mutating operations).
+# MEMORY.md/USER.md remain at their versioned paths as explicit archive/rollback
+# material; they are NOT injected while the pilot is active.
+# memory.write_approval stays true as archive protection for built-in archive
+# writes but does not prevent passive capture or necessarily all Mnemosyne
+# tools. The overlay does NOT enable gbrain embeddings or alter the gbrain
+# wrapper's keyword-only behavior.
+#
+# PASSIVE-ONLY INGESTION: automatic ingestion is passive raw user-turn capture
+# (sync_turn). Explicit upstream-native mutation/management tools (including
+# mutating operations) remain available to the agent. No auto-sleep,
+# reflection, or LLM consolidation runs in the pilot.
+#
+# The env vars below are valid Mnemosyne env-var mirrors (they ARE in the
+# package's ENV_VAR_MAP). The authoritative nested config
+# (memory.mnemosyne.profile_isolation, memory.mnemosyne.auto_sleep) is set by
+# the container init via hermes_cli.config because those keys have NO env var
+# mapping or use a different nested key name. Remote E5 settings flow from the
+# embeddings overlay.
+#
+# MNEMOSYNE_DATA_DIR is the authoritative runtime storage override
+# (/opt/data/mnemosyne/data); MNEMOSYNE_HOME is NOT used.
+
+services:
+  hermes:
+    # Attach to the embeddings network provided by docker-compose.embeddings.yml.
+    # No new network is defined here.
+    networks:
+      josemar-network: null
+      embeddings-net: null
+    environment:
+      # ---- Provider activation gate (consumed by docker-hermes-init.sh) ----
+      # When set to "mnemosyne", the init script (run as the Hermes user, after
+      # the source config template is copied and skill policy is enforced)
+      # creates the dedicated data directory under /opt/data, runs the pinned
+      # wrapper installer idempotently against the Hermes venv, and sets the
+      # full nested runtime config (memory.provider, memory.memory_enabled,
+      # memory.user_profile_enabled, memory.mnemosyne.*) via the supported
+      # Hermes config interface. When unset/empty, the init runs rollback
+      # cleanup (removes installer-owned plugin/skill artifacts, resets
+      # provider/static flags to base template values) and preserves the DB.
+      - MNEMOSYNE_PROVIDER=mnemosyne
+      # Authoritative runtime storage path (inside /opt/data, no writable-volume
+      # allowlist change). Default DB is /opt/data/mnemosyne/data/mnemosyne.db.
+      - MNEMOSYNE_DATA_DIR=/opt/data/mnemosyne/data
+      # ---- Validated passive env mirrors (authoritative nested config set by init) ----
+      # Global cross-session capture scope.
+      - MNEMOSYNE_DEFAULT_SCOPE=global
+      # User-only sync: capture only primary user turns.
+      - MNEMOSYNE_SYNC_ROLES=user
+      # Skip non-primary contexts so cron/flush/subagent/background/skill_loop
+      # turns are NOT captured by the passive memory layer.
+      - MNEMOSYNE_SKIP_CONTEXTS=cron,flush,subagent,background,skill_loop
+      # Validated turn limits (passive capture keeps these bounded).
+      - MNEMOSYNE_SYNC_TURN_USER_LIMIT=500
+      - MNEMOSYNE_SYNC_TURN_ASSISTANT_LIMIT=800
+      # Auto-sleep disabled: do not auto-sleep memory items in the pilot.
+      - MNEMOSYNE_AUTO_SLEEP_ENABLED=false
+      # Reflection disabled for cron and capped at 0 calls/session (off).
+      - MNEMOSYNE_REFLECT_DISABLED_FOR_CRON=true
+      - MNEMOSYNE_REFLECT_MAX_CALLS_PER_SESSION=0

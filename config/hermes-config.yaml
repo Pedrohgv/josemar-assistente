@@ -23,8 +23,30 @@ terminal:
   container_persistent: true
 
 memory:
+  # Base template: native static injection enabled (MEMORY.md/USER.md injected
+  # every turn). When the Mnemosyne pilot overlay is enabled, the container init
+  # sets memory_enabled=false and user_profile_enabled=false at runtime
+  # (upstream-native Mnemosyne, not curated-static coexistence). The static
+  # files remain at their versioned paths as archive/rollback material; they
+  # are NOT injected while the pilot is active. On rollback (base-only init),
+  # the template copy restores these flags to true.
   memory_enabled: true
   user_profile_enabled: true
+  # Stage built-in memory writes so archived static context (MEMORY.md/USER.md)
+  # is not mutated without approval. This is intentionally NOT enforced by
+  # josemar_skill_state.py POLICY_KEYS: it is preserved/un-enforced by the
+  # skill policy so the operator can change it at runtime. It is retained as
+  # archive protection even when Mnemosyne is active; it protects built-in
+  # archive writes but does not prevent passive capture or necessarily all
+  # Mnemosyne tools. Do not set memory.provider here; the container init sets
+  # it at runtime only when MNEMOSYNE_PROVIDER=mnemosyne, and sets the nested
+  # memory.mnemosyne block (default_scope, profile_isolation, auto_sleep,
+  # reflect, sync_roles, skip_contexts, sync_turn limits) via hermes_cli.config.
+  # The tools key is intentionally omitted so the provider exposes all
+  # upstream-native tools (including mutating operations). Automatic ingestion
+  # is passive raw user-turn capture; explicit mutation/management tools remain
+  # available. No auto-sleep/reflection/LLM consolidation runs in the pilot.
+  write_approval: true
   memory_char_limit: 2200
   user_char_limit: 1375
   nudge_interval: 10

@@ -15,5 +15,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install pinned test requirements (no venv)
+        # The self-hosted runner does not provide python3-venv / ensurepip, so
+        # `python3 -m venv` fails (PR #92, run 30848516635). Instead, install
+        # requirements-test.txt reproducibly into a disposable target directory
+        # under $RUNNER_TEMP using `pip install --target`, then expose it via
+        # PYTHONPATH. No system software is installed and the runner is not
+        # modified.
+        #
+        # requirements-test.txt pins the third-party packages needed for the
+        # fast (non-Docker) unittest suite (mcp, httpx, httpx-sse, pydantic,
+        # pydantic-settings, PyYAML, sqlite-vec, pre-commit). It is NOT
+        # production Docker dependency management: Dockerfile.hermes and
+        # aux-ml/Dockerfile install their own production requirements
+        # independently and are intentionally unaffected by this file.
+        env:
+          TEST_DEPS_DIR: ${{ runner.temp }}/fast-test-deps
+        run: |
+          rm -rf "$TEST_DEPS_DIR"
+          mkdir -p "$TEST_DEPS_DIR"
+          python3 -m pip install --target="$TEST_DEPS_DIR" -r requirements-test.txt
+
       - name: Run verification
-        run: make verify
+        # Prepend the disposable deps directory to PYTHONPATH so `make verify`
+        # (which calls `python3 -m unittest ...` and `docker compose config`)
+        # resolves the pinned test dependencies. The directory lives under
+        # $RUNNER_TEMP which Actions clears between runs; the explicit rm above
+        # guarantees no reuse even if the temp is retained.
+        env:
+          TEST_DEPS_DIR: ${{ runner.temp }}/fast-test-deps
+        run: |
+          export PYTHONPATH="$TEST_DEPS_DIR${PYTHONPATH:+:$PYTHONPATH}"
+          make verify

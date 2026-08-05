@@ -57,6 +57,9 @@ Thumbs.db
 htmlcov/
 .tmp/
 
+# Disposable local artifacts and test sandboxes
+dump_folder/
+
 # Docker
 .docker/
 

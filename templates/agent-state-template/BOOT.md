@@ -21,6 +21,17 @@ Run these only when optional features are enabled:
 1. If `AUX_ML_ENABLED=true`, ensure `COMPOSE_PROFILES=aux-ml` is set.
 2. Confirm `aux-ml` container is healthy before requesting OCR jobs.
 
+## Mnemosyne Pilot (Optional)
+
+When the Mnemosyne pilot overlay is enabled
+(`docker-compose.mnemosyne.yml` in `COMPOSE_FILE`), the assistant uses
+upstream-native Mnemosyne semantic memory. `memories/MEMORY.md` and
+`memories/USER.md` are archived-but-not-injected rollback material; they remain
+on disk and versioned but are not injected while the pilot is active. The pilot
+is passive-only (raw user-turn capture, no LLM consolidation/reflection). To
+roll back, remove the overlay from `COMPOSE_FILE`; the init restores static
+injection and preserves the Mnemosyne DB.
+
 ## Safe Defaults
 
 - Do not assume user-specific skills exist.

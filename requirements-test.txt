@@ -1,0 +1,20 @@
+# Local fast-test / pre-commit test environment dependencies.
+#
+# This file pins the THIRD-PARTY packages needed to run the repository's fast
+# (non-Docker) unittest suite and pre-commit hooks in a local developer venv
+# (see scripts/setup-pre-commit.sh and .github/workflows/fast-tests.yml).
+#
+# It is NOT production Docker dependency management. The Hermes runtime image
+# (Dockerfile.hermes) and the aux-ml service (aux-ml/Dockerfile) install their
+# own production requirements independently and are intentionally unaffected by
+# this file. Do not add production runtime deps here.
+#
+# Pins are the versions validated for the fast-test suite (issue #91).
+mcp==1.26.0
+httpx==0.28.1
+httpx-sse==0.4.3
+pydantic==2.13.4
+pydantic-settings==2.14.2
+PyYAML==6.0.3
+sqlite-vec==0.1.9
+pre-commit==4.6.0

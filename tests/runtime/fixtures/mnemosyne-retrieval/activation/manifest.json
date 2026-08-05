@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "dataset_kind": "public-synthetic-regression",
+  "language": "pt-BR",
+  "purpose": "Public synthetic activation-evaluation fixture for the Mnemosyne vector retrieval gate. It is not derived from agent-state.",
+  "provenance": "AI-drafted synthetic-representative operational Portuguese. Authored to be representative of the assistant's domain (household, finance, health, travel, work, food) WITHOUT using real user content, vault notes, or conversation excerpts. All entities are fabricated. No PII.",
+  "pii_policy": "No PII by construction. Content is synthetic. If any real user content is ever added during operator review, it must be scrubbed to synthetic paraphrase before commit and must not include names, addresses, account numbers, or health records of real persons.",
+  "activation_evidence": false,
+  "review_status": "NOT_READY",
+  "review_status_detail": "Synthetic advisory fixture only; it is never activation evidence. Review metadata remains for regression tests and is not used by the activation target.",
+  "minimum_queries_for_activation": 50,
+  "thresholds": {
+    "min_queries": 50,
+    "min_recall_at_1": 0.55,
+    "min_recall_at_3": 0.75,
+    "min_mrr": 0.65,
+    "min_slice_easy_recall_at_3": 0.8,
+    "min_slice_medium_recall_at_3": 0.7,
+    "min_slice_hard_recall_at_3": 0.55,
+    "max_regression_vs_keyword_recall_at_3": 0.05,
+    "min_ndcg_at_10": 0.0,
+    "min_macro_recall_at_3": 0.0
+  },
+  "corpus_path": "corpus.jsonl",
+  "queries_path": "queries.jsonl",
+  "review_path": "review.json",
+  "notes": "Synthetic advisory regression fixture. It is not activation evidence; use the public FaQuAD-IR standard fixture for activation.",
+  "activation_evidence_meaning": "activation_evidence=true declares this fixture ELIGIBLE to become activation evidence. It is NOT current activation evidence: eligibility is confirmed only after operator review (review.json REVIEWED) AND the gate reports READY on a real evaluation run."
+}

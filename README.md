@@ -13,6 +13,8 @@ This repository is the public/platform layer. Personal identity, memories, priva
 - **Obsidian vault infrastructure**: dedicated Docker volume synchronized with Syncthing over a Tailscale sidecar.
 - **TaskNotes lifecycle MCP**: bounded create/get/list/update/complete/archive/delete/tag tools backed by native gbrain, with fail-closed profile and Git transaction guards.
 - **Google Drive vault backups**: daily rotating backup slots via rclone.
+- **Optional Mnemosyne conversation memory**: opt-in semantic recall/capture layer separate from the curated Obsidian vault, backed by an internal TEI embeddings service (no host port).
+- **Optional Mnemosyne encrypted backup**: separate rclone `crypt` backup lane to Google Drive slots for the Mnemosyne memory store; local staging is not encrypted, encryption begins at the rclone `crypt` remote, and full recovery is operator-controlled.
 - **Optional auxiliary ML service**: internal `aux-ml` container for FIFO, one-at-a-time long-running OCR jobs through llama.cpp.
 - **Multi-provider LLM config**: Ollama Cloud, Z.AI/GLM, DeepSeek, and other OpenAI-compatible providers can be configured.
 - **Security checks**: gitleaks and a custom PII guard in CI and optional pre-commit hooks.
@@ -36,7 +38,7 @@ flowchart LR
   Agent --> GBrain[Native gbrain CLI]
   Agent --> TaskNotes[Bounded TaskNotes MCP]
   TaskNotes --> GBrain
-  GBrain --> Vault[Obsidian Vault<br/>obsidian-vault volume]
+  GBrain --> Vault[Obsidian Vault<br/>obsidian-vault volume<br/>canonical curated vault]
 
   CoreSkills --> AuxML[aux-ml API<br/>optional]
   AuxML --> Llama[llama.cpp Router<br/>OCR models]
@@ -47,7 +49,16 @@ flowchart LR
   Syncthing <--> Tailscale[Tailscale Sidecar]
   Vault --> Backup[rclone Backup]
   Backup --> GDrive[Google Drive Slots]
+
+  %% Opt-in Mnemosyne layer (separate from the curated vault)
+  Agent -. opt-in .-> Mnemosyne[Mnemosyne<br/>semantic conversation memory]
+  Mnemosyne -. embeddings .-> TEI[TEI Embeddings<br/>internal only / no host port]
+  Mnemosyne --> MnemoStore[(mnemosyne.db<br/>/opt/data/mnemosyne/data)]
+  MnemoStore -. opt-in backup .-> MnemoBackup[rclone crypt uploader<br/>separate service]
+  MnemoBackup --> MnemoGDrive[Google Drive<br/>mnemosyne-crypt slots]
 ```
+
+The canonical curated vault path is `gbrain -> Obsidian vault`. Mnemosyne is a separate, opt-in operational/conversation-memory layer; it is not a vault replacement and does not alter gbrain's keyword-only retrieval. The TEI embeddings service is internal-only (no host port published); it is only present when the embeddings overlay is applied. The Mnemosyne encrypted backup lane is a separate rclone `crypt` uploader service to its own Google Drive slots, distinct from the vault backup.
 
 ## State Separation
 
@@ -89,6 +100,38 @@ flowchart LR
 ```
 
 The vault persists in its own Docker volume, syncs through Syncthing, and is backed up by rotating rclone snapshots. Native gbrain sync already uses local-only Git history; the TaskNotes MCP reuses it for safe automatic commits. The repository has no remote consumer, its `.git/` directory must be excluded from Syncthing, and it is separate from agent-state versioning.
+
+## Semantic Memory (Mnemosyne pilot, opt-in)
+
+Mnemosyne is an opt-in semantic conversation-memory layer, separate from the curated Obsidian vault. It is not enabled by default and is selected by the `MNEMOSYNE_DEPLOY_MODE` repo variable (see the operator table below). When the pilot is enabled, the static `MEMORY.md`/`USER.md` files remain at their versioned paths as archived rollback material and are not injected into prompts.
+
+```mermaid
+flowchart LR
+  Turn[Primary user turn] -->|passive capture<br/>sync_turn| Mnemo[Mnemosyne store<br/>/opt/data/mnemosyne/data]
+  Mnemo -->|pre-turn recall| Agent[Hermes Agent]
+  Mnemo -. embeddings .-> TEI[TEI Embeddings<br/>internal / no host port]
+  Mnemo -. opt-in backup .-> Crypt[rclone crypt uploader<br/>separate service]
+  Crypt --> Drive[Google Drive<br/>mnemosyne-crypt slots]
+  Vault[Obsidian Vault<br/>canonical curated vault] -. keyword-only retrieval<br/>unchanged .-> Agent
+```
+
+- **Mnemosyne**: semantic conversational recall and capture, opt-in. Passive user-turn capture (`sync_turn`) and pre-turn recall are wired; non-conversation contexts (cron, flush, subagent, background, skill_loop) are excluded. No auto-sleep, reflection, or LLM consolidation runs in the pilot. Retrieval quality is evaluated separately (see `docs/mnemosyne-retrieval-quality.md`); this README makes no precise ranking claims.
+- **gbrain / Obsidian vault**: the canonical curated vault. Retrieval is keyword-only today; the Mnemosyne pilot does not enable gbrain embeddings or alter the gbrain wrapper's behavior.
+- **Static `MEMORY.md` / `USER.md`**: archived rollback material. While the Mnemosyne pilot is enabled they are not injected into prompts; disabling the pilot restores them via the init rollback path.
+
+See `docs/mnemosyne-operations.md` for activation, recovery, and security details, and `docs/mnemosyne-retrieval-quality.md` for the retrieval quality gate.
+
+### MNEMOSYNE_DEPLOY_MODE
+
+| Value | Overlays applied (fixed order) | Prerequisites |
+| --- | --- | --- |
+| `off` (default / unset) | base only | none |
+| `pilot` | base + embeddings + mnemosyne | none beyond the base deploy secrets |
+| `backup` | base + embeddings + mnemosyne + mnemosyne-backup | positive `MNEMOSYNE_BACKUP_EXPORT_INTERVAL` (integer, no leading zeros, <= 10080 minutes) and `RCLONE_CONFIG_B64` (base64 rclone config containing a `crypt` remote named `mnemosyne-crypt` plus the baseline `gdrive` remote) |
+
+There is no embeddings-only mode: `pilot` is the smallest Mnemosyne-enabled mode. Any value other than `off`, `pilot`, or `backup` is rejected before any volume mutation or service teardown. The deploy workflow runs all preflight validation before any `docker volume create`, volume write, or service teardown. See `docs/mnemosyne-operations.md` for the full validation order, fail-closed teardown, mode-specific post-start verification, and the operator-controlled recovery lane.
+
+For the encrypted backup, local staging is not encrypted (it holds a compressed plaintext SQLite snapshot); encryption begins at the rclone `crypt` remote; full recovery is operator-controlled and never automated. See `docs/mnemosyne-operations.md` for the recovery drill and the secret-recovery requirement.
 
 ## Quick Start
 
@@ -202,6 +245,9 @@ josemar-assistente/
 ├── .github/workflows/              # Deploy, stop, runner test, privacy scan
 ├── docker-compose.yml              # Service topology and persistent volumes
 ├── docker-compose.browser-control.yml # Optional browser-control overlay
+├── docker-compose.embeddings.yml   # Optional local embedding service (TEI) overlay; NOT enabled by default. See docs/memory-embeddings-evaluation.md.
+├── docker-compose.mnemosyne.yml   # Optional Mnemosyne pilot overlay (semantic conversation memory); requires the embeddings overlay. See docs/mnemosyne-operations.md.
+├── docker-compose.mnemosyne-backup.yml # Optional Mnemosyne encrypted-backup overlay (separate rclone crypt uploader); layered last. See docs/mnemosyne-operations.md.
 ├── Dockerfile.hermes               # Custom Hermes image
 └── .env.example                    # Environment template
 ```
@@ -212,9 +258,11 @@ josemar-assistente/
 | --- | --- |
 | `hermes` | Main Hermes gateway, Telegram channel, dashboard/API, agent runtime. |
 | `aux-ml` | Optional internal queue API for long-running OCR jobs. |
+| `embeddings` | Optional local Hugging Face Text Embeddings Inference (TEI) service for semantic memory/gbrain embeddings. NOT enabled by default; only present when the `docker-compose.embeddings.yml` overlay is applied. See `docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation. |
 | `tailscale` | Private-network sidecar for Syncthing connectivity and (optionally) Tailscale Serve for browser control. |
 | `syncthing` | Syncs the Obsidian vault to trusted devices. |
 | `obsidian-backup` | Runs daily rclone backups into rotating Google Drive slots. |
+| `mnemosyne-backup-uploader` | Optional separate rclone uploader for the Mnemosyne encrypted-backup lane. Reads the staging volume read-only, uploads through an rclone `crypt` remote to rotating Google Drive slots, writes only its own state volume. Only present when the `docker-compose.mnemosyne-backup.yml` overlay is applied (`MNEMOSYNE_DEPLOY_MODE=backup`). See `docs/mnemosyne-operations.md`. |
 | `browser-tunnel` | Optional hardened OpenSSH reverse-tunnel sidecar for remote browser control. Only started under the `browser-control` Compose overlay/profile. See `docs/browser-control.md`. |
 
 | Volume | Purpose |
@@ -226,7 +274,11 @@ josemar-assistente/
 | `tailscale-state` | Tailscale node identity and login state. |
 | `obsidian-rclone-config` | rclone config used by vault backup container. |
 | `obsidian-backup-state` | Rotating backup slot pointer. |
+| `mnemosyne-backup-staging` | Optional Mnemosyne backup staging volume. Exporter writes immutable generations here (read-write in hermes, read-only in the uploader). Only present with the `docker-compose.mnemosyne-backup.yml` overlay. Local staging is not encrypted. |
+| `mnemosyne-backup-state` | Optional Mnemosyne uploader state (slot rotation, last-uploaded-generation). Writable only by the `mnemosyne-backup-uploader` service; mounted read-only into hermes. Only present with the `docker-compose.mnemosyne-backup.yml` overlay. |
+| `mnemosyne-backup-recovery` | Optional disposable Mnemosyne recovery handoff volume. Written only by the short-lived `mnemosyne-backup-recover` step (`recovery` profile) and consumed transiently by short-lived `docker compose run hermes` invocations; never mounted into the long-running hermes service. Only present with the `docker-compose.mnemosyne-backup.yml` overlay. |
 | `browser-tunnel-state` | Persistent Ed25519 SSH host key for the optional `browser-tunnel` sidecar so laptop `known_hosts` stays stable across redeploys. |
+| `embedding-model-cache` | Public embedding model weights cache for the optional `embeddings` service. Contains only downloaded public model weights; no private data. Only present with the `docker-compose.embeddings.yml` overlay. |
 
 ## Skills
 
@@ -367,6 +419,9 @@ Credentials go under `credentials/<service>/` and are mounted read-only into Her
 - `docs/aux-ml.md`: auxiliary ML API, queue, model lifecycle, and OCR operations.
 - `docs/obsidian-operations.md`: Syncthing, Tailscale, rclone backup, and restore runbook.
 - `docs/gbrain-operations.md`: gbrain activation, reindex, vault swap, schema pack workflow, and troubleshooting.
+- `docs/memory-embeddings-evaluation.md`: issue #86/#65 evaluation of the optional local embedding service and Mnemosyne memory layer (not enabled by default).
+- `docs/mnemosyne-operations.md`: Mnemosyne pilot activation, encrypted-backup overlay, recovery lane, deploy-mode validation, and security boundaries.
+- `docs/mnemosyne-retrieval-quality.md`: Mnemosyne Portuguese retrieval quality gate, activation thresholds, and the FaQuAD-IR benchmark.
 - `docs/tasknotes-mcp.md`: TaskNotes profile gate, local Git/Syncthing prerequisites, tool outcomes, locking, and recovery.
 - `docs/browser-control.md`: optional remote browser control via a reverse SSH tunnel over Tailscale.
 - `.github/workflows/AGENTS.md`: deployment, stop, privacy scan, and runner workflow documentation.

@@ -1,0 +1,163 @@
+# Optional embeddings overlay.
+#
+# Apply together with docker-compose.yml ONLY when the local embedding service
+# is opted in:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.embeddings.yml
+#
+# This overlay is truly opt-in, mirroring docker-compose.browser-control.yml:
+# the base docker-compose.yml is unchanged and base-only deploys are unaffected.
+# No service, network, volume, or env defined here leaks into a base-only run.
+#
+# This overlay adds:
+#   - the `embeddings` service (Hugging Face Text Embeddings Inference, TEI),
+#     parameterized container name `${JOSEMAR_CONTAINER_PREFIX:-josemar}-embeddings`,
+#     image `${EMBEDDING_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}`,
+#     running the selected E5 model with bounded server settings matching the
+#     Josemar benchmark,
+#   - a dedicated `embeddings-net` bridge network shared ONLY by `hermes` and
+#     `embeddings` (not marked `internal: true` because the first model
+#     download needs egress; no unrelated service joins it),
+#   - the `embedding-model-cache` named volume mounted at `/data` so normal
+#     restarts avoid the ~58s re-download of the public model,
+#   - hermes overlay wiring: the embedding network attachment plus
+#     deployment-ready env vars for Mnemosyne (remote API mode) and gbrain
+#     (llama-server provider). These vars are INERT until the relevant
+#     provider is explicitly enabled by the operator; this overlay does NOT
+#     install/enable Mnemosyne and does NOT enable gbrain embeddings or alter
+#     the wrapper's keyword-only behavior.
+#
+# No host ports are published. Only internal service (80) and Prometheus
+# (9000) ports are exposed. No `/shared`, Obsidian, credentials, or Hermes
+# state mounts are added to the embeddings service. No private data is mounted.
+#
+# ONE authoritative model tuple drives every consumer. TEI, Mnemosyne, and the
+# gbrain `llama-server:` provider all derive from the same selectable vars:
+#   EMBEDDING_MODEL_ID, EMBEDDING_MODEL_REVISION, EMBEDDING_MODEL_DIMENSIONS,
+#   EMBEDDING_QUERY_PREFIX, EMBEDDING_PASSAGE_PREFIX.
+# There are NO duplicated independent client-specific model/mode/url knobs.
+# A single optional EMBEDDING_API_URL (default `http://embeddings:80/v1`) feeds
+# both client URL vars (MNEMOSYNE_EMBEDDING_API_URL and LLAMA_SERVER_BASE_URL).
+#
+# The tuple (model id, revision, dimensions, query/passage prefixes) forms ONE
+# migration tuple: changing any one of them requires a full re-index so
+# existing vectors are not mixed with new ones. The defaults pin
+# `intfloat/multilingual-e5-small` at revision
+# `614241f622f53c4eeff9890bdc4f31cfecc418b3` (384 dims) with the exact E5
+# prefixes `query: ` and `passage: `. See .env.example for every EMBEDDING_*
+# variable and the migration-tuple requirement.
+
+services:
+  embeddings:
+    image: ${EMBEDDING_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
+    container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-embeddings
+    restart: unless-stopped
+    # No host ports. TEI serves embeddings on 80 and Prometheus metrics on
+    # 9000 (TEI 1.9 default) inside the container; both are exposed only to
+    # the internal embeddings-net network for hermes to consume.
+    expose:
+      - "80"
+      - "9000"
+    command:
+      - "--model-id"
+      - "${EMBEDDING_MODEL_ID:-intfloat/multilingual-e5-small}"
+      - "--revision"
+      - "${EMBEDDING_MODEL_REVISION:-614241f622f53c4eeff9890bdc4f31cfecc418b3}"
+      # Bounded server settings matching the Josemar benchmark.
+      - "--max-concurrent-requests"
+      - "${EMBEDDING_MAX_CONCURRENT_REQUESTS:-64}"
+      - "--max-batch-tokens"
+      - "${EMBEDDING_MAX_BATCH_TOKENS:-16384}"
+      - "--max-batch-requests"
+      - "${EMBEDDING_MAX_BATCH_REQUESTS:-8}"
+      - "--max-client-batch-size"
+      - "${EMBEDDING_MAX_CLIENT_BATCH_SIZE:-64}"
+      # Structured JSON logging.
+      - "--json-output"
+      # TEI 1.9 has --disable-spans; pass it explicitly so tracing/spans are
+      # off by construction (not merely by omission of --otlp-endpoint).
+      - "--disable-spans"
+      # Prometheus metrics port. TEI 1.9 default is 9000 (not 6000); configure
+      # it explicitly and expose it via EMBEDDING_PROMETHEUS_PORT.
+      - "--prometheus-port"
+      - "${EMBEDDING_PROMETHEUS_PORT:-9000}"
+    volumes:
+      # Persistent public-model cache so normal restarts avoid the ~58s
+      # re-download. Contains only downloaded public model weights; no
+      # private data, no credentials, no Hermes state.
+      - embedding-model-cache:/data
+    # Repo operational Compose style: top-level runtime limits (cpus /
+    # mem_limit). deploy.resources only applies under swarm and is not used
+    # here. Josemar benchmark defaults: 2 CPUs, 4g memory. Configurable.
+    cpus: "${EMBEDDING_CPUS:-2}"
+    mem_limit: ${EMBEDDING_MEM_LIMIT:-4g}
+    healthcheck:
+      # TEI 1.9 cpu image ships /usr/bin/curl. Healthcheck probes the
+      # internal /health endpoint on localhost.
+      test: ["CMD", "curl", "-f", "http://127.0.0.1/health"]
+      interval: ${EMBEDDING_HEALTHCHECK_INTERVAL:-30s}
+      timeout: ${EMBEDDING_HEALTHCHECK_TIMEOUT:-10s}
+      retries: ${EMBEDDING_HEALTHCHECK_RETRIES:-5}
+      # First download of multilingual-e5-small can take ~58s on a warm
+      # cache and considerably longer on a cold one. start_period is
+      # configurable and defaults to a value >= 120s suitable for the
+      # first download.
+      start_period: ${EMBEDDING_HEALTHCHECK_START_PERIOD:-300s}
+    networks:
+      - embeddings-net
+
+  hermes:
+    # Overlay adds the embedding network attachment and deployment-ready env
+    # wiring. These vars are INERT until the relevant provider is explicitly
+    # enabled by the operator:
+    #   - Mnemosyne remote API mode/model/dim/prefixes/API URL: inert until
+    #     Mnemosyne is installed and enabled (this overlay does NOT install
+    #     or enable Mnemosyne).
+    #   - gbrain provider model `llama-server:<selected model>`, dimensions,
+    #     and LLAMA_SERVER_BASE_URL: inert until gbrain embeddings are
+    #     explicitly enabled by the operator (this overlay does NOT enable
+    #     gbrain embeddings and does NOT alter the wrapper's keyword-only
+    #     behavior).
+    # ONE authoritative tuple (EMBEDDING_MODEL_ID/REVISION/DIMENSIONS and
+    # EMBEDDING_QUERY_PREFIX/EMBEDDING_PASSAGE_PREFIX) drives TEI, Mnemosyne,
+    # and the gbrain `llama-server:` provider together. A single optional
+    # EMBEDDING_API_URL feeds both client URL vars. Changing any tuple element
+    # requires a full re-index.
+    networks:
+      josemar-network: null
+      embeddings-net: null
+    environment:
+      # ---- Mnemosyne remote API wiring (INERT until Mnemosyne enabled) ----
+      # Verified upstream Mnemosyne env contract. Model and dim derive from
+      # the authoritative EMBEDDING_MODEL_ID / EMBEDDING_MODEL_DIMENSIONS.
+      - MNEMOSYNE_EMBEDDINGS_VIA_API=true
+      - MNEMOSYNE_EMBEDDING_MODEL=${EMBEDDING_MODEL_ID:-intfloat/multilingual-e5-small}
+      - MNEMOSYNE_EMBEDDING_DIM=${EMBEDDING_MODEL_DIMENSIONS:-384}
+      - "MNEMOSYNE_EMBEDDING_QUERY_PREFIX=${EMBEDDING_QUERY_PREFIX:-query: }"
+      - "MNEMOSYNE_EMBEDDING_DOC_PREFIX=${EMBEDDING_PASSAGE_PREFIX:-passage: }"
+      - MNEMOSYNE_EMBEDDING_API_URL=${EMBEDDING_API_URL:-http://embeddings:80/v1}
+      # ---- gbrain llama-server provider (INERT until gbrain embeddings enabled) ----
+      # Provider model is `llama-server:${EMBEDDING_MODEL_ID}` (quoted so the
+      # colon in the value does not confuse YAML). Dimensions and base URL
+      # derive from the authoritative tuple and the single EMBEDDING_API_URL.
+      # The wrapper's keyword-only behavior is NOT altered by this overlay.
+      - "GBRAIN_EMBEDDING_MODEL=llama-server:${EMBEDDING_MODEL_ID:-intfloat/multilingual-e5-small}"
+      - GBRAIN_EMBEDDING_DIMENSIONS=${EMBEDDING_MODEL_DIMENSIONS:-384}
+      - LLAMA_SERVER_BASE_URL=${EMBEDDING_API_URL:-http://embeddings:80/v1}
+    depends_on:
+      embeddings:
+        condition: service_healthy
+
+networks:
+  # Dedicated bridge network used ONLY by hermes and embeddings. Not marked
+  # internal: true because the first model download needs egress to
+  # huggingface.co. No unrelated service joins this network. No host ports
+  # are published on it.
+  embeddings-net:
+    driver: bridge
+
+volumes:
+  # Persistent cache for the public embedding model weights downloaded by TEI.
+  # Avoids the ~58s re-download on normal restarts. Contains no private data,
+  # credentials, or Hermes state.
+  embedding-model-cache:
+    driver: local

@@ -74,6 +74,34 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 | `cron/jobs.json` | Cron job definitions loaded by Hermes | Manual / agent |
 | `avatars/` | Agent avatar images | Manual |
 
+## Mnemosyne Pilot: Archive Status of Memory Files
+
+When the optional Mnemosyne pilot overlay (`docker-compose.mnemosyne.yml`) is
+enabled, the assistant uses upstream-native Mnemosyne semantic memory instead
+of static file injection. In that mode:
+
+- `memories/MEMORY.md` and `memories/USER.md` are **archived but not injected**.
+  They remain at their versioned paths (tracked by `.sync-manifest` and
+  `.gitignore`) as explicit **rollback material**. No automatic migration or
+  deletion is performed; the files are left untouched on disk.
+- The runtime Mnemosyne database lives separately under
+  `/opt/data/mnemosyne/data` (a runtime SQLite store, NOT versioned here) and
+  is preserved across rollback.
+- To roll back to static injection, disable the Mnemosyne overlay (remove
+  `docker-compose.mnemosyne.yml` from `COMPOSE_FILE`). The container init
+  restores `memory.memory_enabled`/`user_profile_enabled` to true and removes
+  only the installer-owned plugin/override-skill artifacts, while preserving
+  the Mnemosyne DB for future re-activation.
+
+The pilot is **passive-only ingestion**: automatic ingestion is passive raw
+user-turn capture (global cross-session). Explicit upstream-native
+mutation/management tools (including mutating operations) remain available to
+the agent. No auto-sleep, reflection, or LLM consolidation runs in the pilot.
+Full native Mnemosyne tools are available; this is upstream-native behavior.
+LLM consolidation can infer summaries/facts but is intentionally off pending a
+later explicit user decision on LLM provider, privacy, and cost. That decision
+and the future option are documented in `docs/memory-embeddings-evaluation.md`.
+
 ## Security
 
 - This must be a **private** repository
