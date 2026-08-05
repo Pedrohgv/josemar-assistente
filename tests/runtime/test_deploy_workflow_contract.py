@@ -770,6 +770,74 @@ class DocsContractTests(unittest.TestCase):
         self.assertIn("hermes_cli.config.load_config()", agents)
         self.assertIn("/opt/data/config.yaml", agents)
 
+    # --- README deploy-mode / overlay / doc-link drift guards ---
+
+    def test_readme_documents_mnemosyne_deploy_mode_table(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        # The operator-facing deploy-mode table is present.
+        self.assertIn("MNEMOSYNE_DEPLOY_MODE", readme)
+        for mode in ("off", "pilot", "backup"):
+            self.assertIn(mode, readme)
+        # Backup prerequisites documented in the table.
+        self.assertIn("MNEMOSYNE_BACKUP_EXPORT_INTERVAL", readme)
+        self.assertIn("RCLONE_CONFIG_B64", readme)
+        self.assertIn("mnemosyne-crypt", readme)
+        self.assertIn("gdrive", readme)
+        # The 10080-minute ceiling is referenced.
+        self.assertIn("10080", readme)
+
+    def test_readme_documents_overlay_compose_files(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        for overlay in (
+            "docker-compose.mnemosyne.yml",
+            "docker-compose.mnemosyne-backup.yml",
+        ):
+            self.assertIn(overlay, readme, f"README missing overlay {overlay}")
+
+    def test_readme_documents_backup_uploader_service_and_volumes(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("mnemosyne-backup-uploader", readme)
+        for volume in (
+            "mnemosyne-backup-staging",
+            "mnemosyne-backup-state",
+            "mnemosyne-backup-recovery",
+        ):
+            self.assertIn(volume, readme, f"README missing volume {volume}")
+
+    def test_readme_links_mnemosyne_operations_and_retrieval_docs(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("docs/mnemosyne-operations.md", readme)
+        self.assertIn("docs/mnemosyne-retrieval-quality.md", readme)
+        # Both linked docs must actually exist.
+        self.assertTrue((REPO_ROOT / "docs" / "mnemosyne-operations.md").exists())
+        self.assertTrue((REPO_ROOT / "docs" / "mnemosyne-retrieval-quality.md").exists())
+
+    def test_readme_states_local_staging_not_encrypted(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        # Accurate encryption boundary: local staging is NOT encrypted;
+        # encryption begins at the rclone crypt remote; recovery is
+        # operator-controlled.
+        self.assertIn("not encrypted", readme.lower())
+        self.assertIn("crypt", readme.lower())
+        self.assertIn("operator-controlled", readme.lower())
+
+    def test_readme_preserves_canonical_vault_path(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        # gbrain -> Obsidian vault remains the canonical curated vault path,
+        # and Mnemosyne is described as separate / not a vault replacement.
+        self.assertIn("canonical curated vault", readme.lower())
+        self.assertIn("not a vault replacement", readme.lower())
+
+    def test_readme_documents_tei_no_host_port(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        # TEI embeddings on an internal / no-host-port boundary.
+        self.assertIn("no host port", readme.lower())
+
+    def test_readme_avoids_stale_no_deployment_workflow_claims(self) -> None:
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("no deployment workflow changes", readme.lower())
+        self.assertNotIn("NO deployment workflow changes", readme)
+
 
 if __name__ == "__main__":
     unittest.main()
