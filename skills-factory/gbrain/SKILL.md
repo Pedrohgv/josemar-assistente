@@ -41,13 +41,22 @@ activation (init/sync/extract/schema setup) is provided by the
   section-append API. To change any existing page (add a task, edit a section,
   update frontmatter), you MUST: (1) read the full current page with
   `gbrain get <slug>`, (2) apply the change in memory preserving all existing
-  frontmatter and sections, (3) write the complete result back. For inline
+  frontmatter and sections, (3) write the complete result back. This is the
+  official gbrain write model, not a workaround — upstream documents the same
+  loop as READ → ENRICH → WRITE (`skills/brain-ops/SKILL.md`) and WRITE → SYNC
+  (`docs/guides/brain-agent-loop.md`): the agent owns the writing layer and
+  rewrites the compiled truth when new information arrives. For inline
   content use `gbrain put <slug> --content "<full page>"` (see the `gbrain put`
   section below); for large or file-based content use
   `gbrain capture --file PATH --slug SLUG` (works for existing pages too).
   Never edit vault note content through direct filesystem
   tools (`write_file`, `open()`, `cp`) — that bypasses gbrain's index, leaves
   the DB stale until the next 5-min refresh cron, and breaks link extraction.
+  Note: this filesystem-edit ban is a local mitigation for the stale-index bug
+  (josemar-assistente#94 P2), not an upstream gbrain rule — upstream expects
+  external edits and reconciles them via `sync` (see `docs/guides/live-sync.md`).
+  After any gbrain write, the 5-min refresh cron reconciles the index; run
+  `gbrain sync` immediately when the change must be visible right away.
   If `gbrain get` fails or returns incomplete content, retry once; if it still
   fails, stop and report rather than overwriting from partial content.
   Direct filesystem access is reserved ONLY for operations gbrain genuinely
