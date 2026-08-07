@@ -201,6 +201,12 @@ For large content or file-based updates, use
 `gbrain capture --file PATH --slug SLUG` instead — `capture --file` works for
 both new and existing pages.
 
+**Never use `gbrain put --stdin`.** The `--stdin` path is unsafe and has
+caused silent page corruption (josemar-assistente#71/#82): piped input can be
+truncated or contaminated by stderr diagnostics, replacing real content with
+error stubs. The sanctioned mutation path is `gbrain capture --stdin` /
+`gbrain capture --file PATH --slug SLUG` (see `gbrain capture` below).
+
 ```bash
 gbrain put inbox/my-note --content "# Updated content"
 ```
