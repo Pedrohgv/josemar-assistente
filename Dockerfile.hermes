@@ -37,7 +37,7 @@ RUN curl -fsSL -o bun-linux-x64.zip "https://github.com/oven-sh/bun/releases/dow
 # Stage 3: Install pinned gbrain CLI (deterministic ref, frozen lockfile)
 FROM ${HERMES_BASE_IMAGE} AS gbrain-builder
 
-ARG GBRAIN_REF=058f448b9a4ba3d522e2c2a7a4615bccdd00ae76
+ARG GBRAIN_REF=15b9863d13635d173562a54f55a1d388bfcf546b
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -53,18 +53,21 @@ RUN git clone https://github.com/garrytan/gbrain.git /opt/gbrain \
 
 # Josemar local patches to gbrain source (provider-agnostic):
 #
-# 1. (git apply) Three patches for chronicle + provider API key bridge:
+# 1. (git apply) One patch with two concerns: inline worker gateway + provider API key bridge:
 #    a. Configure AI gateway in PGLite inline worker (--follow) path.
 #       Without this, chronicle_extract and other LLM-backed jobs silently return
-#       no_events on PGLite (isAvailable('chat') is false). Upstream bug: #3387
-#    b. Increase chronicle judge maxTokens from 1500 to 8000.
-#       Reasoning models (e.g. DeepSeek deepseek-v4-flash) need more tokens
-#       for the thinking chain before producing output.
-#    c. Generic *_api_key → *_API_KEY config-to-env mapping.
-#       Upstream only maps openai/anthropic/zeroentropy from config to env.
-#       All other providers (DeepSeek, Google, Groq, etc.) rely on process.env
-#       which may not reach subprocesses (e.g. Hermes spawning gbrain).
+#       no_events on PGLite (isAvailable('chat') is false). Upstream bug: #3394
+#    b. Generic *_api_key → *_API_KEY config-to-env mapping.
+#       Upstream maps a fixed set (openai/anthropic/zeroentropy/openrouter/
+#       voyage/dashscope/google) from config to env; all other providers
+#       (DeepSeek, Groq, Together, etc.) rely on process.env which may not
+#       reach subprocesses (e.g. Hermes spawning gbrain). The generic bridge
+#       complements upstream mappings only for unrecognized provider keys.
 #       Upstream bug: #3394
+#    Note: chronicle judge maxTokens is no longer patched in source. Upstream
+#    v0.42 exposes `chronicle.judge_max_tokens` (default 4000); Josemar sets it
+#    to 8000 in the reindex flow (scripts/josemar-gbrain) so reasoning models
+#    (e.g. DeepSeek deepseek-v4-flash) get headroom for the thinking chain.
 #    Uses git apply so the build FAILS LOUDLY if gbrain restructures the
 #    patched files. Verify patches still apply when changing GBRAIN_REF
 #    (see docs/gbrain-operations.md → "gbrain Upgrade Checklist" item 6).

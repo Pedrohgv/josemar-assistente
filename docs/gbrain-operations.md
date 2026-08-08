@@ -44,8 +44,8 @@ The Josemar gbrain integration is intentionally minimal:
 ## Pinned Values
 
 - Bun: `1.3.14`
-- gbrain ref: `058f448b9a4ba3d522e2c2a7a4615bccdd00ae76`
-- gbrain version: `0.42.57.0`
+- gbrain ref: `15b9863d13635d173562a54f55a1d388bfcf546b`
+- gbrain version: `0.42.73.2`
 - Schema pack: `gbrain-base-v2`
 
 ## gbrain Upgrade Checklist
@@ -73,8 +73,14 @@ operator MUST verify the following after rebuild and before deploying:
    time of the upgrade, verify the `auto_chronicle` config key and the
    chronicle commands (`gbrain day`, `gbrain since`, `gbrain last-seen`,
    `gbrain orient`, `gbrain chronicle-backfill`) still exist and behave as
-   documented. Check if the `auto_chronicle` key was added to
-   `KNOWN_CONFIG_KEYS` (the `--force` workaround in v0.42.57.0 may be fixed).
+   documented. As of v0.42.73.2, `auto_chronicle` is a registered
+   `KNOWN_CONFIG_KEYS` entry, so it no longer requires the `--force` flag that
+   the v0.42.57.0 config-key registry bug forced. The chronicle judge token
+   limit is now raised through the supported `chronicle.judge_max_tokens=8000`
+   configuration key (see item 7 below) instead of a source patch/sed. Re-verify
+   these behaviors against the rebuilt image and refresh the version-sensitive
+   chronicle caveats in `skills-factory/gbrain/references/chronicle.md` only
+   when a behavior change is actually established.
 
 4. **Read-then-write behavior.** Verify `put_page` still re-runs auto-link
    on updates (including `status='skipped'`). The read-then-write rule in the
@@ -94,18 +100,33 @@ operator MUST verify the following after rebuild and before deploying:
 6. **Pinned values.** Update the version and ref in this section and in
    `skills-factory/gbrain/SKILL.md` if it references the version.
 
-7. **Local patches.** The Dockerfile applies two patches to gbrain source
+7. **Local patch.** The Dockerfile applies one patch to gbrain source
    after the git clone:
    - `patches/gbrain-inline-worker-gateway.patch` (git apply) — configures the
      AI gateway in the PGLite inline worker (`--follow`) path. If this patch
      fails to apply, the build will fail loudly — re-create the patch against
      the new gbrain source.
-   - `sed -i 's/maxTokens: 1500/maxTokens: 8000/'` on
-     `src/core/chronicle/extract-events.ts` — increases the chronicle judge
-     token limit for reasoning models. If gbrain changes the value (e.g. to
-     2000), the sed silently no-ops; verify the value is still 8000 after build.
-   Both patches are documented inline in `Dockerfile.hermes`. If either has
-   been fixed upstream, remove the patch from the Dockerfile.
+   - **Chronicle judge token limit.** As of v0.42.73.2, the chronicle judge
+     token limit is raised through the supported
+     `chronicle.judge_max_tokens=8000` configuration key (set during
+     activation) instead of the previous source patch/sed on
+     `src/core/chronicle/extract-events.ts`. The old
+     `sed -i 's/maxTokens: 1500/maxTokens: 8000/'` workaround is no longer
+     used; if it is still present in the Dockerfile it should be removed. If
+     gbrain changes the default or the config key name, verify the effective
+     judge token limit is still 8000 after build.
+   The patch is documented inline in `Dockerfile.hermes`. Remove individual
+   hunks when their corresponding behavior is fixed upstream.
+
+8. **Migrations / activation.** The v0.42.73.2 upgrade introduces database
+   migrations v123–v125. These MUST be applied by running the activation
+   (`josemar-gbrain reindex`) against the rebuilt image before the upgraded
+   gbrain is considered ready. Reindex runs `gbrain init`/schema setup, which
+   applies pending migrations to the PGLite database under
+   `$GBRAIN_HOME/.gbrain`. Skipping activation leaves the database on an
+   older schema and may cause runtime errors or silent behavior changes.
+   See "Safe Initial Production Activation" below for the activation
+   procedure.
 
 ## Environment Defaults
 

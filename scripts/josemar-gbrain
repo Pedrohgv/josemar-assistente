@@ -396,6 +396,25 @@ PY
         return 1
     }
 
+    # Chronicle judge maxTokens: upstream v0.42 exposes
+    # `chronicle.judge_max_tokens` (default 4000). Reasoning models
+    # (e.g. DeepSeek deepseek-v4-flash) need more tokens for the thinking
+    # chain before producing output, so raise it to 8000 at activation.
+    # This replaces the old source patch that bumped the hardcoded 1500.
+    config_output=$("$GBRAIN_BIN" config set chronicle.judge_max_tokens 8000 2>&1) || {
+        emit_json "$(python3 - "$config_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_config_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+        return 1
+    }
+
     run_sync_extract_links full || {
         return 1
     }

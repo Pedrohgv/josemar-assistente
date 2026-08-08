@@ -99,6 +99,11 @@ class GbrainE5PatchContractTests(unittest.TestCase):
         # seam so the contract is executable in the gbrain tree.
         self.assertIn("test/ai/e5-preprocess.test.ts", self.patch)
 
+    def test_patch_uses_upstream_chronicle_token_configuration(self) -> None:
+        """Judge sizing must stay in supported runtime config, not a source patch."""
+        self.assertNotIn("maxTokens: 8000", self.patch)
+        self.assertNotIn("src/core/chronicle/extract-events.ts", self.patch)
+
     def test_patch_test_file_covers_query_and_passage_paths(self) -> None:
         # The added test file must cover both the query and document-default
         # (passage) preprocessing paths.

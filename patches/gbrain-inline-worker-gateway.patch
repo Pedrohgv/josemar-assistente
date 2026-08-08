@@ -1,22 +1,22 @@
 diff --git a/src/commands/config.ts b/src/commands/config.ts
-index d4e0bb1..911f52f 100644
+index 59be2005..a25af19b 100644
 --- a/src/commands/config.ts
 +++ b/src/commands/config.ts
-@@ -152,7 +152,12 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
+@@ -175,7 +175,12 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
        const { KNOWN_CONFIG_KEYS, KNOWN_CONFIG_KEY_PREFIXES } = await import('../core/config.ts');
        const isKnown = KNOWN_CONFIG_KEYS.includes(key);
        const matchesPrefix = KNOWN_CONFIG_KEY_PREFIXES.some(p => key.startsWith(p));
 -      if (!isKnown && !matchesPrefix) {
 +      // JOSEMAR PATCH: accept any *_api_key suffix so any provider key can be
 +      // set via `gbrain config set <provider>_api_key <key>` without --force.
-+      // Upstream only lists openai/anthropic/zeroentropy; all other providers
-+      // require --force. Upstream bug: #3387
++      // Upstream only lists openai/anthropic/zeroentropy/openrouter/voyage/
++      // dashscope/google; all other providers require --force. Upstream bug: #3394
 +      const matchesApiKeySuffix = key.endsWith('_api_key');
 +      if (!isKnown && !matchesPrefix && !matchesApiKeySuffix) {
          const { suggestNearest } = await import('../core/levenshtein.ts');
          const suggestion = suggestNearest(key, KNOWN_CONFIG_KEYS, 3);
          console.error(`[config] Unknown config key "${key}".`);
-@@ -169,7 +174,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
+@@ -192,7 +197,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
        const { KNOWN_CONFIG_KEYS, KNOWN_CONFIG_KEY_PREFIXES } = await import('../core/config.ts');
        const isKnown = KNOWN_CONFIG_KEYS.includes(key);
        const matchesPrefix = KNOWN_CONFIG_KEY_PREFIXES.some(p => key.startsWith(p));
@@ -27,10 +27,10 @@ index d4e0bb1..911f52f 100644
        }
      }
 diff --git a/src/commands/jobs.ts b/src/commands/jobs.ts
-index 64aaa6a..3e02535 100644
+index 00d78f42..7e65e307 100644
 --- a/src/commands/jobs.ts
 +++ b/src/commands/jobs.ts
-@@ -378,6 +378,21 @@ HANDLER TYPES (built in)
+@@ -462,6 +462,21 @@ HANDLER TYPES (built in)
          // 'unhealthy' listener, a DB blip would trip emitUnhealthy's
          // no-listener fallback and call process.exit(1) from inside the
          // library, killing the user's CLI session.
@@ -53,35 +53,38 @@ index 64aaa6a..3e02535 100644
            queue: queueName, pollInterval: 100, healthCheckInterval: 0,
          });
 diff --git a/src/core/ai/build-gateway-config.ts b/src/core/ai/build-gateway-config.ts
-index c2b3f84..0f5704c 100644
+index 9a4aeae0..cb9e2d72 100644
 --- a/src/core/ai/build-gateway-config.ts
 +++ b/src/core/ai/build-gateway-config.ts
-@@ -34,6 +34,20 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
-   // plane field now exists (GBrainConfig type) and gets mapped here, so
-   // setting it via `~/.gbrain/config.json` propagates into the gateway.
-   if (c.zeroentropy_api_key) envFromConfig.ZEROENTROPY_API_KEY = c.zeroentropy_api_key;
-+  // JOSEMAR PATCH: generic provider key bridge. Upstream only maps 3 specific
-+  // providers (openai/anthropic/zeroentropy) from config file to gateway env.
-+  // All other providers (deepseek, google, groq, together, etc.) rely on
+@@ -63,6 +63,23 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
+   if (c.azure_openai_endpoint) envFromConfig.AZURE_OPENAI_ENDPOINT = c.azure_openai_endpoint;
+   if (c.azure_openai_deployment) envFromConfig.AZURE_OPENAI_DEPLOYMENT = c.azure_openai_deployment;
+   if (c.azure_openai_use_entra) envFromConfig.AZURE_OPENAI_USE_ENTRA = c.azure_openai_use_entra;
++  // JOSEMAR PATCH: generic provider key bridge. Upstream maps a fixed set of
++  // providers (openai/anthropic/zeroentropy/openrouter/voyage/dashscope/google
++  // + azure-openai endpoint/deployment/entra) from config file to gateway env.
++  // All other providers (deepseek, groq, together, mistral, etc.) rely on
 +  // process.env, which may not reach subprocesses (e.g. Hermes spawning gbrain
 +  // via s6-overlay — the gateway process has an empty env). This generic
 +  // mapping folds any config key matching *_api_key into its uppercase
-+  // *_API_KEY env var, so any provider key written to the config file reaches
-+  // the gateway without depending on process.env propagation.
-+  // Upstream bug: #3387
++  // *_API_KEY env var ONLY when upstream has not already mapped it, so any
++  // provider key written to the config file reaches the gateway without
++  // depending on process.env propagation and without overriding the explicit
++  // mappings above.
++  // Upstream bug: #3394
 +  for (const [k, v] of Object.entries(c)) {
-+    if (k.endsWith('_api_key') && typeof v === 'string' && v && !(k in envFromConfig)) {
++    if (k.endsWith('_api_key') && typeof v === 'string' && v && !(k.toUpperCase() in envFromConfig)) {
 +      envFromConfig[k.toUpperCase()] = v;
 +    }
 +  }
- 
+
    // v0.32 codex finding #4+#5 fix: thread local-server _BASE_URL env vars
    // into base_urls so the gateway hits the user's configured port. Without
 diff --git a/src/core/ai/gateway.ts b/src/core/ai/gateway.ts
-index cf41b1a..02a0f9a 100644
+index 16e196d4..49a4ee74 100644
 --- a/src/core/ai/gateway.ts
 +++ b/src/core/ai/gateway.ts
-@@ -1260,6 +1260,77 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
+@@ -1594,6 +1594,77 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
  /** Minimum sub-batch size before we give up splitting and just throw. */
  const MIN_SUB_BATCH = 1;
 
@@ -100,7 +103,7 @@ index cf41b1a..02a0f9a 100644
 +//
 +// Detection keys off the modelId (the part after the provider prefix), so it
 +// works regardless of which openai-compatible provider hosts the GGUF (e.g.
-+// `llama-server:intfloat/multilingual-e5-small` → modelId
++// `llama-server:intfloat/multilingual-e5-small` -> modelId
 +// `intfloat/multilingual-e5-small`). gbrain stores embedding models as
 +// `provider:modelId` (colon-separated; the modelId may itself contain a
 +// slash, e.g. `intfloat/multilingual-e5-small`).
@@ -139,8 +142,8 @@ index cf41b1a..02a0f9a 100644
 +/**
 + * Apply E5 query/passage preprocessing to a single raw input text. Returns
 + * the text unchanged for non-E5 models. For E5:
-+ *   - inputType 'query'    → `query: ${text}`
-+ *   - anything else (the  → `passage: ${text}`
++ *   - inputType 'query'    -> `query: ${text}`
++ *   - anything else (the  -> `passage: ${text}`
 + *     document / default)
 + * Pure; no module state. Exported for tests.
 + *
@@ -159,7 +162,7 @@ index cf41b1a..02a0f9a 100644
  /**
   * Embed many texts. Truncates to MAX_CHARS, then dispatches based on whether
   * the recipe declares a per-batch token budget.
-@@ -1364,7 +1435,16 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
+@@ -1698,7 +1769,16 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
    const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
    const tracker = __budgetStore.getStore() ?? null;
    const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
@@ -177,44 +180,34 @@ index cf41b1a..02a0f9a 100644
 
    // Reserve up front for the worst-case batch token count. Embeddings have
    // no output rate, so maxOutputTokens=0. record() at the end uses the
-diff --git a/src/core/chronicle/extract-events.ts b/src/core/chronicle/extract-events.ts
-index 4354614..514da6d 100644
---- a/src/core/chronicle/extract-events.ts
-+++ b/src/core/chronicle/extract-events.ts
-@@ -183,7 +183,7 @@ function defaultJudge(engine: BrainEngine): ChronicleJudge {
-             `${input.title}\n\n${body}\n</page>\n\n` +
-             `Known attendees: ${input.attendees.slice(0, 10).join(', ') || '(none)'}.\nExtract the events.`,
-         }],
--        maxTokens: 1500,
-+        maxTokens: 8000,
-       });
-       if (res.stopReason === 'refusal' || res.stopReason === 'content_filter') return { events: [] };
-       text = res.text;
 diff --git a/src/core/config.ts b/src/core/config.ts
-index 8a79b0e..d7d8a5f 100644
+index 4ab5a212..00e62f4a 100644
 --- a/src/core/config.ts
 +++ b/src/core/config.ts
-@@ -526,6 +526,18 @@ export function loadConfig(): GBrainConfig | null {
-     ...(process.env.OPENAI_API_KEY ? { openai_api_key: process.env.OPENAI_API_KEY } : {}),
+@@ -598,6 +598,21 @@ export function loadConfig(): GBrainConfig | null {
      ...(process.env.ANTHROPIC_API_KEY ? { anthropic_api_key: process.env.ANTHROPIC_API_KEY } : {}),
      ...(process.env.ZEROENTROPY_API_KEY ? { zeroentropy_api_key: process.env.ZEROENTROPY_API_KEY } : {}),
+     ...(process.env.OPENROUTER_API_KEY ? { openrouter_api_key: process.env.OPENROUTER_API_KEY } : {}),
 +    // JOSEMAR PATCH: generic *_API_KEY → *_api_key env merge.
-+    // Upstream only merges 3 specific providers. All other provider keys
-+    // (DEEPSEEK_API_KEY, GOOGLE_GENERATIVE_AI_API_KEY, GROQ_API_KEY, etc.)
-+    // are ignored by loadConfig, so they never reach the config object
-+    // and buildGatewayConfig can't map them. This loop folds any *_API_KEY
-+    // env var into its lowercase *_api_key config field.
-+    // Upstream bug: #3387
++    // Upstream only merges a fixed set of providers (openai/anthropic/
++    // zeroentropy/openrouter; voyage/dashscope/google are config-plane only).
++    // All other provider keys (DEEPSEEK_API_KEY, GROQ_API_KEY,
++    // TOGETHER_API_KEY, MISTRAL_API_KEY, etc.) are ignored by loadConfig, so
++    // they never reach the config object and buildGatewayConfig can't map
++    // them. This loop folds any *_API_KEY env var into its lowercase
++    // *_api_key config field ONLY for keys upstream has not already merged,
++    // so the explicit mappings above are preserved and not duplicated.
++    // Upstream bug: #3394
 +    ...Object.fromEntries(
 +      Object.entries(process.env)
-+        .filter(([k]) => k.endsWith('_API_KEY') && !['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'ZEROENTROPY_API_KEY'].includes(k))
++        .filter(([k]) => k.endsWith('_API_KEY') && !['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'ZEROENTROPY_API_KEY', 'OPENROUTER_API_KEY'].includes(k))
 +        .map(([k, v]) => [k.toLowerCase(), v])
 +    ),
      ...(process.env.GBRAIN_EMBEDDING_MODEL ? { embedding_model: process.env.GBRAIN_EMBEDDING_MODEL } : {}),
      ...(process.env.GBRAIN_EMBEDDING_DIMENSIONS ? { embedding_dimensions: parseInt(process.env.GBRAIN_EMBEDDING_DIMENSIONS, 10) } : {}),
      ...(process.env.GBRAIN_EXPANSION_MODEL ? { expansion_model: process.env.GBRAIN_EXPANSION_MODEL } : {}),
 diff --git a/src/core/embedding.ts b/src/core/embedding.ts
-index 108b854..35194a5 100644
+index 108b854f..35194a56 100644
 --- a/src/core/embedding.ts
 +++ b/src/core/embedding.ts
 @@ -11,6 +11,8 @@ import {
@@ -241,7 +234,7 @@ index 108b854..35194a5 100644
    }
 diff --git a/test/ai/e5-preprocess.test.ts b/test/ai/e5-preprocess.test.ts
 new file mode 100644
-index 0000000..af23d86
+index 00000000..69e6e22d
 --- /dev/null
 +++ b/test/ai/e5-preprocess.test.ts
 @@ -0,0 +1,339 @@
@@ -584,4 +577,3 @@ index 0000000..af23d86
 +    expect(sig).not.toContain('e5-query-passage');
 +  });
 +});
-\ No newline at end of file
