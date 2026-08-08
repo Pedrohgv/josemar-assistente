@@ -124,6 +124,11 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         body = _extract_function(self.src, "do_reindex")
         self.assertIn("config set search.mcp_keyword_only true", body)
 
+    def test_reindex_configures_chronicle_judge_token_budget(self) -> None:
+        """Chronicle uses the supported upstream config rather than a source patch."""
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn("config set chronicle.judge_max_tokens 8000", body)
+
     def test_reindex_runs_full_sync(self) -> None:
         body = _extract_function(self.src, "do_reindex")
         self.assertIn("run_sync_extract_links full", body)
@@ -398,6 +403,12 @@ class GbrainDockerWrapperCwdContractTests(unittest.TestCase):
         assert match is not None
         wrapper_line = match.group(0)
         self.assertIn("cd /opt/gbrain", wrapper_line)
+
+    def test_gbrain_ref_is_pinned_to_the_supported_release(self) -> None:
+        self.assertIn(
+            "ARG GBRAIN_REF=15b9863d13635d173562a54f55a1d388bfcf546b",
+            self.src,
+        )
 
     def test_gbrain_wrapper_uses_relative_cli_path(self) -> None:
         match = re.search(r"printf.*?/usr/local/bin/gbrain", self.src, re.DOTALL)
