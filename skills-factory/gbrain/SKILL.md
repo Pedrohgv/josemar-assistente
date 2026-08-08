@@ -55,8 +55,13 @@ activation (init/sync/extract/schema setup) is provided by the
   Note: this filesystem-edit ban is a local mitigation for the stale-index bug
   (josemar-assistente#94 P2), not an upstream gbrain rule — upstream expects
   external edits and reconciles them via `sync` (see `docs/guides/live-sync.md`).
-  After any gbrain write, the 5-min refresh cron reconciles the index; run
-  `gbrain sync` immediately when the change must be visible right away.
+  Writes via `gbrain put`/`capture` are write-through — the index is current
+  immediately, no sync needed. The 5-min refresh cron reconciles external edits
+  (Obsidian/Syncthing). If a read does not reflect the on-disk file, that is
+  the stale-index bug (josemar-assistente#94 P2); incremental sync will not fix
+  it, and `sync --full` is the expensive last resort (full re-import,
+  failure-gated) — reserved for post-reorganization reconciliation, not
+  routine stale reads.
   If `gbrain get` fails or returns incomplete content, retry once; if it still
   fails, stop and report rather than overwriting from partial content.
   Direct filesystem access is reserved ONLY for operations gbrain genuinely
