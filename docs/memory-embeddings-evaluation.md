@@ -6,10 +6,14 @@ is an **evaluation and operator guide**, not an activation runbook: nothing
 described here is enabled by default, and no production data was changed to
 produce it.
 
-> **Status:** Evaluated only. Neither Mnemosyne nor gbrain embeddings are
-> enabled in this branch. The optional `docker-compose.embeddings.yml` overlay
-> and the pinned gbrain E5 preprocessing patch are implemented prerequisites;
-> activation is separate future work. See
+> **Status:** Evaluated, with issue #65 opt-in gbrain semantic/hybrid retrieval
+> now documented as an intended operator flow. Mnemosyne remains evaluated
+> only and is not enabled by default. The optional `docker-compose.embeddings.yml`
+> overlay and the pinned gbrain E5 preprocessing patch are implemented
+> prerequisites; gbrain embeddings are activated by the operator via
+> `josemar-gbrain enable-embeddings` + `josemar-gbrain embed-backfill` (see
+> `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI E5 Semantic/Hybrid
+> Retrieval"). See
 > [Current Branch Scope and Status](#current-branch-scope-and-status).
 
 ## Contents
@@ -125,7 +129,11 @@ Treat all claims here as time-bound.
   `MNEMOSYNE_EMBEDDING_QUERY_PREFIX`, `MNEMOSYNE_EMBEDDING_DOC_PREFIX`,
   `MNEMOSYNE_EMBEDDING_API_URL`). There is no single in-process model selector
   that governs both — they are independent config surfaces that must be kept
-  aligned to the same model tuple (see below).
+  aligned to the same model tuple (see below). Note: the overlay's
+  `EMBEDDING_QUERY_PREFIX` / `EMBEDDING_PASSAGE_PREFIX` feed Mnemosyne/TEI only;
+  gbrain's E5 prefixing is model-gated in the Josemar patch, not driven by those
+  env vars (see [Prefixes are model-gated](#prefixes-are-model-gated-in-the-josemar-patch)
+  and `docs/gbrain-operations.md` → "Issue #65").
 - **No documented `MEMORY.md` migration.** As noted above, there is no
   upstream-provided path to import static memory files into Mnemosyne.
 - **Store location and backup.** The Mnemosyne store should live under
@@ -161,8 +169,12 @@ context.
   [Current Branch Scope and Status](#current-branch-scope-and-status)); the
   overlay exposes `EMBEDDING_QUERY_PREFIX` / `EMBEDDING_PASSAGE_PREFIX`, which
   feed Mnemosyne's `MNEMOSYNE_EMBEDDING_QUERY_PREFIX` /
-  `MNEMOSYNE_EMBEDDING_DOC_PREFIX` and gbrain's prefix path, so the same
-  prefixes reach both consumers.
+  `MNEMOSYNE_EMBEDDING_DOC_PREFIX` and TEI. gbrain's E5 prefixing is
+  **model-gated** in the Josemar patch (the `isE5EmbeddingModel` /
+  `preprocessE5Input` helpers apply the prefixes for E5 models and are a no-op
+  for non-E5 models); the overlay prefix vars do **not** configure gbrain. The
+  same E5 prefixes reach all three consumers, but through independent paths
+  that must be kept aligned to the same model tuple.
 - Native Portuguese MTEB-BR evidence is roughly **0.561** — an **aggregate
   score across MTEB-BR tasks** (not retrieval-only). Treat it as a relative
   cross-task signal, not an absolute retrieval-quality guarantee; retrieval
@@ -338,15 +350,23 @@ When the operator eventually enables embeddings, the following must hold:
   interactive timeouts should be tight (the N100 p95 unloaded is ~17 ms, so a
   few hundred ms is a reasonable upper bound before fallback).
 - **Initial gbrain backfill is separate from refresh and TaskNotes.** The
-  first gbrain embedding backfill is a one-time operator job, distinct from the
-  5-minute `josemar-gbrain refresh` and from the TaskNotes lock. Do not run the
-  initial backfill through the periodic refresh path.
+  first gbrain embedding backfill is a one-time operator job
+  (`josemar-gbrain embed-backfill`), distinct from the 5-minute
+  `josemar-gbrain refresh` and from the TaskNotes lock. It acquires the shared
+  TaskNotes lock nonblocking, runs at concurrency 1, verifies zero stale
+  embeddings remain, and is retryable. Do not run the initial backfill through
+  the periodic refresh path.
 - **Refresh must remain `--no-embed`.** The periodic `josemar-gbrain refresh`
-  continues to use `gbrain sync --no-embed`. Embedding stale pages is a
-  **separate scheduled job**, not folded into refresh. See
-  `docs/gbrain-operations.md`.
-- **Model migration / reindex.** Changing the model tuple requires a full
-  re-embedding of both stores. Plan it as a maintenance window.
+  continues to use `gbrain sync --no-embed` even after issue #65 activation.
+  Embedding stale pages is a **separate scheduled job**, not folded into
+  refresh. In phase one, manual vault edits made after the one-time
+  `embed-backfill` need a later explicit `embed-backfill` to be vectorized. See
+  `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI E5 Semantic/Hybrid
+  Retrieval".
+- **Model migration / reindex.** Changing the model tuple (including revision
+  drift) requires a full re-embedding of both stores via
+  `josemar-gbrain enable-embeddings` + `josemar-gbrain embed-backfill`. Plan it
+  as a maintenance window.
 - **Mnemosyne backup.** The Mnemosyne SQLite store needs
   application-consistent, encrypted backup before authoritative use. It is
   runtime state under `hermes-data`, not agent-state-repo content, and must
@@ -466,9 +486,26 @@ suppression patches).
   `docker-compose.mnemosyne.yml` overlay (which sets
   `MNEMOSYNE_PROVIDER=mnemosyne`). The env vars wired by the embeddings overlay
   are inert until the operator explicitly enables Mnemosyne.
-- gbrain embeddings are **not enabled**. The `josemar-gbrain` wrapper remains
-  keyword-only (`search.mcp_keyword_only=true`, `--no-embed`); the overlays do
-  not alter this.
+- gbrain embeddings are **opt-in (issue #65)**. The base deploy remains
+  keyword-only (`search.mcp_keyword_only=true`, `embedding_disabled` sentinel);
+  the overlays do not alter this. The intended operator activation flow is
+  documented in `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI E5
+  Semantic/Hybrid Retrieval": deploy the embeddings overlay, verify TEI
+  health/config, run `josemar-gbrain enable-embeddings` (native in-place
+  migration; forces keyword-only first, runs `migrate embeddings --no-embed`,
+  then only on success sets `search.mcp_keyword_only=false` and clears the
+  `embedding_disabled` sentinel; preserves DB-only records), run
+  `josemar-gbrain embed-backfill` (one-time existing-vault vectorization that
+  finalizes the native migration state; shared TaskNotes lock, concurrency 1,
+  retryable, verifies zero stale), then both `gbrain search` and
+  `gbrain query --no-expand` use the hybrid/semantic provider path (not exact
+  keyword). Before enable or after `disable-embeddings`, text queries are
+  keyword-only, image/cross-modal queries are rejected, and `put`/`capture` do
+  not embed. The 5-min refresh stays `--no-embed`; manual vault edits need a
+  later explicit `embed-backfill` in phase one. Safe rollback runs
+  `josemar-gbrain disable-embeddings` (sets keyword-only first, then writes the
+  `embedding_disabled` sentinel; vectors/TEI preserved), then optionally
+  removes the TEI overlay (never remove TEI first).
 - No production data was re-indexed, embedded, or modified. All benchmarks ran
   in isolated containers against synthetic corpora in `dump_folder/`.
 - The Mnemosyne encrypted-backup services/volumes/crons ARE implemented but
@@ -488,9 +525,13 @@ suppression patches).
 
 **Future activation work (out of scope here):** enabling Mnemosyne at runtime
 (apply the `docker-compose.mnemosyne.yml` overlay), optionally enabling the
-backup overlay (provision the `crypt` remote secret), flipping gbrain to
-embedding mode, running the initial gbrain backfill, and validating with ≥50
-labeled Portuguese queries. These are separate, explicitly-gated steps.
+backup overlay (provision the `crypt` remote secret), and validating with ≥50
+labeled Portuguese queries. gbrain embeddings activation is documented as the
+intended operator flow in `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI
+E5 Semantic/Hybrid Retrieval" (deploy overlay → verify TEI →
+`enable-embeddings` → `embed-backfill`; after both, `gbrain search` and
+`gbrain query --no-expand` are hybrid/semantic). These are separate,
+explicitly-gated steps.
 
 ## Recommended Staged Transition and Rollback
 
@@ -507,14 +548,19 @@ labeled Portuguese queries. These are separate, explicitly-gated steps.
 4. **LLM consolidation decision (future):** the user makes an explicit decision
    on LLM provider, privacy, and cost before enabling LLM-driven
    consolidation/reflection. This is intentionally off in Phase 1.
-5. **Rollback:** to revert, disable Mnemosyne (remove
+5. **Rollback:** to revert Mnemosyne, disable it (remove
    `docker-compose.mnemosyne.yml` from `COMPOSE_FILE`). The container init
    restores static injection (`memory_enabled`/`user_profile_enabled` to true),
    removes installer-owned plugin/override-skill artifacts (sha256-verified),
    and preserves the Mnemosyne DB at `/opt/data/mnemosyne/data` for future
-   re-activation. Return gbrain to keyword-only (`--no-embed`) if it was enabled.
-   The stores are independent, so rolling back Mnemosyne does not require
-   re-indexing gbrain and vice versa.
+   re-activation. To revert gbrain embeddings, run
+   `josemar-gbrain disable-embeddings` (sets `search.mcp_keyword_only=true`
+   first, then writes the `embedding_disabled` sentinel so `put`/`capture` stop
+   embedding; vectors and TEI are preserved), then optionally remove the TEI
+   overlay (never remove TEI first while gbrain still expects it). The stores
+   are independent, so rolling back Mnemosyne does not require re-indexing
+   gbrain and vice versa. See `docs/gbrain-operations.md` → "Issue #65: Opt-in
+   TEI E5 Semantic/Hybrid Retrieval" for the full gbrain rollback ordering.
 
 ## References
 

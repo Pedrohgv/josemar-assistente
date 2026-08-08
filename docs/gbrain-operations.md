@@ -24,11 +24,16 @@ The Josemar gbrain integration is intentionally minimal:
   manual Obsidian/Syncthing edits via `gbrain sync --no-embed`, stale
   extraction, and link extraction, without init/schema work). Neither is used
   from chat.
-- **Keyword-only native gbrain search.** Activation configures
+- **Keyword-only native gbrain search by default.** Activation configures
   `search.mcp_keyword_only=true` and runs with `--no-embedding`, so search uses
-  `engine.searchKeyword` and never the vector/hybrid provider path.
-  `GBRAIN_SKIP_STARTUP_HOOKS=1` is exported by the operator wrapper to prevent
-  gbrain's detached update-check network call during reindex.
+  `engine.searchKeyword` and never the vector/hybrid provider path; text queries
+  are keyword-only, image/cross-modal queries are rejected, and `gbrain put`/
+  `capture` do not embed (the `embedding_disabled` sentinel makes `embed`/
+  `import` refuse). Semantic/hybrid retrieval is opt-in via issue #65 (see
+  "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval" below); the base deploy
+  remains keyword-only. `GBRAIN_SKIP_STARTUP_HOOKS=1` is exported by the
+  operator wrapper to prevent gbrain's detached update-check network call
+  during reindex.
 - **No auto indexing.** Nothing in startup, deploy, or chat triggers a
   reindex. Operators run `josemar-gbrain reindex` manually.
 - **Runtime state.** gbrain state lives under `$GBRAIN_HOME/.gbrain` (PGLite
@@ -136,7 +141,7 @@ operator MUST verify the following after rebuild and before deploying:
 | `GBRAIN_BRAIN_REPO` | `/opt/data/obsidian` | Vault path gbrain indexes. |
 | `GBRAIN_SCHEMA_PACK` | `gbrain-base-v2` | Schema pack selector. Set to `josemar-user` to use the custom user-owned pack. |
 | `GBRAIN_SCHEMA_SOURCE_ROOT` | `/opt/data/.gbrain/schema-packs` | Source root for custom schema packs. The source pack for the selected `GBRAIN_SCHEMA_PACK` must exist at `<root>/<pack>/pack.yaml`. |
-| `GBRAIN_REFRESH_INTERVAL` | `5` | Hermes cron interval, in minutes, for `josemar-gbrain refresh`. Set to `0` to disable. Refresh deliberately uses `gbrain sync --no-embed` while embeddings are deferred; revisit only after issue #65 activation. See `docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation (not enabled in this branch). |
+| `GBRAIN_REFRESH_INTERVAL` | `5` | Hermes cron interval, in minutes, for `josemar-gbrain refresh`. Set to `0` to disable. Refresh deliberately uses `gbrain sync --no-embed` even after issue #65 activation; embedding stale pages is a separate scheduled job, not folded into the periodic refresh. See "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval" below and `docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation. |
 | `GBRAIN_REFRESH_TIMEOUT` | `240` | Maximum seconds for the refresh child while it holds the shared TaskNotes/gbrain lock. |
 
 No new Docker volume is added. `GBRAIN_HOME` (`/opt/data`) is the parent;
@@ -231,12 +236,12 @@ exits successfully. The refresh child is bounded by `GBRAIN_REFRESH_TIMEOUT`
 (default `240` seconds). See `docs/tasknotes-mcp.md` for the task transaction and
 recovery model.
 
-Refresh currently calls `gbrain sync --no-embed` because Josemar is in
-keyword-only/no-embedding mode. Issue #65 (gbrain embeddings) is **not
-complete** and embeddings are not enabled in this branch. When embeddings are
-eventually activated, refresh must **remain** `--no-embed`; embedding stale
-pages is a separate scheduled job, not folded into the periodic refresh. See
-`docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation, the
+Refresh currently calls `gbrain sync --no-embed` and **must remain `--no-embed`
+even after issue #65 activation**. Embedding stale pages is a separate scheduled
+job, not folded into the periodic refresh; manual vault edits made after the
+one-time `embed-backfill` need a later explicit `embed-backfill` in phase one to
+be vectorized. See "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval" below
+and `docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation, the
 shared embedding service design, and the staged activation/rollback plan.
 
 ## Native Write-Through
@@ -277,14 +282,171 @@ explicit design and validation.
 ## Doctor Warns in No-Embedding Mode
 
 `gbrain doctor` will warn that embeddings are not configured (no embedding
-provider key, `embedding_disabled` mode). This is expected and intentional in
-MVP. Activation configures keyword-only native gbrain search via
-`search.mcp_keyword_only=true`, which calls `engine.searchKeyword` and never
-the vector/hybrid provider path. Do not attempt to enable embeddings in MVP.
-Issue #65 (gbrain embeddings) is not complete; see
-`docs/memory-embeddings-evaluation.md` for the evaluation and the prerequisites
-landed in this branch (the optional `docker-compose.embeddings.yml` overlay and
-the pinned gbrain E5 preprocessing patch are present but inert).
+provider key, `embedding_disabled` mode) while the base deploy runs
+keyword-only. This is expected and intentional in the base deploy. Activation
+configures keyword-only native gbrain search via `search.mcp_keyword_only=true`,
+which calls `engine.searchKeyword` and never the vector/hybrid provider path;
+text queries are keyword-only, and image/cross-modal queries are rejected.
+Issue #65 (gbrain embeddings) is opt-in; see "Issue #65: Opt-in TEI E5
+Semantic/Hybrid Retrieval" below and `docs/memory-embeddings-evaluation.md` for
+the evaluation and the prerequisites landed in this branch (the optional
+`docker-compose.embeddings.yml` overlay and the pinned gbrain E5 preprocessing
+patch are present but inert until the operator opts in).
+
+## Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval
+
+Issue #65 adds opt-in semantic/hybrid retrieval to gbrain using a local TEI
+(Text Embeddings Inference) service running the pinned
+`intfloat/multilingual-e5-small` model. This is **opt-in and not enabled by
+default**; the base deploy remains keyword-only. The prerequisites (the
+optional `docker-compose.embeddings.yml` overlay and the pinned gbrain E5
+preprocessing patch) are present in this branch but inert until the operator
+opts in. No secrets are required (the model is a public Hugging Face model; the
+cache volume holds only downloaded weights).
+
+### Intended operator flow
+
+The deployment overlay is controlled by the optional repository variable
+`GBRAIN_EMBEDDINGS_ENABLED` (strict `true`/`false`, default `false`). The deploy
+workflow also selects the overlay for `MNEMOSYNE_DEPLOY_MODE=pilot` or `backup`.
+It writes the effective value to `.env` and `GITHUB_ENV`, verifies the TEI
+service is healthy when selected (and absent otherwise), and **does not**
+enable gbrain embeddings or start a backfill.
+
+After a deploy with the overlay enabled and healthy, run the manual
+`.github/workflows/gbrain-embedding-backfill.yml` workflow. Type the exact
+destructive confirmation `ENABLE_AND_BACKFILL`. It requires
+`GBRAIN_EMBEDDINGS_ENABLED=true`, validates the existing Hermes container and
+its non-empty `GBRAIN_EMBEDDING_MODEL`/`GBRAIN_EMBEDDING_DIMENSIONS`, then runs
+`docker exec josemar-gbrain enable-embeddings` followed by
+`docker exec josemar-gbrain embed-backfill` (using the configured container
+prefix). The workflow is fail-closed, retry-safe, never exposes secrets, and
+never rebuilds or deploys. Do not run it before the overlay-enabled deploy.
+
+1. **Deploy the embedding compose overlay.** Add
+   `docker-compose.embeddings.yml` to `COMPOSE_FILE` so the `embeddings` TEI
+   service and the dedicated `embeddings-net` network are present. The overlay
+   wires `GBRAIN_EMBEDDING_MODEL` (as `llama-server:<model>`),
+   `GBRAIN_EMBEDDING_DIMENSIONS`, and `LLAMA_SERVER_BASE_URL` into hermes; these
+   are inert until gbrain embeddings are enabled. See
+   `docker-compose.embeddings.yml` and `.env.example`.
+
+2. **Verify TEI health/config/preflight.** Before enabling gbrain embeddings,
+   confirm the TEI service is healthy and serving the expected model tuple:
+   ```bash
+   docker compose exec hermes curl -fsS http://embeddings:80/health
+   docker compose exec hermes curl -fsS http://embeddings:80/info
+   ```
+   `/health` must report healthy; `/info` must report the pinned model id,
+   dimensions, and revision matching the migration tuple
+   (`EMBEDDING_MODEL_ID`, `EMBEDDING_MODEL_REVISION`,
+   `EMBEDDING_MODEL_DIMENSIONS`). Mismatched revision/dimensions is tuple drift
+   and must be resolved before proceeding (see "Model tuple immutability"
+   below).
+
+3. **Run `josemar-gbrain enable-embeddings`** (native in-place migration).
+   This performs the native gbrain embedding migration in place: it forces
+   `search.mcp_keyword_only=true` first (so any error path leaves keyword-only
+   enabled), configures the embedding provider and runs the database migration
+   with `--no-embed` (no vectors produced), then only on success sets
+   `search.mcp_keyword_only=false` and clears the `embedding_disabled` sentinel.
+   It **preserves DB-only records** (e.g. chronicle timeline atoms) and **leaves
+   hybrid/semantic retrieval disabled until the migration succeeds**, so a
+   failed migration does not leave search in a half-enabled state. Hybrid/
+   semantic retrieval is only reachable after this step completes
+   successfully. The migration does not by itself vectorize the existing vault;
+   the explicit `embed-backfill` finalizes the native migration state.
+
+4. **Run `josemar-gbrain embed-backfill`** (one-time existing-vault
+   vectorization). This is the operator-only one-shot backfill that vectorizes
+   the existing vault. It requires `GBRAIN_EMBEDDING_MODEL` and
+   `GBRAIN_EMBEDDING_DIMENSIONS` to be set, acquires the shared TaskNotes lock
+   nonblocking, runs `gbrain embed --stale --include-null-signature` at
+   concurrency 1, then asserts no stale embeddings remain (dry-run verify).
+   It does NOT init or reinit PGLite. It is retryable: re-running it resumes
+   the backfill of any remaining stale/null-signature rows. Do not run it
+   through the periodic refresh path.
+
+5. **`gbrain search` and `gbrain query --no-expand` both become hybrid/semantic.**
+   `enable-embeddings` sets `search.mcp_keyword_only=false` and clears the
+   `embedding_disabled` sentinel on migration success, so both `gbrain search`
+   and `gbrain query --no-expand` use the hybrid/semantic provider path (not
+   exact keyword). The migration runs with `--no-embed` (no vectors produced);
+   the explicit `embed-backfill` finalizes the native migration state by
+   vectorizing the existing vault.
+
+### Keyword-only mode (before enable or after disable-embeddings)
+
+Before `enable-embeddings` (base deploy) or after `disable-embeddings`,
+`search.mcp_keyword_only=true` and the `embedding_disabled` sentinel are in
+effect: text queries are keyword-only (`engine.searchKeyword`), image/cross-
+modal queries are rejected, and `gbrain put`/`capture` do not embed (the
+sentinel makes `embed`/`import` refuse via `assertEmbeddingEnabled`). This is
+the safe default; `enable-embeddings` clears the sentinel on migration success.
+
+### Refresh stays `--no-embed`
+
+The periodic `josemar-gbrain refresh` (every `GBRAIN_REFRESH_INTERVAL` minutes,
+default 5) **continues to use `gbrain sync --no-embed`** even after issue #65
+activation. Embedding stale pages is a separate scheduled job, not folded into
+refresh. In phase one, manual vault edits made after the one-time
+`embed-backfill` need a later explicit `embed-backfill` to be vectorized; the
+5-min refresh reconciles the keyword index only.
+
+### Model tuple immutability
+
+The model tuple — model id + revision + dimensions + query/passage prefixes +
+normalization — is **immutable once embeddings are enabled**. Changing any
+element requires a full migration/backfill event (re-run `enable-embeddings`
+then `embed-backfill`), because mixing vectors from different models/spaces is
+invalid. **Revision drift** (the TEI-served revision no longer matches the
+pinned `EMBEDDING_MODEL_REVISION`) is a tuple change: the gbrain E5 signature
+includes the revision, so a changed revision produces stale vectors and
+requires the full `enable-embeddings` + `embed-backfill` to re-vectorize, not
+just a restart. The pinned gbrain E5 preprocessing patch stamps a versioned
+embedding signature (`e5-query-passage-v1`) for E5 models so raw and prefixed
+vectors are detected as incompatible; non-E5 signatures are byte-identical to
+the pre-patch form.
+
+### Prefixes are model-gated in the Josemar patch
+
+The overlay's `EMBEDDING_QUERY_PREFIX` / `EMBEDDING_PASSAGE_PREFIX` variables
+feed **Mnemosyne and TEI only**; they do **not** configure gbrain. gbrain's E5
+`query: ` / `passage: ` prefixing is **model-gated** in the Josemar patch
+(`patches/gbrain-inline-worker-gateway.patch`): the `isE5EmbeddingModel` /
+`preprocessE5Input` helpers apply the prefixes exactly once for E5 models and
+are a no-op for non-E5 models. Do not assume setting the overlay prefix vars
+re-shapes gbrain's prefixing — they are independent config surfaces that must
+be kept aligned to the same model tuple.
+
+### Safe rollback
+
+To roll back from embeddings to keyword-only:
+
+1. **Run `josemar-gbrain disable-embeddings`.** This sets
+   `search.mcp_keyword_only=true` first (so text queries fall back to
+   keyword-only and image/cross-modal queries are rejected), then atomically
+   writes the `embedding_disabled=true` sentinel into the file-plane config so
+   `gbrain put`/`capture` stop embedding (`embed`/`import` refuse via
+   `assertEmbeddingEnabled`). Vectors and the TEI service are preserved (not
+   deleted); a future re-activation re-runs `enable-embeddings` (which clears
+   the sentinel on migration success) and `embed-backfill` as needed.
+2. **Then, optionally, remove the TEI overlay.** Only after `disable-embeddings`
+   is confirmed should you remove `docker-compose.embeddings.yml` from
+   `COMPOSE_FILE` and stop the `embeddings` service. Removing TEI first while
+   gbrain still expects it can leave retrieval in a degraded state.
+
+The stores are independent: rolling back gbrain embeddings does not require
+re-indexing Mnemosyne and vice versa. The gbrain DB and its vectors remain; a
+future re-activation re-runs `enable-embeddings` / `embed-backfill` as needed.
+
+### No secrets
+
+The embeddings overlay requires no secrets. The model is a public Hugging Face
+model; the `embedding-model-cache` volume holds only downloaded public weights.
+No `/shared`, Obsidian, credentials, or Hermes state mounts are added to the
+`embeddings` service. See `docker-compose.embeddings.yml` and
+`docs/memory-embeddings-evaluation.md`.
 
 ## User-Owned Schema Pack Workflow
 
@@ -347,5 +509,7 @@ workflow: set the env, run reindex.
   the source root are allowed.
 - **`schema_validate_failed`** — The installed pack failed native gbrain
   `schema validate`. Check `pack.yaml` syntax and structure.
-- **Embeddings warning from `gbrain doctor`** — Expected in MVP. Search is
-  keyword-only by configuration; do not enable embeddings.
+- **Embeddings warning from `gbrain doctor`** — Expected in the base
+  (keyword-only) deploy. Text queries are keyword-only, image/cross-modal
+  queries are rejected, and `put`/`capture` do not embed. Embeddings are opt-in
+  via issue #65; see "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval" below.
