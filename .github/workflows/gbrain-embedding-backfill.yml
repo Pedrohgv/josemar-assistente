@@ -1,0 +1,69 @@
+name: gbrain-embedding-backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type ENABLE_AND_BACKFILL to explicitly enable embeddings and backfill vectors.'
+        required: true
+        type: string
+
+jobs:
+  backfill:
+    runs-on: self-hosted
+    steps:
+      - name: Validate destructive confirmation and repository variable
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          GBRAIN_EMBEDDINGS_ENABLED: ${{ vars.GBRAIN_EMBEDDINGS_ENABLED }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRMATION" != "ENABLE_AND_BACKFILL" ]; then
+            echo "ERROR: exact confirmation ENABLE_AND_BACKFILL is required"
+            exit 1
+          fi
+          if [ "$GBRAIN_EMBEDDINGS_ENABLED" != "true" ]; then
+            echo "ERROR: GBRAIN_EMBEDDINGS_ENABLED must be true; deploy with the embeddings overlay first"
+            exit 1
+          fi
+
+      - name: Verify running Hermes embedding runtime
+        env:
+          JOSEMAR_CONTAINER_PREFIX_INPUT: ${{ vars.JOSEMAR_CONTAINER_PREFIX }}
+        run: |
+          set -euo pipefail
+          PREFIX="${JOSEMAR_CONTAINER_PREFIX_INPUT:-josemar}"
+          if [[ ! "$PREFIX" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]; then
+            echo "ERROR: JOSEMAR_CONTAINER_PREFIX must match ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+            exit 1
+          fi
+          HERMES_CONTAINER="${PREFIX}-hermes"
+          if ! docker inspect --type container "$HERMES_CONTAINER" >/dev/null 2>&1; then
+            echo "ERROR: running Hermes container was not found; run a deploy with the embeddings overlay enabled first"
+            exit 1
+          fi
+          RUNNING="$(docker inspect -f '{{.State.Running}}' "$HERMES_CONTAINER")"
+          if [ "$RUNNING" != "true" ]; then
+            echo "ERROR: Hermes container is not running"
+            exit 1
+          fi
+          ENVIRONMENT="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$HERMES_CONTAINER")"
+          if ! printf '%s\n' "$ENVIRONMENT" | grep -Eq '^GBRAIN_EMBEDDING_MODEL=.+$'; then
+            echo "ERROR: running Hermes container lacks GBRAIN_EMBEDDING_MODEL"
+            exit 1
+          fi
+          if ! printf '%s\n' "$ENVIRONMENT" | grep -Eq '^GBRAIN_EMBEDDING_DIMENSIONS=.+$'; then
+            echo "ERROR: running Hermes container lacks GBRAIN_EMBEDDING_DIMENSIONS"
+            exit 1
+          fi
+
+      - name: Enable embeddings and retry-safe backfill
+        env:
+          JOSEMAR_CONTAINER_PREFIX_INPUT: ${{ vars.JOSEMAR_CONTAINER_PREFIX }}
+        run: |
+          set -euo pipefail
+          PREFIX="${JOSEMAR_CONTAINER_PREFIX_INPUT:-josemar}"
+          HERMES_CONTAINER="${PREFIX}-hermes"
+          echo "Enabling gbrain embeddings and running retry-safe backfill in ${HERMES_CONTAINER}"
+          docker exec "$HERMES_CONTAINER" josemar-gbrain enable-embeddings
+          docker exec "$HERMES_CONTAINER" josemar-gbrain embed-backfill

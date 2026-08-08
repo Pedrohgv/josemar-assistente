@@ -130,7 +130,11 @@ class DeployWorkflowContractTests(unittest.TestCase):
         validate = _step_text(self.workflow, "Validate required repository variables")
         self.assertIn("exit 1", validate.split("MNEMOSYNE_DEPLOY_MODE must be one of")[1].split("esac")[0])
 
-    def test_no_embeddings_only_mode(self) -> None:
+    def test_mode_case_branches_are_only_off_pilot_backup(self) -> None:
+        # The MNEMOSYNE_DEPLOY_MODE case statement has exactly the three mode
+        # branches (no extra mode). Standalone gbrain embeddings is NOT a mode
+        # branch: it is selected via GBRAIN_EMBEDDINGS_ENABLED outside the case
+        # (see test_embeddings_overlay_matrix_permits_standalone_off).
         derive = _step_text(self.workflow, "Derive compose file and validate config")
         branches = re.findall(r"(backup|pilot|off)\)", derive)
         self.assertEqual(set(branches), {"backup", "pilot", "off"})
@@ -214,25 +218,24 @@ class DeployWorkflowContractTests(unittest.TestCase):
 
     # --- required compose ordering ---
 
-    def test_pilot_ordering_base_embeddings_mnemosyne(self) -> None:
+    def test_pilot_ordering_embeddings_before_mnemosyne(self) -> None:
         derive = _step_text(self.workflow, "Derive compose file and validate config")
+        self.assertIn('COMPOSE_FILE_VALUE="${COMPOSE_FILE_VALUE}:docker-compose.embeddings.yml"', derive)
         pilot_branch = derive.split("pilot)")[1].split(";;")[0]
-        self.assertIn("docker-compose.embeddings.yml", pilot_branch)
         self.assertIn("docker-compose.mnemosyne.yml", pilot_branch)
         self.assertLess(
-            pilot_branch.index("docker-compose.embeddings.yml"),
-            pilot_branch.index("docker-compose.mnemosyne.yml"),
+            derive.index("docker-compose.embeddings.yml"),
+            derive.index("docker-compose.mnemosyne.yml"),
         )
 
     def test_backup_ordering_base_embeddings_mnemosyne_backup_last(self) -> None:
         derive = _step_text(self.workflow, "Derive compose file and validate config")
         backup_branch = derive.split("backup)")[1].split(";;")[0]
-        self.assertIn("docker-compose.embeddings.yml", backup_branch)
         self.assertIn("docker-compose.mnemosyne.yml", backup_branch)
         self.assertIn("docker-compose.mnemosyne-backup.yml", backup_branch)
         self.assertLess(
-            backup_branch.index("docker-compose.embeddings.yml"),
-            backup_branch.index("docker-compose.mnemosyne.yml"),
+            derive.index("docker-compose.embeddings.yml"),
+            derive.index("docker-compose.mnemosyne.yml"),
         )
         self.assertLess(
             backup_branch.index("docker-compose.mnemosyne.yml"),
@@ -543,6 +546,120 @@ class DeployWorkflowContractTests(unittest.TestCase):
         self.assertIn("vars.MNEMOSYNE_DEPLOY_MODE == 'pilot'", pilot_step.get("if", ""))
         self.assertIn("vars.MNEMOSYNE_DEPLOY_MODE == 'backup'", pilot_step.get("if", ""))
         self.assertEqual(backup_step.get("if"), "vars.MNEMOSYNE_DEPLOY_MODE == 'backup'")
+
+    def test_embeddings_variable_is_strict_default_off_before_teardown(self) -> None:
+        validate = _step_text(self.workflow, "Validate required repository variables")
+        self.assertIn('GBRAIN_EMBEDDINGS_ENABLED="$GBRAIN_EMBEDDINGS_ENABLED_INPUT"', validate)
+        self.assertIn('GBRAIN_EMBEDDINGS_ENABLED="false"', validate)
+        self.assertIn("must be 'true' or 'false'", validate)
+        self.assertLess(
+            _step_index(self.workflow, "Validate required repository variables"),
+            _step_index(self.workflow, "Stop existing services"),
+        )
+
+    def test_embeddings_overlay_is_selected_once_and_in_order(self) -> None:
+        derive = _step_text(self.workflow, "Derive compose file and validate config")
+        self.assertIn('GBRAIN_EMBEDDINGS_ENABLED}" = "true"', derive)
+        self.assertEqual(derive.count("docker-compose.embeddings.yml"), 1)
+        self.assertLess(derive.index("docker-compose.browser-control.yml"), derive.index("docker-compose.embeddings.yml"))
+        self.assertLess(derive.index("docker-compose.embeddings.yml"), derive.index("docker-compose.mnemosyne.yml"))
+
+    def test_effective_embeddings_value_is_persisted(self) -> None:
+        env = _step_text(self.workflow, "Create .env file")
+        self.assertIn('write_env GBRAIN_EMBEDDINGS_ENABLED "$GBRAIN_EMBEDDINGS_ENABLED"', env)
+        self.assertIn('echo "GBRAIN_EMBEDDINGS_ENABLED=$GBRAIN_EMBEDDINGS_ENABLED" >> "$GITHUB_ENV"', env)
+
+    def test_post_start_embeddings_presence_health_check(self) -> None:
+        verify = _step_text(self.workflow, "Verify embeddings overlay selection")
+        self.assertIn('MAXIMAL_ARGS', verify)
+        self.assertIn('ps embeddings', verify)
+        self.assertIn('healthy', verify)
+        self.assertIn('ps --all --format json embeddings', verify)
+        self.assertLess(_step_index(self.workflow, "Start services"), _step_index(self.workflow, "Verify embeddings overlay selection"))
+
+    def test_embeddings_overlay_matrix_permits_standalone_off(self) -> None:
+        # Matrix: GBRAIN_EMBEDDINGS_ENABLED (true/false) x MNEMOSYNE_DEPLOY_MODE
+        # (off/pilot/backup). The embeddings overlay is selected when the
+        # variable is true OR the mode is pilot/backup — exactly once, with no
+        # duplication and no embeddings-only restriction tied to Mnemosyne.
+        derive = _step_text(self.workflow, "Derive compose file and validate config")
+        off = _step_text(self.workflow, "Verify Mnemosyne off (overlays absent, provider disabled)")
+
+        # The standalone selection condition (true + off is sufficient).
+        self.assertIn(
+            'if [ "${GBRAIN_EMBEDDINGS_ENABLED}" = "true" ]'
+            ' || [ "${MNEMOSYNE_DEPLOY_MODE:-off}" = "pilot" ]'
+            ' || [ "${MNEMOSYNE_DEPLOY_MODE:-off}" = "backup" ]; then',
+            derive,
+        )
+
+        # The embeddings overlay is appended exactly once, before the mode
+        # case statement (never inside a case branch, never duplicated).
+        case_idx = derive.index('case "${MNEMOSYNE_DEPLOY_MODE:-off}" in')
+        self.assertEqual(derive.count("docker-compose.embeddings.yml"), 1)
+        self.assertLess(derive.index("docker-compose.embeddings.yml"), case_idx)
+        case_branches = derive[case_idx:]
+        self.assertNotIn("docker-compose.embeddings.yml", case_branches)
+
+        # Mode branches append only the Mnemosyne overlays; off appends none,
+        # so standalone (true + off) yields base + embeddings only.
+        backup_branch = case_branches.split("backup)")[1].split(";;")[0]
+        self.assertIn("docker-compose.mnemosyne.yml", backup_branch)
+        self.assertIn("docker-compose.mnemosyne-backup.yml", backup_branch)
+        pilot_branch = case_branches.split("pilot)")[1].split(";;")[0]
+        self.assertIn("docker-compose.mnemosyne.yml", pilot_branch)
+        self.assertNotIn("docker-compose.mnemosyne-backup.yml", pilot_branch)
+        off_branch = case_branches.split("off)")[1].split(";;")[0]
+        self.assertNotIn("docker-compose.mnemosyne", off_branch)
+
+        # Preserved off-mode behavior with GBRAIN_EMBEDDINGS_ENABLED=false:
+        # the Mnemosyne-off verifier still runs its maximal-set stale check,
+        # provider/cron checks, and forbids Mnemosyne overlay services.
+        self.assertIn("MAXIMAL_ARGS", off)
+        self.assertIn("mnemosyne-backup-export", off)
+        stale_loop = off.split("for svc in")[1].split("; do")[0]
+        self.assertIn("mnemosyne-backup-uploader", stale_loop)
+        self.assertIn("mnemosyne-backup-recover", stale_loop)
+        # Standalone gbrain embeddings must NOT be rejected by the off verifier:
+        # the embeddings service is not in the stale-services loop and is
+        # verified solely by the dedicated "Verify embeddings overlay
+        # selection" step.
+        self.assertNotIn("embeddings", stale_loop)
+        verify = _step_text(self.workflow, "Verify embeddings overlay selection")
+        self.assertIn('GBRAIN_EMBEDDINGS_ENABLED}" = "true"', verify)
+        self.assertIn("healthy", verify)
+        self.assertIn("is absent", verify)
+
+
+class GbrainBackfillWorkflowContractTests(unittest.TestCase):
+    """Pure-source contract for the manual, non-deploying backfill workflow."""
+
+    def setUp(self) -> None:
+        path = REPO_ROOT / ".github" / "workflows" / "gbrain-embedding-backfill.yml"
+        self.text = path.read_text(encoding="utf-8")
+        self.workflow = yaml.safe_load(self.text)
+
+    def test_manual_self_hosted_workflow_and_exact_confirmation(self) -> None:
+        self.assertIn("workflow_dispatch", self.text)
+        self.assertEqual(self.workflow["jobs"]["backfill"]["runs-on"], "self-hosted")
+        self.assertIn("ENABLE_AND_BACKFILL", self.text)
+        self.assertIn('CONFIRMATION" != "ENABLE_AND_BACKFILL"', self.text)
+
+    def test_fail_closed_variable_prefix_and_runtime_checks(self) -> None:
+        self.assertIn('GBRAIN_EMBEDDINGS_ENABLED" != "true"', self.text)
+        self.assertIn(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", self.text)
+        self.assertIn("docker inspect --type container", self.text)
+        self.assertIn(".State.Running", self.text)
+        self.assertIn("GBRAIN_EMBEDDING_MODEL", self.text)
+        self.assertIn("GBRAIN_EMBEDDING_DIMENSIONS", self.text)
+
+    def test_only_explicit_operator_commands_run(self) -> None:
+        self.assertIn("docker exec \"$HERMES_CONTAINER\" josemar-gbrain enable-embeddings", self.text)
+        self.assertIn("docker exec \"$HERMES_CONTAINER\" josemar-gbrain embed-backfill", self.text)
+        self.assertNotIn("docker compose up", self.text)
+        self.assertNotIn("docker compose build", self.text)
+        self.assertNotIn("docker compose down", self.text)
+        self.assertNotIn("secrets.", self.text)
 
 
 class BackupOverlayContractTests(unittest.TestCase):

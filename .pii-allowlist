@@ -22,3 +22,6 @@ tests/runtime/fixtures/mnemosyne-retrieval/faquad-ir/(?:qrels|queries)\.jsonl:\d
 
 # Literal test-only SSH remote, not a personal email address.
 tests/runtime/test_mnemosyne_(?:backup|pilot)\.py:\d+:email:git@github\.com:.*git@github\.com
+
+# Deterministic gbrain upstream E5 patch fixture, not a personal phone number.
+patches/gbrain-inline-worker-gateway\.patch:\d+:phone:[0]123456789:.*[0]123456789
