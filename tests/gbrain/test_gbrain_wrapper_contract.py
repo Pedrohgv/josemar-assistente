@@ -266,7 +266,17 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
     def test_reindex_drops_root_to_hermes_when_possible(self) -> None:
         self.assertIn("drop_root_if_possible", self.src)
         self.assertIn("JOSEMAR_GBRAIN_DROPPED_PRIVS", self.src)
-        self.assertIn("su -s /bin/sh hermes", self.src)
+        self.assertIn("su -p -s /bin/sh -- hermes", self.src)
+
+    def test_root_drop_fails_closed_and_preserves_runtime_environment(self) -> None:
+        body = _extract_function(self.src, "drop_root_if_possible")
+        self.assertIn("runtime_identity_unavailable", body)
+        self.assertIn('export HOME="$runtime_home"', body)
+        self.assertIn('export HERMES_HOME="$runtime_hermes_home"', body)
+        self.assertIn('export GBRAIN_HOME="$runtime_gbrain_home"', body)
+        self.assertIn('export XDG_CONFIG_HOME="$runtime_xdg_config"', body)
+        self.assertIn('runtime_home="${HERMES_HOME:-/opt/data}"', body)
+        self.assertIn('runtime_gbrain_home="${GBRAIN_HOME:-/opt/data}"', body)
 
     def test_reindex_creates_state_dir(self) -> None:
         body = _extract_function(self.src, "do_reindex")

@@ -1021,13 +1021,31 @@ drop_root_if_possible() {
         return 0
     fi
     if ! getent passwd hermes >/dev/null 2>&1; then
-        return 0
+        emit_json '{"success": false, "error": "runtime_identity_unavailable", "message": "Root execution refused: the hermes runtime user does not exist."}'
+        return 1
     fi
     if ! command -v su >/dev/null 2>&1; then
-        return 0
+        emit_json '{"success": false, "error": "runtime_identity_unavailable", "message": "Root execution refused: su is unavailable for the hermes runtime user."}'
+        return 1
     fi
 
-    exec su -s /bin/sh hermes -c "JOSEMAR_GBRAIN_DROPPED_PRIVS=1 exec '$0' '$subcommand'"
+    runtime_home="${HERMES_HOME:-/opt/data}"
+    runtime_gbrain_home="${GBRAIN_HOME:-/opt/data}"
+    runtime_xdg_config="${XDG_CONFIG_HOME:-/opt/data/.config}"
+    exec su -p -s /bin/sh -- hermes -c '
+        runtime_home="$1"
+        runtime_hermes_home="$2"
+        runtime_gbrain_home="$3"
+        runtime_xdg_config="$4"
+        wrapper="$5"
+        subcommand="$6"
+        export HOME="$runtime_home"
+        export HERMES_HOME="$runtime_hermes_home"
+        export GBRAIN_HOME="$runtime_gbrain_home"
+        export XDG_CONFIG_HOME="$runtime_xdg_config"
+        export JOSEMAR_GBRAIN_DROPPED_PRIVS=1
+        exec "$wrapper" "$subcommand"
+    ' sh "$runtime_home" "${HERMES_HOME:-$runtime_home}" "$runtime_gbrain_home" "$runtime_xdg_config" "$0" "$subcommand"
 }
 
 main() {

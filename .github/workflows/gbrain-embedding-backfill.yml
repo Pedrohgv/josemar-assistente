@@ -57,6 +57,27 @@ jobs:
             exit 1
           fi
 
+      - name: Preflight Hermes runtime identity and paths
+        env:
+          JOSEMAR_CONTAINER_PREFIX_INPUT: ${{ vars.JOSEMAR_CONTAINER_PREFIX }}
+        run: |
+          set -euo pipefail
+          PREFIX="${JOSEMAR_CONTAINER_PREFIX_INPUT:-josemar}"
+          HERMES_CONTAINER="${PREFIX}-hermes"
+          docker exec --user hermes --workdir /opt/data \
+            -e HOME=/opt/data -e HERMES_HOME=/opt/data \
+            -e GBRAIN_HOME=/opt/data -e XDG_CONFIG_HOME=/opt/data/.config \
+            "$HERMES_CONTAINER" sh -eu -c '
+              test "$(id -un)" = hermes
+              test "$(id -u)" != 0
+              test "$HOME" = /opt/data
+              test "$HERMES_HOME" = /opt/data
+              test "$GBRAIN_HOME" = /opt/data
+              test "$XDG_CONFIG_HOME" = /opt/data/.config
+              test "$PWD" = /opt/data
+              test -d /opt/data/.gbrain
+            '
+
       - name: Enable embeddings and retry-safe backfill
         env:
           JOSEMAR_CONTAINER_PREFIX_INPUT: ${{ vars.JOSEMAR_CONTAINER_PREFIX }}
@@ -65,5 +86,27 @@ jobs:
           PREFIX="${JOSEMAR_CONTAINER_PREFIX_INPUT:-josemar}"
           HERMES_CONTAINER="${PREFIX}-hermes"
           echo "Enabling gbrain embeddings and running retry-safe backfill in ${HERMES_CONTAINER}"
-          docker exec "$HERMES_CONTAINER" josemar-gbrain enable-embeddings
-          docker exec "$HERMES_CONTAINER" josemar-gbrain embed-backfill
+          docker exec --user hermes --workdir /opt/data \
+            -e HOME=/opt/data -e HERMES_HOME=/opt/data \
+            -e GBRAIN_HOME=/opt/data -e XDG_CONFIG_HOME=/opt/data/.config \
+            "$HERMES_CONTAINER" josemar-gbrain enable-embeddings
+          docker exec --user hermes --workdir /opt/data \
+            -e HOME=/opt/data -e HERMES_HOME=/opt/data \
+            -e GBRAIN_HOME=/opt/data -e XDG_CONFIG_HOME=/opt/data/.config \
+            "$HERMES_CONTAINER" josemar-gbrain embed-backfill
+
+      - name: Smoke-test activated embeddings as hermes
+        env:
+          JOSEMAR_CONTAINER_PREFIX_INPUT: ${{ vars.JOSEMAR_CONTAINER_PREFIX }}
+        run: |
+          set -euo pipefail
+          PREFIX="${JOSEMAR_CONTAINER_PREFIX_INPUT:-josemar}"
+          HERMES_CONTAINER="${PREFIX}-hermes"
+          docker exec --user hermes --workdir /opt/data \
+            -e HOME=/opt/data -e HERMES_HOME=/opt/data \
+            -e GBRAIN_HOME=/opt/data -e XDG_CONFIG_HOME=/opt/data/.config \
+            "$HERMES_CONTAINER" sh -eu -c '
+              test "$(id -un)" = hermes
+              test "$(gbrain config get search.mcp_keyword_only)" = false
+              test -f /opt/data/.gbrain/embedding-backfill-complete.json
+            '

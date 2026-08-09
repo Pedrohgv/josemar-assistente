@@ -108,9 +108,13 @@ embeddings overlay selected and healthy. Enter the exact confirmation
 `GBRAIN_EMBEDDINGS_ENABLED=true`, validates the existing container prefix and
 running Hermes container, verifies the container has non-empty
 `GBRAIN_EMBEDDING_MODEL` and `GBRAIN_EMBEDDING_DIMENSIONS`, then runs
-`josemar-gbrain enable-embeddings` followed by `embed-backfill` with `docker exec`.
-It is fail-closed and retry-safe, never prints environment values or secrets,
-and never rebuilds, deploys, or removes containers.
+`josemar-gbrain enable-embeddings` followed by `embed-backfill` with
+`docker exec --user hermes --workdir /opt/data`, explicitly setting
+`HOME=/opt/data`, `HERMES_HOME=/opt/data`, `GBRAIN_HOME=/opt/data`, and
+`XDG_CONFIG_HOME=/opt/data/.config`. The workflow preflights that identity and
+path, then performs a same-identity post-backfill smoke test. It is fail-closed
+and retry-safe, never prints environment values or secrets, and never rebuilds,
+deploys, or removes containers.
 
 ## Stop Workflow Notes
 

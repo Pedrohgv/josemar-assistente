@@ -654,12 +654,25 @@ class GbrainBackfillWorkflowContractTests(unittest.TestCase):
         self.assertIn("GBRAIN_EMBEDDING_DIMENSIONS", self.text)
 
     def test_only_explicit_operator_commands_run(self) -> None:
-        self.assertIn("docker exec \"$HERMES_CONTAINER\" josemar-gbrain enable-embeddings", self.text)
-        self.assertIn("docker exec \"$HERMES_CONTAINER\" josemar-gbrain embed-backfill", self.text)
+        self.assertIn("docker exec --user hermes --workdir /opt/data", self.text)
+        self.assertIn("josemar-gbrain enable-embeddings", self.text)
+        self.assertIn("josemar-gbrain embed-backfill", self.text)
+        self.assertIn("-e HOME=/opt/data", self.text)
+        self.assertIn("-e HERMES_HOME=/opt/data", self.text)
+        self.assertIn("-e GBRAIN_HOME=/opt/data", self.text)
+        self.assertIn("-e XDG_CONFIG_HOME=/opt/data/.config", self.text)
+        self.assertIn("Smoke-test activated embeddings as hermes", self.text)
         self.assertNotIn("docker compose up", self.text)
         self.assertNotIn("docker compose build", self.text)
         self.assertNotIn("docker compose down", self.text)
         self.assertNotIn("secrets.", self.text)
+
+    def test_runtime_identity_and_post_backfill_smoke_contract(self) -> None:
+        self.assertIn('test "$(id -un)" = hermes', self.text)
+        self.assertIn('test "$(id -u)" != 0', self.text)
+        self.assertIn('test "$PWD" = /opt/data', self.text)
+        self.assertIn('test "$(gbrain config get search.mcp_keyword_only)" = false', self.text)
+        self.assertIn('test -f /opt/data/.gbrain/embedding-backfill-complete.json', self.text)
 
 
 class BackupOverlayContractTests(unittest.TestCase):

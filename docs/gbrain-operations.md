@@ -317,11 +317,15 @@ After a deploy with the overlay enabled and healthy, run the manual
 `.github/workflows/gbrain-embedding-backfill.yml` workflow. Type the exact
 destructive confirmation `ENABLE_AND_BACKFILL`. It requires
 `GBRAIN_EMBEDDINGS_ENABLED=true`, validates the existing Hermes container and
-its non-empty `GBRAIN_EMBEDDING_MODEL`/`GBRAIN_EMBEDDING_DIMENSIONS`, then runs
-`docker exec josemar-gbrain enable-embeddings` followed by
-`docker exec josemar-gbrain embed-backfill` (using the configured container
-prefix). The workflow is fail-closed, retry-safe, never exposes secrets, and
-never rebuilds or deploys. Do not run it before the overlay-enabled deploy.
+its non-empty embedding settings, then preflights the `hermes` identity with
+workdir `/opt/data`, `HOME=HERMES_HOME=GBRAIN_HOME=/opt/data`, and
+`XDG_CONFIG_HOME=/opt/data/.config`. It runs activation and backfill with
+`docker exec --user hermes --workdir /opt/data` and those same environment
+values, followed by a same-identity smoke test. Direct root-default
+`docker exec` is intentionally not used: the container Config.User is root,
+while the runtime gbrain state belongs to hermes under `/opt/data`. The
+workflow is fail-closed, retry-safe, never exposes secrets, and never rebuilds
+or deploys. Do not run it before the overlay-enabled deploy.
 
 1. **Deploy the embedding compose overlay.** Add
    `docker-compose.embeddings.yml` to `COMPOSE_FILE` so the `embeddings` TEI
