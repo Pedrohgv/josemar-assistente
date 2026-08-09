@@ -23,6 +23,14 @@ activation (init/sync/extract/schema setup) is provided by the
   in the container). Do not call `josemar-gbrain` from chat — it is an
   operator maintenance convenience for reindex/activation only. For TaskNotes
   task files, use the bounded `task_*` MCP tools instead of native capture/put.
+- **`josemar-gbrain` wrapper commands are forbidden from chat, with exactly one
+  exception.** Chat MUST NOT invoke `josemar-gbrain` for vault work; use the
+  native `gbrain` binary directly. The sole chat-allowed wrapper invocation is
+  `josemar-gbrain refresh-embeddings`, and it may be run ONLY after an explicit
+  user request. Every other wrapper subcommand — `reindex`, `refresh`,
+  `enable-embeddings`, `disable-embeddings`, and `embed-backfill` — is
+  operator-only and remains forbidden from chat even when the user asks for it
+  directly.
 - **Keyword-only search by default; opt-in semantic/hybrid retrieval (issue #65).**
   The base deploy configures `search.mcp_keyword_only=true` and the
   `embedding_disabled` sentinel, so `gbrain search` uses `engine.searchKeyword`
@@ -45,8 +53,13 @@ activation (init/sync/extract/schema setup) is provided by the
   changes, or vault swaps. A Hermes cron runs `josemar-gbrain refresh` every 5
   minutes by default to pick up manual Obsidian/Syncthing edits. Refresh uses
   `gbrain sync --no-embed` even after issue #65 activation; embedding stale
-  pages is a separate job, not folded into refresh. See
-  `docs/gbrain-operations.md`.
+  pages is a separate daily job, not folded into refresh. The first backfill
+  remains manual; the daily job follows it. Per the primary chat prohibition
+  above, the only wrapper command chat may run is
+  `josemar-gbrain refresh-embeddings`, and only after an explicit user request;
+  `reindex`, `refresh`, `enable-embeddings`, `disable-embeddings`, and
+  `embed-backfill` remain operator-only and forbidden from chat.
+  See `docs/gbrain-operations.md`.
 - **put is whole-page replacement.** `gbrain` upserts the entire page content.
   Rename, template instantiation, surgical section/frontmatter patching, and
   physical move are NOT offered natively; use Obsidian manually for those.

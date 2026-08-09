@@ -393,6 +393,13 @@ refresh. In phase one, manual vault edits made after the one-time
 `embed-backfill` need a later explicit `embed-backfill` to be vectorized; the
 5-min refresh reconciles the keyword index only.
 
+After the first manual `embed-backfill`, the daily no-agent Hermes job
+(`gbrain-embedding-refresh`, `0 5 * * *`) runs
+`josemar-gbrain refresh-embeddings`. It owns the TaskNotes lock, validates
+semantic mode and the completion tuple, and runs the exact stale-only embed
+at concurrency 1. Josemar may invoke this path from chat only after an
+explicit user request.
+
 ### Model tuple immutability
 
 The model tuple — model id + revision + dimensions + query/passage prefixes +

@@ -2,6 +2,11 @@
 
 Self-hosted Hermes assistant infrastructure for running a private AI assistant with Telegram, dashboard/API access, git-backed agent state, an Obsidian vault, and optional queue-based local ML jobs.
 
+After the initial semantic embedding backfill is run manually, the daily
+no-agent `gbrain-embedding-refresh` job maintains stale vectors. The
+`refresh-embeddings` wrapper path is allowed only after an explicit user
+request.
+
 This repository is the public/platform layer. Personal identity, memories, private workflows, and user-specific skills live in a separate private `agent-state` repository so this repo can evolve independently from each user's assistant state.
 
 ## What This Repo Provides

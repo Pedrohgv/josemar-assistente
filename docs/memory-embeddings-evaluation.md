@@ -355,7 +355,10 @@ When the operator eventually enables embeddings, the following must hold:
   `josemar-gbrain refresh` and from the TaskNotes lock. It acquires the shared
   TaskNotes lock nonblocking, runs at concurrency 1, verifies zero stale
   embeddings remain, and is retryable. Do not run the initial backfill through
-  the periodic refresh path.
+  the periodic refresh path. The first backfill remains manual; after it
+  succeeds, a daily no-agent Hermes job runs the marker-guarded
+  `josemar-gbrain refresh-embeddings` path. Josemar may run that wrapper from
+  chat only after an explicit user request.
 - **Refresh must remain `--no-embed`.** The periodic `josemar-gbrain refresh`
   continues to use `gbrain sync --no-embed` even after issue #65 activation.
   Embedding stale pages is a **separate scheduled job**, not folded into

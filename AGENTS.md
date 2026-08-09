@@ -1,5 +1,9 @@
 # AGENTS.md
 
+Semantic gbrain embeddings are initialized by a manual backfill. The daily
+no-agent refresh follows that backfill; Josemar may invoke
+`josemar-gbrain refresh-embeddings` only after an explicit user request.
+
 Purpose: Root guidance for AI assistants working with the Josemar Assistente project.
 
 ## Prompt Language Policy

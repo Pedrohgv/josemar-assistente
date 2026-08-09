@@ -43,13 +43,16 @@
 #   - refresh is safe for cron after activation. It deliberately uses
 #     `--no-embed` while Josemar runs keyword-only; revisit when embeddings are
 #     intentionally enabled.
-#   - embed-backfill is operator-only and never called by cron/startup. It is
-#     the only wrapper path that produces embeddings; reindex/refresh remain
-#     no-embedding and keyword-only.
+#   - embed-backfill is operator-only and never called by cron/startup. The
+#     daily refresh-embeddings path also produces embeddings, but only after
+#     the manual backfill marker and semantic-mode checks pass.
 #   - enable-embeddings/disable-embeddings are operator-only and never called
 #     by cron/startup. enable-embeddings is the explicit, non-destructive
 #     switch to semantic search (migration only, no backfill); disable-embeddings
 #     is the safe rollback (keyword-only on, vectors preserved).
+#   - refresh-embeddings is the sole chat-allowed maintenance command, but only
+#     after an explicit user request. It owns the TaskNotes lock, reconciles
+#     files without embedding, then embeds stale rows at concurrency 1.
 #   - GBRAIN_SKIP_STARTUP_HOOKS=1 is exported for every wrapper-invoked gbrain
 #     command to prevent gbrain's detached update-check network call.
 #   - Results are returned in JSON envelopes.
@@ -67,6 +70,7 @@ GBRAIN_STATE_DIR="${GBRAIN_HOME}/.gbrain"
 # Lock shared with the TaskNotes MCP. embed-backfill acquires this lock
 # nonblocking before any gbrain access to avoid concurrent vault writes.
 GBRAIN_TASKNOTES_LOCK="${GBRAIN_TASKNOTES_LOCK:-/opt/data/.locks/tasknotes.lock}"
+GBRAIN_EMBEDDING_MARKER="${GBRAIN_STATE_DIR}/embedding-backfill-complete.json"
 
 # Schema pack install directory (native gbrain user-pack discovery location).
 SCHEMA_INSTALL_DIR="${GBRAIN_STATE_DIR}/schema-packs"
@@ -499,6 +503,97 @@ do_refresh() {
     emit_json '{"success": true, "action": "refresh", "message": "gbrain refreshed from vault files. Embeddings skipped by design."}'
 }
 
+# Explicit-request semantic refresh. The shared lock is owned here (not by the
+# Hermes cron entrypoint) and validation is performed while it is held.
+do_refresh_embeddings() {
+    export_gbrain_env
+    mkdir -p "$GBRAIN_STATE_DIR"
+    mark_brain_repo_safe_directory
+    # Pre-check before `exec 9<`: a failed redirection on the special builtin
+    # `exec` terminates the shell immediately, which would skip the structured
+    # lock_unavailable error. The -r probe keeps that failure path in-shell.
+    if [ ! -r "$GBRAIN_TASKNOTES_LOCK" ]; then
+        emit_json '{"success": false, "action": "refresh-embeddings", "error": "refresh_embeddings_lock_unavailable", "message": "Could not open the tasknotes lock file."}'
+        return 1
+    fi
+    exec 9<"$GBRAIN_TASKNOTES_LOCK" 2>/dev/null
+    if ! flock -n 9; then
+        emit_json '{"success": true, "action": "refresh-embeddings", "status": "skipped", "reason": "lock_busy"}'
+        return 0
+    fi
+        keyword_only=$("$GBRAIN_BIN" config get search.mcp_keyword_only 2>/dev/null) || {
+            emit_json '{"success": false, "action": "refresh-embeddings", "error": "refresh_embeddings_config_read_failed", "message": "Could not read search.mcp_keyword_only from gbrain."}'
+            exit 1
+        }
+        if [ "$keyword_only" = "true" ]; then
+            emit_json '{"success": true, "action": "refresh-embeddings", "status": "skipped", "reason": "keyword_only"}'
+            exit 0
+        fi
+        if [ "$keyword_only" != "false" ]; then
+            emit_json '{"success": false, "action": "refresh-embeddings", "error": "refresh_embeddings_semantic_mode_invalid", "message": "gbrain config get search.mcp_keyword_only must print exactly false"}'
+            exit 1
+        fi
+        validation=$(python3 - "$GBRAIN_STATE_DIR/config.json" "$GBRAIN_EMBEDDING_MARKER" "${GBRAIN_EMBEDDING_MODEL:-}" "${GBRAIN_EMBEDDING_DIMENSIONS:-}" "${GBRAIN_EMBEDDING_MODEL_REVISION:-}" <<'PY'
+import json, os, sys
+config_path, marker_path, model, dimensions, revision = sys.argv[1:]
+def result(status, **extra):
+    print(json.dumps({"status": status, **extra}, ensure_ascii=False))
+if not os.path.exists(config_path):
+    result("skip", reason="uninitialized"); raise SystemExit
+try:
+    with open(config_path, encoding="utf-8") as fh: config = json.load(fh)
+except Exception as exc:
+    result("fail", error="refresh_embeddings_config_corrupt", message=str(exc)); raise SystemExit
+if not isinstance(config, dict):
+    result("fail", error="refresh_embeddings_config_corrupt", message="config.json is not an object"); raise SystemExit
+sentinel = config.get("embedding_disabled")
+if sentinel is not None and not isinstance(sentinel, bool):
+    result("fail", error="refresh_embeddings_invalid_sentinel", message="embedding_disabled must be boolean"); raise SystemExit
+if sentinel is True:
+    result("skip", reason="embedding_disabled"); raise SystemExit
+if not os.path.exists(marker_path):
+    result("skip", reason="completion_marker_missing"); raise SystemExit
+try:
+    with open(marker_path, encoding="utf-8") as fh: marker = json.load(fh)
+except Exception as exc:
+    result("fail", error="refresh_embeddings_marker_malformed", message=str(exc)); raise SystemExit
+if (not isinstance(marker, dict) or set(marker) != {"model", "dimensions", "revision"
+        } or not isinstance(marker["dimensions"], int) or isinstance(marker["dimensions"], bool)):
+    result("fail", error="refresh_embeddings_marker_malformed", message="marker must contain exactly model, dimensions, revision"); raise SystemExit
+try:
+    matches = (marker["model"] == model and int(marker["dimensions"]) == int(dimensions)
+               and marker["revision"] == revision and all(isinstance(marker[k], str) and marker[k] for k in ("model", "revision")))
+except (TypeError, ValueError):
+    matches = False
+if not matches:
+    result("fail", error="refresh_embeddings_marker_tuple_mismatch", message="completion marker does not match the configured embedding tuple"); raise SystemExit
+result("run")
+PY
+        )
+        case "$validation" in
+            *'"status": "skip"'*) emit_json "$(python3 - "$validation" <<'PY'
+import json, sys
+r=json.loads(sys.argv[1]); print(json.dumps({"success": True, "action": "refresh-embeddings", "status": "skipped", "reason": r["reason"]}))
+PY
+)"; exit 0 ;;
+            *'"status": "fail"'*) emit_json "$(python3 - "$validation" <<'PY'
+import json, sys
+r=json.loads(sys.argv[1]); print(json.dumps({"success": False, "action": "refresh-embeddings", "error": r["error"], "message": r["message"]}))
+PY
+)"; exit 1 ;;
+        esac
+        run_sync_extract_links || exit 1
+        embed_output=$(GBRAIN_EMBED_CONCURRENCY=1 "$GBRAIN_BIN" embed --stale 2>&1) || {
+            emit_json "$(python3 - "$embed_output" <<'PY'
+import json, sys
+print(json.dumps({"success": False, "action": "refresh-embeddings", "error": "gbrain_embed_failed", "message": sys.argv[1][:4000]}))
+PY
+)"
+            exit 1
+        }
+        emit_json '{"success": true, "action": "refresh-embeddings", "message": "gbrain refreshed and stale embeddings processed."}'
+}
+
 # ---------------------------------------------------------------------------
 # embed-backfill (operator-only one-shot embedding backfill, issue #65)
 # ---------------------------------------------------------------------------
@@ -512,7 +607,7 @@ do_refresh() {
 
 do_embed_backfill() {
     # Prerequisite: embedding model + dimensions must be set and nonempty.
-    if [ -z "${GBRAIN_EMBEDDING_MODEL:-}" ] || [ -z "${GBRAIN_EMBEDDING_DIMENSIONS:-}" ]; then
+    if [ -z "${GBRAIN_EMBEDDING_MODEL:-}" ] || [ -z "${GBRAIN_EMBEDDING_DIMENSIONS:-}" ] || [ -z "${GBRAIN_EMBEDDING_MODEL_REVISION:-}" ]; then
         emit_json '{"success": false, "error": "embed_backfill_prerequisites_missing", "message": "GBRAIN_EMBEDDING_MODEL and GBRAIN_EMBEDDING_DIMENSIONS must be set and nonempty to run embed-backfill."}'
         return 1
     fi
@@ -574,6 +669,38 @@ print(json.dumps({
 }, ensure_ascii=False))
 PY
 )"
+            exit 1
+        fi
+
+        # The marker is the durable completion record for the exact migration
+        # tuple. Write it only after the zero-stale check, atomically. A write
+        # failure is an explicit structured nonzero error — it cannot claim
+        # success and must not fall through to the block-level
+        # lock_unavailable handler.
+        if ! python3 - "$GBRAIN_EMBEDDING_MARKER" "$GBRAIN_EMBEDDING_MODEL" "$GBRAIN_EMBEDDING_DIMENSIONS" "$GBRAIN_EMBEDDING_MODEL_REVISION" <<'PY'
+import json, os, sys, tempfile
+path, model, dimensions, revision = sys.argv[1:]
+parent = os.path.dirname(path)
+os.makedirs(parent, exist_ok=True)
+payload = {"model": model, "dimensions": int(dimensions), "revision": revision}
+fd, tmp = tempfile.mkstemp(dir=parent, prefix="embedding-backfill-complete.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, sort_keys=True)
+        fh.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+except Exception as exc:
+    try: os.unlink(tmp)
+    except OSError: pass
+    print(json.dumps({
+        "success": False,
+        "error": "embed_backfill_marker_write_failed",
+        "message": f"Could not write the embedding-backfill completion marker: {exc}",
+    }, ensure_ascii=False))
+    sys.exit(1)
+PY
+        then
             exit 1
         fi
 
@@ -643,6 +770,14 @@ print(json.dumps({
 }, ensure_ascii=False))
 PY
 )"
+            exit 1
+        }
+
+        # A new migration removes the previous completion tuple. Remove it
+        # before migration so a failed migration cannot appear complete. A
+        # removal failure is an explicit structured nonzero error.
+        rm -f "$GBRAIN_EMBEDDING_MARKER" || {
+            emit_json '{"success": false, "error": "enable_embeddings_marker_removal_failed", "message": "Could not remove the previous embedding completion marker."}'
             exit 1
         }
 
@@ -757,6 +892,14 @@ PY
             exit 1
         }
 
+        # Remove the completion marker (rollback means vectors are not
+        # refreshed by the daily job). A removal failure is an explicit
+        # structured nonzero error, not a silent success.
+        rm -f "$GBRAIN_EMBEDDING_MARKER" || {
+            emit_json '{"success": false, "error": "disable_embeddings_marker_removal_failed", "message": "Could not remove the embedding completion marker."}'
+            exit 1
+        }
+
         # Atomically write embedding_disabled=true into the file plane
         # (config.json) via Python so direct gbrain embedding operations
         # (embed, import) refuse via assertEmbeddingEnabled. The migration
@@ -865,7 +1008,7 @@ PY_CHECK
 # ---------------------------------------------------------------------------
 
 usage() {
-    emit_json '{"success": false, "error": "usage", "message": "Usage: josemar-gbrain reindex|refresh|embed-backfill|enable-embeddings|disable-embeddings"}'
+    emit_json '{"success": false, "error": "usage", "message": "Usage: josemar-gbrain reindex|refresh|refresh-embeddings|embed-backfill|enable-embeddings|disable-embeddings"}'
     return 1
 }
 
@@ -899,6 +1042,10 @@ main() {
         refresh)
             drop_root_if_possible refresh
             do_refresh
+            ;;
+        refresh-embeddings)
+            drop_root_if_possible refresh-embeddings
+            do_refresh_embeddings
             ;;
         embed-backfill)
             drop_root_if_possible embed-backfill
