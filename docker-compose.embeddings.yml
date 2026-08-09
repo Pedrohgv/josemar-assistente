@@ -22,9 +22,17 @@
 #   - hermes overlay wiring: the embedding network attachment plus
 #     deployment-ready env vars for Mnemosyne (remote API mode) and gbrain
 #     (llama-server provider). These vars are INERT until the relevant
-#     provider is explicitly enabled by the operator; this overlay does NOT
-#     install/enable Mnemosyne and does NOT enable gbrain embeddings or alter
-#     the wrapper's keyword-only behavior.
+#     provider is explicitly enabled by the operator: Mnemosyne via the
+#     docker-compose.mnemosyne.yml overlay, and gbrain embeddings via
+#     `josemar-gbrain enable-embeddings` + `embed-backfill` (issue #65). This
+#     overlay does NOT install/enable Mnemosyne and does NOT enable gbrain
+#     embeddings or alter the wrapper's keyword-only behavior by itself. After
+#     activation, `gbrain search` and `gbrain query --no-expand` both use the
+#     hybrid/semantic provider path; before enable or after
+#     `disable-embeddings`, text queries are keyword-only, image/cross-modal
+#     queries are rejected, and `put`/`capture` do not embed. See
+#     docs/gbrain-operations.md -> "Issue #65: Opt-in TEI E5 Semantic/Hybrid
+#     Retrieval".
 #
 # No host ports are published. Only internal service (80) and Prometheus
 # (9000) ports are exposed. No `/shared`, Obsidian, credentials, or Hermes
@@ -40,8 +48,10 @@
 #
 # The tuple (model id, revision, dimensions, query/passage prefixes) forms ONE
 # migration tuple: changing any one of them requires a full re-index so
-# existing vectors are not mixed with new ones. The defaults pin
-# `intfloat/multilingual-e5-small` at revision
+# existing vectors are not mixed with new ones. The gbrain E5 signature
+# includes the revision, so a changed revision produces stale vectors and
+# requires the full `enable-embeddings` + `embed-backfill` to re-vectorize, not
+# just a restart. The defaults pin `intfloat/multilingual-e5-small` at revision
 # `614241f622f53c4eeff9890bdc4f31cfecc418b3` (384 dims) with the exact E5
 # prefixes `query: ` and `passage: `. See .env.example for every EMBEDDING_*
 # variable and the migration-tuple requirement.
@@ -110,18 +120,27 @@ services:
     # wiring. These vars are INERT until the relevant provider is explicitly
     # enabled by the operator:
     #   - Mnemosyne remote API mode/model/dim/prefixes/API URL: inert until
-    #     Mnemosyne is installed and enabled (this overlay does NOT install
-    #     or enable Mnemosyne).
+    #     Mnemosyne is installed and enabled via the docker-compose.mnemosyne.yml
+    #     overlay (this overlay does NOT install or enable Mnemosyne).
     #   - gbrain provider model `llama-server:<selected model>`, dimensions,
-    #     and LLAMA_SERVER_BASE_URL: inert until gbrain embeddings are
-    #     explicitly enabled by the operator (this overlay does NOT enable
-    #     gbrain embeddings and does NOT alter the wrapper's keyword-only
-    #     behavior).
+    #     and LLAMA_SERVER_BASE_URL: inert until gbrain embeddings are explicitly
+    #     enabled by the operator via `josemar-gbrain enable-embeddings` +
+    #     `embed-backfill` (issue #65). This overlay does NOT enable gbrain
+    #     embeddings and does NOT alter the wrapper's keyword-only behavior by
+    #     itself. After activation, `gbrain search` and `gbrain query --no-expand`
+    #     both use the hybrid/semantic provider path (not exact keyword);
+    #     before enable or after `disable-embeddings`, text queries are
+    #     keyword-only, image/cross-modal queries are rejected, and
+    #     `put`/`capture` do not embed.
     # ONE authoritative tuple (EMBEDDING_MODEL_ID/REVISION/DIMENSIONS and
     # EMBEDDING_QUERY_PREFIX/EMBEDDING_PASSAGE_PREFIX) drives TEI, Mnemosyne,
-    # and the gbrain `llama-server:` provider together. A single optional
-    # EMBEDDING_API_URL feeds both client URL vars. Changing any tuple element
-    # requires a full re-index.
+    # and the gbrain `llama-server:` provider together. NOTE:
+    # EMBEDDING_QUERY_PREFIX / EMBEDDING_PASSAGE_PREFIX feed Mnemosyne and TEI
+    # only; gbrain's E5 prefixing is model-gated in the Josemar patch
+    # (patches/gbrain-inline-worker-gateway.patch) and is NOT driven by these
+    # env vars. A single optional EMBEDDING_API_URL feeds both client URL vars.
+    # Changing any tuple element (including revision drift) requires a full
+    # re-embedding via enable-embeddings + embed-backfill.
     networks:
       josemar-network: null
       embeddings-net: null
@@ -140,8 +159,12 @@ services:
       # colon in the value does not confuse YAML). Dimensions and base URL
       # derive from the authoritative tuple and the single EMBEDDING_API_URL.
       # The wrapper's keyword-only behavior is NOT altered by this overlay.
+      # GBRAIN_EMBEDDING_MODEL_REVISION wires the TEI-served model revision
+      # into the gbrain E5 signature suffix (issue #65) so a revision drift
+      # is detected as stale and triggers re-embedding.
       - "GBRAIN_EMBEDDING_MODEL=llama-server:${EMBEDDING_MODEL_ID:-intfloat/multilingual-e5-small}"
       - GBRAIN_EMBEDDING_DIMENSIONS=${EMBEDDING_MODEL_DIMENSIONS:-384}
+      - GBRAIN_EMBEDDING_MODEL_REVISION=${EMBEDDING_MODEL_REVISION:-614241f622f53c4eeff9890bdc4f31cfecc418b3}
       - LLAMA_SERVER_BASE_URL=${EMBEDDING_API_URL:-http://embeddings:80/v1}
     depends_on:
       embeddings:

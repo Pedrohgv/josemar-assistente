@@ -7,6 +7,32 @@
 #             extract links, schema sync (if custom pack), git safe.directory.
 #   refresh - recurring lightweight reconciliation for manual Obsidian edits:
 #             sync, extract stale content, extract links. No init/schema work.
+#   embed-backfill - operator-only one-shot embedding backfill (issue #65).
+#             Requires GBRAIN_EMBEDDING_MODEL and GBRAIN_EMBEDDING_DIMENSIONS,
+#             acquires the tasknotes lock, runs `gbrain embed --stale
+#             --include-null-signature` at concurrency 1, then asserts no
+#             stale embeddings remain. Does NOT init or reinit PGLite.
+#   enable-embeddings - operator-only non-destructive semantic-search switch
+#             (issue #65). Requires the TEI-backed
+#             GBRAIN_EMBEDDING_MODEL/DIMENSIONS, acquires the tasknotes lock,
+#             FIRST forces search.mcp_keyword_only true (so any error path
+#             leaves keyword-only enabled), runs `gbrain migrate embeddings
+#             --to <model> --dim <dims> --yes --no-embed --ignore-env-override`
+#             to persist file-plane config (clearing any persisted
+#             embedding_disabled sentinel on success) and migrate schema
+#             (preserving PGLite DB-only records), then ONLY on success sets
+#             search.mcp_keyword_only false. Does NOT initiate backfill; does
+#             NOT init or reinit PGLite. On migration failure keyword-only
+#             stays enabled.
+#   disable-embeddings - operator-only safe rollback to keyword-only (issue
+#             #65). Acquires the shared tasknotes lock, sets
+#             search.mcp_keyword_only true FIRST, then atomically writes
+#             embedding_disabled=true into the file plane (config.json) via
+#             Python so direct gbrain embedding operations (embed, import)
+#             refuse via assertEmbeddingEnabled. The migration command is NOT
+#             blocked (it does not call assertEmbeddingEnabled), so
+#             enable-embeddings can later lift the sentinel. Vectors are
+#             preserved (not deleted).
 #
 # Design:
 #   - Native gbrain CLI only; no custom indexing/retrieval/ranking/authoring.
@@ -17,6 +43,16 @@
 #   - refresh is safe for cron after activation. It deliberately uses
 #     `--no-embed` while Josemar runs keyword-only; revisit when embeddings are
 #     intentionally enabled.
+#   - embed-backfill is operator-only and never called by cron/startup. The
+#     daily refresh-embeddings path also produces embeddings, but only after
+#     the manual backfill marker and semantic-mode checks pass.
+#   - enable-embeddings/disable-embeddings are operator-only and never called
+#     by cron/startup. enable-embeddings is the explicit, non-destructive
+#     switch to semantic search (migration only, no backfill); disable-embeddings
+#     is the safe rollback (keyword-only on, vectors preserved).
+#   - refresh-embeddings is the sole chat-allowed maintenance command, but only
+#     after an explicit user request. It owns the TaskNotes lock, reconciles
+#     files without embedding, then embeds stale rows at concurrency 1.
 #   - GBRAIN_SKIP_STARTUP_HOOKS=1 is exported for every wrapper-invoked gbrain
 #     command to prevent gbrain's detached update-check network call.
 #   - Results are returned in JSON envelopes.
@@ -30,6 +66,11 @@ GBRAIN_SCHEMA_SOURCE_ROOT="${GBRAIN_SCHEMA_SOURCE_ROOT:-/opt/data/.gbrain/schema
 
 GBRAIN_BIN="${GBRAIN_BIN:-/usr/local/bin/gbrain}"
 GBRAIN_STATE_DIR="${GBRAIN_HOME}/.gbrain"
+
+# Lock shared with the TaskNotes MCP. embed-backfill acquires this lock
+# nonblocking before any gbrain access to avoid concurrent vault writes.
+GBRAIN_TASKNOTES_LOCK="${GBRAIN_TASKNOTES_LOCK:-/opt/data/.locks/tasknotes.lock}"
+GBRAIN_EMBEDDING_MARKER="${GBRAIN_STATE_DIR}/embedding-backfill-complete.json"
 
 # Schema pack install directory (native gbrain user-pack discovery location).
 SCHEMA_INSTALL_DIR="${GBRAIN_STATE_DIR}/schema-packs"
@@ -462,12 +503,512 @@ do_refresh() {
     emit_json '{"success": true, "action": "refresh", "message": "gbrain refreshed from vault files. Embeddings skipped by design."}'
 }
 
+# Explicit-request semantic refresh. The shared lock is owned here (not by the
+# Hermes cron entrypoint) and validation is performed while it is held.
+do_refresh_embeddings() {
+    export_gbrain_env
+    mkdir -p "$GBRAIN_STATE_DIR"
+    mark_brain_repo_safe_directory
+    # Pre-check before `exec 9<`: a failed redirection on the special builtin
+    # `exec` terminates the shell immediately, which would skip the structured
+    # lock_unavailable error. The -r probe keeps that failure path in-shell.
+    if [ ! -r "$GBRAIN_TASKNOTES_LOCK" ]; then
+        emit_json '{"success": false, "action": "refresh-embeddings", "error": "refresh_embeddings_lock_unavailable", "message": "Could not open the tasknotes lock file."}'
+        return 1
+    fi
+    exec 9<"$GBRAIN_TASKNOTES_LOCK" 2>/dev/null
+    if ! flock -n 9; then
+        emit_json '{"success": true, "action": "refresh-embeddings", "status": "skipped", "reason": "lock_busy"}'
+        return 0
+    fi
+        keyword_only=$("$GBRAIN_BIN" config get search.mcp_keyword_only 2>/dev/null) || {
+            emit_json '{"success": false, "action": "refresh-embeddings", "error": "refresh_embeddings_config_read_failed", "message": "Could not read search.mcp_keyword_only from gbrain."}'
+            exit 1
+        }
+        if [ "$keyword_only" = "true" ]; then
+            emit_json '{"success": true, "action": "refresh-embeddings", "status": "skipped", "reason": "keyword_only"}'
+            exit 0
+        fi
+        if [ "$keyword_only" != "false" ]; then
+            emit_json '{"success": false, "action": "refresh-embeddings", "error": "refresh_embeddings_semantic_mode_invalid", "message": "gbrain config get search.mcp_keyword_only must print exactly false"}'
+            exit 1
+        fi
+        validation=$(python3 - "$GBRAIN_STATE_DIR/config.json" "$GBRAIN_EMBEDDING_MARKER" "${GBRAIN_EMBEDDING_MODEL:-}" "${GBRAIN_EMBEDDING_DIMENSIONS:-}" "${GBRAIN_EMBEDDING_MODEL_REVISION:-}" <<'PY'
+import json, os, sys
+config_path, marker_path, model, dimensions, revision = sys.argv[1:]
+def result(status, **extra):
+    print(json.dumps({"status": status, **extra}, ensure_ascii=False))
+if not os.path.exists(config_path):
+    result("skip", reason="uninitialized"); raise SystemExit
+try:
+    with open(config_path, encoding="utf-8") as fh: config = json.load(fh)
+except Exception as exc:
+    result("fail", error="refresh_embeddings_config_corrupt", message=str(exc)); raise SystemExit
+if not isinstance(config, dict):
+    result("fail", error="refresh_embeddings_config_corrupt", message="config.json is not an object"); raise SystemExit
+sentinel = config.get("embedding_disabled")
+if sentinel is not None and not isinstance(sentinel, bool):
+    result("fail", error="refresh_embeddings_invalid_sentinel", message="embedding_disabled must be boolean"); raise SystemExit
+if sentinel is True:
+    result("skip", reason="embedding_disabled"); raise SystemExit
+if not os.path.exists(marker_path):
+    result("skip", reason="completion_marker_missing"); raise SystemExit
+try:
+    with open(marker_path, encoding="utf-8") as fh: marker = json.load(fh)
+except Exception as exc:
+    result("fail", error="refresh_embeddings_marker_malformed", message=str(exc)); raise SystemExit
+if (not isinstance(marker, dict) or set(marker) != {"model", "dimensions", "revision"
+        } or not isinstance(marker["dimensions"], int) or isinstance(marker["dimensions"], bool)):
+    result("fail", error="refresh_embeddings_marker_malformed", message="marker must contain exactly model, dimensions, revision"); raise SystemExit
+try:
+    matches = (marker["model"] == model and int(marker["dimensions"]) == int(dimensions)
+               and marker["revision"] == revision and all(isinstance(marker[k], str) and marker[k] for k in ("model", "revision")))
+except (TypeError, ValueError):
+    matches = False
+if not matches:
+    result("fail", error="refresh_embeddings_marker_tuple_mismatch", message="completion marker does not match the configured embedding tuple"); raise SystemExit
+result("run")
+PY
+        )
+        case "$validation" in
+            *'"status": "skip"'*) emit_json "$(python3 - "$validation" <<'PY'
+import json, sys
+r=json.loads(sys.argv[1]); print(json.dumps({"success": True, "action": "refresh-embeddings", "status": "skipped", "reason": r["reason"]}))
+PY
+)"; exit 0 ;;
+            *'"status": "fail"'*) emit_json "$(python3 - "$validation" <<'PY'
+import json, sys
+r=json.loads(sys.argv[1]); print(json.dumps({"success": False, "action": "refresh-embeddings", "error": r["error"], "message": r["message"]}))
+PY
+)"; exit 1 ;;
+        esac
+        run_sync_extract_links || exit 1
+        embed_output=$(GBRAIN_EMBED_CONCURRENCY=1 "$GBRAIN_BIN" embed --stale 2>&1) || {
+            emit_json "$(python3 - "$embed_output" <<'PY'
+import json, sys
+print(json.dumps({"success": False, "action": "refresh-embeddings", "error": "gbrain_embed_failed", "message": sys.argv[1][:4000]}))
+PY
+)"
+            exit 1
+        }
+        emit_json '{"success": true, "action": "refresh-embeddings", "message": "gbrain refreshed and stale embeddings processed."}'
+}
+
+# ---------------------------------------------------------------------------
+# embed-backfill (operator-only one-shot embedding backfill, issue #65)
+# ---------------------------------------------------------------------------
+#
+# Unlike reindex/refresh, this subcommand produces embeddings. It does NOT
+# init or reinit PGLite; it assumes an already-activated gbrain state dir.
+# It requires GBRAIN_EMBEDDING_MODEL and GBRAIN_EMBEDDING_DIMENSIONS to be set
+# and nonempty, acquires the tasknotes lock nonblocking, runs
+# `gbrain embed --stale --include-null-signature` at concurrency 1, then
+# asserts no stale embeddings remain via a dry-run equivalent.
+
+do_embed_backfill() {
+    # Prerequisite: embedding model + dimensions must be set and nonempty.
+    if [ -z "${GBRAIN_EMBEDDING_MODEL:-}" ] || [ -z "${GBRAIN_EMBEDDING_DIMENSIONS:-}" ] || [ -z "${GBRAIN_EMBEDDING_MODEL_REVISION:-}" ]; then
+        emit_json '{"success": false, "error": "embed_backfill_prerequisites_missing", "message": "GBRAIN_EMBEDDING_MODEL and GBRAIN_EMBEDDING_DIMENSIONS must be set and nonempty to run embed-backfill."}'
+        return 1
+    fi
+
+    export_gbrain_env
+    mkdir -p "$GBRAIN_STATE_DIR"
+    mark_brain_repo_safe_directory
+
+    # Acquire the tasknotes lock nonblocking before any gbrain access.
+    # The lock fd (9) is held open for the duration of the compound block so
+    # the flock is released when the block exits.
+    {
+        flock -n 9 || {
+            emit_json '{"success": false, "error": "embed_backfill_lock_busy", "message": "Could not acquire tasknotes lock; another holder is active."}'
+            exit 1
+        }
+
+        # Run the embedding backfill at concurrency 1.
+        embed_output=$(
+            GBRAIN_EMBED_CONCURRENCY=1 "$GBRAIN_BIN" embed --stale --include-null-signature 2>&1
+        ) || {
+            emit_json "$(python3 - "$embed_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_embed_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            exit 1
+        }
+
+        # Dry-run equivalent: assert no stale embeddings remain.
+        verify_output=$(
+            GBRAIN_EMBED_CONCURRENCY=1 "$GBRAIN_BIN" embed --stale --include-null-signature --dry-run 2>&1
+        ) || {
+            emit_json "$(python3 - "$verify_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "embed_backfill_verify_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            exit 1
+        }
+        if echo "$verify_output" | grep -iE "\bstale\b" | grep -viE "no stale|0 stale|no rows|0 rows" >/dev/null 2>&1; then
+            emit_json "$(python3 - "$verify_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "embed_backfill_stale_remaining",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            exit 1
+        fi
+
+        # The marker is the durable completion record for the exact migration
+        # tuple. Write it only after the zero-stale check, atomically. A write
+        # failure is an explicit structured nonzero error — it cannot claim
+        # success and must not fall through to the block-level
+        # lock_unavailable handler.
+        if ! python3 - "$GBRAIN_EMBEDDING_MARKER" "$GBRAIN_EMBEDDING_MODEL" "$GBRAIN_EMBEDDING_DIMENSIONS" "$GBRAIN_EMBEDDING_MODEL_REVISION" <<'PY'
+import json, os, sys, tempfile
+path, model, dimensions, revision = sys.argv[1:]
+parent = os.path.dirname(path)
+os.makedirs(parent, exist_ok=True)
+payload = {"model": model, "dimensions": int(dimensions), "revision": revision}
+fd, tmp = tempfile.mkstemp(dir=parent, prefix="embedding-backfill-complete.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, sort_keys=True)
+        fh.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+except Exception as exc:
+    try: os.unlink(tmp)
+    except OSError: pass
+    print(json.dumps({
+        "success": False,
+        "error": "embed_backfill_marker_write_failed",
+        "message": f"Could not write the embedding-backfill completion marker: {exc}",
+    }, ensure_ascii=False))
+    sys.exit(1)
+PY
+        then
+            exit 1
+        fi
+
+        emit_json '{"success": true, "action": "embed-backfill", "message": "Embedding backfill complete; no stale embeddings remain."}'
+    } 9<"$GBRAIN_TASKNOTES_LOCK" 2>/dev/null || {
+        # Block failed (e.g. lock path missing) and did not already emit JSON.
+        emit_json '{"success": false, "error": "embed_backfill_lock_unavailable", "message": "Could not open the tasknotes lock file."}'
+        return 1
+    }
+}
+
+# ---------------------------------------------------------------------------
+# enable-embeddings (operator-only non-destructive semantic-search switch,
+# issue #65)
+# ---------------------------------------------------------------------------
+#
+# Unlike embed-backfill, this subcommand does NOT produce embeddings. It is
+# the explicit, non-destructive switch from keyword-only to semantic search:
+#   1. Require the TEI-backed GBRAIN_EMBEDDING_MODEL and
+#      GBRAIN_EMBEDDING_DIMENSIONS (nonempty).
+#   2. Acquire the shared tasknotes lock nonblocking before any gbrain access.
+#   3. FIRST force search.mcp_keyword_only true so any error path leaves
+#      keyword-only enabled (graceful degradation to keyword search).
+#   4. Run `gbrain migrate embeddings --to <model> --dim <dims> --yes --no-embed
+#      --ignore-env-override` to persist file-plane config (clearing any
+#      persisted embedding_disabled sentinel on success) and migrate schema
+#      while preserving PGLite DB-only records (--no-embed skips the re-embed
+#      pass; --ignore-env-override proceeds even when GBRAIN_EMBEDDING_* env
+#      vars would override the target at runtime).
+#   5. ONLY after a successful migration, set search.mcp_keyword_only false to
+#      enable semantic search.
+#   6. Do NOT initiate backfill itself — run embed-backfill separately.
+#
+# On any migration failure, keyword-only stays enabled (true) so retrieval
+# degrades gracefully to keyword search rather than serving wrong/empty
+# semantic results. No init or reinit-pglite is performed.
+
+do_enable_embeddings() {
+    # Prerequisite: embedding model + dimensions must be set and nonempty.
+    if [ -z "${GBRAIN_EMBEDDING_MODEL:-}" ] || [ -z "${GBRAIN_EMBEDDING_DIMENSIONS:-}" ]; then
+        emit_json '{"success": false, "error": "enable_embeddings_prerequisites_missing", "message": "GBRAIN_EMBEDDING_MODEL and GBRAIN_EMBEDDING_DIMENSIONS must be set and nonempty to run enable-embeddings."}'
+        return 1
+    fi
+
+    export_gbrain_env
+    mkdir -p "$GBRAIN_STATE_DIR"
+    mark_brain_repo_safe_directory
+
+    # Acquire the tasknotes lock nonblocking before any gbrain access.
+    {
+        flock -n 9 || {
+            emit_json '{"success": false, "error": "enable_embeddings_lock_busy", "message": "Could not acquire tasknotes lock; another holder is active."}'
+            exit 1
+        }
+
+        # FIRST force keyword-only true so any error path leaves keyword-only
+        # enabled. This is the safe default: even if migration fails, retrieval
+        # degrades gracefully to keyword search.
+        config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
+            emit_json "$(python3 - "$config_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "enable_embeddings_keyword_only_force_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            exit 1
+        }
+
+        # A new migration removes the previous completion tuple. Remove it
+        # before migration so a failed migration cannot appear complete. A
+        # removal failure is an explicit structured nonzero error.
+        rm -f "$GBRAIN_EMBEDDING_MARKER" || {
+            emit_json '{"success": false, "error": "enable_embeddings_marker_removal_failed", "message": "Could not remove the previous embedding completion marker."}'
+            exit 1
+        }
+
+        # Run the non-destructive migration: persist file-plane config, migrate
+        # schema, invalidate stale signatures, but do NOT re-embed (--no-embed).
+        # --ignore-env-override proceeds even when GBRAIN_EMBEDDING_* env vars
+        # would override the target at runtime (the operator has set them
+        # intentionally as the source of truth). The migration also clears any
+        # persisted embedding_disabled sentinel on success (issue #65).
+        migrate_output=$(
+            "$GBRAIN_BIN" migrate embeddings --to "$GBRAIN_EMBEDDING_MODEL" --dim "$GBRAIN_EMBEDDING_DIMENSIONS" --yes --no-embed --ignore-env-override 2>&1
+        ) || {
+            emit_json "$(python3 - "$migrate_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_migrate_embeddings_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            exit 1
+        }
+        # Guard against a non-zero-exit masked by subshell quirks: scan the
+        # output for hard failure markers the migrate command prints on
+        # refused/failed apply (it does not always exit nonzero on --json).
+        if echo "$migrate_output" | grep -iE "\"status\"[: ]*\"(refused|failed)\"|\b(fatal|aborted|panic)\b" | grep -viE "warn|no_embed|no-embed" >/dev/null 2>&1; then
+            emit_json "$(python3 - "$migrate_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_migrate_embeddings_blocked",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            exit 1
+        fi
+
+        # ONLY after a successful migration, flip keyword-only off to enable
+        # semantic search. On any migration failure above, we exit before
+        # reaching this line, so keyword-only stays enabled (true).
+        config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only false 2>&1) || {
+            emit_json "$(python3 - "$config_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "enable_embeddings_keyword_only_flip_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            exit 1
+        }
+
+        emit_json '{"success": true, "action": "enable-embeddings", "message": "Embeddings enabled: file-plane config persisted and schema migrated. Keyword-only disabled. Run embed-backfill separately to populate vectors."}'
+    } 9<"$GBRAIN_TASKNOTES_LOCK" 2>/dev/null || {
+        emit_json '{"success": false, "error": "enable_embeddings_lock_unavailable", "message": "Could not open the tasknotes lock file."}'
+        return 1
+    }
+}
+
+# ---------------------------------------------------------------------------
+# disable-embeddings (operator-only safe rollback to keyword-only, issue #65)
+# ---------------------------------------------------------------------------
+#
+# Explicit safe rollback from semantic search back to keyword-only:
+#   1. Acquire the shared tasknotes lock nonblocking before any gbrain access.
+#   2. Set search.mcp_keyword_only true FIRST so retrieval immediately falls
+#      back to keyword search.
+#   3. Atomically write embedding_disabled=true into the file plane (config.json)
+#      via Python so direct gbrain embedding operations (embed, import) refuse
+#      via assertEmbeddingEnabled. The migration command is NOT blocked (it
+#      does not call assertEmbeddingEnabled), so enable-embeddings can later
+#      lift the sentinel by running `migrate embeddings --no-embed` (which
+#      clears embedding_disabled on success).
+#   4. Do NOT delete vectors — the vectors remain on disk and can be re-activated
+#      by re-running enable-embeddings (which clears the sentinel).
+#
+# This is the safe inverse of enable-embeddings: it flips the search mode AND
+# writes the sentinel so embedding operations refuse, without destroying data.
+
+do_disable_embeddings() {
+    export_gbrain_env
+    mkdir -p "$GBRAIN_STATE_DIR"
+    mark_brain_repo_safe_directory
+
+    # Acquire the tasknotes lock nonblocking before any gbrain access.
+    {
+        flock -n 9 || {
+            emit_json '{"success": false, "error": "disable_embeddings_lock_busy", "message": "Could not acquire tasknotes lock; another holder is active."}'
+            exit 1
+        }
+
+        # Set keyword-only true FIRST so retrieval immediately falls back to
+        # keyword search. This is the safe rollback: even if a later step were
+        # to fail, keyword search remains functional.
+        config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
+            emit_json "$(python3 - "$config_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "disable_embeddings_keyword_only_flip_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            exit 1
+        }
+
+        # Remove the completion marker (rollback means vectors are not
+        # refreshed by the daily job). A removal failure is an explicit
+        # structured nonzero error, not a silent success.
+        rm -f "$GBRAIN_EMBEDDING_MARKER" || {
+            emit_json '{"success": false, "error": "disable_embeddings_marker_removal_failed", "message": "Could not remove the embedding completion marker."}'
+            exit 1
+        }
+
+        # Atomically write embedding_disabled=true into the file plane
+        # (config.json) via Python so direct gbrain embedding operations
+        # (embed, import) refuse via assertEmbeddingEnabled. The migration
+        # command is NOT blocked (it does not call assertEmbeddingEnabled), so
+        # enable-embeddings can later lift the sentinel.
+        #
+        # Fail-closed (issue #65 final review): the sentinel is written ONLY
+        # when the existing config is missing OR a valid JSON object. If the
+        # existing config cannot be read, parsed, or is a non-object (e.g. a
+        # JSON array or scalar), the sentinel is NOT written and the command
+        # fails with a structured error. This prevents clobbering a corrupt
+        # or hand-edited config with a fresh `{embedding_disabled: true}`
+        # object that would lose the operator's prior config.
+        python3 - "$GBRAIN_STATE_DIR" <<'PY'
+import json, os, sys, tempfile
+state_dir = sys.argv[1]
+config_path = os.path.join(state_dir, "config.json")
+# Load existing config. Fail closed when the file exists but cannot be
+# read/parsed, or is a non-object. Only start fresh when the file is MISSING.
+cfg = None
+if os.path.exists(config_path):
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        # Fail closed: do NOT replace a config that cannot be parsed.
+        print(json.dumps({
+            "success": False,
+            "error": "disable_embeddings_config_unreadable",
+            "message": f"Existing config.json cannot be read/parsed: {e}. Refusing to write embedding_disabled sentinel to avoid clobbering a corrupt config.",
+        }, ensure_ascii=False))
+        sys.exit(1)
+    if not isinstance(cfg, dict):
+        # Fail closed: do NOT replace a non-object config (e.g. JSON array).
+        print(json.dumps({
+            "success": False,
+            "error": "disable_embeddings_config_not_object",
+            "message": f"Existing config.json is a JSON {type(cfg).__name__}, not an object. Refusing to write embedding_disabled sentinel to avoid clobbering a non-object config.",
+        }, ensure_ascii=False))
+        sys.exit(1)
+else:
+    cfg = {}
+# Set the sentinel so assertEmbeddingEnabled refuses embed/import.
+cfg["embedding_disabled"] = True
+# Atomic write via temp file + rename.
+fd, tmp_path = tempfile.mkstemp(dir=state_dir, prefix="config.json.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, config_path)
+except Exception:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    raise
+PY
+        if [ $? -ne 0 ]; then
+            # The Python block may have emitted a structured fail-closed
+            # error (config_unreadable / config_not_object). Re-detect which
+            # error fired so the wrapper surfaces the right structured JSON.
+            # If the Python block raised (uncaught), fall back to the generic
+            # sentinel_write_failed error.
+            py_output=$(python3 - "$GBRAIN_STATE_DIR" <<'PY_CHECK' 2>/dev/null || true
+import json, os, sys
+state_dir = sys.argv[1]
+config_path = os.path.join(state_dir, "config.json")
+if os.path.exists(config_path):
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        if not isinstance(cfg, dict):
+            print("disable_embeddings_config_not_object")
+            sys.exit(0)
+    except (json.JSONDecodeError, OSError):
+        print("disable_embeddings_config_unreadable")
+        sys.exit(0)
+print("disable_embeddings_sentinel_write_failed")
+PY_CHECK
+)
+            case "$py_output" in
+                disable_embeddings_config_unreadable)
+                    emit_json '{"success": false, "error": "disable_embeddings_config_unreadable", "message": "Existing config.json cannot be read/parsed. Refusing to write embedding_disabled sentinel to avoid clobbering a corrupt config."}'
+                    ;;
+                disable_embeddings_config_not_object)
+                    emit_json '{"success": false, "error": "disable_embeddings_config_not_object", "message": "Existing config.json is not a JSON object. Refusing to write embedding_disabled sentinel to avoid clobbering a non-object config."}'
+                    ;;
+                *)
+                    emit_json '{"success": false, "error": "disable_embeddings_sentinel_write_failed", "message": "Failed to write embedding_disabled sentinel to config.json."}'
+                    ;;
+            esac
+            exit 1
+        fi
+
+        emit_json '{"success": true, "action": "disable-embeddings", "message": "Embeddings disabled: keyword-only re-enabled and embedding_disabled sentinel written. Vectors preserved (not removed). Re-run enable-embeddings to re-activate (clears sentinel on migration success)."}'
+    } 9<"$GBRAIN_TASKNOTES_LOCK" 2>/dev/null || {
+        emit_json '{"success": false, "error": "disable_embeddings_lock_unavailable", "message": "Could not open the tasknotes lock file."}'
+        return 1
+    }
+}
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
 usage() {
-    emit_json '{"success": false, "error": "usage", "message": "Usage: josemar-gbrain reindex|refresh"}'
+    emit_json '{"success": false, "error": "usage", "message": "Usage: josemar-gbrain reindex|refresh|refresh-embeddings|embed-backfill|enable-embeddings|disable-embeddings"}'
     return 1
 }
 
@@ -480,13 +1021,31 @@ drop_root_if_possible() {
         return 0
     fi
     if ! getent passwd hermes >/dev/null 2>&1; then
-        return 0
+        emit_json '{"success": false, "error": "runtime_identity_unavailable", "message": "Root execution refused: the hermes runtime user does not exist."}'
+        return 1
     fi
     if ! command -v su >/dev/null 2>&1; then
-        return 0
+        emit_json '{"success": false, "error": "runtime_identity_unavailable", "message": "Root execution refused: su is unavailable for the hermes runtime user."}'
+        return 1
     fi
 
-    exec su -s /bin/sh hermes -c "JOSEMAR_GBRAIN_DROPPED_PRIVS=1 exec '$0' '$subcommand'"
+    runtime_home="${HERMES_HOME:-/opt/data}"
+    runtime_gbrain_home="${GBRAIN_HOME:-/opt/data}"
+    runtime_xdg_config="${XDG_CONFIG_HOME:-/opt/data/.config}"
+    exec su -p -s /bin/sh -- hermes -c '
+        runtime_home="$1"
+        runtime_hermes_home="$2"
+        runtime_gbrain_home="$3"
+        runtime_xdg_config="$4"
+        wrapper="$5"
+        subcommand="$6"
+        export HOME="$runtime_home"
+        export HERMES_HOME="$runtime_hermes_home"
+        export GBRAIN_HOME="$runtime_gbrain_home"
+        export XDG_CONFIG_HOME="$runtime_xdg_config"
+        export JOSEMAR_GBRAIN_DROPPED_PRIVS=1
+        exec "$wrapper" "$subcommand"
+    ' sh "$runtime_home" "${HERMES_HOME:-$runtime_home}" "$runtime_gbrain_home" "$runtime_xdg_config" "$0" "$subcommand"
 }
 
 main() {
@@ -501,6 +1060,22 @@ main() {
         refresh)
             drop_root_if_possible refresh
             do_refresh
+            ;;
+        refresh-embeddings)
+            drop_root_if_possible refresh-embeddings
+            do_refresh_embeddings
+            ;;
+        embed-backfill)
+            drop_root_if_possible embed-backfill
+            do_embed_backfill
+            ;;
+        enable-embeddings)
+            drop_root_if_possible enable-embeddings
+            do_enable_embeddings
+            ;;
+        disable-embeddings)
+            drop_root_if_possible disable-embeddings
+            do_disable_embeddings
             ;;
         *)
             usage

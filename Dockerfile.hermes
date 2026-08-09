@@ -168,6 +168,8 @@ RUN chmod +x /usr/local/bin/josemar-gbrain
 
 COPY scripts/hermes-workspace-sync-cron.sh /opt/josemar/scripts/hermes-workspace-sync-cron.sh
 COPY scripts/hermes-gbrain-refresh-cron.sh /opt/josemar/scripts/hermes-gbrain-refresh-cron.sh
+COPY scripts/hermes-gbrain-embedding-refresh-cron.sh /opt/josemar/scripts/hermes-gbrain-embedding-refresh-cron.sh
+COPY scripts/hermes-gbrain-embedding-refresh.py /opt/josemar/scripts/hermes-gbrain-embedding-refresh.py
 COPY scripts/tasknotes_mcp_core.py scripts/tasknotes_mcp.py scripts/tasknotes_lock_run.py /opt/josemar/scripts/
 # Mnemosyne encrypted-backup core (Phase 2): Hermes-side exporter + restore
 # helper. The separate rclone uploader service runs in its own container
@@ -177,6 +179,8 @@ COPY scripts/mnemosyne-backup-export.sh /opt/josemar/scripts/mnemosyne-backup-ex
 COPY scripts/mnemosyne-backup-restore.sh /opt/josemar/scripts/mnemosyne-backup-restore.sh
 RUN chmod +x /opt/josemar/scripts/hermes-workspace-sync-cron.sh \
     /opt/josemar/scripts/hermes-gbrain-refresh-cron.sh \
+    /opt/josemar/scripts/hermes-gbrain-embedding-refresh-cron.sh \
+    /opt/josemar/scripts/hermes-gbrain-embedding-refresh.py \
     /opt/josemar/scripts/tasknotes_mcp.py \
     /opt/josemar/scripts/tasknotes_lock_run.py \
     /opt/josemar/scripts/mnemosyne-backup-export.sh \

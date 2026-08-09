@@ -307,6 +307,106 @@ PY
         || log "WARNING: failed to create Hermes gbrain-refresh cron job"
 }
 
+install_gbrain_embedding_refresh_cron() {
+    # The schedule is evaluated by the Hermes scheduler in the container's
+    # local timezone (TZ/HERMES_TIMEZONE, America/Sao_Paulo by default), NOT
+    # UTC. `0 5 * * *` therefore means 05:00 local, and the string is passed
+    # through verbatim to `hermes cron create` with no UTC conversion.
+    script_source="/opt/josemar/scripts/hermes-gbrain-embedding-refresh-cron.sh"
+    script_dir="${HERMES_HOME}/scripts"
+    script_path="${script_dir}/hermes-gbrain-embedding-refresh-cron.sh"
+    schedule="${GBRAIN_EMBED_REFRESH_SCHEDULE:-0 5 * * *}"
+    jobs_file="${HERMES_HOME}/cron/jobs.json"
+
+    # Disabled or malformed schedules remove the owned job (like the other
+    # owned-job installers) instead of leaving a stale daily job behind.
+    case "$schedule" in
+        ""|0)
+            log "Hermes gbrain-embedding-refresh cron disabled"
+            remove_gbrain_embedding_refresh_cron_job
+            return 0
+            ;;
+    esac
+
+    [ -x "$script_source" ] || return 0
+    # Hermes accepts a five-field cron expression here.  Reject malformed
+    # values rather than passing shell-looking input to the CLI.
+    if ! python3 - "$schedule" <<'PY'
+import re, sys
+s=sys.argv[1]
+sys.exit(0 if len(s.split()) == 5 and all(re.fullmatch(r'[0-9*/?,\-]+', x) for x in s.split()) else 1)
+PY
+    then
+        log "WARNING: invalid GBRAIN_EMBED_REFRESH_SCHEDULE; embedding refresh cron disabled"
+        remove_gbrain_embedding_refresh_cron_job
+        return 0
+    fi
+
+    mkdir -p "$script_dir"
+    cp "$script_source" "$script_path"
+    chmod 700 "$script_path"
+    chown -R "${HERMES_UID_VALUE}:${HERMES_GID_VALUE}" "${HERMES_HOME}/scripts" "${HERMES_HOME}/cron" 2>/dev/null || true
+
+    # Reconcile by full expected state, not merely by name: the schedule
+    # expression, script name, no_agent flag, and workdir must all match.
+    # Hermes persists cron schedules as {"kind":"cron","expr":"0 5 * * *"}.
+    if python3 - "$jobs_file" "$schedule" "$WORKSPACE_DIR" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f: data=json.load(f)
+    wanted=sys.argv[2]
+    workdir=sys.argv[3]
+    found=False
+    for j in data.get("jobs",[]):
+        if not isinstance(j,dict) or j.get("name") != "gbrain-embedding-refresh": continue
+        s=j.get("schedule")
+        actual = s.get("expr") if isinstance(s,dict) else None
+        found = (isinstance(s,dict) and s.get("kind") == "cron" and actual == wanted
+                 and j.get("script") == "hermes-gbrain-embedding-refresh-cron.sh"
+                 and j.get("no_agent") is True and j.get("workdir") == workdir)
+        break
+except Exception: found=False
+sys.exit(0 if found else 1)
+PY
+    then
+        log "Hermes gbrain-embedding-refresh cron job already exists"
+        return 0
+    fi
+
+    # A same-name job with drift must be removed before recreation; otherwise
+    # Hermes would retain the stale schedule/script/workdir.
+    log "Reconciling Hermes gbrain-embedding-refresh cron job drift"
+    remove_gbrain_embedding_refresh_cron_job
+
+    log "Creating Hermes gbrain-embedding-refresh cron job"
+    su -s /bin/sh -- "$HERMES_USER" -c '
+        HOME=$1; HERMES_HOME=$1; WORKSPACE_DIR=$2; HERMES_CLI=$3
+        export HOME HERMES_HOME WORKSPACE_DIR HERMES_CLI
+        shift 3
+        exec "$HERMES_CLI" cron create "$@"
+    ' sh "$HERMES_HOME" "$WORKSPACE_DIR" "$HERMES_CLI" "$schedule" \
+        --no-agent --script hermes-gbrain-embedding-refresh-cron.sh \
+        --workdir "$WORKSPACE_DIR" --name gbrain-embedding-refresh \
+        || log "WARNING: failed to create Hermes gbrain-embedding-refresh cron job"
+}
+
+# Remove the owned gbrain-embedding-refresh cron job when present. Safe to
+# call when jobs.json is missing or malformed; failure is non-fatal.
+remove_gbrain_embedding_refresh_cron_job() {
+    [ -f "$jobs_file" ] || return 0
+    if python3 - "$jobs_file" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f: data=json.load(f)
+    found=any(isinstance(j,dict) and j.get("name")=="gbrain-embedding-refresh" for j in data.get("jobs",[]))
+except Exception: found=False
+sys.exit(0 if found else 1)
+PY
+    then
+        su -s /bin/sh -- "$HERMES_USER" -c 'HOME="$1"; HERMES_HOME="$1"; export HOME HERMES_HOME; exec "$2" cron remove gbrain-embedding-refresh' sh "$HERMES_HOME" "$HERMES_CLI" || true
+    fi
+}
+
 # Mnemosyne backup export cron (Phase 2, opt-in). Installs a no-agent cron
 # job that runs the backup export script on a minute-based schedule. The
 # script sources /opt/josemar/scripts/mnemosyne-backup-export.sh and runs
@@ -543,6 +643,7 @@ fi
 
 install_workspace_sync_cron
 install_gbrain_refresh_cron
+install_gbrain_embedding_refresh_cron
 
 # Bridge provider API keys from the container env into gbrain's config file.
 # s6-overlay stores container env vars in /run/s6/container_environment/, but

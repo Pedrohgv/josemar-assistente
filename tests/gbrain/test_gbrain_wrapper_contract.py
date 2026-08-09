@@ -17,7 +17,10 @@ to guard the simplified direct-CLI gbrain integration:
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -263,7 +266,17 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
     def test_reindex_drops_root_to_hermes_when_possible(self) -> None:
         self.assertIn("drop_root_if_possible", self.src)
         self.assertIn("JOSEMAR_GBRAIN_DROPPED_PRIVS", self.src)
-        self.assertIn("su -s /bin/sh hermes", self.src)
+        self.assertIn("su -p -s /bin/sh -- hermes", self.src)
+
+    def test_root_drop_fails_closed_and_preserves_runtime_environment(self) -> None:
+        body = _extract_function(self.src, "drop_root_if_possible")
+        self.assertIn("runtime_identity_unavailable", body)
+        self.assertIn('export HOME="$runtime_home"', body)
+        self.assertIn('export HERMES_HOME="$runtime_hermes_home"', body)
+        self.assertIn('export GBRAIN_HOME="$runtime_gbrain_home"', body)
+        self.assertIn('export XDG_CONFIG_HOME="$runtime_xdg_config"', body)
+        self.assertIn('runtime_home="${HERMES_HOME:-/opt/data}"', body)
+        self.assertIn('runtime_gbrain_home="${GBRAIN_HOME:-/opt/data}"', body)
 
     def test_reindex_creates_state_dir(self) -> None:
         body = _extract_function(self.src, "do_reindex")
@@ -321,6 +334,1249 @@ class GbrainRefreshContractTests(unittest.TestCase):
         body = _extract_function(self.src, "do_refresh")
         self.assertIn("Embeddings skipped", body)
 
+    def test_refresh_does_not_invoke_embed(self) -> None:
+        """refresh must remain no-embedding; it must not invoke `gbrain embed`."""
+        body = _extract_function(self.src, "do_refresh")
+        self.assertNotIn("embed --stale", body)
+        self.assertNotIn("embed-backfill", body)
+
+    def test_refresh_does_not_require_embedding_env(self) -> None:
+        """refresh must not require GBRAIN_EMBEDDING_* env vars."""
+        body = _extract_function(self.src, "do_refresh")
+        self.assertNotIn("GBRAIN_EMBEDDING_MODEL", body)
+        self.assertNotIn("GBRAIN_EMBEDDING_DIMENSIONS", body)
+
+    def test_refresh_does_not_acquire_tasknotes_lock(self) -> None:
+        """refresh must not acquire the tasknotes lock (no embedding writes)."""
+        body = _extract_function(self.src, "do_refresh")
+        self.assertNotIn("tasknotes.lock", body)
+        self.assertNotIn("flock", body)
+
+
+class GbrainRefreshEmbeddingsContractTests(unittest.TestCase):
+    """refresh-embeddings is the explicit-request / daily stale-only embed path.
+
+    The wrapper owns the TaskNotes lock itself (not the cron entrypoint),
+    reads `search.mcp_keyword_only` through the exact stdout of
+    `gbrain config get search.mcp_keyword_only` while holding that lock (NOT
+    from config.json), requires the exact value `false`, then runs the
+    marker-guarded stale-only embed at concurrency 1.
+    """
+
+    def setUp(self) -> None:
+        self.src = _read(WRAPPER_PATH)
+
+    # --- usage, dispatch, privilege drop ---
+
+    def test_usage_includes_refresh_embeddings(self) -> None:
+        body = _extract_function(self.src, "usage")
+        self.assertIn("refresh-embeddings", body)
+
+    def test_main_dispatches_refresh_embeddings(self) -> None:
+        body = _extract_function(self.src, "main")
+        self.assertIn("refresh-embeddings)", body)
+        self.assertIn("do_refresh_embeddings", body)
+
+    def test_main_dispatch_drops_root_for_refresh_embeddings(self) -> None:
+        body = _extract_function(self.src, "main")
+        drop_pos = body.find("drop_root_if_possible refresh-embeddings")
+        do_pos = body.find("do_refresh_embeddings")
+        self.assertGreater(drop_pos, -1, "refresh-embeddings must drop root privileges")
+        self.assertGreater(do_pos, -1, "do_refresh_embeddings must be dispatched")
+        self.assertLess(drop_pos, do_pos,
+                        "drop_root_if_possible must precede do_refresh_embeddings")
+
+    # --- keyword_only read through exact gbrain stdout under the lock ---
+
+    def test_reads_keyword_only_via_gbrain_config_get(self) -> None:
+        """The semantic-mode gate must read `gbrain config get
+        search.mcp_keyword_only`, never config.json."""
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn('"$GBRAIN_BIN" config get search.mcp_keyword_only', body)
+
+    def test_does_not_read_keyword_only_from_config_json(self) -> None:
+        """config.json is only used for the sentinel/marker checks; the
+        mcp_keyword_only decision must not come from it."""
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        config_block = body[body.find("validation=$("):body.find('esac', body.find("validation=$("))]
+        self.assertNotIn("mcp_keyword_only", config_block)
+        self.assertNotIn('config.get("search")', config_block)
+
+    def test_keyword_only_exact_false_required(self) -> None:
+        """Any stdout other than exactly `false` must fail closed as
+        semantic_mode_invalid (only exact `false` means semantic mode)."""
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn('if [ "$keyword_only" = "true" ]; then', body)
+        self.assertIn('if [ "$keyword_only" != "false" ]; then', body)
+        self.assertIn("refresh_embeddings_semantic_mode_invalid", body)
+
+    def test_keyword_only_true_skips(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn('"keyword_only"', body)
+        self.assertIn('"skipped"', body)
+
+    def test_config_read_failure_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn("refresh_embeddings_config_read_failed", body)
+        self.assertIn('"success": false', body)
+
+    # --- lock ownership and command order ---
+
+    def test_lock_owned_here_not_by_cron_entrypoint(self) -> None:
+        """The shared lock must be acquired inside the wrapper so the cron
+        entrypoint needs no external lock."""
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn("flock -n 9", body)
+        self.assertIn("GBRAIN_TASKNOTES_LOCK", body)
+
+    def test_lock_non_nested_not_double_acquired(self) -> None:
+        """do_refresh_embeddings must acquire fd 9 via `exec 9<` at the top of
+        the function and flock it in place — it must NOT use the nested
+        `{ ... } 9<"$GBRAIN_TASKNOTES_LOCK"` compound-block pattern (that would
+        double-open/double-lock and deadlock with a single flock -n)."""
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn('exec 9<"$GBRAIN_TASKNOTES_LOCK"', body)
+        self.assertNotIn('} 9<"$GBRAIN_TASKNOTES_LOCK"', body)
+
+    def test_config_get_after_lock_acquisition(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        lock_pos = body.find("flock -n")
+        config_pos = body.find("config get search.mcp_keyword_only")
+        self.assertGreater(lock_pos, -1)
+        self.assertGreater(config_pos, -1)
+        self.assertLess(lock_pos, config_pos,
+                        "config get must run while holding the lock")
+
+    def test_lock_busy_skips_without_gbrain_access(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn('"reason": "lock_busy"', body)
+        # The skip must return before any gbrain command runs.
+        busy_pos = body.find("lock_busy")
+        config_pos = body.find("config get search.mcp_keyword_only")
+        self.assertLess(busy_pos, config_pos,
+                        "lock-busy skip must precede the config read")
+
+    def test_lock_unavailable_is_structured_error(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn("refresh_embeddings_lock_unavailable", body)
+        self.assertIn('"success": false', body)
+
+    def test_lock_readability_precheck_before_exec(self) -> None:
+        """A failed `exec` redirection would kill the shell, so the wrapper must
+        probe the lock file first and emit the structured lock_unavailable
+        error from the pre-check."""
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        precheck_pos = body.find('[ ! -r "$GBRAIN_TASKNOTES_LOCK" ]')
+        exec_pos = body.find('exec 9<"$GBRAIN_TASKNOTES_LOCK"')
+        self.assertGreater(precheck_pos, -1)
+        self.assertGreater(exec_pos, -1)
+        self.assertLess(precheck_pos, exec_pos,
+                        "readability pre-check must precede exec 9<")
+
+    # --- validation and lifecycle gates ---
+
+    def test_marker_checked_after_config_get(self) -> None:
+        """The completion-marker gate must run after the semantic-mode read."""
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        config_pos = body.find("config get search.mcp_keyword_only")
+        marker_pos = body.find("completion_marker_missing")
+        self.assertLess(config_pos, marker_pos,
+                        "marker gate must follow the semantic-mode read")
+
+    def test_marker_gate_skips_when_missing(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn('"completion_marker_missing"', body)
+        self.assertIn('"skipped"', body)
+
+    def test_marker_tuple_mismatch_fails(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn("refresh_embeddings_marker_tuple_mismatch", body)
+        self.assertIn('"success": false', body)
+
+    def test_embedding_disabled_sentinel_gate(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn("embedding_disabled", body)
+        self.assertIn('"skipped"', body)
+
+    # --- embed invocation and order ---
+
+    def test_embed_after_sync(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        sync_pos = body.find("run_sync_extract_links")
+        embed_pos = body.find("embed --stale")
+        self.assertGreater(sync_pos, -1)
+        self.assertGreater(embed_pos, -1)
+        self.assertLess(sync_pos, embed_pos,
+                        "embed must run after the sync/extract reconcile")
+
+    def test_embed_runs_at_concurrency_one(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        embed_pos = body.find("embed --stale")
+        cmd_start = body.rfind("\n", 0, embed_pos)
+        cmd_line = body[cmd_start:embed_pos]
+        self.assertIn("GBRAIN_EMBED_CONCURRENCY=1", cmd_line)
+
+    def test_embed_failure_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn("gbrain_embed_failed", body)
+        self.assertIn('"success": false', body)
+
+    def test_success_emitted_after_embed(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        embed_pos = body.find("embed --stale")
+        success_pos = body.rfind('"success": true, "action": "refresh-embeddings"')
+        self.assertGreater(embed_pos, -1)
+        self.assertGreater(success_pos, -1)
+        self.assertLess(embed_pos, success_pos,
+                        "success JSON must follow the embed run")
+
+    def test_does_not_init_or_migrate(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertNotIn("init --pglite", body)
+        self.assertNotIn("migrate embeddings", body)
+
+    def test_exports_gbrain_env_and_state_dir(self) -> None:
+        body = _extract_function(self.src, "do_refresh_embeddings")
+        self.assertIn("export_gbrain_env", body)
+        self.assertIn('mkdir -p "$GBRAIN_STATE_DIR"', body)
+        self.assertIn("mark_brain_repo_safe_directory", body)
+
+
+class GbrainEmbedBackfillContractTests(unittest.TestCase):
+    """embed-backfill is the operator-only one-shot embedding backfill (issue #65).
+
+    Unlike reindex/refresh, this subcommand produces embeddings. These tests
+    guard the source contract for every requirement point:
+      (1) shell usage and main dispatch include it; privilege drop supports it
+      (2) runs export_gbrain_env, state dir creation, and safe-directory setup
+      (3) requires nonempty GBRAIN_EMBEDDING_MODEL and GBRAIN_EMBEDDING_DIMENSIONS
+      (4) must not invoke init or reinit-pglite
+      (5) acquires /opt/data/.locks/tasknotes.lock flock nonblocking before gbrain
+      (6) invokes `gbrain embed --stale --include-null-signature` with
+          GBRAIN_EMBED_CONCURRENCY=1
+      (7) after success, runs dry-run equivalent to assert no stale remain
+      (8) emits structured success JSON
+    """
+
+    def setUp(self) -> None:
+        self.src = _read(WRAPPER_PATH)
+
+    # --- (1) usage, dispatch, privilege drop ---
+
+    def test_usage_includes_embed_backfill(self) -> None:
+        body = _extract_function(self.src, "usage")
+        self.assertIn("embed-backfill", body)
+
+    def test_main_dispatches_embed_backfill(self) -> None:
+        body = _extract_function(self.src, "main")
+        self.assertIn("embed-backfill)", body)
+        self.assertIn("do_embed_backfill", body)
+
+    def test_main_dispatch_drops_root_for_embed_backfill(self) -> None:
+        body = _extract_function(self.src, "main")
+        # The embed-backfill case must call drop_root_if_possible before do_embed_backfill.
+        drop_pos = body.find("drop_root_if_possible embed-backfill")
+        do_pos = body.find("do_embed_backfill")
+        self.assertGreater(drop_pos, -1, "embed-backfill must drop root privileges")
+        self.assertGreater(do_pos, -1, "do_embed_backfill must be dispatched")
+        self.assertLess(drop_pos, do_pos,
+                        "drop_root_if_possible must precede do_embed_backfill")
+
+    def test_drop_root_passes_embed_backfill_subcommand(self) -> None:
+        body = _extract_function(self.src, "drop_root_if_possible")
+        # drop_root_if_possible re-execs with the subcommand name; the main
+        # dispatch must pass 'embed-backfill' as that argument.
+        main_body = _extract_function(self.src, "main")
+        self.assertIn("drop_root_if_possible embed-backfill", main_body)
+
+    # --- (2) env export, state dir, safe-directory ---
+
+    def test_embed_backfill_exports_gbrain_env(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("export_gbrain_env", body)
+
+    def test_embed_backfill_creates_state_dir(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn('mkdir -p "$GBRAIN_STATE_DIR"', body)
+
+    def test_embed_backfill_sets_git_safe_directory(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("mark_brain_repo_safe_directory", body)
+
+    def test_embed_backfill_env_before_lock(self) -> None:
+        """export_gbrain_env and state dir setup must happen before gbrain access."""
+        body = _extract_function(self.src, "do_embed_backfill")
+        env_pos = body.find("export_gbrain_env")
+        lock_pos = body.find("flock")
+        self.assertLess(env_pos, lock_pos,
+                        "export_gbrain_env must precede lock acquisition")
+
+    # --- (3) prerequisites ---
+
+    def test_embed_backfill_requires_embedding_model(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("GBRAIN_EMBEDDING_MODEL", body)
+
+    def test_embed_backfill_requires_embedding_dimensions(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("GBRAIN_EMBEDDING_DIMENSIONS", body)
+
+    def test_embed_backfill_prereq_check_is_nonempty(self) -> None:
+        """The prerequisite check must use -z (nonempty) guards for both vars."""
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("-z", body)
+        self.assertIn("GBRAIN_EMBEDDING_MODEL", body)
+        self.assertIn("GBRAIN_EMBEDDING_DIMENSIONS", body)
+
+    def test_embed_backfill_prereq_error_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("embed_backfill_prerequisites_missing", body)
+        self.assertIn('"success": false', body)
+
+    def test_embed_backfill_prereq_check_before_lock(self) -> None:
+        """The prerequisite check must run before any lock acquisition."""
+        body = _extract_function(self.src, "do_embed_backfill")
+        prereq_pos = body.find("embed_backfill_prerequisites_missing")
+        lock_pos = body.find("flock")
+        self.assertLess(prereq_pos, lock_pos,
+                        "prerequisite check must precede lock acquisition")
+
+    def test_embed_backfill_prereq_failure_returns_nonzero(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        # The prereq block must return 1 on failure.
+        prereq_block = body[:body.find("export_gbrain_env")]
+        self.assertIn("return 1", prereq_block)
+
+    # --- (4) must not init or reinit PGLite ---
+
+    def test_embed_backfill_does_not_invoke_init(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertNotIn("init --pglite", body)
+        self.assertNotIn("init ", body)
+
+    def test_embed_backfill_does_not_reinit_pglite(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertNotIn("reinit", body)
+        self.assertNotIn("reinit-pglite", body)
+
+    def test_embed_backfill_does_not_run_schema_sync(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertNotIn("schema sync --apply", body)
+
+    def test_embed_backfill_does_not_install_source_pack(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertNotIn("install_source_pack", body)
+
+    # --- (5) tasknotes lock, nonblocking, before gbrain access ---
+
+    def test_embed_backfill_references_tasknotes_lock_path(self) -> None:
+        self.assertIn("/opt/data/.locks/tasknotes.lock", self.src)
+
+    def test_embed_backfill_uses_tasknotes_lock_var(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("GBRAIN_TASKNOTES_LOCK", body)
+
+    def test_embed_backfill_uses_flock_nonblocking(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("flock -n", body)
+
+    def test_embed_backfill_lock_before_gbrain_embed(self) -> None:
+        """The lock must be acquired before the `gbrain embed` invocation."""
+        body = _extract_function(self.src, "do_embed_backfill")
+        lock_pos = body.find("flock -n")
+        embed_pos = body.find("embed --stale")
+        self.assertGreater(lock_pos, -1, "flock -n must be present")
+        self.assertGreater(embed_pos, -1, "embed --stale must be present")
+        self.assertLess(lock_pos, embed_pos,
+                        "flock acquisition must precede gbrain embed")
+
+    def test_embed_backfill_lock_busy_error_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("embed_backfill_lock_busy", body)
+        self.assertIn('"success": false', body)
+
+    # --- (6) gbrain embed invocation with concurrency 1 ---
+
+    def test_embed_backfill_invokes_gbrain_embed_stale(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("embed --stale", body)
+
+    def test_embed_backfill_invokes_gbrain_embed_include_null_signature(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("--include-null-signature", body)
+
+    def test_embed_backfill_sets_embed_concurrency_one(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("GBRAIN_EMBED_CONCURRENCY=1", body)
+
+    def test_embed_backfill_concurrency_applied_to_embed(self) -> None:
+        """GBRAIN_EMBED_CONCURRENCY=1 must be applied to the embed invocation."""
+        body = _extract_function(self.src, "do_embed_backfill")
+        # The concurrency env must appear in the same command line as `embed --stale`.
+        # Find the embed invocation and check the concurrency prefix precedes it
+        # within the same command substitution.
+        embed_pos = body.find("embed --stale")
+        self.assertGreater(embed_pos, -1)
+        # Look backwards from embed_pos for the concurrency assignment.
+        cmd_start = body.rfind("\n", 0, embed_pos)
+        cmd_line = body[cmd_start:embed_pos]
+        self.assertIn("GBRAIN_EMBED_CONCURRENCY=1", cmd_line)
+
+    def test_embed_backfill_embed_failure_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("gbrain_embed_failed", body)
+        self.assertIn('"success": false', body)
+
+    # --- (7) dry-run verification after success ---
+
+    def test_embed_backfill_runs_dry_run_verify(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("--dry-run", body)
+
+    def test_embed_backfill_dry_run_after_embed(self) -> None:
+        """The dry-run verification must run AFTER the embed backfill."""
+        body = _extract_function(self.src, "do_embed_backfill")
+        embed_pos = body.find("embed --stale --include-null-signature")
+        # The dry-run invocation is the second occurrence of embed --stale.
+        dry_pos = body.find("--dry-run")
+        self.assertGreater(embed_pos, -1)
+        self.assertGreater(dry_pos, -1)
+        self.assertLess(embed_pos, dry_pos,
+                        "dry-run verification must follow the embed backfill")
+
+    def test_embed_backfill_dry_run_uses_same_flags(self) -> None:
+        """The dry-run must use the same --stale --include-null-signature flags."""
+        body = _extract_function(self.src, "do_embed_backfill")
+        # Count occurrences of the embed flags; should appear at least twice
+        # (once for the real run, once for the dry-run verify).
+        self.assertGreaterEqual(
+            body.count("embed --stale --include-null-signature"), 2,
+            "embed --stale --include-null-signature must appear for both "
+            "the backfill and the dry-run verification",
+        )
+
+    def test_embed_backfill_dry_run_uses_concurrency_one(self) -> None:
+        """The dry-run verification must also set GBRAIN_EMBED_CONCURRENCY=1."""
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertGreaterEqual(
+            body.count("GBRAIN_EMBED_CONCURRENCY=1"), 2,
+            "GBRAIN_EMBED_CONCURRENCY=1 must be set for both the backfill "
+            "and the dry-run verification",
+        )
+
+    def test_embed_backfill_stale_remaining_error_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("embed_backfill_stale_remaining", body)
+        self.assertIn('"success": false', body)
+
+    def test_embed_backfill_verify_failure_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("embed_backfill_verify_failed", body)
+
+    # --- (8) structured success JSON ---
+
+    def test_embed_backfill_emits_structured_success(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn('"success": true', body)
+        self.assertIn('"action": "embed-backfill"', body)
+
+    def test_embed_backfill_success_message_mentions_completion(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        # The success message must indicate the backfill completed and no stale remain.
+        self.assertIn("no stale", body.lower())
+
+    def test_embed_backfill_success_after_verify(self) -> None:
+        """The success JSON must be emitted after the dry-run verification."""
+        body = _extract_function(self.src, "do_embed_backfill")
+        dry_pos = body.find("--dry-run")
+        success_pos = body.find('"action": "embed-backfill"')
+        self.assertGreater(dry_pos, -1)
+        self.assertGreater(success_pos, -1)
+        self.assertLess(dry_pos, success_pos,
+                        "success JSON must be emitted after dry-run verification")
+
+    # --- (9) marker write failure is explicit and structured ---
+
+    def test_embed_backfill_marker_write_failure_is_structured(self) -> None:
+        """A marker write failure must emit a structured
+        embed_backfill_marker_write_failed error and exit nonzero — it must
+        not claim success or fall through to the block-level
+        lock_unavailable handler."""
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertIn("embed_backfill_marker_write_failed", body)
+        self.assertIn('"success": false', body)
+        # The write must be guarded so a failure exits before the success emit.
+        marker_pos = body.find("embed_backfill_marker_write_failed")
+        success_pos = body.find('"action": "embed-backfill"')
+        self.assertGreater(marker_pos, -1)
+        self.assertGreater(success_pos, -1)
+        self.assertLess(marker_pos, success_pos,
+                        "marker write failure must precede any success JSON")
+
+
+class GbrainEmbedBackfillPreservationContractTests(unittest.TestCase):
+    """embed-backfill must not alter the behavior of reindex/refresh.
+
+    reindex and refresh must remain no-embedding and keyword-only. The
+    embedding-producing paths are do_embed_backfill (operator-only one-shot)
+    and do_refresh_embeddings (explicit-request/daily stale-only refresh).
+    """
+
+    def setUp(self) -> None:
+        self.src = _read(WRAPPER_PATH)
+
+    def test_reindex_still_uses_no_embedding_init(self) -> None:
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn("init --pglite --no-embedding", body)
+
+    def test_reindex_still_sets_keyword_only(self) -> None:
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn("config set search.mcp_keyword_only true", body)
+
+    def test_reindex_does_not_invoke_embed(self) -> None:
+        body = _extract_function(self.src, "do_reindex")
+        self.assertNotIn("embed --stale", body)
+        self.assertNotIn("embed-backfill", body)
+
+    def test_reindex_does_not_require_embedding_env(self) -> None:
+        body = _extract_function(self.src, "do_reindex")
+        self.assertNotIn("GBRAIN_EMBEDDING_MODEL", body)
+        self.assertNotIn("GBRAIN_EMBEDDING_DIMENSIONS", body)
+
+    def test_reindex_does_not_acquire_tasknotes_lock(self) -> None:
+        body = _extract_function(self.src, "do_reindex")
+        self.assertNotIn("tasknotes.lock", body)
+        self.assertNotIn("flock", body)
+
+    def test_refresh_still_uses_no_embed_sync(self) -> None:
+        body = _extract_function(self.src, "run_sync_extract_links")
+        self.assertIn("--no-embed", body)
+
+    def test_refresh_does_not_invoke_embed(self) -> None:
+        body = _extract_function(self.src, "do_refresh")
+        self.assertNotIn("embed --stale", body)
+        self.assertNotIn("embed-backfill", body)
+
+    def test_refresh_does_not_require_embedding_env(self) -> None:
+        body = _extract_function(self.src, "do_refresh")
+        self.assertNotIn("GBRAIN_EMBEDDING_MODEL", body)
+        self.assertNotIn("GBRAIN_EMBEDDING_DIMENSIONS", body)
+
+    def test_refresh_does_not_acquire_tasknotes_lock(self) -> None:
+        body = _extract_function(self.src, "do_refresh")
+        self.assertNotIn("tasknotes.lock", body)
+        self.assertNotIn("flock", body)
+
+    def test_embed_invocation_confined_to_embed_paths(self) -> None:
+        """Only do_embed_backfill and do_refresh_embeddings may invoke
+        `gbrain embed --stale`; reindex/refresh/sync helpers stay no-embed."""
+        for func in ("do_reindex", "do_refresh", "run_sync_extract_links"):
+            body = _extract_function(self.src, func)
+            self.assertNotIn(
+                "embed --stale", body,
+                f"{func} must not invoke `gbrain embed --stale`",
+            )
+        for func in ("do_embed_backfill", "do_refresh_embeddings"):
+            body = _extract_function(self.src, func)
+            self.assertIn(
+                "embed --stale", body,
+                f"{func} must invoke `gbrain embed --stale`",
+            )
+
+    def test_embed_backfill_does_not_share_sync_helper(self) -> None:
+        """embed-backfill must not route through run_sync_extract_links.
+
+        The shared sync helper is no-embed by design; embed-backfill must use
+        `gbrain embed` directly, not the sync/extract helper.
+        """
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertNotIn("run_sync_extract_links", body)
+
+
+class GbrainEnableEmbeddingsContractTests(unittest.TestCase):
+    """enable-embeddings is the operator-only non-destructive semantic-search
+    switch (issue #65).
+
+    Unlike embed-backfill, this subcommand does NOT produce embeddings. It is
+    the explicit, non-destructive switch from keyword-only to semantic search.
+    These tests guard the source contract for every requirement point:
+      (1) shell usage and main dispatch include it; privilege drop supports it
+      (2) requires nonempty GBRAIN_EMBEDDING_MODEL and GBRAIN_EMBEDDING_DIMENSIONS
+      (3) must not invoke init or reinit-pglite
+      (4) acquires /opt/data/.locks/tasknotes.lock flock nonblocking before gbrain
+      (5) invokes `gbrain migrate embeddings --to <model> --dim <dims> --yes
+          --no-embed --ignore-env-override`
+      (6) does NOT initiate backfill itself (no `gbrain embed --stale`)
+      (7) ONLY after a successful migration sets search.mcp_keyword_only false
+      (8) on migration failure keyword-only stays enabled (the keyword-only
+          flip must come AFTER the migration success guard)
+      (9) emits structured failure JSON for every failure path
+      (10) emits structured success JSON
+    """
+
+    def setUp(self) -> None:
+        self.src = _read(WRAPPER_PATH)
+
+    # --- (1) usage, dispatch, privilege drop ---
+
+    def test_usage_includes_enable_embeddings(self) -> None:
+        body = _extract_function(self.src, "usage")
+        self.assertIn("enable-embeddings", body)
+
+    def test_main_dispatches_enable_embeddings(self) -> None:
+        body = _extract_function(self.src, "main")
+        self.assertIn("enable-embeddings)", body)
+        self.assertIn("do_enable_embeddings", body)
+
+    def test_main_dispatch_drops_root_for_enable_embeddings(self) -> None:
+        body = _extract_function(self.src, "main")
+        drop_pos = body.find("drop_root_if_possible enable-embeddings")
+        do_pos = body.find("do_enable_embeddings")
+        self.assertGreater(drop_pos, -1, "enable-embeddings must drop root privileges")
+        self.assertGreater(do_pos, -1, "do_enable_embeddings must be dispatched")
+        self.assertLess(drop_pos, do_pos,
+                        "drop_root_if_possible must precede do_enable_embeddings")
+
+    # --- (2) prerequisites ---
+
+    def test_enable_embeddings_requires_embedding_model(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("GBRAIN_EMBEDDING_MODEL", body)
+
+    def test_enable_embeddings_requires_embedding_dimensions(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("GBRAIN_EMBEDDING_DIMENSIONS", body)
+
+    def test_enable_embeddings_prereq_check_is_nonempty(self) -> None:
+        """The prerequisite check must use -z (nonempty) guards for both vars."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("-z", body)
+        self.assertIn("GBRAIN_EMBEDDING_MODEL", body)
+        self.assertIn("GBRAIN_EMBEDDING_DIMENSIONS", body)
+
+    def test_enable_embeddings_prereq_error_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("enable_embeddings_prerequisites_missing", body)
+        self.assertIn('"success": false', body)
+
+    def test_enable_embeddings_prereq_check_before_lock(self) -> None:
+        """The prerequisite check must run before any lock acquisition."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        prereq_pos = body.find("enable_embeddings_prerequisites_missing")
+        lock_pos = body.find("flock")
+        self.assertLess(prereq_pos, lock_pos,
+                        "prerequisite check must precede lock acquisition")
+
+    def test_enable_embeddings_prereq_failure_returns_nonzero(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        prereq_block = body[:body.find("export_gbrain_env")]
+        self.assertIn("return 1", prereq_block)
+
+    # --- (3) must not init or reinit PGLite ---
+
+    def test_enable_embeddings_does_not_invoke_init(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertNotIn("init --pglite", body)
+        self.assertNotIn("init ", body)
+
+    def test_enable_embeddings_does_not_reinit_pglite(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertNotIn("reinit", body)
+        self.assertNotIn("reinit-pglite", body)
+
+    def test_enable_embeddings_does_not_run_schema_sync_apply(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertNotIn("schema sync --apply", body)
+
+    def test_enable_embeddings_does_not_install_source_pack(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertNotIn("install_source_pack", body)
+
+    # --- (4) tasknotes lock, nonblocking, before gbrain access ---
+
+    def test_enable_embeddings_references_tasknotes_lock_path(self) -> None:
+        # The lock path is a shared global; just confirm it is still present.
+        self.assertIn("/opt/data/.locks/tasknotes.lock", self.src)
+
+    def test_enable_embeddings_uses_tasknotes_lock_var(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("GBRAIN_TASKNOTES_LOCK", body)
+
+    def test_enable_embeddings_uses_flock_nonblocking(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("flock -n", body)
+
+    def test_enable_embeddings_lock_before_migrate(self) -> None:
+        """The lock must be acquired before the `gbrain migrate` invocation."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        lock_pos = body.find("flock -n")
+        migrate_pos = body.find("migrate embeddings")
+        self.assertGreater(lock_pos, -1, "flock -n must be present")
+        self.assertGreater(migrate_pos, -1, "migrate embeddings must be present")
+        self.assertLess(lock_pos, migrate_pos,
+                        "flock acquisition must precede gbrain migrate")
+
+    def test_enable_embeddings_lock_busy_error_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("enable_embeddings_lock_busy", body)
+        self.assertIn('"success": false', body)
+
+    def test_enable_embeddings_lock_unavailable_error_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("enable_embeddings_lock_unavailable", body)
+
+    # --- (5) gbrain migrate embeddings invocation ---
+
+    def test_enable_embeddings_invokes_migrate_embeddings(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("migrate embeddings", body)
+
+    def test_enable_embeddings_passes_to_flag(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("--to", body)
+        self.assertIn("$GBRAIN_EMBEDDING_MODEL", body)
+
+    def test_enable_embeddings_passes_dim_flag(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("--dim", body)
+        self.assertIn("$GBRAIN_EMBEDDING_DIMENSIONS", body)
+
+    def test_enable_embeddings_passes_yes_flag(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("--yes", body)
+
+    def test_enable_embeddings_passes_no_embed_flag(self) -> None:
+        """The migration must skip the re-embed pass (--no-embed)."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("--no-embed", body)
+
+    def test_enable_embeddings_passes_ignore_env_override_flag(self) -> None:
+        """The migration must proceed even when env vars would override."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("--ignore-env-override", body)
+
+    def test_enable_embeddings_migrate_failure_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("gbrain_migrate_embeddings_failed", body)
+        self.assertIn('"success": false', body)
+
+    def test_enable_embeddings_migrate_blocked_is_structured(self) -> None:
+        """A refused/failed status in the migrate output must be surfaced."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("gbrain_migrate_embeddings_blocked", body)
+
+    # --- (6) does NOT initiate backfill ---
+
+    def test_enable_embeddings_does_not_invoke_embed_stale(self) -> None:
+        """enable-embeddings must NOT initiate backfill (no `gbrain embed --stale`).
+
+        The success message may legitimately reference `embed-backfill` as the
+        next operator step, but the function must not invoke `gbrain embed` or
+        `embed --stale` itself.
+        """
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertNotIn("embed --stale", body)
+        self.assertNotIn("$GBRAIN_BIN\" embed", body)
+        self.assertNotIn("GBRAIN_EMBED_CONCURRENCY", body)
+
+    def test_enable_embeddings_does_not_invoke_embed(self) -> None:
+        """enable-embeddings must not invoke any `gbrain embed` subcommand.
+
+        The success message may reference `embed-backfill` as the next step,
+        but no `gbrain embed` invocation may appear in the function.
+        """
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertNotIn("$GBRAIN_BIN\" embed", body)
+        self.assertNotIn("GBRAIN_EMBED_CONCURRENCY", body)
+
+    # --- (7) ONLY after success set keyword_only false ---
+
+    def test_enable_embeddings_sets_keyword_only_false(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("config set search.mcp_keyword_only false", body)
+
+    def test_enable_embeddings_forces_keyword_only_true_first(self) -> None:
+        """enable-embeddings must FIRST force search.mcp_keyword_only true so
+        any error path leaves keyword-only enabled (issue #65)."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("config set search.mcp_keyword_only true", body)
+
+    def test_enable_embeddings_keyword_only_true_before_migrate(self) -> None:
+        """The keyword_only=true force must happen BEFORE the migration so
+        any migration failure leaves keyword-only enabled."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        force_pos = body.find("search.mcp_keyword_only true")
+        migrate_pos = body.find("migrate embeddings")
+        self.assertGreater(force_pos, -1)
+        self.assertGreater(migrate_pos, -1)
+        self.assertLess(force_pos, migrate_pos,
+                        "keyword_only=true force must precede the migration")
+
+    def test_enable_embeddings_keyword_only_force_failure_structured(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("enable_embeddings_keyword_only_force_failed", body)
+
+    def test_enable_embeddings_keyword_only_force_exits_on_failure(self) -> None:
+        """The keyword_only=true force failure must exit before the migration."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        force_failed_pos = body.find("enable_embeddings_keyword_only_force_failed")
+        migrate_pos = body.find("migrate embeddings")
+        self.assertGreater(force_failed_pos, -1)
+        self.assertGreater(migrate_pos, -1)
+        force_block = body[force_failed_pos:migrate_pos]
+        self.assertIn("exit 1", force_block,
+                      "keyword_only force failure must exit before migration")
+
+    def test_enable_embeddings_keyword_only_flip_after_migrate(self) -> None:
+        """The keyword_only=false flip must come AFTER the migration success."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        migrate_pos = body.find("migrate embeddings")
+        flip_pos = body.find("search.mcp_keyword_only false")
+        self.assertGreater(migrate_pos, -1)
+        self.assertGreater(flip_pos, -1)
+        self.assertLess(migrate_pos, flip_pos,
+                        "keyword_only=false must be set after the migration")
+
+    def test_enable_embeddings_keyword_only_flip_failure_structured(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("enable_embeddings_keyword_only_flip_failed", body)
+
+    # --- (8) on migration failure keyword-only stays enabled ---
+
+    def test_enable_embeddings_no_keyword_flip_on_migrate_failure(self) -> None:
+        """On migration failure the function must exit before the keyword flip.
+
+        The migrate-failure handler must `exit 1` (inside the flock block) so
+        the keyword_only=false line is never reached on a failed migration.
+        """
+        body = _extract_function(self.src, "do_enable_embeddings")
+        migrate_failed_pos = body.find("gbrain_migrate_embeddings_failed")
+        flip_pos = body.find("search.mcp_keyword_only false")
+        self.assertGreater(migrate_failed_pos, -1)
+        self.assertGreater(flip_pos, -1)
+        # The migrate-failure block must contain an `exit 1` before the flip.
+        migrate_block = body[migrate_failed_pos:flip_pos]
+        self.assertIn("exit 1", migrate_block,
+                      "migrate failure must exit before the keyword flip")
+
+    def test_enable_embeddings_no_keyword_flip_on_blocked(self) -> None:
+        """A blocked migration (refused/failed status) must also exit before
+        the keyword flip."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        blocked_pos = body.find("gbrain_migrate_embeddings_blocked")
+        flip_pos = body.find("search.mcp_keyword_only false")
+        self.assertGreater(blocked_pos, -1)
+        self.assertGreater(flip_pos, -1)
+        blocked_block = body[blocked_pos:flip_pos]
+        self.assertIn("exit 1", blocked_block,
+                      "blocked migration must exit before the keyword flip")
+
+    # --- (9) structured failure JSON ---
+
+    def test_enable_embeddings_all_failures_are_structured(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        for error in (
+            "enable_embeddings_prerequisites_missing",
+            "enable_embeddings_lock_busy",
+            "enable_embeddings_lock_unavailable",
+            "enable_embeddings_keyword_only_force_failed",
+            "gbrain_migrate_embeddings_failed",
+            "gbrain_migrate_embeddings_blocked",
+            "enable_embeddings_keyword_only_flip_failed",
+        ):
+            self.assertIn(error, body)
+
+    # --- (10) structured success JSON ---
+
+    def test_enable_embeddings_emits_structured_success(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn('"success": true', body)
+        self.assertIn('"action": "enable-embeddings"', body)
+
+    def test_enable_embeddings_success_message_mentions_no_backfill(self) -> None:
+        """The success message must indicate backfill is a separate step."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("embed-backfill", body.lower())
+
+    def test_enable_embeddings_success_after_keyword_flip(self) -> None:
+        """The success JSON must be emitted after the keyword_only flip."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        flip_pos = body.find("search.mcp_keyword_only false")
+        success_pos = body.find('"action": "enable-embeddings"')
+        self.assertGreater(flip_pos, -1)
+        self.assertGreater(success_pos, -1)
+        self.assertLess(flip_pos, success_pos,
+                        "success JSON must be emitted after the keyword flip")
+
+    # --- (11) marker invalidation failure is explicit and structured ---
+
+    def test_enable_embeddings_marker_removal_failure_is_structured(self) -> None:
+        """A marker removal failure must emit a structured
+        enable_embeddings_marker_removal_failed error and exit nonzero —
+        it must not claim success or fall through to the block-level
+        lock_unavailable handler."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("enable_embeddings_marker_removal_failed", body)
+        self.assertIn('"success": false', body)
+        marker_pos = body.find("enable_embeddings_marker_removal_failed")
+        success_pos = body.find('"action": "enable-embeddings"')
+        self.assertGreater(marker_pos, -1)
+        self.assertGreater(success_pos, -1)
+        self.assertLess(marker_pos, success_pos,
+                        "marker removal failure must precede any success JSON")
+
+    # --- env export, state dir, safe-directory ---
+
+    def test_enable_embeddings_exports_gbrain_env(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("export_gbrain_env", body)
+
+    def test_enable_embeddings_creates_state_dir(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn('mkdir -p "$GBRAIN_STATE_DIR"', body)
+
+    def test_enable_embeddings_sets_git_safe_directory(self) -> None:
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertIn("mark_brain_repo_safe_directory", body)
+
+    def test_enable_embeddings_env_before_lock(self) -> None:
+        """export_gbrain_env and state dir setup must happen before gbrain access."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        env_pos = body.find("export_gbrain_env")
+        lock_pos = body.find("flock")
+        self.assertLess(env_pos, lock_pos,
+                        "export_gbrain_env must precede lock acquisition")
+
+
+class GbrainDisableEmbeddingsContractTests(unittest.TestCase):
+    """disable-embeddings is the operator-only rollback to keyword-only (issue #65).
+
+    It is the safe inverse of enable-embeddings: flips search mode back to
+    keyword-only WITHOUT destroying data. These tests guard:
+      (1) shell usage and main dispatch include it; privilege drop supports it
+      (2) sets search.mcp_keyword_only true FIRST
+      (3) does NOT remove the embeddings overlay or delete vectors
+      (4) does NOT invoke migrate embeddings or embed
+      (5) emits structured failure JSON
+      (6) emits structured success JSON
+    """
+
+    def setUp(self) -> None:
+        self.src = _read(WRAPPER_PATH)
+
+    # --- (1) usage, dispatch, privilege drop ---
+
+    def test_usage_includes_disable_embeddings(self) -> None:
+        body = _extract_function(self.src, "usage")
+        self.assertIn("disable-embeddings", body)
+
+    def test_main_dispatches_disable_embeddings(self) -> None:
+        body = _extract_function(self.src, "main")
+        self.assertIn("disable-embeddings)", body)
+        self.assertIn("do_disable_embeddings", body)
+
+    def test_main_dispatch_drops_root_for_disable_embeddings(self) -> None:
+        body = _extract_function(self.src, "main")
+        drop_pos = body.find("drop_root_if_possible disable-embeddings")
+        do_pos = body.find("do_disable_embeddings")
+        self.assertGreater(drop_pos, -1, "disable-embeddings must drop root privileges")
+        self.assertGreater(do_pos, -1, "do_disable_embeddings must be dispatched")
+        self.assertLess(drop_pos, do_pos,
+                        "drop_root_if_possible must precede do_disable_embeddings")
+
+    # --- (2) sets keyword_only true FIRST ---
+
+    def test_disable_embeddings_sets_keyword_only_true(self) -> None:
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("config set search.mcp_keyword_only true", body)
+
+    def test_disable_embeddings_keyword_only_true_is_first_action(self) -> None:
+        """The keyword_only=true flip must be the first gbrain action."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        flip_pos = body.find("search.mcp_keyword_only true")
+        # No other gbrain command (migrate, embed, init, schema) may precede it.
+        for cmd in ("migrate embeddings", "embed --stale", "init --pglite",
+                    "schema sync --apply", "config set search.mcp_keyword_only false"):
+            cmd_pos = body.find(cmd)
+            if cmd_pos != -1:
+                self.assertGreater(flip_pos, -1)
+                self.assertLess(flip_pos, cmd_pos,
+                                f"keyword_only=true must precede {cmd}")
+
+    def test_disable_embeddings_keyword_only_flip_failure_structured(self) -> None:
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("disable_embeddings_keyword_only_flip_failed", body)
+
+    # --- (3) does NOT remove overlay or delete vectors ---
+
+    def test_disable_embeddings_does_not_remove_overlay(self) -> None:
+        """disable-embeddings must not remove the embeddings overlay config."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertNotIn("config unset embedding_model", body)
+        self.assertNotIn("config unset embedding_dimensions", body)
+        self.assertNotIn("config delete embedding_model", body)
+        self.assertNotIn("config delete embedding_dimensions", body)
+
+    def test_disable_embeddings_does_not_delete_vectors(self) -> None:
+        """disable-embeddings must not delete or null embedding vectors."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertNotIn("invalidate", body)
+        self.assertNotIn("DELETE", body)
+        self.assertNotIn("drop", body.lower())
+
+    def test_disable_embeddings_does_not_migrate(self) -> None:
+        """disable-embeddings must not invoke migrate embeddings."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertNotIn("migrate embeddings", body)
+
+    # --- (4) does NOT invoke embed or migrate ---
+
+    def test_disable_embeddings_does_not_invoke_embed(self) -> None:
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertNotIn("embed --stale", body)
+        self.assertNotIn("embed-backfill", body)
+        self.assertNotIn("$GBRAIN_BIN\" embed", body)
+
+    def test_disable_embeddings_does_not_require_embedding_env(self) -> None:
+        """disable-embeddings must not require GBRAIN_EMBEDDING_* env vars."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertNotIn("GBRAIN_EMBEDDING_MODEL", body)
+        self.assertNotIn("GBRAIN_EMBEDDING_DIMENSIONS", body)
+
+    def test_disable_embeddings_acquires_tasknotes_lock(self) -> None:
+        """disable-embeddings must acquire the shared tasknotes lock (issue #65
+        safe rollback: it writes to the file plane, so it must hold the lock
+        to avoid concurrent vault writes)."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("flock -n", body)
+        self.assertIn("GBRAIN_TASKNOTES_LOCK", body)
+
+    def test_disable_embeddings_lock_busy_error_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("disable_embeddings_lock_busy", body)
+        self.assertIn('"success": false', body)
+
+    def test_disable_embeddings_lock_unavailable_error_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("disable_embeddings_lock_unavailable", body)
+
+    def test_disable_embeddings_does_not_init_or_reinit(self) -> None:
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertNotIn("init --pglite", body)
+        self.assertNotIn("reinit", body)
+
+    # --- (3b) writes embedding_disabled sentinel atomically (issue #65) ---
+
+    def test_disable_embeddings_writes_embedding_disabled_sentinel(self) -> None:
+        """disable-embeddings must write embedding_disabled=true into the file
+        plane so direct gbrain embedding operations refuse (issue #65)."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("embedding_disabled", body)
+        self.assertIn("True", body)
+
+    def test_disable_embeddings_writes_sentinel_via_python(self) -> None:
+        """The sentinel must be written atomically via Python (temp file +
+        rename), not via `gbrain config set` (which would be a shell
+        subprocess vulnerable to partial writes)."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("python3", body)
+        self.assertIn("tempfile", body)
+        self.assertIn("os.replace", body)
+
+    def test_disable_embeddings_sentinel_write_failure_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("disable_embeddings_sentinel_write_failed", body)
+
+    def test_disable_embeddings_keyword_only_before_sentinel(self) -> None:
+        """keyword-only true must be set BEFORE the sentinel write so
+        retrieval falls back to keyword search even if the sentinel write
+        fails."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        flip_pos = body.find("search.mcp_keyword_only true")
+        sentinel_pos = body.find("embedding_disabled")
+        self.assertGreater(flip_pos, -1)
+        self.assertGreater(sentinel_pos, -1)
+        self.assertLess(flip_pos, sentinel_pos,
+                        "keyword_only=true must precede the sentinel write")
+
+    # --- (5) structured failure JSON ---
+
+    def test_disable_embeddings_failure_is_structured(self) -> None:
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("disable_embeddings_keyword_only_flip_failed", body)
+        # The failure JSON is Python-generated (json.dumps), so the source
+        # contains the Python literal `False` which serializes to JSON `false`.
+        self.assertIn('"success": False', body)
+
+    # --- (6) structured success JSON ---
+
+    def test_disable_embeddings_emits_structured_success(self) -> None:
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn('"success": true', body)
+        self.assertIn('"action": "disable-embeddings"', body)
+
+    def test_disable_embeddings_marker_removal_failure_is_structured(self) -> None:
+        """A marker removal failure must emit a structured
+        disable_embeddings_marker_removal_failed error and exit nonzero —
+        it must not claim success or fall through to the block-level
+        lock_unavailable handler."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("disable_embeddings_marker_removal_failed", body)
+        self.assertIn('"success": false', body)
+        marker_pos = body.find("disable_embeddings_marker_removal_failed")
+        success_pos = body.find('"action": "disable-embeddings"')
+        self.assertGreater(marker_pos, -1)
+        self.assertGreater(success_pos, -1)
+        self.assertLess(marker_pos, success_pos,
+                        "marker removal failure must precede any success JSON")
+
+    def test_disable_embeddings_success_message_mentions_preserved(self) -> None:
+        """The success message must indicate vectors/overlay are preserved."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("preserved", body.lower())
+
+    def test_disable_embeddings_success_after_keyword_flip(self) -> None:
+        """The success JSON must be emitted after the keyword_only flip."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        flip_pos = body.find("search.mcp_keyword_only true")
+        success_pos = body.find('"action": "disable-embeddings"')
+        self.assertGreater(flip_pos, -1)
+        self.assertGreater(success_pos, -1)
+        self.assertLess(flip_pos, success_pos,
+                        "success JSON must be emitted after the keyword flip")
+
+    # --- env export, state dir, safe-directory ---
+
+    def test_disable_embeddings_exports_gbrain_env(self) -> None:
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("export_gbrain_env", body)
+
+    def test_disable_embeddings_creates_state_dir(self) -> None:
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn('mkdir -p "$GBRAIN_STATE_DIR"', body)
+
+    def test_disable_embeddings_sets_git_safe_directory(self) -> None:
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("mark_brain_repo_safe_directory", body)
+
+    # --- (3b-2) fail-closed sentinel write (issue #65 final review) ---
+
+    def test_disable_embeddings_fail_closed_on_unreadable_config(self) -> None:
+        """disable-embeddings must fail closed when the existing config.json
+        cannot be read/parsed, without replacing it. The Python block must
+        emit a structured disable_embeddings_config_unreadable error."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("disable_embeddings_config_unreadable", body)
+
+    def test_disable_embeddings_fail_closed_on_non_object_config(self) -> None:
+        """disable-embeddings must fail closed when the existing config.json
+        is a non-object (e.g. JSON array), without replacing it. The Python
+        block must emit a structured disable_embeddings_config_not_object
+        error."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("disable_embeddings_config_not_object", body)
+
+    def test_disable_embeddings_fail_closed_does_not_silently_reset(self) -> None:
+        """The Python block must NOT silently reset cfg to {} on parse/read
+        failure (the old behavior). It must fail closed instead."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        # The old behavior had `except (json.JSONDecodeError, OSError): cfg = {}`
+        # which silently reset. The new behavior must NOT contain that silent
+        # reset — it must sys.exit(1) with a structured error instead.
+        self.assertNotIn("except (json.JSONDecodeError, OSError):\n        cfg = {}", body)
+        # The new behavior must sys.exit(1) on parse/read failure.
+        self.assertIn("sys.exit(1)", body)
+
+    def test_disable_embeddings_fail_closed_checks_isinstance_dict(self) -> None:
+        """The Python block must check isinstance(cfg, dict) and fail closed
+        when the config is a non-object."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("isinstance(cfg, dict)", body)
+
+    def test_disable_embeddings_fail_closed_only_starts_fresh_when_missing(self) -> None:
+        """The Python block must only start fresh (cfg = {}) when the config
+        file is MISSING, not when it exists but cannot be parsed."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn("if os.path.exists(config_path):", body)
+        self.assertIn("else:", body)
+        # The else branch (file missing) sets cfg = {}.
+        else_pos = body.find("else:")
+        self.assertGreater(else_pos, 0)
+        else_block = body[else_pos:else_pos + 50]
+        self.assertIn("cfg = {}", else_block)
+
+    def test_disable_embeddings_fail_closed_errors_are_structured(self) -> None:
+        """The fail-closed errors must be structured JSON with success: false."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertIn('"success": false', body.lower())
+        self.assertIn("disable_embeddings_config_unreadable", body)
+        self.assertIn("disable_embeddings_config_not_object", body)
+
+    def test_disable_embeddings_fail_closed_surfaces_right_error(self) -> None:
+        """The wrapper must surface the right structured error depending on
+        which fail-closed condition fired (config_unreadable vs
+        config_not_object vs sentinel_write_failed)."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        # The case statement must dispatch on the Python re-check output.
+        self.assertIn("disable_embeddings_config_unreadable", body)
+        self.assertIn("disable_embeddings_config_not_object", body)
+        self.assertIn("disable_embeddings_sentinel_write_failed", body)
+        # The case must use a case/esac dispatch.
+        self.assertIn("case", body)
+        self.assertIn("esac", body)
+
+
+class GbrainEnableDisableEmbeddingsPreservationContractTests(unittest.TestCase):
+    """enable-embeddings/disable-embeddings must not alter reindex/refresh/embed-backfill.
+
+    reindex and refresh must remain no-embedding and keyword-only. The
+    subcommands are operator-only switches; they must not introduce embedding
+    production into reindex/refresh. Embedding production stays confined to
+    embed-backfill and the explicit-request refresh-embeddings path.
+    """
+
+    def setUp(self) -> None:
+        self.src = _read(WRAPPER_PATH)
+
+    def test_reindex_still_sets_keyword_only_true(self) -> None:
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn("config set search.mcp_keyword_only true", body)
+
+    def test_reindex_does_not_invoke_enable_embeddings(self) -> None:
+        body = _extract_function(self.src, "do_reindex")
+        self.assertNotIn("enable-embeddings", body)
+        self.assertNotIn("do_enable_embeddings", body)
+
+    def test_refresh_does_not_invoke_enable_embeddings(self) -> None:
+        body = _extract_function(self.src, "do_refresh")
+        self.assertNotIn("enable-embeddings", body)
+        self.assertNotIn("do_enable_embeddings", body)
+
+    def test_embed_backfill_does_not_invoke_enable_embeddings(self) -> None:
+        body = _extract_function(self.src, "do_embed_backfill")
+        self.assertNotIn("enable-embeddings", body)
+        self.assertNotIn("do_enable_embeddings", body)
+        self.assertNotIn("migrate embeddings", body)
+
+    def test_enable_embeddings_does_not_share_sync_helper(self) -> None:
+        """enable-embeddings must not route through run_sync_extract_links."""
+        body = _extract_function(self.src, "do_enable_embeddings")
+        self.assertNotIn("run_sync_extract_links", body)
+
+    def test_disable_embeddings_does_not_share_sync_helper(self) -> None:
+        """disable-embeddings must not route through run_sync_extract_links."""
+        body = _extract_function(self.src, "do_disable_embeddings")
+        self.assertNotIn("run_sync_extract_links", body)
+
+    def test_enable_embeddings_is_not_called_by_cron_paths(self) -> None:
+        """reindex/refresh must not call enable-embeddings or migrate embeddings."""
+        for func in ("do_reindex", "do_refresh", "run_sync_extract_links"):
+            body = _extract_function(self.src, func)
+            self.assertNotIn("migrate embeddings", body,
+                              f"{func} must not invoke migrate embeddings")
+            self.assertNotIn("enable-embeddings", body,
+                              f"{func} must not invoke enable-embeddings")
+
 
 class GbrainSimplificationContractTests(unittest.TestCase):
     """The wrapper must NOT contain removed gating/bounding/per-action logic."""
@@ -374,6 +1630,8 @@ class GbrainSimplificationContractTests(unittest.TestCase):
         self.assertIn("do_reindex", body)
         self.assertIn("refresh", body)
         self.assertIn("do_refresh", body)
+        self.assertIn("refresh-embeddings", body)
+        self.assertIn("do_refresh_embeddings", body)
 
     def test_no_managed_link_sources_constant(self) -> None:
         self.assertNotIn("MANAGED_LINK_SOURCES", self.src)
@@ -469,6 +1727,292 @@ class GbrainCronContractTests(unittest.TestCase):
                 body = _extract_function(self.src, function_name)
                 self.assertIn("su -s /bin/sh -- hermes -c", body)
                 self.assertNotIn("su -s /bin/sh hermes -c", body)
+
+
+class GbrainEmbeddingRefreshCronContractTests(unittest.TestCase):
+    """Hermes init must install the daily gbrain-embedding-refresh cron with a
+    validated local-timezone schedule and reconcile full drift (schedule,
+    script, workdir, no_agent), not merely the job name."""
+
+    def setUp(self) -> None:
+        self.src = _read(HERMES_INIT_PATH)
+
+    def test_default_schedule_is_local_5am(self) -> None:
+        """The default is 0 5 * * * in the Hermes local timezone, not UTC."""
+        body = _extract_function(self.src, "install_gbrain_embedding_refresh_cron")
+        self.assertIn('schedule="${GBRAIN_EMBED_REFRESH_SCHEDULE:-0 5 * * *}"', body)
+        # The schedule must be handed to the scheduler as-is (local time), with
+        # no conversion to a UTC offset expression.
+        self.assertNotIn("TZ=UTC", body)
+        self.assertNotIn("offset", body.lower())
+
+    def test_schedule_passed_verbatim_to_cron_create(self) -> None:
+        """The schedule string must be handed to `hermes cron create` verbatim
+        (the scheduler evaluates it in the container's local timezone)."""
+        body = _extract_function(self.src, "install_gbrain_embedding_refresh_cron")
+        self.assertIn('"$schedule"', body)
+        self.assertIn('cron create "$@"', body)
+
+    def test_schedule_validated_before_install(self) -> None:
+        body = _extract_function(self.src, "install_gbrain_embedding_refresh_cron")
+        self.assertIn("WARNING: invalid GBRAIN_EMBED_REFRESH_SCHEDULE", body)
+        self.assertIn("re.fullmatch", body)
+        self.assertIn("len(s.split()) == 5", body)
+
+    def test_disabled_schedule_removes_owned_job(self) -> None:
+        body = _extract_function(self.src, "install_gbrain_embedding_refresh_cron")
+        self.assertIn('""|0)', body)
+        self.assertIn("remove_gbrain_embedding_refresh_cron_job", body)
+
+    def test_invalid_schedule_removes_owned_job(self) -> None:
+        """A malformed schedule must not leave the owned job behind."""
+        body = _extract_function(self.src, "install_gbrain_embedding_refresh_cron")
+        invalid_pos = body.find("WARNING: invalid GBRAIN_EMBED_REFRESH_SCHEDULE")
+        self.assertGreater(invalid_pos, -1)
+        self.assertIn("remove_gbrain_embedding_refresh_cron_job",
+                      body[invalid_pos:invalid_pos + 200])
+
+    def test_remove_helper_uses_named_remove(self) -> None:
+        body = _extract_function(self.src, "remove_gbrain_embedding_refresh_cron_job")
+        self.assertIn("cron remove gbrain-embedding-refresh", body)
+        self.assertIn('"$HERMES_CLI"', body)
+
+    def test_reconciles_drift_not_merely_name(self) -> None:
+        """The existing-job check must compare the real cron schedule field
+        (schedule.expr with kind=cron), script name, no_agent flag, and workdir
+        — not just the job name."""
+        body = _extract_function(self.src, "install_gbrain_embedding_refresh_cron")
+        self.assertIn('s.get("kind") == "cron"', body)
+        self.assertIn('s.get("expr")', body)
+        self.assertIn('j.get("script") == "hermes-gbrain-embedding-refresh-cron.sh"', body)
+        self.assertIn('j.get("no_agent") is True', body)
+        self.assertIn('j.get("workdir")', body)
+
+    def test_drift_logs_reconciliation(self) -> None:
+        body = _extract_function(self.src, "install_gbrain_embedding_refresh_cron")
+        self.assertIn("Reconciling Hermes gbrain-embedding-refresh cron job drift", body)
+
+    def test_create_uses_expected_flags(self) -> None:
+        body = _extract_function(self.src, "install_gbrain_embedding_refresh_cron")
+        self.assertIn("--no-agent", body)
+        self.assertIn("--script hermes-gbrain-embedding-refresh-cron.sh", body)
+        self.assertIn("--workdir", body)
+        self.assertIn("--name gbrain-embedding-refresh", body)
+
+    def test_called_after_jobs_json_creation(self) -> None:
+        jobs_pos = self.src.find("Creating empty Hermes cron/jobs.json")
+        call_pos = self.src.rfind("install_gbrain_embedding_refresh_cron")
+        self.assertGreater(jobs_pos, 0)
+        self.assertGreater(call_pos, jobs_pos,
+                           "embedding refresh cron must be called after jobs.json creation")
+
+    def test_called_alongside_other_cron_installers(self) -> None:
+        ws_pos = self.src.rfind("install_workspace_sync_cron")
+        gb_pos = self.src.rfind("install_gbrain_refresh_cron")
+        emb_pos = self.src.rfind("install_gbrain_embedding_refresh_cron")
+        self.assertGreater(gb_pos, ws_pos)
+        self.assertGreater(emb_pos, gb_pos)
+
+
+class GbrainEmbeddingRefreshCronReconcileBehaviorTests(unittest.TestCase):
+    """Behavior tests for the reconcile comparison embedded in
+    install_gbrain_embedding_refresh_cron: the real Hermes cron schedule schema
+    is {"kind": "cron", "expr": "0 5 * * *"}, and a matching existing job must
+    be recognized as already correct (exit 0) so the init does NOT perpetually
+    recreate it. The exact python heredoc from the init script is executed
+    against fixture jobs.json files."""
+
+    SCHEDULE = "0 5 * * *"
+    WORKDIR = "/opt/data"
+    SCRIPT = "hermes-gbrain-embedding-refresh-cron.sh"
+
+    def setUp(self) -> None:
+        self.src = _read(HERMES_INIT_PATH)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self._tmp.name)
+        match = re.search(
+            r'python3 - "\$jobs_file" "\$schedule" "\$WORKSPACE_DIR" <<\'PY\'\n(.*?)\nPY',
+            self.src, re.DOTALL,
+        )
+        self.assertIsNotNone(match, "Could not find the reconcile heredoc in init")
+        assert match is not None
+        self.reconcile_py = match.group(1)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _reconcile(self, fixture: dict) -> int:
+        jobs = self.tmpdir / "jobs.json"
+        jobs.write_text(json.dumps(fixture), encoding="utf-8")
+        result = subprocess.run(
+            ["python3", "-", str(jobs), self.SCHEDULE, self.WORKDIR],
+            input=self.reconcile_py,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return result.returncode
+
+    def _owned_job(self, **overrides) -> dict:
+        job = {
+            "name": "gbrain-embedding-refresh",
+            "schedule": {"kind": "cron", "expr": self.SCHEDULE},
+            "script": self.SCRIPT,
+            "no_agent": True,
+            "workdir": self.WORKDIR,
+        }
+        job.update(overrides)
+        return job
+
+    def test_real_cron_expr_fixture_is_recognized(self) -> None:
+        """{"kind":"cron","expr":"0 5 * * *"} with the expected script/no_agent/
+        workdir must be treated as already-correct (exit 0), not recreated."""
+        fixture = {"jobs": [self._owned_job()]}
+        self.assertEqual(self._reconcile(fixture), 0)
+
+    def test_drifted_expr_is_recreated(self) -> None:
+        fixture = {"jobs": [self._owned_job(schedule={"kind": "cron", "expr": "0 4 * * *"})]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_interval_kind_is_recreated(self) -> None:
+        fixture = {"jobs": [self._owned_job(schedule={"kind": "interval", "minutes": 5})]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_drifted_script_is_recreated(self) -> None:
+        fixture = {"jobs": [self._owned_job(script="other-script.sh")]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_no_agent_false_is_recreated(self) -> None:
+        fixture = {"jobs": [self._owned_job(no_agent=False)]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_drifted_workdir_is_recreated(self) -> None:
+        fixture = {"jobs": [self._owned_job(workdir="/tmp/other")]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_string_schedule_shape_is_recreated(self) -> None:
+        """A schedule persisted as a bare string must be treated as drift, not
+        guessed into an enabled state."""
+        fixture = {"jobs": [self._owned_job(schedule=self.SCHEDULE)]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_absent_job_is_recreated(self) -> None:
+        fixture = {"jobs": []}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+
+class GbrainEmbeddingRefreshTimeoutContractTests(unittest.TestCase):
+    """The daily cron entrypoint must terminate its whole process group on
+    timeout so a gbrain child holding the tasknotes flock cannot be orphaned,
+    and the wrapper (not the cron entrypoint) must own the lock."""
+
+    def setUp(self) -> None:
+        self.helper = _read(REPO_ROOT / "scripts" / "hermes-gbrain-embedding-refresh.py")
+        self.cron = _read(REPO_ROOT / "scripts" / "hermes-gbrain-embedding-refresh-cron.sh")
+        self.dockerfile = _read(DOCKERFILE_PATH)
+        self.compose = _read(REPO_ROOT / "docker-compose.yml")
+
+    def test_cron_script_routes_through_timeout_helper(self) -> None:
+        self.assertIn(
+            'exec python3 "${GBRAIN_EMBED_REFRESH_HELPER:-/opt/josemar/scripts/hermes-gbrain-embedding-refresh.py}"',
+            self.cron,
+        )
+        self.assertNotIn("josemar-gbrain refresh-embeddings", self.cron)
+
+    def test_cron_script_constrains_helper_below_hermes_outer_timeout(self) -> None:
+        self.assertIn('outer_timeout="${HERMES_CRON_SCRIPT_TIMEOUT:-300}"', self.cron)
+        self.assertIn('requested_timeout="${GBRAIN_EMBED_REFRESH_TIMEOUT:-240}"', self.cron)
+        self.assertIn('safe_timeout=$((outer_timeout - kill_grace - group_drain - safety_margin - 1))', self.cron)
+        self.assertIn('requested_timeout="$safe_timeout"', self.cron)
+        self.assertIn('export GBRAIN_EMBED_REFRESH_TIMEOUT="$requested_timeout"', self.cron)
+        self.assertIn('export GBRAIN_EMBED_REFRESH_KILL_GRACE="$kill_grace"', self.cron)
+
+    def test_helper_spawns_child_in_own_session(self) -> None:
+        self.assertIn("start_new_session=True", self.helper)
+
+    def test_helper_kills_whole_process_group(self) -> None:
+        self.assertIn("_signal_group(proc.pid, signal.SIGTERM)", self.helper)
+        self.assertIn("_signal_group(proc.pid, signal.SIGKILL)", self.helper)
+
+    def test_helper_cleanup_checks_group_not_leader(self) -> None:
+        """After SIGTERM, cleanup must be driven by the liveness of the whole
+        process GROUP (killpg(..., 0)), not the leader's proc.poll() state."""
+        self.assertIn("os.killpg(proc.pid, 0)", self.helper)
+        self.assertIn("_group_cleared(proc)", self.helper)
+        self.assertIn("proc.poll()", self.helper)
+
+    def test_helper_returns_124_on_timeout(self) -> None:
+        self.assertIn("return 124", self.helper)
+
+    def test_helper_outer_timeout_protection_sigterm_handler(self) -> None:
+        """If the Hermes outer timeout signals the helper itself, the helper
+        must forward cleanup to the process group before exiting (bounded
+        helper semantics) so no orphaned lock holder remains."""
+        self.assertIn("signal.SIGTERM", self.helper)
+        self.assertIn("signal.SIGINT", self.helper)
+        self.assertIn("_shutdown_group(proc, grace, drain)", self.helper)
+        self.assertIn("os._exit(128 + signum)", self.helper)
+
+    def test_helper_total_runtime_bounded(self) -> None:
+        """The helper must self-bound its total wall time to
+        timeout + grace + a small post-KILL drain, so a configured Hermes cron
+        timeout >= that bound never preempts cleanup."""
+        self.assertIn('timeout = _env_float("GBRAIN_EMBED_REFRESH_TIMEOUT", 240.0)', self.helper)
+        self.assertIn('grace = _env_float("GBRAIN_EMBED_REFRESH_KILL_GRACE", 5.0)', self.helper)
+        self.assertIn("deadline = time.monotonic() + drain", self.helper)
+
+    def test_helper_accepts_cron_capped_boundary_equality(self) -> None:
+        """The cron entrypoint caps with `-ge safe_timeout` where safe_timeout
+        equals this helper's maximum. The helper must therefore accept
+        timeout == maximum (the capped value) while rejecting timeout strictly
+        above it, so a direct invocation still cannot exceed the outer
+        deadline."""
+        self.assertIn("maximum = outer - grace - drain - margin - 1.0", self.helper)
+        self.assertIn("if maximum < 0.1 or timeout > maximum:", self.helper)
+        self.assertNotIn("timeout >= maximum", self.helper)
+
+    def test_helper_does_not_acquire_external_lock(self) -> None:
+        """The cron entrypoint must not take the tasknotes lock itself; the
+        wrapper owns it. The helper must not open or flock any lock file."""
+        self.assertNotIn("tasknotes.lock", self.helper)
+        self.assertNotIn("fcntl", self.helper)
+        self.assertNotIn("flock(", self.helper)
+
+    def test_helper_env_defaults(self) -> None:
+        self.assertIn("GBRAIN_EMBED_REFRESH_CMD", self.helper)
+        self.assertIn("240.0", self.helper)
+        self.assertIn("GBRAIN_EMBED_REFRESH_KILL_GRACE", self.helper)
+
+    def test_helper_copied_into_image_and_executable(self) -> None:
+        self.assertIn(
+            "COPY scripts/hermes-gbrain-embedding-refresh.py "
+            "/opt/josemar/scripts/hermes-gbrain-embedding-refresh.py",
+            self.dockerfile,
+        )
+        self.assertIn("hermes-gbrain-embedding-refresh.py", self.dockerfile)
+        self.assertIn("/opt/josemar/scripts/hermes-gbrain-embedding-refresh.py \\", self.dockerfile)
+
+    def test_compose_wires_schedule_with_default(self) -> None:
+        self.assertIn(
+            "GBRAIN_EMBED_REFRESH_SCHEDULE=${GBRAIN_EMBED_REFRESH_SCHEDULE:-0 5 * * *}",
+            self.compose,
+        )
+
+    def test_compose_wires_timeout_with_default(self) -> None:
+        self.assertIn(
+            "GBRAIN_EMBED_REFRESH_TIMEOUT=${GBRAIN_EMBED_REFRESH_TIMEOUT:-240}",
+            self.compose,
+        )
+
+    def test_compose_wires_timeout_hierarchy_defaults(self) -> None:
+        for line in (
+            "GBRAIN_EMBED_REFRESH_KILL_GRACE=${GBRAIN_EMBED_REFRESH_KILL_GRACE:-5}",
+            "GBRAIN_EMBED_REFRESH_GROUP_DRAIN=${GBRAIN_EMBED_REFRESH_GROUP_DRAIN:-2}",
+            "GBRAIN_EMBED_REFRESH_TIMEOUT_MARGIN=${GBRAIN_EMBED_REFRESH_TIMEOUT_MARGIN:-10}",
+            "HERMES_CRON_SCRIPT_TIMEOUT=${HERMES_CRON_SCRIPT_TIMEOUT:-300}",
+        ):
+            with self.subTest(line=line):
+                self.assertIn(line, self.compose)
 
 
 class GbrainBunInstallerCurlContractTests(unittest.TestCase):

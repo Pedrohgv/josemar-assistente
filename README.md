@@ -2,6 +2,11 @@
 
 Self-hosted Hermes assistant infrastructure for running a private AI assistant with Telegram, dashboard/API access, git-backed agent state, an Obsidian vault, and optional queue-based local ML jobs.
 
+After the initial semantic embedding backfill is run manually, the daily
+no-agent `gbrain-embedding-refresh` job maintains stale vectors. The
+`refresh-embeddings` wrapper path is allowed only after an explicit user
+request.
+
 This repository is the public/platform layer. Personal identity, memories, private workflows, and user-specific skills live in a separate private `agent-state` repository so this repo can evolve independently from each user's assistant state.
 
 ## What This Repo Provides
@@ -58,7 +63,7 @@ flowchart LR
   MnemoBackup --> MnemoGDrive[Google Drive<br/>mnemosyne-crypt slots]
 ```
 
-The canonical curated vault path is `gbrain -> Obsidian vault`. Mnemosyne is a separate, opt-in operational/conversation-memory layer; it is not a vault replacement and does not alter gbrain's keyword-only retrieval. The TEI embeddings service is internal-only (no host port published); it is only present when the embeddings overlay is applied. The Mnemosyne encrypted backup lane is a separate rclone `crypt` uploader service to its own Google Drive slots, distinct from the vault backup.
+The canonical curated vault path is `gbrain -> Obsidian vault`. Mnemosyne is a separate, opt-in operational/conversation-memory layer; it is not a vault replacement. gbrain retrieval is keyword-only by default (text queries keyword-only, image/cross-modal queries rejected, `put`/`capture` do not embed); opt-in TEI E5 semantic/hybrid retrieval (issue #65) is activated separately by the operator (`josemar-gbrain enable-embeddings` + `embed-backfill`), after which both `gbrain search` and `gbrain query --no-expand` use the hybrid/semantic provider path. The TEI embeddings service is internal-only (no host port published); it is only present when the embeddings overlay is applied. The Mnemosyne encrypted backup lane is a separate rclone `crypt` uploader service to its own Google Drive slots, distinct from the vault backup.
 
 ## State Separation
 
@@ -116,7 +121,7 @@ flowchart LR
 ```
 
 - **Mnemosyne**: semantic conversational recall and capture, opt-in. Passive user-turn capture (`sync_turn`) and pre-turn recall are wired; non-conversation contexts (cron, flush, subagent, background, skill_loop) are excluded. No auto-sleep, reflection, or LLM consolidation runs in the pilot. Retrieval quality is evaluated separately (see `docs/mnemosyne-retrieval-quality.md`); this README makes no precise ranking claims.
-- **gbrain / Obsidian vault**: the canonical curated vault. Retrieval is keyword-only today; the Mnemosyne pilot does not enable gbrain embeddings or alter the gbrain wrapper's behavior.
+- **gbrain / Obsidian vault**: the canonical curated vault. Retrieval is keyword-only by default (text queries keyword-only, image/cross-modal queries rejected, `put`/`capture` do not embed); the Mnemosyne pilot does not enable gbrain embeddings or alter the gbrain wrapper's behavior. Opt-in TEI E5 semantic/hybrid retrieval (issue #65) is a separate operator activation (`josemar-gbrain enable-embeddings` + `embed-backfill`), after which both `gbrain search` and `gbrain query --no-expand` use the hybrid/semantic provider path; see `docs/gbrain-operations.md` → "Issue #65".
 - **Static `MEMORY.md` / `USER.md`**: archived rollback material. While the Mnemosyne pilot is enabled they are not injected into prompts; disabling the pilot restores them via the init rollback path.
 
 See `docs/mnemosyne-operations.md` for activation, recovery, and security details, and `docs/mnemosyne-retrieval-quality.md` for the retrieval quality gate.
@@ -258,7 +263,7 @@ josemar-assistente/
 | --- | --- |
 | `hermes` | Main Hermes gateway, Telegram channel, dashboard/API, agent runtime. |
 | `aux-ml` | Optional internal queue API for long-running OCR jobs. |
-| `embeddings` | Optional local Hugging Face Text Embeddings Inference (TEI) service for semantic memory/gbrain embeddings. NOT enabled by default; only present when the `docker-compose.embeddings.yml` overlay is applied. See `docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation. |
+| `embeddings` | Optional local Hugging Face Text Embeddings Inference (TEI) service for semantic memory and opt-in gbrain E5 semantic/hybrid retrieval (issue #65). NOT enabled by default; only present when the `docker-compose.embeddings.yml` overlay is applied. gbrain embeddings are activated separately by the operator via `josemar-gbrain enable-embeddings` + `josemar-gbrain embed-backfill`; after both, `gbrain search` and `gbrain query --no-expand` use the hybrid/semantic provider path. See `docs/gbrain-operations.md` → "Issue #65" and `docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation. |
 | `tailscale` | Private-network sidecar for Syncthing connectivity and (optionally) Tailscale Serve for browser control. |
 | `syncthing` | Syncs the Obsidian vault to trusted devices. |
 | `obsidian-backup` | Runs daily rclone backups into rotating Google Drive slots. |
@@ -385,7 +390,7 @@ git-tracked state instead of the sensitive, untracked `/opt/data/config.yaml`.
 
 Current repo-shipped skills:
 
-- `gbrain`: native gbrain vault interface (search, get, capture, put, link, backlinks) used directly via the pinned `gbrain` CLI. Keyword-only search, no embeddings. Operator activation via `josemar-gbrain reindex`; periodic manual-edit reconciliation via `josemar-gbrain refresh` every 5 minutes by default.
+- `gbrain`: native gbrain vault interface (search, get, capture, put, link, backlinks) used directly via the pinned `gbrain` CLI. Keyword-only search by default (text keyword-only, image/cross-modal rejected, put/capture do not embed); opt-in TEI E5 semantic/hybrid retrieval via `gbrain query --no-expand` (issue #65) makes both `search` and `query` hybrid/semantic. Operator activation via `josemar-gbrain reindex`; periodic manual-edit reconciliation via `josemar-gbrain refresh` every 5 minutes by default. See `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval".
 - `tasknotes`: bounded durable-task lifecycle through the `task_*` MCP tools. Native gbrain remains the backend and sole task writer. See `docs/tasknotes-mcp.md` for prerequisites and recovery.
 - `aux-ml`: skill interface for queue-based auxiliary ML jobs.
 - `workspace-sync`: skill interface for workspace git sync, status, commit, and push flows.
@@ -453,7 +458,7 @@ Credentials go under `credentials/<service>/` and are mounted read-only into Her
 - `credentials/README.md`: credential setup and storage rules.
 - `docs/aux-ml.md`: auxiliary ML API, queue, model lifecycle, and OCR operations.
 - `docs/obsidian-operations.md`: Syncthing, Tailscale, rclone backup, and restore runbook.
-- `docs/gbrain-operations.md`: gbrain activation, reindex, vault swap, schema pack workflow, and troubleshooting.
+- `docs/gbrain-operations.md`: gbrain activation, reindex, vault swap, schema pack workflow, issue #65 opt-in TEI E5 semantic/hybrid retrieval, and troubleshooting.
 - `docs/memory-embeddings-evaluation.md`: issue #86/#65 evaluation of the optional local embedding service and Mnemosyne memory layer (not enabled by default).
 - `docs/mnemosyne-operations.md`: Mnemosyne pilot activation, encrypted-backup overlay, recovery lane, deploy-mode validation, and security boundaries.
 - `docs/mnemosyne-retrieval-quality.md`: Mnemosyne Portuguese retrieval quality gate, activation thresholds, and the FaQuAD-IR benchmark.
