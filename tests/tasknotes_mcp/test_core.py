@@ -1012,6 +1012,8 @@ class SubprocessTests(unittest.TestCase):
         inherited = {
             "LLAMA_SERVER_BASE_URL": "http://llama:8080",
             "GBRAIN_EMBEDDING_MODEL_REVISION": "revision-1",
+            "GBRAIN_EMBEDDING_MODEL": "nomic-embed-text",
+            "GBRAIN_EMBEDDING_DIMENSIONS": "768",
             "OPENAI_API_KEY": "secret",
             "TELEGRAM_BOT_TOKEN": "secret",
             "AWS_SECRET_ACCESS_KEY": "secret",
@@ -1025,10 +1027,13 @@ class SubprocessTests(unittest.TestCase):
                 "HOME", "PATH", "LANG", "LC_ALL", "TZ", "GBRAIN_HOME",
                 "GBRAIN_BRAIN_REPO", "GBRAIN_SKIP_STARTUP_HOOKS",
                 "LLAMA_SERVER_BASE_URL", "GBRAIN_EMBEDDING_MODEL_REVISION",
+                "GBRAIN_EMBEDDING_MODEL", "GBRAIN_EMBEDDING_DIMENSIONS",
             },
         )
         self.assertEqual(env["LLAMA_SERVER_BASE_URL"], "http://llama:8080")
         self.assertEqual(env["GBRAIN_EMBEDDING_MODEL_REVISION"], "revision-1")
+        self.assertEqual(env["GBRAIN_EMBEDDING_MODEL"], "nomic-embed-text")
+        self.assertEqual(env["GBRAIN_EMBEDDING_DIMENSIONS"], "768")
         self.assertNotIn("OPENAI_API_KEY", env)
         self.assertNotIn("TELEGRAM_BOT_TOKEN", env)
         self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)

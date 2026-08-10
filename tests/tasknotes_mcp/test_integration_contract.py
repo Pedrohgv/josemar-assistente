@@ -15,6 +15,13 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn("mcp_servers:", text)
         self.assertIn('command: "/opt/hermes/.venv/bin/python3"', text)
         self.assertIn('"/opt/josemar/scripts/tasknotes_mcp.py"', text)
+        for name in (
+            "LLAMA_SERVER_BASE_URL",
+            "GBRAIN_EMBEDDING_MODEL_REVISION",
+            "GBRAIN_EMBEDDING_MODEL",
+            "GBRAIN_EMBEDDING_DIMENSIONS",
+        ):
+            self.assertIn(f'{name}: "${{{name}}}"', text)
         self.assertIn("connect_timeout: 30", text)
         self.assertIn("timeout: 180", text)
         self.assertIn("supports_parallel_tool_calls: false", text)
