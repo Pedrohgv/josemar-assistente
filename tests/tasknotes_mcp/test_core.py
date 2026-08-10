@@ -367,7 +367,12 @@ def _write_fake_gbrain(tmpdir: Path, behavior: Optional[dict] = None) -> Path:
             title = fm.pop("title", "")
             tags = fm.pop("tags", [])
             fm.pop("slug", None)
-            # Normalize dates in frontmatter for disk.
+            # The on-disk write-through preserves the frontmatter the
+            # adapter sent verbatim (gbrain capture --stdin is write-
+            # through). Keep a copy of the raw frontmatter for disk.
+            disk_fm_raw = dict(fm)
+            # Normalize dates for the in-memory DB state only: gbrain
+            # get_page returns bare dates normalized to midnight UTC.
             for k, v in list(fm.items()):
                 fm[k] = normalize_date(v)
             # Store page (in-memory DB state, faithful get_page shape).
@@ -384,7 +389,7 @@ def _write_fake_gbrain(tmpdir: Path, behavior: Optional[dict] = None) -> Path:
             if vault:
                 p = os.path.join(vault, slug + ".md")
                 os.makedirs(os.path.dirname(p), exist_ok=True)
-                disk_fm = dict(fm)
+                disk_fm = dict(disk_fm_raw)
                 disk_fm["type"] = ptype
                 disk_fm["title"] = title
                 # Provenance injection (operations.ts put_page + capture).
@@ -1526,6 +1531,50 @@ class ReconstructionTests(unittest.TestCase):
         self.assertIn("timeline event 1", md)
         self.assertIn("timeline event 2", md)
 
+    def test_reconstruct_denormalizes_bare_date_from_gbrain(self) -> None:
+        """gbrain returns bare dates as ``YYYY-MM-DDT00:00:00.000Z``.
+
+        The write path must serialize them back as plain ``YYYY-MM-DD``
+        so disk frontmatter stays canonical, while still applying status
+        and completedDate updates.
+        """
+        page = {
+            "type": "note", "title": "T", "tags": ["task"],
+            "frontmatter": {
+                "status": "open",
+                "scheduled": "2026-08-10T00:00:00.000Z",
+                "due": "2026-09-01T00:00:00.000Z",
+            },
+            "compiled_truth": "body", "timeline": "",
+        }
+        md = self.core.reconstruct_markdown(
+            page, self.profile,
+            {"status": "done", "completedDate": "2026-08-10"},
+        )
+        fm, _ = self.core._parse_frontmatter(md)
+        # Preserved date fields collapse to plain YYYY-MM-DD.
+        self.assertEqual(str(fm["scheduled"]), "2026-08-10")
+        self.assertEqual(str(fm["due"]), "2026-09-01")
+        # Updated fields are applied.
+        self.assertEqual(fm["status"], "done")
+        self.assertEqual(str(fm["completedDate"]), "2026-08-10")
+        # No normalized timestamp form leaks into the serialized markdown.
+        self.assertNotIn("T00:00:00.000Z", md)
+
+    def test_reconstruct_preserves_true_datetime(self) -> None:
+        """True datetimes (non-midnight-UTC) are preserved verbatim."""
+        page = {
+            "type": "note", "title": "T", "tags": ["task"],
+            "frontmatter": {
+                "status": "open",
+                "scheduled": "2026-08-10T13:45:00.000Z",
+            },
+            "compiled_truth": "body", "timeline": "",
+        }
+        md = self.core.reconstruct_markdown(page, self.profile, {})
+        fm, _ = self.core._parse_frontmatter(md)
+        self.assertEqual(str(fm["scheduled"]), "2026-08-10T13:45:00.000Z")
+
     def test_build_create_markdown_injects_task_tag(self) -> None:
         md = self.core.build_create_markdown(
             self.profile, "Title", "open", "normal", None, None, None, None, "body"
@@ -2120,6 +2169,27 @@ class EngineOperationTests(unittest.TestCase):
         self.assertEqual(result.state, self.core.NOT_APPLIED)
         fm, _ = self.core._parse_frontmatter((self.vault / "tasks" / "t1.md").read_text(encoding="utf-8"))
         self.assertEqual(str(fm["completedDate"])[:10], "2026-07-18")
+
+    def test_complete_retains_plain_scheduled_date_on_disk(self) -> None:
+        """Regression for issue #107: completing a task with a bare
+        ``scheduled`` date must retain exactly that plain ``YYYY-MM-DD``
+        on disk, not the gbrain-normalized ``YYYY-MM-DDT00:00:00.000Z``
+        form returned by ``get_page``.
+        """
+        self.engine.create(
+            "t1", "T", status="open", scheduled="2026-08-10", body="b"
+        )
+        result = self.engine.complete("t1", completion_date="2026-08-10")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        disk_text = (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        fm, _ = self.core._parse_frontmatter(disk_text)
+        # The scheduled date is preserved as the exact plain bare date.
+        self.assertEqual(str(fm["scheduled"]), "2026-08-10")
+        # No normalized timestamp form leaks onto disk for scheduled.
+        self.assertNotIn("scheduled: 2026-08-10T00:00:00.000Z", disk_text)
+        # Status/completedDate are updated as required.
+        self.assertEqual(fm["status"], "done")
+        self.assertEqual(str(fm["completedDate"]), "2026-08-10")
 
     def test_archive_success(self) -> None:
         self.engine.create("t1", "T", status="open", body="b")

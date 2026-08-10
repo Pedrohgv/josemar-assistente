@@ -127,6 +127,13 @@ MAX_RECURRENCE_LEN = 500
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _TAG_RE = re.compile(r"^[^\s\x00-\x1f\x7f]+$")  # non-empty, no whitespace/control
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Pinned gbrain normalizes bare TaskNotes dates to midnight UTC on read.
+# This is the exact normalized form of a bare ``YYYY-MM-DD`` date as
+# returned by ``gbrain get_page`` frontmatter. The write path collapses
+# it back to the plain bare-date form so disk frontmatter stays canonical.
+_NORMALIZED_BARE_DATE_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})T00:00:00\.000Z$"
+)
 
 # Slug generation: timestamp prefix + slugified title.
 _SLUGIFY_RE = re.compile(r"[^a-z0-9]+")
@@ -1774,6 +1781,17 @@ def reconstruct_markdown(
     if "tags" not in updates:
         fm["tags"] = list(decoded["tags"])
 
+    # Collapse gbrain-normalized bare dates back to plain ``YYYY-MM-DD``.
+    # gbrain returns bare TaskNotes dates as ``YYYY-MM-DDT00:00:00.000Z``;
+    # the write path serializes them as plain dates so disk frontmatter
+    # stays canonical. Caller-supplied dates are already plain
+    # ``YYYY-MM-DD`` (validated) and pass through unchanged; true
+    # datetimes (any other ISO form) are preserved verbatim.
+    date_keys = _date_valued_frontmatter_keys(profile)
+    for key in date_keys:
+        if key in fm:
+            fm[key] = _denormalize_bare_date(fm[key])
+
     body = decoded["compiled_truth"]
     if body_override is not None:
         body = body_override
@@ -1908,6 +1926,37 @@ def _normalize_semantic_frontmatter(
         if isinstance(value, str) and _DATE_RE.fullmatch(value):
             normalized[key] = value + "T00:00:00.000Z"
     return normalized
+
+
+def _date_valued_frontmatter_keys(profile: TaskNotesProfile) -> set:
+    """Return the set of frontmatter keys that hold bare-date values.
+
+    Includes the modeled date mappings (``due``, ``scheduled``,
+    ``completedDate``) and any custom user fields declared with
+    ``type: date``. These are the keys whose values gbrain normalizes
+    to ``YYYY-MM-DDT00:00:00.000Z`` on read and that the write path
+    must collapse back to plain ``YYYY-MM-DD``.
+    """
+    keys = {profile.mappings[logical] for logical in ("due", "scheduled", "completedDate")}
+    for uf in profile.user_fields:
+        if uf["type"] == "date":
+            keys.add(uf["key"])
+    return keys
+
+
+def _denormalize_bare_date(value: Any) -> Any:
+    """Collapse a gbrain-normalized bare date back to ``YYYY-MM-DD``.
+
+    gbrain returns bare TaskNotes dates as ``YYYY-MM-DDT00:00:00.000Z``.
+    The write path serializes them as plain ``YYYY-MM-DD`` so disk
+    frontmatter stays canonical. True datetimes (any other ISO form) and
+    non-string values are returned unchanged.
+    """
+    if isinstance(value, str):
+        m = _NORMALIZED_BARE_DATE_RE.match(value)
+        if m is not None:
+            return m.group(1)
+    return value
 
 
 def semantic_from_gbrain(page: Dict[str, Any], profile: TaskNotesProfile) -> SemanticDocument:
