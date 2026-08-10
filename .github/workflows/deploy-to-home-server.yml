@@ -50,6 +50,12 @@ jobs:
           GBRAIN_EMBEDDINGS_ENABLED_INPUT: ${{ vars.GBRAIN_EMBEDDINGS_ENABLED }}
           MNEMOSYNE_BACKUP_EXPORT_INTERVAL_INPUT: ${{ vars.MNEMOSYNE_BACKUP_EXPORT_INTERVAL }}
           RCLONE_CONFIG_B64_SECRET: ${{ secrets.RCLONE_CONFIG_B64 }}
+          JOSEMAR_MCP_ENABLED_INPUT: ${{ vars.JOSEMAR_MCP_ENABLED }}
+          JOSEMAR_MCP_SUBNET: ${{ vars.JOSEMAR_MCP_SUBNET }}
+          JOSEMAR_MCP_GATEWAY: ${{ vars.JOSEMAR_MCP_GATEWAY }}
+          JOSEMAR_MCP_HERMES_IP: ${{ vars.JOSEMAR_MCP_HERMES_IP }}
+          JOSEMAR_MCP_TAILSCALE_IP: ${{ vars.JOSEMAR_MCP_TAILSCALE_IP }}
+          JOSEMAR_MCP_AUTHORIZED_KEY: ${{ secrets.JOSEMAR_MCP_AUTHORIZED_KEY }}
         run: |
           if [ -z "$WORKSPACE_STATE_REPO" ]; then
             echo "ERROR: Repository variable WORKSPACE_STATE_REPO is required"
@@ -167,6 +173,98 @@ jobs:
           PY
           fi
 
+          # Josemar MCP is optional and disabled by default. When enabled,
+          # require a single-line SSH public key secret and validate
+          # subnet/IP overrides together using ipaddress (Python stdlib, no
+          # installs). SSH user (hermes), SSH port (2223), and the forced
+          # command are fixed constants and not configurable. The feature
+          # also requires the Hermes API server to be enabled with a key
+          # (validated later, after HERMES_API_SERVER_ENABLED is resolved).
+          JOSEMAR_MCP_ENABLED="$JOSEMAR_MCP_ENABLED_INPUT"
+          if [ -z "$JOSEMAR_MCP_ENABLED" ]; then
+            JOSEMAR_MCP_ENABLED="false"
+          fi
+          if [ "$JOSEMAR_MCP_ENABLED" != "true" ] && [ "$JOSEMAR_MCP_ENABLED" != "false" ]; then
+            echo "ERROR: JOSEMAR_MCP_ENABLED must be 'true' or 'false' (got: $JOSEMAR_MCP_ENABLED)"
+            exit 1
+          fi
+
+          if [ "$JOSEMAR_MCP_ENABLED" = "true" ]; then
+            if [ -z "$JOSEMAR_MCP_AUTHORIZED_KEY" ]; then
+              echo "ERROR: JOSEMAR_MCP_AUTHORIZED_KEY secret is required when JOSEMAR_MCP_ENABLED=true"
+              exit 1
+            fi
+            if [[ "$JOSEMAR_MCP_AUTHORIZED_KEY" == *$'\n'* || "$JOSEMAR_MCP_AUTHORIZED_KEY" == *$'\r'* ]]; then
+              echo "ERROR: JOSEMAR_MCP_AUTHORIZED_KEY must be a single-line SSH public key"
+              exit 1
+            fi
+            if ! printf '%s' "$JOSEMAR_MCP_AUTHORIZED_KEY" | grep -Eq '^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)) [A-Za-z0-9+/=]+( .*)?$'; then
+              echo "ERROR: JOSEMAR_MCP_AUTHORIZED_KEY does not look like a single OpenSSH public key line"
+              exit 1
+            fi
+
+            # Validate subnet/IP overrides together using ipaddress. Defaults
+            # use a distinct subnet (172.31.251.0/29) from browser-control
+            # (172.31.250.0/29) so both overlays can be enabled simultaneously.
+            # JOSEMAR_MCP_HERMES_IP is Hermes's static IP on josemar-mcp; the
+            # sshd and MCP server run inside that same Hermes container.
+            python3 - <<'PY'
+          import ipaddress
+          import os
+          import sys
+
+          subnet = os.environ.get("JOSEMAR_MCP_SUBNET") or "172.31.251.0/29"
+          gateway = os.environ.get("JOSEMAR_MCP_GATEWAY") or "172.31.251.1"
+          tunnel = os.environ.get("JOSEMAR_MCP_HERMES_IP") or "172.31.251.2"
+          ts = os.environ.get("JOSEMAR_MCP_TAILSCALE_IP") or "172.31.251.3"
+
+          provided = {
+              "JOSEMAR_MCP_SUBNET": os.environ.get("JOSEMAR_MCP_SUBNET"),
+              "JOSEMAR_MCP_GATEWAY": os.environ.get("JOSEMAR_MCP_GATEWAY"),
+              "JOSEMAR_MCP_HERMES_IP": os.environ.get("JOSEMAR_MCP_HERMES_IP"),
+              "JOSEMAR_MCP_TAILSCALE_IP": os.environ.get("JOSEMAR_MCP_TAILSCALE_IP"),
+          }
+          if any(provided.values()):
+              missing = [k for k, v in provided.items() if not v]
+              if missing:
+                  print(f"ERROR: when overriding josemar-mcp networking, set {', '.join(missing)} together with the others")
+                  sys.exit(1)
+
+          try:
+              net = ipaddress.ip_network(subnet, strict=True)
+          except ValueError as exc:
+              print(f"ERROR: JOSEMAR_MCP_SUBNET is not a valid strict network: {subnet} ({exc})")
+              sys.exit(1)
+          if net.version != 4:
+              print(f"ERROR: JOSEMAR_MCP_SUBNET must be IPv4: {subnet}")
+              sys.exit(1)
+
+          ips = {}
+          for name, value in (("JOSEMAR_MCP_GATEWAY", gateway),
+                              ("JOSEMAR_MCP_HERMES_IP", tunnel),
+                              ("JOSEMAR_MCP_TAILSCALE_IP", ts)):
+              try:
+                  addr = ipaddress.ip_address(value)
+              except ValueError as exc:
+                  print(f"ERROR: {name} is not a valid IPv4 address: {value} ({exc})")
+                  sys.exit(1)
+              if addr.version != 4:
+                  print(f"ERROR: {name} must be IPv4: {value}")
+                  sys.exit(1)
+              if addr not in net:
+                  print(f"ERROR: {name} {addr} is not inside subnet {net}")
+                  sys.exit(1)
+              if addr in (net.network_address, net.broadcast_address):
+                  print(f"ERROR: {name} {addr} is the network/broadcast address and not usable")
+                  sys.exit(1)
+              ips[name] = addr
+
+          if len(set(ips.values())) != len(ips):
+              print("ERROR: JOSEMAR_MCP_GATEWAY, JOSEMAR_MCP_HERMES_IP, and JOSEMAR_MCP_TAILSCALE_IP must be unique")
+              sys.exit(1)
+          PY
+          fi
+
           # ---- Mnemosyne deploy mode (default off) ----
           # Allowed values: off, pilot, backup. Any other value is rejected
           # BEFORE any volume mutation or service teardown. The Mnemosyne
@@ -233,6 +331,7 @@ jobs:
 
           echo "MNEMOSYNE_DEPLOY_MODE=$MNEMOSYNE_DEPLOY_MODE" >> "$GITHUB_ENV"
           echo "GBRAIN_EMBEDDINGS_ENABLED=$GBRAIN_EMBEDDINGS_ENABLED" >> "$GITHUB_ENV"
+          echo "JOSEMAR_MCP_ENABLED=$JOSEMAR_MCP_ENABLED" >> "$GITHUB_ENV"
 
       - name: Create .env file
         env:
@@ -284,6 +383,11 @@ jobs:
           MNEMOSYNE_DEPLOY_MODE_INPUT: ${{ vars.MNEMOSYNE_DEPLOY_MODE }}
           MNEMOSYNE_BACKUP_EXPORT_INTERVAL_INPUT: ${{ vars.MNEMOSYNE_BACKUP_EXPORT_INTERVAL }}
           GBRAIN_EMBEDDINGS_ENABLED_INPUT: ${{ vars.GBRAIN_EMBEDDINGS_ENABLED }}
+          JOSEMAR_MCP_ENABLED_INPUT: ${{ vars.JOSEMAR_MCP_ENABLED }}
+          JOSEMAR_MCP_SUBNET: ${{ vars.JOSEMAR_MCP_SUBNET }}
+          JOSEMAR_MCP_GATEWAY: ${{ vars.JOSEMAR_MCP_GATEWAY }}
+          JOSEMAR_MCP_HERMES_IP: ${{ vars.JOSEMAR_MCP_HERMES_IP }}
+          JOSEMAR_MCP_TAILSCALE_IP: ${{ vars.JOSEMAR_MCP_TAILSCALE_IP }}
         run: |
           GBRAIN_EMBEDDINGS_ENABLED="${GBRAIN_EMBEDDINGS_ENABLED_INPUT:-false}"
           if [ "$GBRAIN_EMBEDDINGS_ENABLED" != "true" ] && [ "$GBRAIN_EMBEDDINGS_ENABLED" != "false" ]; then
@@ -499,6 +603,43 @@ jobs:
             write_env BROWSER_CONTROL_TAILSCALE_IP "$BC_TS"
           fi
 
+          # Josemar MCP (optional, disabled by default). Subnet/IP overrides
+          # are written only when enabled; the overlay reads them with
+          # defaults. SSH user/port and the forced command are fixed
+          # constants and not written here. When enabled, the Hermes API
+          # server MUST be enabled with a key (josemar_chat calls the
+          # internal API using API_SERVER_KEY injected server-side).
+          JOSEMAR_MCP_ENABLED="$JOSEMAR_MCP_ENABLED_INPUT"
+          if [ -z "$JOSEMAR_MCP_ENABLED" ]; then
+            JOSEMAR_MCP_ENABLED="false"
+          fi
+          JM_SUBNET="${JOSEMAR_MCP_SUBNET:-172.31.251.0/29}"
+          JM_GATEWAY="${JOSEMAR_MCP_GATEWAY:-172.31.251.1}"
+          JM_HERMES="${JOSEMAR_MCP_HERMES_IP:-172.31.251.2}"
+          JM_TS="${JOSEMAR_MCP_TAILSCALE_IP:-172.31.251.3}"
+
+          if [ "$JOSEMAR_MCP_ENABLED" = "true" ]; then
+            if [ "$HERMES_API_SERVER_ENABLED" != "true" ]; then
+              echo "ERROR: JOSEMAR_MCP_ENABLED=true requires HERMES_API_SERVER_ENABLED=true (josemar_chat calls the internal Hermes API)"
+              exit 1
+            fi
+            if [ -z "$HERMES_API_SERVER_KEY" ]; then
+              echo "ERROR: JOSEMAR_MCP_ENABLED=true requires HERMES_API_SERVER_KEY secret (josemar_chat uses it server-side)"
+              exit 1
+            fi
+            # No COMPOSE_PROFILES addition: the josemar-mcp overlay only
+            # adds network attachments and a volume to the existing hermes
+            # service. The sshd runs inside the hermes container via a
+            # cont-init script, not as a separate profile-gated service.
+          fi
+          write_env JOSEMAR_MCP_ENABLED "$JOSEMAR_MCP_ENABLED"
+          if [ "$JOSEMAR_MCP_ENABLED" = "true" ]; then
+            write_env JOSEMAR_MCP_SUBNET "$JM_SUBNET"
+            write_env JOSEMAR_MCP_GATEWAY "$JM_GATEWAY"
+            write_env JOSEMAR_MCP_HERMES_IP "$JM_HERMES"
+            write_env JOSEMAR_MCP_TAILSCALE_IP "$JM_TS"
+          fi
+
           # ---- Mnemosyne deploy mode (default off) ----
           # off    -> no Mnemosyne overlays (baseline behavior preserved).
           # pilot  -> base + embeddings + mnemosyne overlays.
@@ -534,6 +675,8 @@ jobs:
           echo "JOSEMAR_CONTAINER_PREFIX=$JOSEMAR_CONTAINER_PREFIX" >> "$GITHUB_ENV"
           echo "BROWSER_CONTROL_ENABLED=$BROWSER_CONTROL_ENABLED" >> "$GITHUB_ENV"
           echo "BC_HERMES_IP=$BC_HERMES" >> "$GITHUB_ENV"
+          echo "JOSEMAR_MCP_ENABLED=$JOSEMAR_MCP_ENABLED" >> "$GITHUB_ENV"
+          echo "JM_HERMES_IP=$JM_HERMES" >> "$GITHUB_ENV"
           echo "MNEMOSYNE_DEPLOY_MODE=$MNEMOSYNE_DEPLOY_MODE" >> "$GITHUB_ENV"
           echo "MNEMOSYNE_BACKUP_EXPORT_INTERVAL=$MNEMOSYNE_BACKUP_EXPORT_INTERVAL" >> "$GITHUB_ENV"
           echo "GBRAIN_EMBEDDINGS_ENABLED=$GBRAIN_EMBEDDINGS_ENABLED" >> "$GITHUB_ENV"
@@ -561,6 +704,9 @@ jobs:
           COMPOSE_FILE_VALUE="docker-compose.yml"
           if [ "${BROWSER_CONTROL_ENABLED}" = "true" ]; then
             COMPOSE_FILE_VALUE="${COMPOSE_FILE_VALUE}:docker-compose.browser-control.yml"
+          fi
+          if [ "${JOSEMAR_MCP_ENABLED}" = "true" ]; then
+            COMPOSE_FILE_VALUE="${COMPOSE_FILE_VALUE}:docker-compose.josemar-mcp.yml"
           fi
           if [ "${GBRAIN_EMBEDDINGS_ENABLED}" = "true" ] || [ "${MNEMOSYNE_DEPLOY_MODE:-off}" = "pilot" ] || [ "${MNEMOSYNE_DEPLOY_MODE:-off}" = "backup" ]; then
             COMPOSE_FILE_VALUE="${COMPOSE_FILE_VALUE}:docker-compose.embeddings.yml"
@@ -702,42 +848,77 @@ jobs:
 
           echo "RCLONE_TEMP_CONF=$TMP_RCLONE_CONF" >> "$GITHUB_ENV"
 
-      - name: Populate browser-control persistent volumes
+      - name: Populate browser-control and josemar-mcp persistent volumes
         env:
           BROWSER_TUNNEL_AUTHORIZED_KEY: ${{ secrets.BROWSER_TUNNEL_AUTHORIZED_KEY }}
+          JOSEMAR_MCP_AUTHORIZED_KEY: ${{ secrets.JOSEMAR_MCP_AUTHORIZED_KEY }}
         run: |
           set -euo pipefail
-          # Populate the tailscale-serve-config and browser-tunnel-authorized-keys
-          # named volumes using a pinned Alpine image (same Docker-only pattern
-          # as the rclone config step). No host bind mounts of checkout files;
-          # no deletion of volume contents on cleanup.
+          # Populate the tailscale-serve-config, browser-tunnel-authorized-keys,
+          # and josemar-mcp-authorized-keys named volumes using a pinned Alpine
+          # image (same Docker-only pattern as the rclone config step). No host
+          # bind mounts of checkout files; no deletion of volume contents on
+          # cleanup.
           #
-          # tailscale-serve-config always receives a serve.json:
-          #   - enabled: real legacy TCPForward to BC_HERMES_IP:2222
-          #   - disabled: empty {} so stale tcp:2222 is cleared on restart/redeploy
+          # tailscale-serve-config always receives a serve.json built from the
+          # set of enabled features:
+          #   - browser-control only: {"TCP":{"2222":{"TCPForward":"<BC_IP>:2222"}}}
+          #   - josemar-mcp only:     {"TCP":{"2223":{"TCPForward":"<JM_IP>:2223"}}}
+          #   - both:                 both tcp:2222 and tcp:2223 entries
+          #   - neither:              empty {} so stale forwards are cleared
+          # No Funnel is ever written.
           #
-          # browser-tunnel-authorized-keys receives authorized_keys when enabled,
-          # and is cleared when disabled.
+          # browser-tunnel-authorized-keys receives authorized_keys when
+          # browser-control is enabled, and is cleared when disabled.
+          # josemar-mcp-authorized-keys receives authorized_keys when
+          # josemar-mcp is enabled, and is cleared when disabled.
           #
           # Copies into the volumes are atomic: write to a temp file in the same
           # volume, chmod, then mv into place so a reader never sees a partial
           # file.
           COMPOSE_PROJECT="$(basename "$PWD")"
           TS_SERVE_VOLUME="${COMPOSE_PROJECT}_tailscale-serve-config"
-          AUTH_KEYS_VOLUME="${COMPOSE_PROJECT}_browser-tunnel-authorized-keys"
+          BC_AUTH_KEYS_VOLUME="${COMPOSE_PROJECT}_browser-tunnel-authorized-keys"
+          JM_AUTH_KEYS_VOLUME="${COMPOSE_PROJECT}_josemar-mcp-authorized-keys"
+          JM_HOST_KEY_VOLUME="${COMPOSE_PROJECT}_josemar-mcp-hostkeys"
 
           docker volume create "$TS_SERVE_VOLUME" >/dev/null
-          docker volume create "$AUTH_KEYS_VOLUME" >/dev/null
+          docker volume create "$BC_AUTH_KEYS_VOLUME" >/dev/null
+          docker volume create "$JM_AUTH_KEYS_VOLUME" >/dev/null
+          # Persistent SSH host key volume. It is mounted at a path outside
+          # docker-hermes-init's writable-volume allowlist and is never removed.
+          docker volume create "$JM_HOST_KEY_VOLUME" >/dev/null
 
           TMP_DIR="$(mktemp -d)"
           trap 'rm -rf "$TMP_DIR"' EXIT
 
+          # Build the Tailscale Serve TCP map from the set of enabled features.
+          # No Funnel. Use python to assemble the JSON deterministically.
+          BC_ON="false"; JM_ON="false"
+          if [ "${BROWSER_CONTROL_ENABLED}" = "true" ]; then BC_ON="true"; fi
+          if [ "${JOSEMAR_MCP_ENABLED}" = "true" ]; then JM_ON="true"; fi
+          BC_IP="${BC_HERMES_IP}"; JM_IP="${JM_HERMES_IP}"
+          python3 - "$BC_ON" "$JM_ON" "$BC_IP" "$JM_IP" "$TMP_DIR/serve.json" <<'PY'
+          import json, sys
+          bc_on, jm_on, bc_ip, jm_ip, out = sys.argv[1:6]
+          tcp = {}
+          if bc_on == "true":
+              tcp["2222"] = {"TCPForward": f"{bc_ip}:2222"}
+          if jm_on == "true":
+              tcp["2223"] = {"TCPForward": f"{jm_ip}:2223"}
+          cfg = {"TCP": tcp} if tcp else {}
+          with open(out, "w", encoding="utf-8") as fh:
+              json.dump(cfg, fh, separators=(",", ":"))
+              fh.write("\n")
+          PY
+
           if [ "${BROWSER_CONTROL_ENABLED}" = "true" ]; then
-            printf '%s\n' "{\"TCP\":{\"2222\":{\"TCPForward\":\"${BC_HERMES_IP}:2222\"}}}" > "$TMP_DIR/serve.json"
-            printf '%s\n' "$BROWSER_TUNNEL_AUTHORIZED_KEY" > "$TMP_DIR/authorized_keys"
-            chmod 600 "$TMP_DIR/authorized_keys"
-          else
-            printf '%s\n' '{}' > "$TMP_DIR/serve.json"
+            printf '%s\n' "$BROWSER_TUNNEL_AUTHORIZED_KEY" > "$TMP_DIR/bc_authorized_keys"
+            chmod 600 "$TMP_DIR/bc_authorized_keys"
+          fi
+          if [ "${JOSEMAR_MCP_ENABLED}" = "true" ]; then
+            printf '%s\n' "$JOSEMAR_MCP_AUTHORIZED_KEY" > "$TMP_DIR/jm_authorized_keys"
+            chmod 600 "$TMP_DIR/jm_authorized_keys"
           fi
 
           # Atomic copy into tailscale-serve-config: temp file + chmod + mv.
@@ -751,13 +932,28 @@ jobs:
             # Atomic copy into browser-tunnel-authorized-keys.
             docker run --rm \
               -v "$TMP_DIR:/seed:ro" \
-              -v "$AUTH_KEYS_VOLUME:/authorized-keys" \
+              -v "$BC_AUTH_KEYS_VOLUME:/authorized-keys" \
               alpine:3.20.3 \
-              sh -c 'mkdir -p /authorized-keys && cp /seed/authorized_keys /authorized-keys/authorized_keys.new && chmod 600 /authorized-keys/authorized_keys.new && mv /authorized-keys/authorized_keys.new /authorized-keys/authorized_keys'
+              sh -c 'mkdir -p /authorized-keys && cp /seed/bc_authorized_keys /authorized-keys/authorized_keys.new && chmod 600 /authorized-keys/authorized_keys.new && mv /authorized-keys/authorized_keys.new /authorized-keys/authorized_keys'
           else
             # Clear any stale authorized key content from a previous enabled deploy.
             docker run --rm \
-              -v "$AUTH_KEYS_VOLUME:/authorized-keys" \
+              -v "$BC_AUTH_KEYS_VOLUME:/authorized-keys" \
+              alpine:3.20.3 \
+              sh -c 'rm -f /authorized-keys/authorized_keys 2>/dev/null || true'
+          fi
+
+          if [ "${JOSEMAR_MCP_ENABLED}" = "true" ]; then
+            # Atomic copy into josemar-mcp-authorized-keys.
+            docker run --rm \
+              -v "$TMP_DIR:/seed:ro" \
+              -v "$JM_AUTH_KEYS_VOLUME:/authorized-keys" \
+              alpine:3.20.3 \
+              sh -c 'mkdir -p /authorized-keys && cp /seed/jm_authorized_keys /authorized-keys/authorized_keys.new && chmod 600 /authorized-keys/authorized_keys.new && mv /authorized-keys/authorized_keys.new /authorized-keys/authorized_keys'
+          else
+            # Clear any stale authorized key content from a previous enabled deploy.
+            docker run --rm \
+              -v "$JM_AUTH_KEYS_VOLUME:/authorized-keys" \
               alpine:3.20.3 \
               sh -c 'rm -f /authorized-keys/authorized_keys 2>/dev/null || true'
           fi
@@ -829,6 +1025,7 @@ jobs:
           docker compose \
             -f docker-compose.yml \
             -f docker-compose.browser-control.yml \
+            -f docker-compose.josemar-mcp.yml \
             -f docker-compose.embeddings.yml \
             -f docker-compose.mnemosyne.yml \
             -f docker-compose.mnemosyne-backup.yml \
@@ -983,26 +1180,190 @@ jobs:
             exit 1
           fi
 
-      - name: Verify Tailscale Serve is cleared (only when disabled)
-        if: vars.BROWSER_CONTROL_ENABLED != 'true'
+      - name: Verify Tailscale Serve is cleared (only when both disabled)
+        if: vars.BROWSER_CONTROL_ENABLED != 'true' && vars.JOSEMAR_MCP_ENABLED != 'true'
         run: |
+          set -euo pipefail
           # The disabled deploy wrote {} into tailscale-serve-config, so
-          # tcp:2222 must not be present after Tailscale picks it up.
+          # neither tcp:2222 nor tcp:2223 must be present after Tailscale
+          # picks it up. Require a valid JSON response from `tailscale serve
+          # status --json` (no empty/|| true accepted as confirmation); retry
+          # until valid JSON is received or the budget is exhausted.
           SERVE_OK=0
-          for i in {1..20}; do
+          for i in {1..30}; do
             SERVE_OUT="$(docker compose exec -T tailscale tailscale serve status --json 2>/dev/null || true)"
-            if echo "$SERVE_OUT" | grep -q '"2222"'; then
-              echo "ERROR: stale Tailscale Serve tcp:2222 still present after disabled redeploy"
+            # Require non-empty output that parses as JSON. An empty/error
+            # response is NOT accepted as confirmation.
+            if [ -z "$SERVE_OUT" ]; then
+              echo "Waiting for Tailscale Serve status (empty response)... ($i/30)"
+              sleep 2
+              continue
+            fi
+            if ! printf '%s' "$SERVE_OUT" | python3 -c 'import json,sys; json.loads(sys.stdin.read())' 2>/dev/null; then
+              echo "Waiting for Tailscale Serve status (invalid JSON)... ($i/30)"
+              sleep 2
+              continue
+            fi
+            # Valid JSON received. Assert neither port is present.
+            if printf '%s' "$SERVE_OUT" | grep -q '"2222"' || printf '%s' "$SERVE_OUT" | grep -q '"2223"'; then
+              echo "ERROR: stale Tailscale Serve tcp:2222 or tcp:2223 still present after disabled redeploy"
               docker compose logs --tail=80 tailscale
               exit 1
             fi
-            # Empty serve config is reported as an empty/no TCP map; treat
-            # absence of 2222 as success.
+            echo "Tailscale Serve is cleared (no tcp:2222 or tcp:2223)"
             SERVE_OK=1
             break
           done
           if [ "$SERVE_OK" -ne 1 ]; then
-            echo "WARNING: could not confirm Tailscale Serve status; verify manually"
+            echo "ERROR: could not obtain a valid Tailscale Serve status response after 30 attempts"
+            docker compose logs --tail=80 tailscale
+            exit 1
+          fi
+
+      - name: Verify josemar-mcp sshd (only when enabled)
+        if: vars.JOSEMAR_MCP_ENABLED == 'true'
+        run: |
+          set -euo pipefail
+          # The josemar-mcp sshd runs inside the hermes container (not a
+          # separate sidecar). Verify the sshd process is running, the
+          # forced-command wrapper and MCP server are present, and Tailscale
+          # Serve picked up the tcp:2223 forward with the exact expected
+          # target. No Funnel is ever used.
+          echo "Checking josemar-mcp sshd process inside hermes container..."
+          if ! docker compose exec -T hermes pgrep -f "sshd.*josemar-mcp" >/dev/null 2>&1; then
+            echo "ERROR: josemar-mcp sshd process is not running inside the hermes container"
+            docker compose exec -T hermes ps aux | grep sshd || true
+            docker compose logs --tail=80 hermes
+            exit 1
+          fi
+          echo "josemar-mcp sshd is running inside hermes container"
+
+          # Verify the sshd is listening on the expected IP:port.
+          echo "Checking sshd listen on ${JM_HERMES_IP}:2223..."
+          if ! docker compose exec -T hermes python3 -c 'import sys; rows=open("/proc/net/tcp").read().splitlines()[1:]+open("/proc/net/tcp6").read().splitlines()[1:]; sys.exit(0 if any(len(r.split()) >= 4 and r.split()[3] == "0A" and int(r.split()[1].rsplit(":", 1)[1], 16) == 2223 for r in rows) else 1)' >/dev/null 2>&1; then
+            echo "ERROR: sshd is not listening on port 2223"
+            docker compose exec -T hermes sh -c 'python3 -c "print(open(\"/proc/net/tcp\").read())"' || true
+            exit 1
+          fi
+
+          echo "Checking Tailscale Serve TCP config for tcp:2223 -> ${JM_HERMES_IP}:2223..."
+          EXPECTED_TARGET="${JM_HERMES_IP}:2223"
+          SERVE_OK=0
+          for i in {1..30}; do
+            SERVE_OUT="$(docker compose exec -T tailscale tailscale serve status --json 2>/dev/null || true)"
+            if [ -z "$SERVE_OUT" ]; then
+              echo "Waiting for Tailscale Serve status (empty response)... ($i/30)"
+              sleep 2
+              continue
+            fi
+            if ! printf '%s' "$SERVE_OUT" | python3 -c 'import json,sys; json.loads(sys.stdin.read())' 2>/dev/null; then
+              echo "Waiting for Tailscale Serve status (invalid JSON)... ($i/30)"
+              sleep 2
+              continue
+            fi
+            if printf '%s' "$SERVE_OUT" | grep -q '"2223"' && printf '%s' "$SERVE_OUT" | grep -q "$EXPECTED_TARGET"; then
+              echo "Tailscale Serve tcp:2223 -> $EXPECTED_TARGET is configured"
+              # Assert no Funnel is configured.
+              if printf '%s' "$SERVE_OUT" | grep -Eq '"AllowFunnel"[[:space:]]*:[[:space:]]*true'; then
+                echo "ERROR: Tailscale Funnel is configured; josemar-mcp must never use Funnel"
+                exit 1
+              fi
+              SERVE_OK=1
+              break
+            fi
+            echo "Waiting for Tailscale Serve to apply config... ($i/30)"
+            sleep 2
+          done
+          if [ "$SERVE_OK" -ne 1 ]; then
+            echo "ERROR: Tailscale Serve tcp:2223 -> $EXPECTED_TARGET was not applied"
+            docker compose logs --tail=80 tailscale
+            exit 1
+          fi
+
+          # Verify the forced-command wrapper and MCP server are present in
+          # the hermes container (the sshd runs inside it, sharing its PID
+          # namespace, gbrain state, and locks).
+          echo "Checking forced-command wrapper and MCP server in hermes container..."
+          docker compose exec -T hermes test -x /usr/local/bin/josemar-knowledge-mcp-forced
+          docker compose exec -T hermes test -f /opt/josemar/scripts/josemar_knowledge_mcp.py
+          docker compose exec -T hermes test -x /opt/hermes/.venv/bin/python3
+          # Verify the MCP server imports cleanly under the hermes venv.
+          # Use PYTHONDONTWRITEBYTECODE=1 so no .pyc is written beside the
+          # source. The tool surface is verified by the unit tests; here we
+          # only verify the module imports without error.
+          docker compose exec -T -e PYTHONDONTWRITEBYTECODE=1 hermes /opt/hermes/.venv/bin/python3 -c 'import importlib.util; spec = importlib.util.spec_from_file_location("josemar_knowledge_mcp", "/opt/josemar/scripts/josemar_knowledge_mcp.py"); mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); assert hasattr(mod, "mcp"); assert hasattr(mod, "main"); print("MCP server import OK")'
+          # Verify the gbrain binary is present.
+          docker compose exec -T hermes test -x /usr/local/bin/gbrain
+          # Verify the vault and gbrain state are accessible (same container).
+          docker compose exec -T hermes test -d /opt/data/obsidian
+          docker compose exec -T hermes test -d /opt/data/.gbrain
+          # Verify the josemar-mcp skill is baked into the image.
+          docker compose exec -T hermes test -f /opt/josemar/skills/josemar-mcp/SKILL.md
+          # Verify the authorized-keys volume is mounted.
+          docker compose exec -T hermes test -f /josemar-mcp-authorized-keys/authorized_keys
+          # Verify the sshd config template and init script are present.
+          docker compose exec -T hermes test -f /etc/josemar-mcp/sshd_config.template
+          docker compose exec -T hermes test -x /etc/cont-init.d/02-josemar-mcp-sshd
+          # Verify the sshd host key was generated.
+          docker compose exec -T hermes test -f /var/lib/josemar-mcp-hostkeys/ssh_host_ed25519_key
+          docker compose exec -T hermes sh -c 'test "$(stat -c %u:%g /var/lib/josemar-mcp-hostkeys)" = 0:0 && test "$(stat -c %a /var/lib/josemar-mcp-hostkeys/ssh_host_ed25519_key)" = 600'
+          # Verify the Hermes gateway is still running as non-root hermes.
+          GATEWAY_UID=$(docker compose exec -T hermes sh -c 'pgrep -f "hermes.*gateway" | head -1 | xargs -I{} cat /proc/{}/status 2>/dev/null | grep "^Uid:" | awk "{print \$2}"' 2>/dev/null || echo "")
+          if [ -z "$GATEWAY_UID" ] || [ "$GATEWAY_UID" = "0" ]; then
+            echo "ERROR: Hermes gateway is not running or is running as root (UID=$GATEWAY_UID)"
+            docker compose exec -T hermes ps aux | grep hermes || true
+            exit 1
+          fi
+          echo "Hermes gateway is running as non-root (UID=$GATEWAY_UID)"
+          # Verify the sshd process is running as root (for privilege separation).
+          SSHD_UID=$(docker compose exec -T hermes sh -c 'pgrep -f "sshd.*josemar-mcp" | head -1 | xargs -I{} cat /proc/{}/status 2>/dev/null | grep "^Uid:" | awk "{print \$2}"' 2>/dev/null || echo "")
+          if [ "$SSHD_UID" != "0" ]; then
+            echo "ERROR: josemar-mcp sshd is not running as root (UID=$SSHD_UID); privilege separation requires root"
+            exit 1
+          fi
+          echo "josemar-mcp sshd is running as root (UID=$SSHD_UID) for privilege separation"
+
+      - name: Verify josemar-mcp is absent (only when disabled)
+        if: vars.JOSEMAR_MCP_ENABLED != 'true'
+        run: |
+          set -euo pipefail
+          # When disabled, the sshd must not be running inside hermes, and
+          # tcp:2223 must not be present in Tailscale Serve. Require a valid
+          # JSON response from `tailscale serve status --json` (no empty/||
+          # true accepted as confirmation); retry until valid JSON is received
+          # or the budget is exhausted.
+          if docker compose exec -T hermes pgrep -f "sshd.*josemar-mcp" >/dev/null 2>&1; then
+            echo "ERROR: josemar-mcp sshd is running inside hermes when JOSEMAR_MCP_ENABLED is not true"
+            docker compose exec -T hermes ps aux | grep sshd || true
+            exit 1
+          fi
+          SERVE_OK=0
+          for i in {1..30}; do
+            SERVE_OUT="$(docker compose exec -T tailscale tailscale serve status --json 2>/dev/null || true)"
+            if [ -z "$SERVE_OUT" ]; then
+              echo "Waiting for Tailscale Serve status (empty response)... ($i/30)"
+              sleep 2
+              continue
+            fi
+            if ! printf '%s' "$SERVE_OUT" | python3 -c 'import json,sys; json.loads(sys.stdin.read())' 2>/dev/null; then
+              echo "Waiting for Tailscale Serve status (invalid JSON)... ($i/30)"
+              sleep 2
+              continue
+            fi
+            # Valid JSON received. Assert tcp:2223 is not present.
+            if printf '%s' "$SERVE_OUT" | grep -q '"2223"'; then
+              echo "ERROR: stale Tailscale Serve tcp:2223 still present after josemar-mcp disabled redeploy"
+              docker compose logs --tail=80 tailscale
+              exit 1
+            fi
+            echo "Tailscale Serve has no tcp:2223 (josemar-mcp cleared)"
+            SERVE_OK=1
+            break
+          done
+          if [ "$SERVE_OK" -ne 1 ]; then
+            echo "ERROR: could not obtain a valid Tailscale Serve status response after 30 attempts"
+            docker compose logs --tail=80 tailscale
+            exit 1
           fi
 
       - name: Verify Mnemosyne off (overlays absent, provider disabled)
