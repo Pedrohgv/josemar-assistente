@@ -1231,10 +1231,13 @@ def _build_gbrain_env(
     """Build a minimal env for gbrain subprocesses.
 
     Only HOME, PATH, LANG, LC_ALL, TZ, GBRAIN_HOME, GBRAIN_BRAIN_REPO,
-    and GBRAIN_SKIP_STARTUP_HOOKS=1 are set. No provider/API credentials
-    are inherited.
+    and GBRAIN_SKIP_STARTUP_HOOKS=1 are set by default. The four non-secret
+    embedding configuration variables (LLAMA_SERVER_BASE_URL,
+    GBRAIN_EMBEDDING_MODEL_REVISION, GBRAIN_EMBEDDING_MODEL, and
+    GBRAIN_EMBEDDING_DIMENSIONS) are forwarded only when inherited with
+    non-empty values. No provider/API credentials are inherited.
     """
-    return {
+    env = {
         "HOME": os.environ.get("HOME", "/tmp"),
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "LANG": os.environ.get("LANG", "C.UTF-8"),
@@ -1244,6 +1247,16 @@ def _build_gbrain_env(
         "GBRAIN_BRAIN_REPO": str(brain_repo),
         "GBRAIN_SKIP_STARTUP_HOOKS": "1",
     }
+    for key in (
+        "LLAMA_SERVER_BASE_URL",
+        "GBRAIN_EMBEDDING_MODEL_REVISION",
+        "GBRAIN_EMBEDDING_MODEL",
+        "GBRAIN_EMBEDDING_DIMENSIONS",
+    ):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    return env
 
 
 def _build_git_env() -> Dict[str, str]:

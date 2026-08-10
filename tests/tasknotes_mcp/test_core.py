@@ -1009,18 +1009,38 @@ class SubprocessTests(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_gbrain_env_excludes_credentials(self) -> None:
-        env = self.core._build_gbrain_env(self.tmpdir, self.tmpdir)
-        for key in env:
-            self.assertFalse(
-                any(s in key.upper() for s in ("TOKEN", "SECRET", "KEY", "PASSWORD", "CREDENTIAL", "API")),
-                f"unexpected credential-like env var: {key}",
-            )
-        self.assertEqual(env["GBRAIN_SKIP_STARTUP_HOOKS"], "1")
-        self.assertIn("GBRAIN_HOME", env)
-        self.assertIn("GBRAIN_BRAIN_REPO", env)
+        inherited = {
+            "LLAMA_SERVER_BASE_URL": "http://llama:8080",
+            "GBRAIN_EMBEDDING_MODEL_REVISION": "revision-1",
+            "GBRAIN_EMBEDDING_MODEL": "nomic-embed-text",
+            "GBRAIN_EMBEDDING_DIMENSIONS": "768",
+            "OPENAI_API_KEY": "secret",
+            "TELEGRAM_BOT_TOKEN": "secret",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+        }
+        with mock.patch.dict(os.environ, inherited, clear=True):
+            env = self.core._build_gbrain_env(self.tmpdir, self.tmpdir)
+
+        self.assertEqual(
+            set(env),
+            {
+                "HOME", "PATH", "LANG", "LC_ALL", "TZ", "GBRAIN_HOME",
+                "GBRAIN_BRAIN_REPO", "GBRAIN_SKIP_STARTUP_HOOKS",
+                "LLAMA_SERVER_BASE_URL", "GBRAIN_EMBEDDING_MODEL_REVISION",
+                "GBRAIN_EMBEDDING_MODEL", "GBRAIN_EMBEDDING_DIMENSIONS",
+            },
+        )
+        self.assertEqual(env["LLAMA_SERVER_BASE_URL"], "http://llama:8080")
+        self.assertEqual(env["GBRAIN_EMBEDDING_MODEL_REVISION"], "revision-1")
+        self.assertEqual(env["GBRAIN_EMBEDDING_MODEL"], "nomic-embed-text")
+        self.assertEqual(env["GBRAIN_EMBEDDING_DIMENSIONS"], "768")
+        self.assertNotIn("OPENAI_API_KEY", env)
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", env)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
 
     def test_gbrain_env_minimal_keys(self) -> None:
-        env = self.core._build_gbrain_env(self.tmpdir, self.tmpdir)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            env = self.core._build_gbrain_env(self.tmpdir, self.tmpdir)
         expected = {"HOME", "PATH", "LANG", "LC_ALL", "TZ", "GBRAIN_HOME",
                     "GBRAIN_BRAIN_REPO", "GBRAIN_SKIP_STARTUP_HOOKS"}
         self.assertEqual(set(env.keys()), expected)
