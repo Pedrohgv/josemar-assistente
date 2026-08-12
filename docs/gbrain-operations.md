@@ -88,6 +88,14 @@ protection in agent-facing instructions. Deployment paths are fixed:
 at `/opt/data/.locks/tasknotes.lock`; no relocatable overrides are supported
 in this deployment.
 
+**Startup-hook suppression (issue #112).** The private native launcher
+(`/opt/josemar/libexec/gbrain-native`) enforces `GBRAIN_SKIP_STARTUP_HOOKS=1`
+on every invocation, so gbrain's startup upgrade notice is never emitted and
+cannot corrupt notes when a caller merges stderr into stdin (`2>&1`). This is
+defense in depth, not generic stderr filtering: `put --stdin` remains
+forbidden, public agent-facing calls use `gbrain`, and TaskNotes uses the
+private native launcher only under its transaction-level lock.
+
 Immediate non-negotiables:
 
 1. **No root execution.** Never run gbrain, `josemar-gbrain`, or vault Git

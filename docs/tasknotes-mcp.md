@@ -142,6 +142,15 @@ then performs one source-routed write via
 `gbrain capture --stdin --slug <slug> --source <source-id> --json`, verifies
 both gbrain and the on-disk task, and commits only the target task file.
 
+TaskNotes invokes the private native launcher
+(`/opt/josemar/libexec/gbrain-native`) under the transaction-level lock. The
+launcher enforces `GBRAIN_SKIP_STARTUP_HOOKS=1` on every invocation, so
+gbrain's startup upgrade notice is never emitted and cannot corrupt the
+stdin-routed write even if a caller merges stderr into stdin (`2>&1`). This is
+defense in depth, not generic stderr filtering: the source-routed write path
+above remains the only sanctioned task-file write, and task mutations go
+through the `task_*` MCP tools only.
+
 The periodic `gbrain-refresh` cron uses the same lock nonblockingly. If a task
 operation holds the lock, refresh logs a skip and exits successfully rather
 than queueing behind it. `GBRAIN_REFRESH_TIMEOUT` bounds the refresh child

@@ -63,14 +63,17 @@ def patched_wrapper(tmp: Path, fake_gbrain: Path, lock_path: Path) -> Path:
 
 
 class FakeGbrain:
-    """A fake `gbrain` binary that logs every invocation."""
+    """A fake `gbrain` binary that logs every invocation and the enforced
+    startup-hook env value."""
 
     def __init__(self, tmp: Path):
         self.log = tmp / "gbrain-calls.log"
+        self.env_log = tmp / "gbrain-env.log"
         self.script = tmp / "gbrain"
         self.script.write_text(
             f"""#!/bin/sh
 echo "$*" >> "{self.log}"
+printf 'GBRAIN_SKIP_STARTUP_HOOKS=%s\\n' "${{GBRAIN_SKIP_STARTUP_HOOKS:-}}" >> "{self.env_log}"
 case "$1" in
   config) echo "ok" ;;
   sync) echo '{{"status":"ok"}}' ;;
@@ -86,6 +89,11 @@ esac
         if not self.log.exists():
             return []
         return [ln for ln in self.log.read_text(encoding="utf-8").splitlines() if ln]
+
+    def env_lines(self) -> list[str]:
+        if not self.env_log.exists():
+            return []
+        return [ln for ln in self.env_log.read_text(encoding="utf-8").splitlines() if ln]
 
 
 class ManualRefreshReindexLockBehaviorTests(unittest.TestCase):
@@ -127,6 +135,22 @@ class ManualRefreshReindexLockBehaviorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('"success": true', result.stdout)
         self.assertTrue(self.fake.calls(), "gbrain must run when the lock is free")
+
+    def test_skip_startup_hooks_enforced_regardless_of_caller_env(self) -> None:
+        """Issue #112: the wrapper exports GBRAIN_SKIP_STARTUP_HOOKS=1
+        (export assignment overrides the caller), so every gbrain invocation
+        through the private launcher skips startup hooks even under a hostile
+        caller environment."""
+        for hostile in ("0", ""):
+            with self.subTest(caller_value=hostile):
+                if self.fake.env_log.exists():
+                    self.fake.env_log.unlink()
+                result = self.run_wrapper("refresh", GBRAIN_SKIP_STARTUP_HOOKS=hostile)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                lines = self.fake.env_lines()
+                self.assertTrue(lines, "gbrain must run under refresh")
+                for line in lines:
+                    self.assertEqual(line, "GBRAIN_SKIP_STARTUP_HOOKS=1")
 
     def test_refresh_refuses_when_lock_held(self) -> None:
         fd = self._hold_lock()

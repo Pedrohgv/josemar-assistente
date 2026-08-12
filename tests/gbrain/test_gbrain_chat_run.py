@@ -80,7 +80,7 @@ class GbrainChatRunBehaviorTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _run(
-        self, *gbrain_args: str
+        self, *gbrain_args: str, env_extra: dict | None = None
     ) -> subprocess.CompletedProcess[str]:
         """Run main() in a fresh interpreter with fakes injected via the
         module-level test parameters (no production executable override: the
@@ -101,13 +101,16 @@ class GbrainChatRunBehaviorTests(unittest.TestCase):
             runner=str(RUNNER),
             lock=str(self.lock_path),
         )
+        env = os.environ.copy()
+        if env_extra:
+            env.update(env_extra)
         return subprocess.run(
             [sys.executable, "-c", boot],
             capture_output=True,
             text=True,
             check=False,
             timeout=15,
-            env=os.environ.copy(),
+            env=env,
             input="hello-stdin",
         )
 
@@ -170,6 +173,20 @@ class GbrainChatRunBehaviorTests(unittest.TestCase):
         self.assertNotIn(
             "TASKNOTES_LOCK_HELD", "\n".join(env_lines), "no forgeable boolean marker"
         )
+
+    def test_skip_startup_hooks_enforced_regardless_of_caller_env(self) -> None:
+        """Issue #112: GBRAIN_SKIP_STARTUP_HOOKS must be assigned (never
+        inherited), so a hostile caller environment cannot re-enable gbrain
+        startup hooks through the private launcher chain."""
+        for hostile in ("0", ""):
+            with self.subTest(caller_value=hostile):
+                if self.fake.env_log.exists():
+                    self.fake.env_log.unlink()
+                result = self._run(
+                    "status", env_extra={"GBRAIN_SKIP_STARTUP_HOOKS": hostile}
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("GBRAIN_SKIP_STARTUP_HOOKS=1", self.fake.env_lines())
 
     def test_waits_for_fixed_lock_wait_then_runs(self) -> None:
         """With the public lock-wait knob gone, the adapter uses the fixed
@@ -435,6 +452,13 @@ class GbrainChatRunRootDropContractTests(unittest.TestCase):
         self.assertNotIn('setdefault("GBRAIN_', self.src)
         self.assertIn('SCHEMA_PACK_FILE = "/opt/data/.gbrain/active-schema-pack"', self.src)
         self.assertIn("schema_pack_file: str = SCHEMA_PACK_FILE", self.src)
+
+    def test_skip_startup_hooks_assigned_not_inherited(self) -> None:
+        """Issue #112: GBRAIN_SKIP_STARTUP_HOOKS must be assigned explicitly
+        (never setdefault), so a caller-supplied value cannot re-enable
+        gbrain startup hooks through the private launcher."""
+        self.assertIn('os.environ["GBRAIN_SKIP_STARTUP_HOOKS"] = "1"', self.src)
+        self.assertNotIn('setdefault("GBRAIN_SKIP_STARTUP_HOOKS"', self.src)
 
     def test_explicit_chat_subcommand_allowlist(self) -> None:
         """The adapter must define an explicit allowlist of the documented

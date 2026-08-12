@@ -21,6 +21,7 @@ to guard the simplified direct-CLI gbrain integration:
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -1813,6 +1814,24 @@ class GbrainSimplificationContractTests(unittest.TestCase):
         self.assertNotIn("read_gbrain_config()", self.src)
 
 
+class GbrainEnvExportContractTests(unittest.TestCase):
+    """export_gbrain_env is the single place where the wrapper exports the
+    gbrain runtime env before every gbrain invocation (issue #112: the
+    startup-hook skip must be enforced regardless of caller environment)."""
+
+    def setUp(self) -> None:
+        self.src = _read(WRAPPER_PATH)
+
+    def test_skip_startup_hooks_exported_with_override_semantics(self) -> None:
+        body = _extract_function(self.src, "export_gbrain_env")
+        self.assertIn("export GBRAIN_SKIP_STARTUP_HOOKS=1", body)
+        # An export assignment overrides any caller-provided value; a
+        # ${VAR:-default} form would let a hostile "0" or empty value
+        # through to the private launcher.
+        self.assertNotIn("GBRAIN_SKIP_STARTUP_HOOKS:-", body)
+        self.assertNotIn("GBRAIN_SKIP_STARTUP_HOOKS:+", body)
+
+
 class GbrainDockerLayoutContractTests(unittest.TestCase):
     """The native CLI must live at the private non-PATH path
     /opt/josemar/libexec/gbrain-native; the PUBLIC /usr/local/bin/gbrain must
@@ -1829,6 +1848,27 @@ class GbrainDockerLayoutContractTests(unittest.TestCase):
         wrapper_line = match.group(0)
         self.assertIn("cd /opt/gbrain", wrapper_line)
         self.assertIn("src/cli.ts", wrapper_line)
+
+    def test_native_wrapper_enforces_skip_startup_hooks(self) -> None:
+        """Issue #112: the private launcher itself must enforce
+        GBRAIN_SKIP_STARTUP_HOOKS=1 as an inline assignment before exec, so
+        no caller environment (unset, empty, or "0") can re-enable gbrain's
+        detached startup-hook network call."""
+        match = re.search(r"printf.*?/opt/josemar/libexec/gbrain-native", self.src, re.DOTALL)
+        self.assertIsNotNone(match, "Could not find native wrapper creation in Dockerfile")
+        assert match is not None
+        wrapper_line = match.group(0)
+        self.assertIn("GBRAIN_SKIP_STARTUP_HOOKS=1 exec", wrapper_line)
+        self.assertLess(
+            wrapper_line.find("GBRAIN_SKIP_STARTUP_HOOKS=1"),
+            wrapper_line.find("exec"),
+            "the assignment must precede exec so it overrides caller env",
+        )
+        self.assertLess(
+            wrapper_line.find("GBRAIN_SKIP_STARTUP_HOOKS=1"),
+            wrapper_line.find("src/cli.ts"),
+            "the assignment must apply to the bun CLI invocation",
+        )
 
     def test_no_native_wrapper_at_public_path(self) -> None:
         """The public /usr/local/bin/gbrain must never be the native wrapper:
@@ -2397,6 +2437,88 @@ class GbrainHomeSemanticsContractTests(unittest.TestCase):
 
     def test_schema_install_dir_under_state_dir(self) -> None:
         self.assertIn('SCHEMA_INSTALL_DIR="${GBRAIN_STATE_DIR}/schema-packs"', self.src)
+
+
+class GbrainNativeLauncherBehaviorTests(unittest.TestCase):
+    """Issue #112: the private native launcher must enforce
+    GBRAIN_SKIP_STARTUP_HOOKS=1 itself, regardless of caller environment.
+
+    The launcher command is materialized exactly as Dockerfile.hermes writes
+    it (image paths substituted for local fakes) and executed under hostile
+    caller env values; the fake CLI must always observe the enforced value.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="gbrain-launcher-")
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _launcher_command(self) -> str:
+        dockerfile = _read(DOCKERFILE_PATH)
+        match = re.search(
+            r"printf '%s\\n' '#!/bin/sh' '([^']*)' > /opt/josemar/libexec/gbrain-native",
+            dockerfile,
+        )
+        self.assertIsNotNone(
+            match, "Could not extract the native launcher line from Dockerfile.hermes"
+        )
+        assert match is not None
+        return match.group(1)
+
+    def _fake_chain(self) -> tuple[Path, Path]:
+        """One fake gbrain tree: a `bun` stand-in that execs a fake
+        src/cli.ts which logs the enforced env value."""
+        gbrain_dir = self.tmp / "gbrain"
+        (gbrain_dir / "src").mkdir(parents=True, exist_ok=True)
+        cli = gbrain_dir / "src" / "cli.ts"
+        cli.write_text(
+            "#!/bin/sh\n"
+            f"printf 'GBRAIN_SKIP_STARTUP_HOOKS=%s\\n' "
+            f"\"${{GBRAIN_SKIP_STARTUP_HOOKS:-}}\" > \"{self.cli_env_log}\"\n",
+            encoding="utf-8",
+        )
+        cli.chmod(0o755)
+        fake_bun = self.tmp / "bun"
+        fake_bun.write_text(f"#!/bin/sh\nexec \"{cli}\" \"$@\"\n", encoding="utf-8")
+        fake_bun.chmod(0o755)
+        return gbrain_dir, fake_bun
+
+    def _run_launcher(
+        self, caller_value: str | None, gbrain_dir: Path, fake_bun: Path
+    ) -> subprocess.CompletedProcess[str]:
+        command = (
+            self._launcher_command()
+            .replace("/opt/gbrain", str(gbrain_dir))
+            .replace("/usr/local/bin/bun", str(fake_bun))
+        )
+        env = os.environ.copy()
+        if caller_value is None:
+            env.pop("GBRAIN_SKIP_STARTUP_HOOKS", None)
+        else:
+            env["GBRAIN_SKIP_STARTUP_HOOKS"] = caller_value
+        return subprocess.run(
+            ["/bin/sh", "-c", command, "sh", "status"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+            env=env,
+        )
+
+    def test_launcher_enforces_skip_startup_hooks_for_any_caller_env(self) -> None:
+        cases = [("0", "caller sets 0"), ("", "caller sets empty"), (None, "caller unsets")]
+        for index, (value, label) in enumerate(cases):
+            with self.subTest(caller=label):
+                self.cli_env_log = self.tmp / f"cli-env-{index}.log"
+                gbrain_dir, fake_bun = self._fake_chain()
+                result = self._run_launcher(value, gbrain_dir, fake_bun)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    self.cli_env_log.read_text(encoding="utf-8").strip(),
+                    "GBRAIN_SKIP_STARTUP_HOOKS=1",
+                )
 
 
 if __name__ == "__main__":

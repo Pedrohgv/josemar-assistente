@@ -144,7 +144,7 @@ RUN chmod +x /usr/local/bin/bun
 # native gbrain remains reachable from a normal PATH.
 COPY --from=gbrain-builder /opt/gbrain /opt/gbrain
 RUN mkdir -p /opt/josemar/libexec \
-    && printf '%s\n' '#!/bin/sh' 'cd /opt/gbrain && exec /usr/local/bin/bun run src/cli.ts "$@"' > /opt/josemar/libexec/gbrain-native \
+    && printf '%s\n' '#!/bin/sh' 'cd /opt/gbrain && GBRAIN_SKIP_STARTUP_HOOKS=1 exec /usr/local/bin/bun run src/cli.ts "$@"' > /opt/josemar/libexec/gbrain-native \
     && chmod 755 /opt/josemar/libexec/gbrain-native
 
 RUN mkdir -p /opt/josemar/skills /opt/josemar/hermes /opt/josemar/scripts
