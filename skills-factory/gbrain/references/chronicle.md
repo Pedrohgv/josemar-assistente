@@ -87,6 +87,9 @@ The LLM judge classifies each atom into one of these kinds. Anything not in this
 | `gbrain on-this-day` | Prior-year atoms on this month-day |
 | `gbrain orient [--days 7] [--entities a,b]` | Recent timeline (last 7 days) + per-entity ontology in one zero-LLM call |
 
+All chronicle queries run through the public `gbrain` command (issue #110,
+safe by default), never via the internal private native gbrain path.
+
 ### `gbrain day` output structure
 
 ```yaml
@@ -118,17 +121,14 @@ Beyond timeline atoms, chronicle maintains a **bi-temporal ontology** — per-en
 
 ## Backfill (Existing Pages)
 
-To extract events from existing meeting/conversation/calendar-event pages:
-
-```bash
-# Enqueue extraction jobs (returns scanned/eligible/enqueued counts)
-gbrain chronicle-backfill [--since YYYY-MM-DD] [--limit N] [--dry-run]
-
-# On PGLite, run jobs inline (no background worker)
-gbrain jobs submit chronicle_extract \
-  --params '{"slug":"<meeting-slug>","sourceId":"default"}' \
-  --follow
-```
+**Operator-only — NOT a chat action.** Extracting events from existing
+meeting/conversation/calendar-event pages is operator maintenance. The
+operator runs `gbrain chronicle-backfill [--since YYYY-MM-DD] [--limit N]
+[--dry-run]` to enqueue extraction jobs, or, on PGLite, `gbrain jobs submit
+chronicle_extract --params '{"slug":"<meeting-slug>","sourceId":"default"}'
+--follow` to run them inline, inside a maintenance window with both refresh
+crons paused. Normal agents must NOT invoke `gbrain jobs` or
+`gbrain chronicle-backfill`; they are not part of the agent-facing surface.
 
 Auto-emission (on every new `put_page` of an eligible page) requires `auto_chronicle=true` (operator config). As of v0.42.73.2, `auto_chronicle` is a registered config key and no longer requires the `--force` flag that the v0.42.57.0 config-key registry bug forced.
 

@@ -85,10 +85,13 @@ class ComposeContractTests(unittest.TestCase):
 
     def test_gbrain_env_defaults_are_present(self) -> None:
         block = service_block(self.text, "hermes")
-        self.assertIn("- GBRAIN_HOME=${GBRAIN_HOME:-/opt/data}", block)
-        self.assertIn("- GBRAIN_BRAIN_REPO=${GBRAIN_BRAIN_REPO:-/opt/data/obsidian}", block)
+        # Location overrides are gone: GBRAIN_HOME / GBRAIN_BRAIN_REPO /
+        # GBRAIN_SCHEMA_SOURCE_ROOT are fixed constants in the wrapper, MCP,
+        # and adapter, so the compose env must not carry them.
+        self.assertNotIn("GBRAIN_HOME=${", block)
+        self.assertNotIn("GBRAIN_BRAIN_REPO=${", block)
+        self.assertNotIn("GBRAIN_SCHEMA_SOURCE_ROOT=${", block)
         self.assertIn("- GBRAIN_SCHEMA_PACK=${GBRAIN_SCHEMA_PACK:-josemar}", block)
-        self.assertIn("- GBRAIN_SCHEMA_SOURCE_ROOT=${GBRAIN_SCHEMA_SOURCE_ROOT:-/opt/data/.gbrain/schema-packs}", block)
         self.assertIn("- GBRAIN_REFRESH_INTERVAL=${GBRAIN_REFRESH_INTERVAL:-5}", block)
 
     def test_gbrain_removed_env_vars_absent(self) -> None:

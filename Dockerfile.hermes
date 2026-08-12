@@ -138,10 +138,14 @@ RUN chmod +x /usr/local/bin/gog
 COPY --from=bun-installer /opt/bun/bin/bun /usr/local/bin/bun
 RUN chmod +x /usr/local/bin/bun
 
-# Install pinned gbrain CLI from the deterministic build stage
+# Install pinned gbrain CLI from the deterministic build stage. The native
+# CLI lives at a private, non-PATH path (/opt/josemar/libexec/gbrain-native):
+# the PUBLIC /usr/local/bin/gbrain is the issue #110 adapter, so no bare
+# native gbrain remains reachable from a normal PATH.
 COPY --from=gbrain-builder /opt/gbrain /opt/gbrain
-RUN printf '%s\n' '#!/bin/sh' 'cd /opt/gbrain && exec /usr/local/bin/bun run src/cli.ts "$@"' > /usr/local/bin/gbrain \
-    && chmod +x /usr/local/bin/gbrain
+RUN mkdir -p /opt/josemar/libexec \
+    && printf '%s\n' '#!/bin/sh' 'cd /opt/gbrain && exec /usr/local/bin/bun run src/cli.ts "$@"' > /opt/josemar/libexec/gbrain-native \
+    && chmod 755 /opt/josemar/libexec/gbrain-native
 
 RUN mkdir -p /opt/josemar/skills /opt/josemar/hermes /opt/josemar/scripts
 
@@ -165,6 +169,13 @@ RUN chmod +x /usr/local/bin/workspace-sync \
 
 COPY scripts/josemar-gbrain /usr/local/bin/josemar-gbrain
 RUN chmod +x /usr/local/bin/josemar-gbrain
+
+# Public gbrain IS the safe adapter (lock, root drop, allowlist, canonical
+# env). gbrain-chat-run remains as a backwards-compatible symlink alias, not
+# a duplicate script.
+COPY scripts/gbrain_chat_run.py /usr/local/bin/gbrain
+RUN chmod +x /usr/local/bin/gbrain \
+    && ln -s /usr/local/bin/gbrain /usr/local/bin/gbrain-chat-run
 
 COPY scripts/hermes-workspace-sync-cron.sh /opt/josemar/scripts/hermes-workspace-sync-cron.sh
 COPY scripts/hermes-gbrain-refresh-cron.sh /opt/josemar/scripts/hermes-gbrain-refresh-cron.sh

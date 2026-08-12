@@ -28,6 +28,36 @@ e.g. `FREQ=WEEKLY;BYDAY=MO,WE,FR`) for native TaskNotes repeating tasks. The
 profile must declare a `recurrence` field mapping; otherwise `task_create`
 rejects the call before any Git or gbrain mutation.
 
+## Access non-negotiables (issue #110)
+
+The public `gbrain` command (safe by default) is the single
+agent-facing gateway for general vault access; see
+`docs/gbrain-operations.md` → "Issue #110: Safe gbrain Adapter". The TaskNotes
+MCP does NOT use the public wrapper: it is already the lock owner and stays
+implemented on short-lived internal native gbrain commands (the reference
+bounded pattern).
+
+- **No root execution.** Every adapter and operator command runs as the Hermes
+  runtime user, never as root.
+- **No concurrent PGLite opens.** The adapter never opens PGLite directly, and
+  no other path may hold the gbrain database open concurrently.
+- **Cooperative flock.** `/opt/data/.locks/tasknotes.lock` is the global
+  serialization point: every TaskNotes transaction takes it; the
+  `gbrain-refresh` and `gbrain-embedding-refresh` crons take it nonblockingly
+  and skip when busy; backfills take it exclusively; the public `gbrain`
+  command acquires it through the same lock runner.
+- **No nested wrapper usage.** TaskNotes is implemented on short-lived internal
+  native gbrain commands and must NEVER route through the public `gbrain`
+  wrapper's lock path inside its transaction path (it retains its
+  transaction-level global lock). Conversely, the public wrapper must never be
+  used for TaskNotes task-file mutations and must never call into TaskNotes.
+  Task-file mutations go through the `task_*` MCP tools only.
+- **Pause both crons for maintenance windows.** For recovery, reindex/rebuild,
+  migrations, vault swaps, and unadapted/third-party diagnostics, the operator
+  pauses BOTH `gbrain-refresh` and `gbrain-embedding-refresh` (procedure in
+  `docs/gbrain-operations.md` → "Cron Pause/Resume for Maintenance Windows").
+  Routine adapted access does not require pausing.
+
 ## External prerequisites
 
 Repo deployment does not apply these changes automatically. Complete all of
@@ -115,7 +145,10 @@ both gbrain and the on-disk task, and commits only the target task file.
 The periodic `gbrain-refresh` cron uses the same lock nonblockingly. If a task
 operation holds the lock, refresh logs a skip and exits successfully rather
 than queueing behind it. `GBRAIN_REFRESH_TIMEOUT` bounds the refresh child
-process (default `240` seconds).
+process (default `240` seconds). The daily `gbrain-embedding-refresh` cron
+takes the same lock nonblockingly via `refresh-embeddings`. This lock is the
+global serialization point for cooperative gbrain access (issue #110):
+TaskNotes transactions, both refresh crons, and backfills all cooperate on it.
 
 Hermes registers the server from `config/hermes-config.yaml` with parallel tool
 calls disabled. One author at a time per task file remains an operating rule;
@@ -245,7 +278,10 @@ on disk, and the next sync cycle will re-import it.
 When `recovery_required` occurs, later mutations are blocked by
 `/opt/data/.locks/tasknotes-recovery.marker`.
 
-1. Stop task mutations and inspect the reported task, vault Git status, free
+1. Pause BOTH refresh crons for the window (`gbrain-refresh` and
+   `gbrain-embedding-refresh`; see `docs/gbrain-operations.md` → "Cron
+   Pause/Resume for Maintenance Windows"). Stop task mutations and inspect the
+   reported task, vault Git status, free
    space, permissions, and gbrain source status.
 2. Reconcile deliberately with the on-disk vault as the user-facing source of
    truth. Run operator gbrain refresh/reindex only after reviewing the files.
@@ -257,6 +293,8 @@ When `recovery_required` occurs, later mutations are blocked by
    docker compose exec hermes su -s /bin/sh hermes -c \
      'rm -- /opt/data/.locks/tasknotes-recovery.marker'
    ```
+
+Resume both crons only after step 4 and a successful verification read.
 
 Never remove the marker merely to retry a failed call.
 

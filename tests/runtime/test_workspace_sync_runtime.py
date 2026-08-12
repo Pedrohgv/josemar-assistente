@@ -151,6 +151,40 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
         self.assertIn("refresh skipped", result.stdout)
         self.assertNotIn("MUST_NOT_RUN", result.stdout + result.stderr)
 
+    def test_gbrain_refresh_cron_refuses_to_run_as_root(self) -> None:
+        """The cron must enforce the hermes runtime identity before touching
+        the lock: a root UID (simulated via a fake id binary) refuses with a
+        clear message instead of relying on base-image behavior."""
+        fake_id = Path(self._mk_dir()) / "id"
+        fake_id.write_text("#!/bin/sh\necho 0\n", encoding="utf-8")
+        fake_id.chmod(0o755)
+        src = GBRAIN_REFRESH_CRON_SCRIPT.read_text(encoding="utf-8")
+        patched = src.replace("/usr/bin/id", str(fake_id))
+        self.assertNotEqual(src, patched)
+        out_dir = Path(self._mk_dir())
+        wrapper = out_dir / "cron-root.sh"
+        wrapper.write_text(patched, encoding="utf-8")
+        wrapper.chmod(0o755)
+        result = self._run_cron_wrapper(wrapper)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refuses to run as root", result.stderr)
+
+    def test_gbrain_refresh_cron_fails_closed_when_uid_unknown(self) -> None:
+        """A failing/garbage id lookup must refuse (fail closed), never
+        proceed as if non-root."""
+        fake_id = Path(self._mk_dir()) / "id"
+        fake_id.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        fake_id.chmod(0o755)
+        src = GBRAIN_REFRESH_CRON_SCRIPT.read_text(encoding="utf-8")
+        patched = src.replace("/usr/bin/id", str(fake_id))
+        out_dir = Path(self._mk_dir())
+        wrapper = out_dir / "cron-noid.sh"
+        wrapper.write_text(patched, encoding="utf-8")
+        wrapper.chmod(0o755)
+        result = self._run_cron_wrapper(wrapper)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("could not determine the effective UID", result.stderr)
+
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
@@ -386,14 +420,27 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
     ) -> Path:
         """Return a copy of the cron wrapper with the hardcoded sync path replaced.
 
-        The production wrapper hardcodes a binary path which
-        is not writable in the test environment, so we substitute the fake script
-        path while preserving the rest of the wrapper logic verbatim.
+        The production wrapper hardcodes binary paths which
+        are not writable in the test environment, so we substitute the fake script
+        path while preserving the rest of the wrapper logic verbatim. The gbrain
+        refresh cron also hardcodes the fixed image interpreter
+        (/opt/hermes/.venv/bin/python3, absent locally), the lock runner path,
+        and the lock path; the copy substitutes local equivalents so the
+        fixture runs without touching the production script (which keeps no
+        environment seam for any of them).
         """
         src = source.read_text(encoding="utf-8")
         patched = src.replace(hardcoded_path, str(fake_sync))
-        self.assertNotEqual(src, patched, "cron wrapper does not reference expected hardcoded path")
+        patched = patched.replace("/opt/hermes/.venv/bin/python3", sys.executable)
+        patched = patched.replace(
+            "/opt/josemar/scripts/tasknotes_lock_run.py", str(TASKNOTES_LOCK_RUNNER)
+        )
         out_dir = Path(self._mk_dir())
+        lock_path = out_dir / "tasknotes.lock"
+        patched = patched.replace(
+            'lock_path="/opt/data/.locks/tasknotes.lock"', f'lock_path="{lock_path}"'
+        )
+        self.assertNotEqual(src, patched, "cron wrapper does not reference expected hardcoded path")
         wrapper = out_dir / "cron-wrapper.sh"
         wrapper.write_text(patched, encoding="utf-8")
         wrapper.chmod(0o755)
@@ -404,8 +451,6 @@ class WorkspaceSyncRuntimeTests(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["TMPDIR"] = str(Path(wrapper).parent)
-        env["TASKNOTES_LOCK_RUNNER"] = str(TASKNOTES_LOCK_RUNNER)
-        env["TASKNOTES_LOCK_PATH"] = str(Path(wrapper).parent / "tasknotes.lock")
         if extra_env:
             env.update(extra_env)
         return subprocess.run(

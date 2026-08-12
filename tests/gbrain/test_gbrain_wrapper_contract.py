@@ -6,11 +6,14 @@ to guard the simplified direct-CLI gbrain integration:
   - reindex performs initial activation (init, config, sync, extract,
     extract links, schema sync for custom packs, git safe.directory)
   - refresh performs lightweight vault-file reconciliation without init/schema
+  - refresh and reindex self-acquire the shared tasknotes lock (issue #110)
+    unless the lock runner already holds it and passed the validated lock fd
+    (TASKNOTES_LOCK_FD)
   - schema pack install logic for custom packs (source path resolution,
     confinement validation, atomic install, native validate)
   - no readiness marker, no gate, no provider stripping for chat actions,
     no per-action functions, no output capping, no timeout resolution
-  - the /usr/local/bin/gbrain Docker wrapper must cd to /opt/gbrain
+  - the private native wrapper (/opt/josemar/libexec/gbrain-native) must cd to /opt/gbrain
   - Bun installer stage must apt-install curl
   - GBRAIN_HOME is a parent; state lives under $GBRAIN_HOME/.gbrain
 """
@@ -265,8 +268,12 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
 
     def test_reindex_drops_root_to_hermes_when_possible(self) -> None:
         self.assertIn("drop_root_if_possible", self.src)
-        self.assertIn("JOSEMAR_GBRAIN_DROPPED_PRIVS", self.src)
-        self.assertIn("su -p -s /bin/sh -- hermes", self.src)
+        # The drop is unconditional: no env sentinel may skip it, and the
+        # su re-exec must not export one.
+        self.assertNotIn("JOSEMAR_GBRAIN_DROPPED_PRIVS", self.src)
+        # The drop re-exec uses the fixed su path, not PATH resolution.
+        self.assertIn('"$SU_BIN" -p -s /bin/sh -- hermes', self.src)
+        self.assertNotIn("su -p -s /bin/sh -- hermes", self.src.replace('"$SU_BIN" ', ""))
 
     def test_root_drop_fails_closed_and_preserves_runtime_environment(self) -> None:
         body = _extract_function(self.src, "drop_root_if_possible")
@@ -276,11 +283,47 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         self.assertIn('export GBRAIN_HOME="$runtime_gbrain_home"', body)
         self.assertIn('export XDG_CONFIG_HOME="$runtime_xdg_config"', body)
         self.assertIn('runtime_home="${HERMES_HOME:-/opt/data}"', body)
-        self.assertIn('runtime_gbrain_home="${GBRAIN_HOME:-/opt/data}"', body)
+        # GBRAIN_HOME is a fixed constant; the su re-exec passes it through
+        # verbatim without any env-default read.
+        self.assertIn('runtime_gbrain_home="$GBRAIN_HOME"', body)
+        self.assertNotIn('runtime_gbrain_home="${GBRAIN_HOME:-', body)
 
     def test_reindex_creates_state_dir(self) -> None:
         body = _extract_function(self.src, "do_reindex")
         self.assertIn('mkdir -p "$GBRAIN_STATE_DIR"', body)
+
+    def test_reindex_persists_schema_pack_marker_atomically(self) -> None:
+        """The active schema pack marker must be written atomically: temp
+        file in the SAME directory, fsync, then rename (replacing any stale
+        marker), plus a directory fsync for durability."""
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn("tempfile.mkstemp(dir=parent", body)
+        self.assertIn("os.fsync(fd)", body)
+        self.assertIn("os.replace(tmp, path)", body)
+        self.assertIn('os.fsync(dfd)', body)
+
+    def test_reindex_marker_write_is_required_not_best_effort(self) -> None:
+        """A marker write/replace failure must be a structured nonzero error:
+        reindex must NOT report success without the marker. The old
+        best-effort warning path must be gone."""
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn("schema_pack_marker_write_failed", body)
+        self.assertIn("return 1", body)
+        self.assertNotIn("WARNING: could not persist active schema pack marker", body)
+        # The failure must precede the success envelope.
+        fail_pos = body.find("schema_pack_marker_write_failed")
+        success_pos = body.find('"success": True')
+        self.assertGreater(fail_pos, -1)
+        self.assertGreater(success_pos, -1)
+        self.assertLess(fail_pos, success_pos,
+                        "marker failure must be reported before any success")
+
+    def test_reindex_marker_path_safety_is_fail_closed(self) -> None:
+        """A symlinked marker or symlinked parent must be refused (no clobber
+        of a decoy target)."""
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn("os.path.islink(path)", body)
+        self.assertIn("os.path.islink(parent)", body)
 
 
 class GbrainRefreshContractTests(unittest.TestCase):
@@ -346,11 +389,118 @@ class GbrainRefreshContractTests(unittest.TestCase):
         self.assertNotIn("GBRAIN_EMBEDDING_MODEL", body)
         self.assertNotIn("GBRAIN_EMBEDDING_DIMENSIONS", body)
 
-    def test_refresh_does_not_acquire_tasknotes_lock(self) -> None:
-        """refresh must not acquire the tasknotes lock (no embedding writes)."""
+    def test_refresh_acquires_tasknotes_lock(self) -> None:
+        """refresh must self-acquire the shared tasknotes lock so direct
+        manual runs cannot open PGLite unprotected (issue #110)."""
         body = _extract_function(self.src, "do_refresh")
-        self.assertNotIn("tasknotes.lock", body)
-        self.assertNotIn("flock", body)
+        self.assertIn("acquire_tasknotes_lock refresh", body)
+
+
+class GbrainTasknotesLockAcquisitionContractTests(unittest.TestCase):
+    """refresh/reindex self-lock through acquire_tasknotes_lock (issue #110).
+
+    The helper must skip only when the lock runner's inherited lock fd is
+    validated (TASKNOTES_LOCK_FD + flock actually held, cron chains), fail
+    closed when the lock file is unavailable, and acquire the flock
+    nonblocking so a busy lock never starts gbrain work. No env boolean can
+    forge the skip.
+    """
+
+    def setUp(self) -> None:
+        self.src = _read(WRAPPER_PATH)
+
+    def test_acquire_helper_exists(self) -> None:
+        self.assertIn("acquire_tasknotes_lock()", self.src)
+
+    def test_acquire_skips_only_when_inherited_lock_fd_validated(self) -> None:
+        body = _extract_function(self.src, "run_under_lock")
+        self.assertIn("lock_held_by_runner", body)
+        self.assertNotIn("TASKNOTES_LOCK_HELD", body)
+
+    def test_inherited_lock_fd_validation_helper_exists(self) -> None:
+        body = _extract_function(self.src, "lock_held_by_runner")
+        self.assertIn("TASKNOTES_LOCK_FD", body)
+        self.assertIn("fstat", body)
+        self.assertIn("fdinfo", body)
+        self.assertIn("FLOCK", body)
+
+    def test_inherited_lock_fd_requires_exclusive_write_state(self) -> None:
+        """Only an EXCLUSIVE flock (fdinfo 'FLOCK ... WRITE') validates; a
+        shared LOCK_SH lock shows READ and must not satisfy the check."""
+        body = _extract_function(self.src, "lock_held_by_runner")
+        self.assertIn('"FLOCK" in line and "WRITE" in line', body)
+        self.assertIn("WRITE", body)
+
+    def test_lock_open_is_safe_creation_with_no_follow_verification(self) -> None:
+        """The lock open must create the file on fresh installs (O_CREAT via
+        `exec 9<>`) and verify the inode against a no-follow open so a
+        symlinked lock is refused — no check→open TOCTOU."""
+        body = _extract_function(self.src, "open_tasknotes_lock_fd")
+        self.assertIn('exec 9<>"$GBRAIN_TASKNOTES_LOCK"', body)
+        self.assertIn("O_NOFOLLOW", body)
+        self.assertIn("fstat(9)", body)
+        self.assertIn("mkdir -p", body)
+        self.assertNotIn("[ ! -r", body)
+
+    def test_lock_acquired_nonblocking_then_reenters_through_runner(self) -> None:
+        """run_under_lock must flock fd 9 nonblocking and, once held,
+        exec-replace itself with the fixed lock runner passing the inherited
+        fd — the flock is never released between wrapper and runner."""
+        body = _extract_function(self.src, "run_under_lock")
+        self.assertIn('"$FLOCK_BIN" -n 9', body)
+        self.assertIn("TASKNOTES_LOCK_FD=9", body)
+        self.assertIn('exec "$PYTHON_BIN" -I "$TASKNOTES_LOCK_RUNNER"', body)
+        self.assertIn('--lock-path "$GBRAIN_TASKNOTES_LOCK"', body)
+        self.assertIn('-- "$0" "$action"', body)
+
+    def test_acquire_fails_closed_when_lock_unavailable(self) -> None:
+        body = _extract_function(self.src, "open_tasknotes_lock_fd")
+        self.assertIn("_lock_unavailable", body)
+
+    def test_acquire_reports_busy_lock(self) -> None:
+        body = _extract_function(self.src, "acquire_tasknotes_lock")
+        self.assertIn("_lock_busy", body)
+
+    def test_production_paths_are_fixed_constants(self) -> None:
+        """GBRAIN_BIN and GBRAIN_TASKNOTES_LOCK must be fixed constants, not
+        env-overridable: they are binary/lock security boundaries."""
+        self.assertIn('GBRAIN_BIN="/opt/josemar/libexec/gbrain-native"', self.src)
+        self.assertNotIn('GBRAIN_BIN="/usr/local/bin/gbrain"', self.src)
+        self.assertIn(
+            'GBRAIN_TASKNOTES_LOCK="/opt/data/.locks/tasknotes.lock"', self.src
+        )
+        self.assertNotIn('GBRAIN_BIN="${GBRAIN_BIN:-', self.src)
+        self.assertNotIn('GBRAIN_TASKNOTES_LOCK="${GBRAIN_TASKNOTES_LOCK:-', self.src)
+
+    def test_fixed_tool_paths_no_path_resolution(self) -> None:
+        """python3/flock/su/getent/id must be fixed paths (no PATH injection)
+        for everything that touches the lock, executes gbrain, or drops
+        privileges."""
+        self.assertIn('PYTHON_BIN="/opt/hermes/.venv/bin/python3"', self.src)
+        self.assertIn('FLOCK_BIN="/usr/bin/flock"', self.src)
+        self.assertIn('SU_BIN="/usr/bin/su"', self.src)
+        self.assertIn('GETENT_BIN="/usr/bin/getent"', self.src)
+        self.assertIn('ID_BIN="/usr/bin/id"', self.src)
+        self.assertNotIn("command -v python3", self.src)
+        self.assertNotIn("command -v su", self.src)
+        # No bare PATH-resolved invocations of the security-relevant tools.
+        self.assertNotIn("\"python3\" - ", self.src)
+        self.assertNotIn(" flock -n 9", self.src)
+        self.assertNotIn("su -p", self.src)
+
+    def test_no_dropped_privs_env_sentinel(self) -> None:
+        """Root must always drop before the lock; no env flag may claim the
+        drop already happened."""
+        self.assertNotIn("JOSEMAR_GBRAIN_DROPPED_PRIVS", self.src)
+
+    def test_chat_policy_header_routes_through_adapter(self) -> None:
+        """The wrapper header must not claim chat calls the bare gbrain CLI
+        directly: chat-facing actions run through the gbrain-chat-run
+        adapter (issue #110)."""
+        self.assertIn("gbrain-chat-run", self.src.split("set -eu")[0])
+        self.assertNotIn(
+            "invoked directly via the `gbrain` CLI", self.src.split("set -eu")[0]
+        )
 
 
 class GbrainRefreshEmbeddingsContractTests(unittest.TestCase):
@@ -426,21 +576,21 @@ class GbrainRefreshEmbeddingsContractTests(unittest.TestCase):
         """The shared lock must be acquired inside the wrapper so the cron
         entrypoint needs no external lock."""
         body = _extract_function(self.src, "do_refresh_embeddings")
-        self.assertIn("flock -n 9", body)
-        self.assertIn("GBRAIN_TASKNOTES_LOCK", body)
+        self.assertIn("run_under_lock refresh-embeddings", body)
+        self.assertIn("GBRAIN_TASKNOTES_LOCK", self.src)
 
     def test_lock_non_nested_not_double_acquired(self) -> None:
-        """do_refresh_embeddings must acquire fd 9 via `exec 9<` at the top of
-        the function and flock it in place — it must NOT use the nested
-        `{ ... } 9<"$GBRAIN_TASKNOTES_LOCK"` compound-block pattern (that would
-        double-open/double-lock and deadlock with a single flock -n)."""
+        """do_refresh_embeddings must go through run_under_lock (single
+        safe open of fd 9 + single flock -n + runner re-entry) — it must NOT
+        use the nested `{ ... } 9<"$GBRAIN_TASKNOTES_LOCK"` compound-block
+        pattern (that would double-open/double-lock and deadlock)."""
         body = _extract_function(self.src, "do_refresh_embeddings")
-        self.assertIn('exec 9<"$GBRAIN_TASKNOTES_LOCK"', body)
+        self.assertIn("run_under_lock refresh-embeddings refresh_embeddings", body)
         self.assertNotIn('} 9<"$GBRAIN_TASKNOTES_LOCK"', body)
 
     def test_config_get_after_lock_acquisition(self) -> None:
         body = _extract_function(self.src, "do_refresh_embeddings")
-        lock_pos = body.find("flock -n")
+        lock_pos = body.find("run_under_lock")
         config_pos = body.find("config get search.mcp_keyword_only")
         self.assertGreater(lock_pos, -1)
         self.assertGreater(config_pos, -1)
@@ -457,21 +607,26 @@ class GbrainRefreshEmbeddingsContractTests(unittest.TestCase):
                         "lock-busy skip must precede the config read")
 
     def test_lock_unavailable_is_structured_error(self) -> None:
-        body = _extract_function(self.src, "do_refresh_embeddings")
-        self.assertIn("refresh_embeddings_lock_unavailable", body)
-        self.assertIn('"success": false', body)
+        """The safe open must emit the structured ${err_tag}_lock_unavailable
+        JSON (per-action tag, e.g. refresh_embeddings for the
+        refresh-embeddings path) and never a bare shell death."""
+        body = _extract_function(self.src, "open_tasknotes_lock_fd")
+        self.assertIn("${err_tag}_lock_unavailable", body)
+        self.assertIn("\\\"success\\\": false", body)
+        self.assertIn("Could not open the tasknotes lock file.", body)
 
-    def test_lock_readability_precheck_before_exec(self) -> None:
-        """A failed `exec` redirection would kill the shell, so the wrapper must
-        probe the lock file first and emit the structured lock_unavailable
-        error from the pre-check."""
-        body = _extract_function(self.src, "do_refresh_embeddings")
-        precheck_pos = body.find('[ ! -r "$GBRAIN_TASKNOTES_LOCK" ]')
-        exec_pos = body.find('exec 9<"$GBRAIN_TASKNOTES_LOCK"')
-        self.assertGreater(precheck_pos, -1)
+    def test_lock_openability_probe_keeps_failure_in_shell(self) -> None:
+        """A failed `exec` redirection would kill the shell, so the safe open
+        must probe openability in a subshell first and emit the structured
+        lock_unavailable error from the probe; the authoritative no-follow
+        verification then guards the real open."""
+        body = _extract_function(self.src, "open_tasknotes_lock_fd")
+        probe_pos = body.find("( : ) 9<>")
+        exec_pos = body.find('exec 9<>"$GBRAIN_TASKNOTES_LOCK"')
+        self.assertGreater(probe_pos, -1)
         self.assertGreater(exec_pos, -1)
-        self.assertLess(precheck_pos, exec_pos,
-                        "readability pre-check must precede exec 9<")
+        self.assertLess(probe_pos, exec_pos,
+                        "openability probe must precede the real exec 9<>")
 
     # --- validation and lifecycle gates ---
 
@@ -607,7 +762,7 @@ class GbrainEmbedBackfillContractTests(unittest.TestCase):
         """export_gbrain_env and state dir setup must happen before gbrain access."""
         body = _extract_function(self.src, "do_embed_backfill")
         env_pos = body.find("export_gbrain_env")
-        lock_pos = body.find("flock")
+        lock_pos = body.find("run_under_lock")
         self.assertLess(env_pos, lock_pos,
                         "export_gbrain_env must precede lock acquisition")
 
@@ -637,7 +792,7 @@ class GbrainEmbedBackfillContractTests(unittest.TestCase):
         """The prerequisite check must run before any lock acquisition."""
         body = _extract_function(self.src, "do_embed_backfill")
         prereq_pos = body.find("embed_backfill_prerequisites_missing")
-        lock_pos = body.find("flock")
+        lock_pos = body.find("run_under_lock")
         self.assertLess(prereq_pos, lock_pos,
                         "prerequisite check must precede lock acquisition")
 
@@ -673,19 +828,21 @@ class GbrainEmbedBackfillContractTests(unittest.TestCase):
         self.assertIn("/opt/data/.locks/tasknotes.lock", self.src)
 
     def test_embed_backfill_uses_tasknotes_lock_var(self) -> None:
-        body = _extract_function(self.src, "do_embed_backfill")
-        self.assertIn("GBRAIN_TASKNOTES_LOCK", body)
+        """The fixed lock path constant is used by the shared safe open."""
+        body = _extract_function(self.src, "open_tasknotes_lock_fd")
+        self.assertIn("$GBRAIN_TASKNOTES_LOCK", body)
 
     def test_embed_backfill_uses_flock_nonblocking(self) -> None:
-        body = _extract_function(self.src, "do_embed_backfill")
-        self.assertIn("flock -n", body)
+        """The nonblocking flock lives in the shared run_under_lock helper."""
+        body = _extract_function(self.src, "run_under_lock")
+        self.assertIn('"$FLOCK_BIN" -n 9', body)
 
     def test_embed_backfill_lock_before_gbrain_embed(self) -> None:
         """The lock must be acquired before the `gbrain embed` invocation."""
         body = _extract_function(self.src, "do_embed_backfill")
-        lock_pos = body.find("flock -n")
+        lock_pos = body.find("run_under_lock")
         embed_pos = body.find("embed --stale")
-        self.assertGreater(lock_pos, -1, "flock -n must be present")
+        self.assertGreater(lock_pos, -1, "run_under_lock must be present")
         self.assertGreater(embed_pos, -1, "embed --stale must be present")
         self.assertLess(lock_pos, embed_pos,
                         "flock acquisition must precede gbrain embed")
@@ -843,10 +1000,11 @@ class GbrainEmbedBackfillPreservationContractTests(unittest.TestCase):
         self.assertNotIn("GBRAIN_EMBEDDING_MODEL", body)
         self.assertNotIn("GBRAIN_EMBEDDING_DIMENSIONS", body)
 
-    def test_reindex_does_not_acquire_tasknotes_lock(self) -> None:
+    def test_reindex_acquires_tasknotes_lock(self) -> None:
+        """reindex must self-acquire the shared tasknotes lock so direct
+        manual runs cannot open PGLite unprotected (issue #110)."""
         body = _extract_function(self.src, "do_reindex")
-        self.assertNotIn("tasknotes.lock", body)
-        self.assertNotIn("flock", body)
+        self.assertIn("acquire_tasknotes_lock reindex", body)
 
     def test_refresh_still_uses_no_embed_sync(self) -> None:
         body = _extract_function(self.src, "run_sync_extract_links")
@@ -862,10 +1020,11 @@ class GbrainEmbedBackfillPreservationContractTests(unittest.TestCase):
         self.assertNotIn("GBRAIN_EMBEDDING_MODEL", body)
         self.assertNotIn("GBRAIN_EMBEDDING_DIMENSIONS", body)
 
-    def test_refresh_does_not_acquire_tasknotes_lock(self) -> None:
+    def test_refresh_acquires_tasknotes_lock(self) -> None:
+        """refresh must self-acquire the shared tasknotes lock so direct
+        manual runs cannot open PGLite unprotected (issue #110)."""
         body = _extract_function(self.src, "do_refresh")
-        self.assertNotIn("tasknotes.lock", body)
-        self.assertNotIn("flock", body)
+        self.assertIn("acquire_tasknotes_lock refresh", body)
 
     def test_embed_invocation_confined_to_embed_paths(self) -> None:
         """Only do_embed_backfill and do_refresh_embeddings may invoke
@@ -963,7 +1122,7 @@ class GbrainEnableEmbeddingsContractTests(unittest.TestCase):
         """The prerequisite check must run before any lock acquisition."""
         body = _extract_function(self.src, "do_enable_embeddings")
         prereq_pos = body.find("enable_embeddings_prerequisites_missing")
-        lock_pos = body.find("flock")
+        lock_pos = body.find("run_under_lock")
         self.assertLess(prereq_pos, lock_pos,
                         "prerequisite check must precede lock acquisition")
 
@@ -999,22 +1158,24 @@ class GbrainEnableEmbeddingsContractTests(unittest.TestCase):
         self.assertIn("/opt/data/.locks/tasknotes.lock", self.src)
 
     def test_enable_embeddings_uses_tasknotes_lock_var(self) -> None:
-        body = _extract_function(self.src, "do_enable_embeddings")
-        self.assertIn("GBRAIN_TASKNOTES_LOCK", body)
+        """The fixed lock path constant is used by the shared safe open."""
+        body = _extract_function(self.src, "open_tasknotes_lock_fd")
+        self.assertIn("$GBRAIN_TASKNOTES_LOCK", body)
 
     def test_enable_embeddings_uses_flock_nonblocking(self) -> None:
-        body = _extract_function(self.src, "do_enable_embeddings")
-        self.assertIn("flock -n", body)
+        """The nonblocking flock lives in the shared run_under_lock helper."""
+        body = _extract_function(self.src, "run_under_lock")
+        self.assertIn('"$FLOCK_BIN" -n 9', body)
 
     def test_enable_embeddings_lock_before_migrate(self) -> None:
         """The lock must be acquired before the `gbrain migrate` invocation."""
         body = _extract_function(self.src, "do_enable_embeddings")
-        lock_pos = body.find("flock -n")
+        lock_pos = body.find("run_under_lock")
         migrate_pos = body.find("migrate embeddings")
-        self.assertGreater(lock_pos, -1, "flock -n must be present")
+        self.assertGreater(lock_pos, -1, "run_under_lock must be present")
         self.assertGreater(migrate_pos, -1, "migrate embeddings must be present")
         self.assertLess(lock_pos, migrate_pos,
-                        "flock acquisition must precede gbrain migrate")
+                        "lock acquisition must precede gbrain migrate")
 
     def test_enable_embeddings_lock_busy_error_is_structured(self) -> None:
         body = _extract_function(self.src, "do_enable_embeddings")
@@ -1022,8 +1183,10 @@ class GbrainEnableEmbeddingsContractTests(unittest.TestCase):
         self.assertIn('"success": false', body)
 
     def test_enable_embeddings_lock_unavailable_error_is_structured(self) -> None:
-        body = _extract_function(self.src, "do_enable_embeddings")
-        self.assertIn("enable_embeddings_lock_unavailable", body)
+        """The structured unavailable error is emitted by the shared safe
+        open with the per-action tag."""
+        body = _extract_function(self.src, "open_tasknotes_lock_fd")
+        self.assertIn("${err_tag}_lock_unavailable", body)
 
     # --- (5) gbrain migrate embeddings invocation ---
 
@@ -1178,7 +1341,6 @@ class GbrainEnableEmbeddingsContractTests(unittest.TestCase):
         for error in (
             "enable_embeddings_prerequisites_missing",
             "enable_embeddings_lock_busy",
-            "enable_embeddings_lock_unavailable",
             "enable_embeddings_keyword_only_force_failed",
             "gbrain_migrate_embeddings_failed",
             "gbrain_migrate_embeddings_blocked",
@@ -1243,7 +1405,7 @@ class GbrainEnableEmbeddingsContractTests(unittest.TestCase):
         """export_gbrain_env and state dir setup must happen before gbrain access."""
         body = _extract_function(self.src, "do_enable_embeddings")
         env_pos = body.find("export_gbrain_env")
-        lock_pos = body.find("flock")
+        lock_pos = body.find("run_under_lock")
         self.assertLess(env_pos, lock_pos,
                         "export_gbrain_env must precede lock acquisition")
 
@@ -1348,8 +1510,7 @@ class GbrainDisableEmbeddingsContractTests(unittest.TestCase):
         safe rollback: it writes to the file plane, so it must hold the lock
         to avoid concurrent vault writes)."""
         body = _extract_function(self.src, "do_disable_embeddings")
-        self.assertIn("flock -n", body)
-        self.assertIn("GBRAIN_TASKNOTES_LOCK", body)
+        self.assertIn("run_under_lock disable-embeddings", body)
 
     def test_disable_embeddings_lock_busy_error_is_structured(self) -> None:
         body = _extract_function(self.src, "do_disable_embeddings")
@@ -1357,8 +1518,10 @@ class GbrainDisableEmbeddingsContractTests(unittest.TestCase):
         self.assertIn('"success": false', body)
 
     def test_disable_embeddings_lock_unavailable_error_is_structured(self) -> None:
-        body = _extract_function(self.src, "do_disable_embeddings")
-        self.assertIn("disable_embeddings_lock_unavailable", body)
+        """The structured unavailable error is emitted by the shared safe
+        open with the per-action tag."""
+        body = _extract_function(self.src, "open_tasknotes_lock_fd")
+        self.assertIn("${err_tag}_lock_unavailable", body)
 
     def test_disable_embeddings_does_not_init_or_reinit(self) -> None:
         body = _extract_function(self.src, "do_disable_embeddings")
@@ -1379,7 +1542,8 @@ class GbrainDisableEmbeddingsContractTests(unittest.TestCase):
         rename), not via `gbrain config set` (which would be a shell
         subprocess vulnerable to partial writes)."""
         body = _extract_function(self.src, "do_disable_embeddings")
-        self.assertIn("python3", body)
+        self.assertIn('"$PYTHON_BIN"', body)
+        self.assertNotIn(" python3 ", body)
         self.assertIn("tempfile", body)
         self.assertIn("os.replace", body)
 
@@ -1649,31 +1813,49 @@ class GbrainSimplificationContractTests(unittest.TestCase):
         self.assertNotIn("read_gbrain_config()", self.src)
 
 
-class GbrainDockerWrapperCwdContractTests(unittest.TestCase):
-    """The /usr/local/bin/gbrain Docker wrapper must cd to /opt/gbrain."""
+class GbrainDockerLayoutContractTests(unittest.TestCase):
+    """The native CLI must live at the private non-PATH path
+    /opt/josemar/libexec/gbrain-native; the PUBLIC /usr/local/bin/gbrain must
+    be the issue #110 adapter, with gbrain-chat-run kept only as a
+    backwards-compatible symlink alias."""
 
     def setUp(self) -> None:
         self.src = _read(DOCKERFILE_PATH)
 
-    def test_gbrain_wrapper_cds_to_opt_gbrain(self) -> None:
-        match = re.search(r"printf.*?/usr/local/bin/gbrain", self.src, re.DOTALL)
-        self.assertIsNotNone(match, "Could not find gbrain wrapper creation in Dockerfile")
+    def test_native_wrapper_lives_at_private_non_path_location(self) -> None:
+        match = re.search(r"printf.*?/opt/josemar/libexec/gbrain-native", self.src, re.DOTALL)
+        self.assertIsNotNone(match, "Could not find native wrapper creation in Dockerfile")
         assert match is not None
         wrapper_line = match.group(0)
         self.assertIn("cd /opt/gbrain", wrapper_line)
+        self.assertIn("src/cli.ts", wrapper_line)
+
+    def test_no_native_wrapper_at_public_path(self) -> None:
+        """The public /usr/local/bin/gbrain must never be the native wrapper:
+        no printf-style wrapper may redirect to it (the adapter COPY is the
+        only thing at the public path)."""
+        match = re.search(r"printf[^\n]*> /usr/local/bin/gbrain", self.src)
+        self.assertIsNone(match, "native wrapper must not be installed at the public path")
+
+    def test_public_gbrain_is_the_safe_adapter(self) -> None:
+        self.assertIn(
+            "COPY scripts/gbrain_chat_run.py /usr/local/bin/gbrain", self.src
+        )
+        self.assertIn("chmod +x /usr/local/bin/gbrain", self.src)
+
+    def test_gbrain_chat_run_is_a_symlink_alias_not_a_duplicate(self) -> None:
+        self.assertIn(
+            "ln -s /usr/local/bin/gbrain /usr/local/bin/gbrain-chat-run", self.src
+        )
+        self.assertNotIn(
+            "COPY scripts/gbrain_chat_run.py /usr/local/bin/gbrain-chat-run", self.src
+        )
 
     def test_gbrain_ref_is_pinned_to_the_supported_release(self) -> None:
         self.assertIn(
             "ARG GBRAIN_REF=15b9863d13635d173562a54f55a1d388bfcf546b",
             self.src,
         )
-
-    def test_gbrain_wrapper_uses_relative_cli_path(self) -> None:
-        match = re.search(r"printf.*?/usr/local/bin/gbrain", self.src, re.DOTALL)
-        self.assertIsNotNone(match)
-        assert match is not None
-        wrapper_line = match.group(0)
-        self.assertIn("src/cli.ts", wrapper_line)
 
     def test_no_gbrain_skill_symlink(self) -> None:
         """The gbrain-skill symlink must not be created (Josemar uses gbrain directly)."""
@@ -1901,6 +2083,144 @@ class GbrainEmbeddingRefreshCronReconcileBehaviorTests(unittest.TestCase):
         self.assertEqual(self._reconcile(fixture), 1)
 
 
+class GbrainRefreshCronInstallerContractTests(unittest.TestCase):
+    """Hermes init must install the gbrain-refresh cron with full drift
+    reconciliation (interval schedule, script, workdir, no_agent) like the
+    embedding refresh cron — not merely check the job name."""
+
+    def setUp(self) -> None:
+        self.src = _read(HERMES_INIT_PATH)
+
+    def test_reconciles_drift_not_merely_name(self) -> None:
+        """The existing-job check must compare the real interval schedule
+        (kind=interval, minutes), script name, no_agent flag, and workdir —
+        not just the job name."""
+        body = _extract_function(self.src, "install_gbrain_refresh_cron")
+        self.assertIn('s.get("kind") == "interval"', body)
+        self.assertIn('isinstance(actual, int)', body)
+        self.assertIn('not isinstance(actual, bool)', body)
+        self.assertIn('j.get("script") == "hermes-gbrain-refresh-cron.sh"', body)
+        self.assertIn('j.get("no_agent") is True', body)
+        self.assertIn('j.get("workdir") == workdir', body)
+        self.assertNotIn('job.get("name") == "gbrain-refresh"', body.replace("continue", ""))
+
+    def test_drift_logs_reconciliation(self) -> None:
+        body = _extract_function(self.src, "install_gbrain_refresh_cron")
+        self.assertIn("Reconciling Hermes gbrain-refresh cron job drift", body)
+
+    def test_disabled_interval_removes_owned_job(self) -> None:
+        body = _extract_function(self.src, "install_gbrain_refresh_cron")
+        self.assertIn('""|0|*[!0-9]*)', body)
+        self.assertIn("remove_gbrain_refresh_cron_job", body)
+
+    def test_remove_helper_uses_named_remove(self) -> None:
+        body = _extract_function(self.src, "remove_gbrain_refresh_cron_job")
+        self.assertIn('cron remove "$@"', body)
+        self.assertIn("gbrain-refresh", body)
+        self.assertIn('"$HERMES_CLI"', body)
+
+    def test_create_uses_expected_flags(self) -> None:
+        body = _extract_function(self.src, "install_gbrain_refresh_cron")
+        self.assertIn("--no-agent", body)
+        self.assertIn("--script hermes-gbrain-refresh-cron.sh", body)
+        self.assertIn("--workdir", body)
+        self.assertIn("--name gbrain-refresh", body)
+        self.assertIn("every ${refresh_interval}m", body)
+
+
+class GbrainRefreshCronReconcileBehaviorTests(unittest.TestCase):
+    """Behavior tests for the reconcile comparison embedded in
+    install_gbrain_refresh_cron: the real Hermes interval schedule schema is
+    {"kind": "interval", "minutes": N}, and a matching existing job must be
+    recognized as already correct (exit 0) so the init does NOT perpetually
+    recreate it. The exact python heredoc from the init script is executed
+    against fixture jobs.json files."""
+
+    INTERVAL = 5
+    WORKDIR = "/opt/data"
+    SCRIPT = "hermes-gbrain-refresh-cron.sh"
+
+    def setUp(self) -> None:
+        self.src = _read(HERMES_INIT_PATH)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self._tmp.name)
+        match = re.search(
+            r'python3 - "\$jobs_file" "\$refresh_interval" "\$WORKSPACE_DIR" <<\'PY\'\n(.*?)\nPY',
+            self.src, re.DOTALL,
+        )
+        self.assertIsNotNone(match, "Could not find the refresh reconcile heredoc in init")
+        assert match is not None
+        self.reconcile_py = match.group(1)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _reconcile(self, fixture: dict) -> int:
+        jobs = self.tmpdir / "jobs.json"
+        jobs.write_text(json.dumps(fixture), encoding="utf-8")
+        result = subprocess.run(
+            ["python3", "-", str(jobs), str(self.INTERVAL), self.WORKDIR],
+            input=self.reconcile_py,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return result.returncode
+
+    def _owned_job(self, **overrides) -> dict:
+        job = {
+            "name": "gbrain-refresh",
+            "schedule": {"kind": "interval", "minutes": self.INTERVAL,
+                         "display": "every 5m"},
+            "script": self.SCRIPT,
+            "no_agent": True,
+            "workdir": self.WORKDIR,
+        }
+        job.update(overrides)
+        return job
+
+    def test_real_interval_fixture_is_recognized(self) -> None:
+        """{"kind":"interval","minutes":5} with the expected script/no_agent/
+        workdir must be treated as already-correct (exit 0), not recreated."""
+        fixture = {"jobs": [self._owned_job()]}
+        self.assertEqual(self._reconcile(fixture), 0)
+
+    def test_drifted_minutes_is_recreated(self) -> None:
+        fixture = {"jobs": [self._owned_job(schedule={"kind": "interval", "minutes": 30})]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_drifted_kind_is_recreated(self) -> None:
+        fixture = {"jobs": [self._owned_job(schedule={"kind": "cron", "expr": "0 5 * * *"})]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_drifted_script_is_recreated(self) -> None:
+        fixture = {"jobs": [self._owned_job(script="other-script.sh")]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_no_agent_false_is_recreated(self) -> None:
+        fixture = {"jobs": [self._owned_job(no_agent=False)]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_drifted_workdir_is_recreated(self) -> None:
+        fixture = {"jobs": [self._owned_job(workdir="/tmp/other")]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_bool_minutes_is_recreated(self) -> None:
+        """True is an int in Python but must not satisfy the interval check."""
+        fixture = {"jobs": [self._owned_job(schedule={"kind": "interval", "minutes": True})]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_string_schedule_shape_is_recreated(self) -> None:
+        """A schedule persisted as a bare string must be treated as drift, not
+        guessed into an enabled state."""
+        fixture = {"jobs": [self._owned_job(schedule="every 5m")]}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+    def test_absent_job_is_recreated(self) -> None:
+        fixture = {"jobs": []}
+        self.assertEqual(self._reconcile(fixture), 1)
+
+
 class GbrainEmbeddingRefreshTimeoutContractTests(unittest.TestCase):
     """The daily cron entrypoint must terminate its whole process group on
     timeout so a gbrain child holding the tasknotes flock cannot be orphaned,
@@ -1913,10 +2233,14 @@ class GbrainEmbeddingRefreshTimeoutContractTests(unittest.TestCase):
         self.compose = _read(REPO_ROOT / "docker-compose.yml")
 
     def test_cron_script_routes_through_timeout_helper(self) -> None:
+        """The cron must exec the helper with the fixed image interpreter in
+        isolated mode and an immutable helper path: no env redirection of the
+        helper, no PATH-resolved python."""
         self.assertIn(
-            'exec python3 "${GBRAIN_EMBED_REFRESH_HELPER:-/opt/josemar/scripts/hermes-gbrain-embedding-refresh.py}"',
+            'exec "/opt/hermes/.venv/bin/python3" -I "/opt/josemar/scripts/hermes-gbrain-embedding-refresh.py"',
             self.cron,
         )
+        self.assertNotIn("GBRAIN_EMBED_REFRESH_HELPER", self.cron)
         self.assertNotIn("josemar-gbrain refresh-embeddings", self.cron)
 
     def test_cron_script_constrains_helper_below_hermes_outer_timeout(self) -> None:
@@ -1979,7 +2303,11 @@ class GbrainEmbeddingRefreshTimeoutContractTests(unittest.TestCase):
         self.assertNotIn("flock(", self.helper)
 
     def test_helper_env_defaults(self) -> None:
-        self.assertIn("GBRAIN_EMBED_REFRESH_CMD", self.helper)
+        """The helper's command is an immutable constant (the environment
+        cannot redirect it to an uncooperative command); the bounded duration
+        knobs stay env-driven."""
+        self.assertIn('REFRESH_CMD = "/usr/local/bin/josemar-gbrain refresh-embeddings"', self.helper)
+        self.assertNotIn("GBRAIN_EMBED_REFRESH_CMD", self.helper)
         self.assertIn("240.0", self.helper)
         self.assertIn("GBRAIN_EMBED_REFRESH_KILL_GRACE", self.helper)
 
@@ -2054,13 +2382,15 @@ class GbrainBunArchiveLayoutContractTests(unittest.TestCase):
 
 
 class GbrainHomeSemanticsContractTests(unittest.TestCase):
-    """GBRAIN_HOME is a parent; state lives under $GBRAIN_HOME/.gbrain."""
+    """GBRAIN_HOME is the fixed canonical parent; state lives under
+    $GBRAIN_HOME/.gbrain."""
 
     def setUp(self) -> None:
         self.src = _read(WRAPPER_PATH)
 
-    def test_gbrain_home_default_is_parent(self) -> None:
-        self.assertRegex(self.src, r'GBRAIN_HOME="\$\{GBRAIN_HOME:-/opt/data\}"')
+    def test_gbrain_home_is_fixed(self) -> None:
+        self.assertIn('GBRAIN_HOME="/opt/data"', self.src)
+        self.assertNotIn("${GBRAIN_HOME:-", self.src)
 
     def test_state_dir_derived_from_home(self) -> None:
         self.assertIn('GBRAIN_STATE_DIR="${GBRAIN_HOME}/.gbrain"', self.src)

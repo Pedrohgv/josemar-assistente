@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import asdict
 from pathlib import Path
@@ -22,6 +23,19 @@ from tasknotes_mcp_core import (
 
 
 LOGGER = logging.getLogger("tasknotes-mcp")
+
+# TaskNotes is a trusted internal native gbrain user: it invokes the private
+# non-PATH native CLI directly (transaction-level lock ownership), never the
+# public adapter. The path is a fixed constant — no environment escape hatch;
+# tests inject a fake binary through the TaskNotesEngine constructor.
+TASKNOTES_GBRAIN_NATIVE = "/opt/josemar/libexec/gbrain-native"
+
+# Fixed deployment locations (issue #110): the vault, gbrain state, and the
+# shared lock never come from the caller's environment. Non-location
+# operational settings (TASKNOTES_LOCK_TIMEOUT, TZ) remain env-driven.
+TASKNOTES_VAULT = "/opt/data/obsidian"
+TASKNOTES_GBRAIN_HOME = "/opt/data"
+TASKNOTES_LOCK_DIR = "/opt/data/.locks"
 
 mcp = FastMCP(
     "tasknotes",
@@ -43,19 +57,35 @@ def _env_float(name: str, default: float) -> float:
         value = float(raw)
     except ValueError as exc:
         raise ValidationError(f"{name} must be a number") from exc
+    if not math.isfinite(value):
+        # nan/inf/-inf would make the lock wait unbounded or nonsensical.
+        raise ValidationError(f"{name} must be a finite number")
     if value <= 0:
         raise ValidationError(f"{name} must be greater than zero")
     return value
 
 
+def _assert_runtime_identity() -> None:
+    """The MCP must run as the hermes runtime user before any native gbrain
+    work: the global lock and PGLite must never be touched as root. Refuses
+    root execution outright (fail-closed, no env escape hatch); the check is
+    a direct effective-UID probe, compatible with the container runtime and
+    custom HERMES_UID deployments (any non-root uid is accepted)."""
+    if os.geteuid() == 0:
+        raise RuntimeError(
+            "tasknotes MCP refuses to run as root; start as the hermes runtime user"
+        )
+
+
 def _get_engine() -> TaskNotesEngine:
     global _ENGINE
     if _ENGINE is None:
+        _assert_runtime_identity()
         _ENGINE = TaskNotesEngine(
-            vault=Path(os.environ.get("GBRAIN_BRAIN_REPO", "/opt/data/obsidian")),
-            gbrain_bin=os.environ.get("TASKNOTES_GBRAIN_BIN", "/usr/local/bin/gbrain"),
-            gbrain_home=Path(os.environ.get("GBRAIN_HOME", "/opt/data")),
-            lock_dir=Path(os.environ.get("TASKNOTES_LOCK_DIR", "/opt/data/.locks")),
+            vault=Path(TASKNOTES_VAULT),
+            gbrain_bin=TASKNOTES_GBRAIN_NATIVE,
+            gbrain_home=Path(TASKNOTES_GBRAIN_HOME),
+            lock_dir=Path(TASKNOTES_LOCK_DIR),
             lock_timeout=_env_float("TASKNOTES_LOCK_TIMEOUT", 10.0),
             tz=os.environ.get("TZ", "UTC"),
         )

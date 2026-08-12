@@ -40,7 +40,7 @@ flowchart LR
   Agent --> Models[LLM Providers<br/>Ollama Cloud / Z.AI / DeepSeek]
   Agent --> CoreSkills[Repo Core Skills<br/>/opt/josemar/skills]
   Agent --> StateSkills[User State Skills<br/>/opt/data/skills]
-  Agent --> GBrain[Native gbrain CLI]
+  Agent --> GBrain[public gbrain CLI<br/>safe by default, issue #110]
   Agent --> TaskNotes[Bounded TaskNotes MCP]
   TaskNotes --> GBrain
   GBrain --> Vault[Obsidian Vault<br/>obsidian-vault volume<br/>canonical curated vault]
@@ -93,7 +93,7 @@ The state sync script only versions paths listed in `.sync-manifest`, uses the r
 
 ```mermaid
 flowchart LR
-  Hermes[Hermes Container<br/>/opt/data/obsidian] <--> GBrain[Native gbrain CLI]
+  Hermes[Hermes Container<br/>/opt/data/obsidian] <--> GBrain[public gbrain CLI<br/>safe by default, issue #110]
   GBrain <--> Vault[(obsidian-vault volume)]
   Vault <--> Syncthing[Syncthing Container]
   Syncthing <--> Tailscale[Tailscale Sidecar<br/>private network]
@@ -390,7 +390,7 @@ git-tracked state instead of the sensitive, untracked `/opt/data/config.yaml`.
 
 Current repo-shipped skills:
 
-- `gbrain`: native gbrain vault interface (search, get, capture, put, link, backlinks) used directly via the pinned `gbrain` CLI. Keyword-only search by default (text keyword-only, image/cross-modal rejected, put/capture do not embed); opt-in TEI E5 semantic/hybrid retrieval via `gbrain query --no-expand` (issue #65) makes both `search` and `query` hybrid/semantic. Operator activation via `josemar-gbrain reindex`; periodic manual-edit reconciliation via `josemar-gbrain refresh` every 5 minutes by default. See `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval".
+- `gbrain`: native gbrain vault interface (search, get, capture, put, link, backlinks), agent-facing access via the public `gbrain` command, which is safe by default (issue #110 transparent wrapper). Keyword-only search by default (text keyword-only, image/cross-modal rejected, put/capture do not embed); opt-in TEI E5 semantic/hybrid retrieval via `gbrain query --no-expand` (issue #65) makes both `search` and `query` hybrid/semantic. Operator activation via `josemar-gbrain reindex`; periodic manual-edit reconciliation via `josemar-gbrain refresh` every 5 minutes by default. See `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval".
 - `tasknotes`: bounded durable-task lifecycle through the `task_*` MCP tools. Native gbrain remains the backend and sole task writer. See `docs/tasknotes-mcp.md` for prerequisites and recovery.
 - `aux-ml`: skill interface for queue-based auxiliary ML jobs.
 - `workspace-sync`: skill interface for workspace git sync, status, commit, and push flows.

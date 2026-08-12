@@ -501,8 +501,9 @@ suppression patches).
   `josemar-gbrain embed-backfill` (one-time existing-vault vectorization that
   finalizes the native migration state; shared TaskNotes lock, concurrency 1,
   retryable, verifies zero stale), then both `gbrain search` and
-  `gbrain query --no-expand` use the hybrid/semantic provider path (not exact
-  keyword). Before enable or after `disable-embeddings`, text queries are
+  `gbrain query --no-expand` use the hybrid/semantic provider path
+  (not exact keyword). Before enable or after `disable-embeddings`, text
+  queries are
   keyword-only, image/cross-modal queries are rejected, and `put`/`capture` do
   not embed. The 5-min refresh stays `--no-embed`; manual vault edits need a
   later explicit `embed-backfill` in phase one. Safe rollback runs
@@ -532,8 +533,9 @@ backup overlay (provision the `crypt` remote secret), and validating with ≥50
 labeled Portuguese queries. gbrain embeddings activation is documented as the
 intended operator flow in `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI
 E5 Semantic/Hybrid Retrieval" (deploy overlay → verify TEI →
-`enable-embeddings` → `embed-backfill`; after both, `gbrain search` and
-`gbrain query --no-expand` are hybrid/semantic). These are separate,
+`enable-embeddings` → `embed-backfill`; after both, `gbrain search`
+and `gbrain query --no-expand` are hybrid/semantic). These are
+separate,
 explicitly-gated steps.
 
 ## Recommended Staged Transition and Rollback

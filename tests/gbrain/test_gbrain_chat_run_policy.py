@@ -1,0 +1,349 @@
+"""Policy contract: agent-facing instruction docs must use the public `gbrain`
+command (issue #110 transparent safe wrapper), never the internal private
+native gbrain path or the temporary compatibility alias.
+
+Policy (issue #110, transparent-wrapper UX):
+- ALL chat/skill/external general vault access uses the public `gbrain`
+  command, which is safe by default: it transparently provides the
+  safe-adapter behavior (runs as the `hermes` runtime user under the shared
+  TaskNotes/gbrain lock).
+- `gbrain-chat-run` is a TEMPORARY COMPATIBILITY ALIAS: it may appear only on
+  lines that document it as such (alias/compatibility wording) or in dated
+  historical incident records. New instructions must use the public `gbrain`.
+- The internal private native gbrain path (used by the `josemar-gbrain`
+  operator wrapper, both refresh crons, and the TaskNotes MCP) must never be
+  presented as an agent command: internal operator commands (`init`, `sync`,
+  `extract`, `schema`, `embed`, `migrate`, `sources`) may appear only in the
+  operator documentation files that describe those locked paths.
+- TaskNotes mutations go through the `task_*` MCP tools only; the TaskNotes
+  internal source-routed write (`gbrain capture --stdin --slug`) is documented
+  only in TaskNotes docs and the operator runbook.
+- Prohibitions ("never use `gbrain put --stdin`") and upstream terminology
+  (`gbrain sources harden`, `gbrain autopilot --install`, skillpack
+  references) remain allowed and need no exception.
+
+Agent command inventory (must match the runtime public surface):
+- ALLOWED agent-facing spellings include `gbrain restore` and
+  `gbrain schema-status` (hyphenated).
+- NOT agent-facing: `gbrain schema_status` (underscore spelling is not a
+  command), `gbrain jobs` and `gbrain chronicle-backfill` (operator-only),
+  and `gbrain put --stdin` (forbidden; use `capture --stdin`/`capture --file`).
+  These may appear only in operator documentation or in explicit
+  prohibition/operator-only statements.
+
+The scan is deliberately conservative: in prose, a bare `gbrain <cmd>` counts
+only when backticked (a command token); inside fenced code blocks every
+occurrence counts (command context). When in doubt, change the example to the
+public `gbrain` command rather than waiving it here.
+"""
+
+import re
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+SCANNED = [
+    REPO_ROOT / "AGENTS.md",
+    REPO_ROOT / "README.md",
+    REPO_ROOT / ".env.example",
+    *sorted((REPO_ROOT / "docs").glob("*.md")),
+    *sorted((REPO_ROOT / "skills-factory").rglob("*.md")),
+    REPO_ROOT / "agent-state" / "AGENTS.md",
+    *sorted((REPO_ROOT / "agent-state" / "skills").rglob("*.md")),
+]
+
+# Operator documentation files that legitimately describe the internal
+# operator/cron implementation paths (init/sync/extract/schema/embed/sources).
+OPERATOR_FILES = {
+    "docs/gbrain-operations.md",
+    "docs/tasknotes-mcp.md",
+    "docs/memory-embeddings-evaluation.md",
+    ".env.example",
+    "skills-factory/gbrain/SKILL.md",
+}
+
+# Files documenting the TaskNotes MCP internal implementation (sole task
+# writer) — the only place the internal source-routed write path appears.
+TASKNOTES_FILES = {
+    "skills-factory/tasknotes/SKILL.md",
+    "skills-factory/tasknotes/references/custom-fields.md",
+    "docs/tasknotes-mcp.md",
+}
+
+# Dated incident record: the tool trace documents what actually ran on
+# 2026-07-03, before the safe wrapper shipped. Rewriting it would falsify the
+# record; it must carry the annotation added by the issue #110 docs pass.
+HISTORICAL_FILES = {
+    "agent-state/skills/calendar-report/references/incident-2026-07-03.md",
+}
+
+# Native gbrain subcommands that are operator/cron-internal only; presenting
+# them as agent-facing commands would expose the internal private native path.
+_INTERNAL_CMDS = (
+    "init", "sync", "extract", "schema", "embed", "migrate", "sources",
+)
+_INTERNAL_ALT = "|".join(sorted(_INTERNAL_CMDS, key=len, reverse=True))
+
+_ALIAS_RE = re.compile(r"gbrain-chat-run")
+_ALIAS_DOC_RE = re.compile(r"alias|compatib", re.IGNORECASE)
+# The lookbehind excludes "josemar-gbrain ..." and "gbrain-chat-run ..." (the
+# hyphen binds "gbrain" to a longer token); the trailing guard keeps
+# "gbrain schema-status" (an agent-facing command) from matching "schema".
+_INTERNAL_FENCE_RE = re.compile(
+    rf"(?<![\w-])gbrain\s+({_INTERNAL_ALT})(?![-\w])"
+)
+_INTERNAL_PROSE_RE = re.compile(
+    rf"`(?<![\w-])gbrain\s+({_INTERNAL_ALT})(?![-\w])"
+)
+_TASKNOTES_WRITE_RE = re.compile(r"gbrain capture --stdin --slug[^\n]*--source")
+
+# Agent command inventory guards (see module docstring).
+_PROHIBITION_WORDS = re.compile(
+    r"never|not|banned|unsafe|forbid|avoid|don'?t", re.IGNORECASE
+)
+_OPERATOR_CTX_WORDS = re.compile(
+    r"operator|maintenance|chat action|agent-facing surface", re.IGNORECASE
+)
+_SCHEMA_STATUS_UNDERSCORE_RE = re.compile(r"gbrain schema_status\b")
+_PUT_STDIN_RE = re.compile(r"(?<![\w-])gbrain put --stdin\b")
+_JOBS_RE = re.compile(r"(?<![\w-])gbrain jobs\b")
+_CHRONICLE_BACKFILL_RE = re.compile(r"(?<![\w-])gbrain chronicle-backfill\b")
+
+
+def _rel(path: Path) -> str:
+    return path.relative_to(REPO_ROOT).as_posix()
+
+
+def _iter_matches(lines, fence_re, prose_re):
+    in_fence = False
+    for lineno, raw in enumerate(lines, start=1):
+        stripped = raw.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        regex = fence_re if in_fence else prose_re
+        for m in regex.finditer(raw):
+            yield lineno, raw
+
+
+class GbrainTransparentWrapperPolicyTest(unittest.TestCase):
+    """Agent-facing docs must use public `gbrain`, not the alias or the
+    internal private native path."""
+
+    def test_gbrain_chat_run_alias_not_recommended(self):
+        violations = []
+        for path in SCANNED:
+            if not path.exists() or _rel(path) in HISTORICAL_FILES:
+                continue
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for lineno, line in enumerate(lines, start=1):
+                if not _ALIAS_RE.search(line):
+                    continue
+                # The alias-documentation wording may wrap across lines; check
+                # a small window around the mention.
+                window = "\n".join(lines[max(0, lineno - 2): lineno + 1])
+                if not _ALIAS_DOC_RE.search(window):
+                    violations.append((_rel(path), lineno, line.strip()))
+        self.assertEqual(
+            [],
+            violations,
+            "`gbrain-chat-run` is a temporary compatibility alias and must not "
+            "be recommended in instructions; every mention must document it as "
+            "such (alias/compatibility wording) or live in a dated historical "
+            "incident record.\n"
+            + "\n".join(f"{rel}:{lineno}: {text}" for rel, lineno, text in violations),
+        )
+
+    def test_internal_native_commands_scoped_to_operator_docs(self):
+        violations = []
+        for path in SCANNED:
+            if not path.exists() or _rel(path) in HISTORICAL_FILES:
+                continue
+            rel = _rel(path)
+            if rel in OPERATOR_FILES:
+                continue
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for lineno, line in _iter_matches(lines, _INTERNAL_FENCE_RE, _INTERNAL_PROSE_RE):
+                violations.append((rel, lineno, line.strip()))
+        self.assertEqual(
+            [],
+            violations,
+            "Internal operator/cron native gbrain commands (init/sync/extract/"
+            "schema/embed/migrate/sources) describe the internal private native "
+            "path and must not appear in agent-facing instructions outside the "
+            "operator documentation (docs/gbrain-operations.md, "
+            "docs/tasknotes-mcp.md, docs/memory-embeddings-evaluation.md, "
+            ".env.example, skills-factory/gbrain/SKILL.md).\n"
+            + "\n".join(f"{rel}:{lineno}: {text}" for rel, lineno, text in violations),
+        )
+
+    def test_tasknotes_internal_write_scoped_to_tasknotes_docs(self):
+        allowed = TASKNOTES_FILES | {"docs/gbrain-operations.md"}
+        violations = []
+        for path in SCANNED:
+            if not path.exists() or _rel(path) in HISTORICAL_FILES:
+                continue
+            rel = _rel(path)
+            if rel in allowed:
+                continue
+            text = path.read_text(encoding="utf-8")
+            if _TASKNOTES_WRITE_RE.search(text):
+                violations.append(rel)
+        self.assertEqual(
+            [],
+            violations,
+            "The TaskNotes internal source-routed write "
+            "(`gbrain capture --stdin --slug`) is TaskNotes implementation "
+            "detail and may be documented only in TaskNotes docs or the "
+            "operator runbook.",
+        )
+
+    def test_rejected_agent_commands_only_in_operator_or_prohibition_context(
+        self,
+    ):
+        """schema_status/jobs/chronicle-backfill/put --stdin must not appear as
+        agent-facing command examples; only operator documentation,
+        prohibition statements, or explicit operator-only context allows
+        them."""
+        violations = []
+        for path in SCANNED:
+            if not path.exists() or _rel(path) in HISTORICAL_FILES:
+                continue
+            rel = _rel(path)
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for idx, line in enumerate(lines):
+                if _SCHEMA_STATUS_UNDERSCORE_RE.search(line):
+                    violations.append(
+                        (rel, idx + 1, line.strip(),
+                         "schema_status is not a command; agent-facing "
+                         "spelling is `gbrain schema-status`")
+                    )
+                if _PUT_STDIN_RE.search(line) and not _PROHIBITION_WORDS.search(
+                    line
+                ):
+                    violations.append(
+                        (rel, idx + 1, line.strip(),
+                         "gbrain put --stdin is forbidden; use capture "
+                         "--stdin/--file (prohibition wording required)")
+                    )
+                if rel in OPERATOR_FILES:
+                    continue
+                window = "\n".join(lines[max(0, idx - 2): idx + 1])
+                if _JOBS_RE.search(line) and not (
+                    _OPERATOR_CTX_WORDS.search(window)
+                    or _PROHIBITION_WORDS.search(window)
+                ):
+                    violations.append(
+                        (rel, idx + 1, line.strip(),
+                         "gbrain jobs is operator-only (chronicle extraction)")
+                    )
+                if _CHRONICLE_BACKFILL_RE.search(line) and not (
+                    _OPERATOR_CTX_WORDS.search(window)
+                    or _PROHIBITION_WORDS.search(window)
+                ):
+                    violations.append(
+                        (rel, idx + 1, line.strip(),
+                         "gbrain chronicle-backfill is operator-only")
+                    )
+        self.assertEqual(
+            [],
+            violations,
+            "Rejected agent commands found outside their allowed "
+            "operator/prohibition context.\n"
+            + "\n".join(
+                f"{rel}:{lineno}: {text} ({why})"
+                for rel, lineno, text, why in violations
+            ),
+        )
+
+    def test_agent_command_inventory_spellings(self):
+        """Agent-facing docs must use the real runtime spellings: hyphenated
+        `schema-status` and `restore` are documented agent commands."""
+        agent_state = (REPO_ROOT / "agent-state/AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+        for token in ("`schema-status`", "`restore`"):
+            self.assertIn(
+                token,
+                agent_state,
+                f"agent-state/AGENTS.md must document agent-facing `{token}`",
+            )
+        skill = (REPO_ROOT / "skills-factory/gbrain/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "gbrain restore",
+            skill,
+            "gbrain skill must document agent-facing `gbrain restore`",
+        )
+
+    def test_public_gbrain_required_in_policy_docs(self):
+        for rel in (
+            "AGENTS.md",
+            "docs/gbrain-operations.md",
+            "skills-factory/gbrain/SKILL.md",
+            "agent-state/AGENTS.md",
+        ):
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            self.assertIn(
+                "public `gbrain`",
+                text,
+                f"{rel}: must state that the public `gbrain` command is the "
+                "agent-facing interface (issue #110)",
+            )
+        # The compatibility alias must be documented somewhere in the policy.
+        runbook = (REPO_ROOT / "docs/gbrain-operations.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "temporary compatibility alias",
+            runbook,
+            "docs/gbrain-operations.md: must document `gbrain-chat-run` as a "
+            "temporary compatibility alias",
+        )
+
+    def test_historical_incident_record_annotated(self):
+        for rel in HISTORICAL_FILES:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            self.assertIn(
+                "> **Historical record.**",
+                text,
+                f"{rel}: historical incident record lost its annotation",
+            )
+
+    def test_scanned_files_exist(self):
+        missing = [str(p) for p in SCANNED if not p.exists()]
+        self.assertEqual([], missing, "Expected scan targets are missing")
+
+    def test_runtime_allowlist_matches_policy_inventory(self):
+        """The runtime adapter exports a mechanical command inventory; this
+        policy suite asserts against it instead of a fragile duplicate list:
+        internal operator commands are absent, restore is public, jobs and
+        chronicle-backfill are operator-only, put --stdin is rejected."""
+        import importlib.util
+
+        repo_root = Path(__file__).resolve().parents[2]
+        adapter = repo_root / "scripts" / "gbrain_chat_run.py"
+        spec = importlib.util.spec_from_file_location("gbrain_chat_run_inv", adapter)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        inventory = mod.CHAT_COMMAND_INVENTORY
+        subcommands = set(inventory["subcommands"])
+        for internal in _INTERNAL_CMDS:
+            if internal == "sources":
+                # sources is public ONLY as read-only `sources list`.
+                self.assertEqual(inventory["subsubcommands"]["sources"], ["list"])
+            else:
+                self.assertNotIn(internal, subcommands, internal)
+        for op in inventory["operator_only"]:
+            self.assertNotIn(op, subcommands, op)
+        self.assertIn("restore", subcommands)
+        self.assertNotIn("jobs", subcommands)
+        self.assertNotIn("chronicle-backfill", subcommands)
+        self.assertIn("--stdin", inventory["rejected_arguments"]["put"])
+
+
+if __name__ == "__main__":
+    unittest.main()
