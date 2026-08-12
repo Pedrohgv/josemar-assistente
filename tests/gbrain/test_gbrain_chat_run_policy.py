@@ -43,15 +43,25 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+PRIVATE_STATE_ROOT = REPO_ROOT / "agent-state"
+
 SCANNED = [
     REPO_ROOT / "AGENTS.md",
     REPO_ROOT / "README.md",
     REPO_ROOT / ".env.example",
     *sorted((REPO_ROOT / "docs").glob("*.md")),
     *sorted((REPO_ROOT / "skills-factory").rglob("*.md")),
-    REPO_ROOT / "agent-state" / "AGENTS.md",
-    *sorted((REPO_ROOT / "agent-state" / "skills").rglob("*.md")),
 ]
+
+# agent-state is a private nested repository. It is present in local/runtime
+# checkouts but deliberately absent from public CI checkouts.
+if PRIVATE_STATE_ROOT.is_dir():
+    SCANNED.extend(
+        [
+            PRIVATE_STATE_ROOT / "AGENTS.md",
+            *sorted((PRIVATE_STATE_ROOT / "skills").rglob("*.md")),
+        ]
+    )
 
 # Operator documentation files that legitimately describe the internal
 # operator/cron implementation paths (init/sync/extract/schema/embed/sources).
@@ -260,15 +270,15 @@ class GbrainTransparentWrapperPolicyTest(unittest.TestCase):
     def test_agent_command_inventory_spellings(self):
         """Agent-facing docs must use the real runtime spellings: hyphenated
         `schema-status` and `restore` are documented agent commands."""
-        agent_state = (REPO_ROOT / "agent-state/AGENTS.md").read_text(
-            encoding="utf-8"
-        )
-        for token in ("`schema-status`", "`restore`"):
-            self.assertIn(
-                token,
-                agent_state,
-                f"agent-state/AGENTS.md must document agent-facing `{token}`",
-            )
+        agent_state_path = PRIVATE_STATE_ROOT / "AGENTS.md"
+        if agent_state_path.exists():
+            agent_state = agent_state_path.read_text(encoding="utf-8")
+            for token in ("`schema-status`", "`restore`"):
+                self.assertIn(
+                    token,
+                    agent_state,
+                    f"agent-state/AGENTS.md must document agent-facing `{token}`",
+                )
         skill = (REPO_ROOT / "skills-factory/gbrain/SKILL.md").read_text(
             encoding="utf-8"
         )
@@ -279,12 +289,14 @@ class GbrainTransparentWrapperPolicyTest(unittest.TestCase):
         )
 
     def test_public_gbrain_required_in_policy_docs(self):
-        for rel in (
+        required_docs = [
             "AGENTS.md",
             "docs/gbrain-operations.md",
             "skills-factory/gbrain/SKILL.md",
-            "agent-state/AGENTS.md",
-        ):
+        ]
+        if (PRIVATE_STATE_ROOT / "AGENTS.md").exists():
+            required_docs.append("agent-state/AGENTS.md")
+        for rel in required_docs:
             text = (REPO_ROOT / rel).read_text(encoding="utf-8")
             self.assertIn(
                 "public `gbrain`",
@@ -305,7 +317,10 @@ class GbrainTransparentWrapperPolicyTest(unittest.TestCase):
 
     def test_historical_incident_record_annotated(self):
         for rel in HISTORICAL_FILES:
-            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            path = REPO_ROOT / rel
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
             self.assertIn(
                 "> **Historical record.**",
                 text,
