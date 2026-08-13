@@ -215,6 +215,33 @@ class _WorkspaceSyncTest(GitEnvIsolation, unittest.TestCase):
             check=False,
         )
 
+    def _run_target_argv(
+        self,
+        args: list[str],
+        *,
+        input_text: str = "",
+        devnull: bool = False,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run the canonical executable with explicit argv and given stdin.
+
+        With ``devnull=True`` the child gets ``/dev/null`` as stdin (no
+        stdin at all); otherwise ``input_text`` is piped in.
+        """
+        env = os.environ.copy()
+        env["WORKSPACE_DIR"] = str(self.repo.workspace)
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            [sys.executable, str(TARGET_PY_MODULE), *args],
+            input=None if devnull else input_text,
+            stdin=subprocess.DEVNULL if devnull else None,
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+
 
 # ===========================================================================
 # Lifecycle characterization — approved behavior of workspace-sync.sh
@@ -2439,6 +2466,421 @@ sys.exit(result.returncode)
             overlap_file.exists(),
             "Critical sections overlapped",
         )
+
+
+# ===========================================================================
+# Terminal argv contract — issue #114 bare CLI
+# ===========================================================================
+
+
+@unittest.skipUnless(
+    _target_module_exists(),
+    "scripts/workspace_sync.py not yet implemented (phase 2); terminal contract tests skip.",
+)
+class TerminalArgvContract(_WorkspaceSyncTest):
+    """Issue #114: bare-argv terminal CLI for every tool action.
+
+    Sole home for the terminal argv contract. Covers:
+
+    - Every action success path: status, diff, log (default 10 and
+      explicit COUNT), commit (default and explicit message), sync
+      (default and explicit message), push, pull, gh.
+    - stdin never consumed: empty, malformed, and malicious
+      other-action JSON on stdin is ignored — the argv action wins.
+    - Parity with the JSON stdin path: terminal status emits the exact
+      same JSON document as ``{"action": "status"}`` (shared dispatch).
+    - Rejection of unknown actions, wrong arity, invalid log COUNTs,
+      and `gh` without a command: nonzero, concise stderr (reason +
+      usage), zero stdout, no workspace mutation.
+    - gh argv preserved losslessly to the gh binary (spaces, quotes,
+      shell metacharacters); no shell is ever involved.
+    - Lifecycle preserved: ``startup``/``periodic`` argv still route to
+      lifecycle, emit no JSON on stdout, and exit 0 on an unchanged
+      repo.
+
+    No-argv behavior is unchanged and covered elsewhere: JSON stdin
+    status/diff/log/commit/sync and slash-command parsing remain green
+    in ``ToolCharacterization``/``UnifiedTargetContract``, malformed
+    JSON stdin still emits exactly one error JSON, and the full
+    startup/periodic semantics remain covered by
+    ``LifecycleCharacterization``.
+    """
+
+    def setUp(self) -> None:
+        self.setUpRepo()
+
+    def tearDown(self) -> None:
+        self.tearDownRepo()
+
+    # -- helpers --
+
+    def _install_recording_gh(self) -> tuple[Path, Path]:
+        """Install a recording stub `gh` on PATH; returns (stub_dir, record_file)."""
+        stub_dir = Path(self._mk_temp_dir())
+        record_dir = Path(self._mk_temp_dir())
+        record_file = record_dir / "gh_argv.jsonl"
+        stub_gh = stub_dir / "gh"
+        stub_gh.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "import sys\n"
+            f"record = {str(record_file)!r}\n"
+            "with open(record, 'a') as f:\n"
+            "    f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "print('stub-gh-ok:' + '|'.join(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        stub_gh.chmod(0o755)
+        return stub_dir, record_file
+
+    def _gh_env(self, stub_dir: Path) -> dict[str, str]:
+        env = os.environ.copy()
+        env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
+        env["HOME"] = self._mk_temp_dir()
+        return env
+
+    def _read_gh_records(self, record_file: Path) -> list[list[str]]:
+        if not record_file.exists():
+            return []
+        return [
+            cast(list[str], json.loads(line))
+            for line in record_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    # -- success paths --
+
+    def test_terminal_status_diff_success(self) -> None:
+        """Bare `status`/`diff` argv succeed with /dev/null stdin."""
+        for args, expected_action in ((["status"], "status"), (["diff"], "diff")):
+            with self.subTest(args=args):
+                result = self._run_target_argv(args, devnull=True)
+                self.assertEqual(0, result.returncode, result.stderr)
+                doc = json.loads(result.stdout)
+                self.assertTrue(doc["success"])
+                self.assertEqual(expected_action, doc["action"])
+
+    def test_terminal_log_default_and_explicit_count(self) -> None:
+        """`log` defaults to 10 commits; a positive COUNT is honored."""
+        for i in range(1, 13):
+            self.repo.git(["commit", "-qm", f"commit-{i}", "--allow-empty"])
+        for argv, expected in (
+            (["log"], 10),
+            (["log", "1"], 1),
+            (["log", "3"], 3),
+            (["log", "12"], 12),
+        ):
+            with self.subTest(argv=argv):
+                result = self._run_target_argv(argv)
+                self.assertEqual(0, result.returncode, result.stderr)
+                doc = json.loads(result.stdout)
+                self.assertTrue(doc["success"])
+                self.assertEqual("log", doc["action"])
+                self.assertEqual(expected, len(cast(list[str], doc["commits"])))
+
+    def test_terminal_commit_default_and_explicit_message(self) -> None:
+        """`commit` defaults to 'Manual commit'; remaining argv joins as message."""
+        self.repo.build_dirty_worktree("notes/a.md", "a\n")
+        result = self._run_target_argv(["commit"])
+        self.assertEqual(0, result.returncode, result.stderr)
+        doc = json.loads(result.stdout)
+        self.assertTrue(doc["success"])
+        self.assertEqual("commit", doc["action"])
+        self.assertEqual("Manual commit", doc["message"])
+        # Explicit multi-word message joined with single spaces.
+        self.repo.build_dirty_worktree("notes/b.md", "b\n")
+        result = self._run_target_argv(["commit", "fix", "the", "bug"])
+        self.assertEqual(0, result.returncode, result.stderr)
+        doc = json.loads(result.stdout)
+        self.assertTrue(doc["success"])
+        self.assertEqual("fix the bug", doc["message"])
+
+    def test_terminal_sync_default_and_explicit_message(self) -> None:
+        """`sync` defaults to 'Auto-sync'; remaining argv joins and pushes."""
+        self.repo.build_dirty_worktree("notes/a.md", "a\n")
+        self.repo.push_to_remote()
+        result = self._run_target_argv(["sync"])
+        self.assertEqual(0, result.returncode, result.stderr)
+        doc = json.loads(result.stdout)
+        self.assertTrue(doc["success"])
+        self.assertEqual("sync", doc["action"])
+        self.assertTrue(doc["push"])
+        self.repo.assert_remote_tracks_file("notes/a.md", "a\n")
+        # The default message must have been used for the commit (the
+        # sync success JSON does not echo the message by contract).
+        subject = self.repo.git(["log", "-1", "--format=%s"]).stdout.strip()
+        self.assertEqual("Auto-sync", subject)
+        # Explicit message.
+        self.repo.build_dirty_worktree("notes/b.md", "b\n")
+        result = self._run_target_argv(["sync", "deploy", "v2"])
+        self.assertEqual(0, result.returncode, result.stderr)
+        doc = json.loads(result.stdout)
+        self.assertTrue(doc["success"])
+        self.assertTrue(doc["push"])
+        self.repo.assert_remote_tracks_file("notes/b.md", "b\n")
+        subject = self.repo.git(["log", "-1", "--format=%s"]).stdout.strip()
+        self.assertEqual("deploy v2", subject)
+
+    def test_terminal_push_success(self) -> None:
+        """Bare `push` argv pushes the local-ahead commit."""
+        self.repo.build_clean_local_ahead("notes/keep.md", "push-content\n")
+        result = self._run_target_argv(["push"])
+        self.assertEqual(0, result.returncode, result.stderr)
+        doc = json.loads(result.stdout)
+        self.assertTrue(doc["success"])
+        self.assertEqual("push", doc["action"])
+        self.repo.assert_remote_tracks_file("notes/keep.md", "push-content\n")
+
+    def test_terminal_pull_success(self) -> None:
+        """Bare `pull` argv merges the remote-ahead commit."""
+        self.repo.build_remote_ahead("notes/keep.md", "from-remote\n")
+        result = self._run_target_argv(["pull"])
+        self.assertEqual(0, result.returncode, result.stderr)
+        doc = json.loads(result.stdout)
+        self.assertTrue(doc["success"])
+        self.assertEqual("pull", doc["action"])
+        content = (Path(self.repo.workspace) / "notes" / "keep.md").read_text(encoding="utf-8")
+        self.assertEqual("from-remote\n", content)
+
+    def test_terminal_gh_success(self) -> None:
+        """Bare `gh` argv runs the command and echoes the joined command."""
+        stub_dir, record_file = self._install_recording_gh()
+        result = self._run_target_argv(
+            ["gh", "repo", "view", "owner/repo"], extra_env=self._gh_env(stub_dir)
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        doc = json.loads(result.stdout)
+        self.assertTrue(doc["success"])
+        self.assertEqual("gh", doc["action"])
+        self.assertEqual(0, doc["exit_code"])
+        self.assertEqual("repo view owner/repo", doc["command"])
+        self.assertEqual([["repo", "view", "owner/repo"]], self._read_gh_records(record_file))
+
+    # -- stdin never consumed --
+
+    def test_terminal_status_ignores_stdin(self) -> None:
+        """`status` argv never reads stdin: empty, malformed, or other-action JSON.
+
+        If the terminal shortcut read stdin as JSON, malformed input
+        would fail and a commit/gh payload would dispatch that action
+        instead of status. Both must not happen.
+        """
+        for stdin_data in (
+            "",
+            "not valid json {{{",
+            json.dumps({"action": "commit", "message": "must not run"}),
+            json.dumps({"action": "gh", "command": "repo view owner/repo"}),
+        ):
+            with self.subTest(stdin=stdin_data[:24]):
+                result = self._run_target_argv(["status"], input_text=stdin_data)
+                self.assertEqual(0, result.returncode, result.stderr)
+                doc = json.loads(result.stdout)
+                self.assertTrue(doc["success"])
+                # The dispatched action is always status, never the
+                # stdin payload's action.
+                self.assertEqual("status", doc["action"])
+
+    def test_terminal_sync_ignores_stdin_payload(self) -> None:
+        """A mutating argv action wins over a conflicting stdin payload."""
+        self.repo.build_dirty_worktree("notes/a.md", "a\n")
+        self.repo.push_to_remote()
+        result = self._run_target_argv(
+            ["sync"], input_text=json.dumps({"action": "gh", "command": "repo view"})
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        doc = json.loads(result.stdout)
+        # sync ran — not the gh payload that stdin would have requested.
+        self.assertTrue(doc["success"])
+        self.assertEqual("sync", doc["action"])
+        self.repo.assert_remote_tracks_file("notes/a.md", "a\n")
+        # Garbage stdin is equally ignored.
+        self.repo.build_dirty_worktree("notes/b.md", "b\n")
+        result = self._run_target_argv(["sync"], input_text="not valid json {{{")
+        self.assertEqual(0, result.returncode, result.stderr)
+        doc = json.loads(result.stdout)
+        self.assertTrue(doc["success"])
+        self.assertEqual("sync", doc["action"])
+        self.repo.assert_remote_tracks_file("notes/b.md", "b\n")
+
+    # -- parity with JSON stdin path --
+
+    def test_terminal_status_matches_json_status_dispatch(self) -> None:
+        """Terminal status emits the same JSON as ``{"action": "status"}`` stdin.
+
+        Proves the terminal shortcut routes through the exact shared
+        payload dispatch — no separate implementation drift.
+        """
+        argv_result = self._run_target_argv(["status"], input_text="")
+        json_result = self._run_target_tool({"action": "status"})
+        self.assertEqual(0, argv_result.returncode, argv_result.stderr)
+        self.assertEqual(0, json_result.returncode, json_result.stderr)
+        self.assertEqual(
+            json.loads(json_result.stdout),
+            json.loads(argv_result.stdout),
+            "terminal status must route through the exact JSON payload dispatch",
+        )
+
+    # -- rejection: unknown actions, arity, count, gh command --
+
+    def test_terminal_rejects_unknown_actions(self) -> None:
+        """Unknown/case-variant/flag argv and lifecycle misuse are rejected."""
+        invalid_argv: tuple[tuple[str, ...], ...] = (
+            ("STATUS",),
+            ("Status",),
+            ("Status ",),
+            ("--status",),
+            ("-s",),
+            ("bogus",),
+            ("syncx",),
+            ("startup", "extra"),
+            ("periodic", "extra"),
+            ("startup", "status"),
+            ("periodic", "status"),
+            ("",),
+        )
+        for argv in invalid_argv:
+            with self.subTest(argv=argv):
+                result = self._run_target_argv(list(argv), devnull=True)
+                self.assertNotEqual(0, result.returncode, f"argv {argv} must be rejected")
+                self.assertIn("Unknown mode", result.stderr)
+                self.assertIn("Usage", result.stderr)
+                self.assertEqual("", result.stdout)
+
+    def test_terminal_rejects_invalid_arity(self) -> None:
+        """Exact-arity actions reject extra args; log rejects more than one."""
+        invalid_argv: tuple[tuple[tuple[str, ...], str], ...] = (
+            (("status", "extra"), "takes no arguments"),
+            (("status", "--json"), "takes no arguments"),
+            (("status", "startup"), "takes no arguments"),
+            (("status", "status"), "takes no arguments"),
+            (("diff", "x"), "takes no arguments"),
+            (("push", "extra"), "takes no arguments"),
+            (("pull", "extra"), "takes no arguments"),
+            (("log", "5", "extra"), "at most one"),
+            (("log", "extra", "more"), "at most one"),
+        )
+        for argv, reason in invalid_argv:
+            with self.subTest(argv=argv):
+                result = self._run_target_argv(list(argv), devnull=True)
+                self.assertNotEqual(0, result.returncode, f"argv {argv} must be rejected")
+                self.assertIn(reason, result.stderr)
+                self.assertIn("Usage", result.stderr)
+                self.assertEqual("", result.stdout)
+
+    def test_terminal_rejects_invalid_log_count(self) -> None:
+        """`log` COUNT must be exactly one positive decimal integer.
+
+        Includes ``²`` (unicode superscript two, passes ``isdigit()``)
+        and a 5000-digit oversize count (beyond Python's int() limit):
+        both must be rejected cleanly — no int() crash, no traceback.
+        """
+        for count in ("0", "-1", "abc", "1.5", "", "1e3", "--json", "+3", "²", "9" * 5000):
+            with self.subTest(count=count):
+                result = self._run_target_argv(["log", count], devnull=True)
+                self.assertNotEqual(0, result.returncode, f"log {count!r} must be rejected")
+                self.assertIn("positive decimal integer", result.stderr)
+                self.assertIn("Usage", result.stderr)
+                self.assertEqual("", result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_terminal_gh_requires_command(self) -> None:
+        """Bare `gh` with no command is rejected before any gh invocation."""
+        result = self._run_target_argv(["gh"], devnull=True)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("requires a command", result.stderr)
+        self.assertIn("Usage", result.stderr)
+        self.assertEqual("", result.stdout)
+
+    # -- gh argv preservation / no shell --
+
+    def test_terminal_gh_exact_argv_preservation_no_shell(self) -> None:
+        """gh argv reaches the binary losslessly; no shell interpretation.
+
+        Args containing spaces, literal quotes, ``$VAR``, ``$(...)``,
+        backticks, and ``;`` must be recorded verbatim by the stub gh.
+        If the tool joined argv and ran it through a shell, ``$HOME``
+        would expand, ``$(id)`` would execute, and the ``; touch``
+        marker would appear — none may happen.
+        """
+        stub_dir, record_file = self._install_recording_gh()
+        marker = Path(self._mk_temp_dir()) / "shell-marker"
+        cases: list[list[str]] = [
+            ["gh", "issue", "list", "--search", "a b c"],
+            ["gh", "pr", "create", "--title", 'say "hi"', "--body", "a; b `c` $d $(e)"],
+            ["gh", "api", "repos/x/issues", "--field", "q='x y'"],
+            ["gh", "run", "view", "$HOME", ";", "touch", str(marker), "$(id)"],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                result = self._run_target_argv(args, extra_env=self._gh_env(stub_dir))
+                self.assertEqual(0, result.returncode, result.stderr)
+                doc = json.loads(result.stdout)
+                self.assertTrue(doc["success"])
+                records = self._read_gh_records(record_file)
+                # Verbatim argv, including $HOME/$(id)/; — never expanded.
+                self.assertEqual(args[1:], records[-1])
+        # No shell was ever involved.
+        self.assertFalse(marker.exists(), "shell metacharacters must never be executed")
+
+    # -- rejection never mutates the workspace --
+
+    def test_terminal_invalid_argv_no_workspace_mutation(self) -> None:
+        """Rejected argv never touches the workspace: no push, no lock dir.
+
+        With a local-ahead commit, an invalid ``push extra`` must not
+        push, and no rejected invocation may create the ``.locks``
+        directory (validation happens before chdir/lock/manifest/git).
+        """
+        self.repo.build_clean_local_ahead("notes/keep.md", "local\n")
+        remote_before = subprocess.run(
+            ["git", "-C", self.repo.remote, "rev-parse", "main"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        for argv in (
+            ["push", "extra"],
+            ["pull", "extra"],
+            ["status", "extra"],
+            ["diff", "x"],
+            ["log", "0"],
+            ["log", "abc"],
+            ["gh"],
+            ["bogus"],
+            ["STATUS"],
+            ["--status"],
+        ):
+            with self.subTest(argv=argv):
+                result = self._run_target_argv(argv, devnull=True)
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual("", result.stdout)
+        remote_after = subprocess.run(
+            ["git", "-C", self.repo.remote, "rev-parse", "main"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(remote_before, remote_after, "rejected argv must not push")
+        self.assertFalse(
+            (Path(self.repo.workspace) / ".locks").exists(),
+            "rejected argv must not create the workspace lock directory",
+        )
+
+    # -- lifecycle preserved --
+
+    def test_terminal_lifecycle_modes_still_dispatch(self) -> None:
+        """`startup`/`periodic` argv still route to lifecycle (unchanged).
+
+        With an unchanged repo both modes exit 0 and emit NO JSON on
+        stdout (lifecycle logs to stderr) — proving they were not
+        rerouted into the JSON payload dispatch by the terminal actions.
+        """
+        self.repo.build_unchanged()
+        for mode in ("startup", "periodic"):
+            with self.subTest(mode=mode):
+                result = self._run_target_lifecycle(
+                    workspace=self.repo.workspace,
+                    remote=self.repo.remote,
+                    mode=mode,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("", result.stdout)
 
 
 # ===========================================================================

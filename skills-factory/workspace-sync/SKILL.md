@@ -27,47 +27,56 @@ Common user requests that should invoke this skill:
 - "pull latest state"
 - "show state repo status"
 
-## Automatic Authentication
+## Invocation
 
-The skill automatically configures Git credentials when `WORKSPACE_REPO_TOKEN` environment variable is present. It:
+Canonical interface: bare PATH command `workspace-sync <action> [args...]` (no stdin). Every action emits JSON on stdout.
 
-1. Cleans any existing tokens from the remote URL (prevents duplication)
-2. Configures `credential.helper store` for persistent authentication
-3. Creates `~/.git-credentials` with proper format
-4. Also configures `gh` CLI if available
-5. Sets `user.name` and `user.email` from `WORKSPACE_GIT_USER_NAME` and `WORKSPACE_GIT_USER_EMAIL`
+| Form | Default | Notes |
+|------|---------|-------|
+| `workspace-sync status` | — | exact action only |
+| `workspace-sync diff` | — | exact action only |
+| `workspace-sync push` | — | exact action only |
+| `workspace-sync pull` | — | exact action only |
+| `workspace-sync log [COUNT]` | 10 | COUNT must be one positive decimal integer |
+| `workspace-sync commit [MESSAGE...]` | `Manual commit` | extra args joined with single spaces |
+| `workspace-sync sync [MESSAGE...]` | `Auto-sync` | extra args joined with single spaces |
+| `workspace-sync gh ARGS...` | — | at least one token; argv passed losslessly to `gh` |
 
-## How to Use
+Examples:
 
-Pass a JSON object via stdin with an `action` field:
+```bash
+workspace-sync status
+workspace-sync diff
+workspace-sync log 20
+workspace-sync commit Update state
+workspace-sync sync Deploy from chat
+workspace-sync push
+workspace-sync pull
+workspace-sync gh repo view owner/repo
+```
+
+Terminal argv is validated before any workspace access, never reads stdin, and invalid action/arity/count fails with a concise stderr usage and zero stdout.
+
+## Compatibility Protocols
+
+Deterministic slash command: `/workspace_sync ...` — bypasses the model and dispatches directly to the tool. `/workspace_sync` alone runs `sync`; other forms mirror the table above (`/workspace_sync log 20`, `/workspace_sync commit Update state`, `/workspace_sync gh repo view owner/repo`).
+
+Legacy JSON stdin (Hermes command dispatch) remains supported:
 
 ```bash
 echo '{"action": "status"}' | workspace-sync
+echo '{"action": "commit", "message": "Update skills"}' | workspace-sync
+echo '{"action": "gh", "command": "repo view owner/repo"}' | workspace-sync
 ```
 
-## Slash Command (Deterministic)
+## Authentication
 
-This skill exposes a deterministic slash command: `/workspace_sync`.
-
-- `/workspace_sync` -> runs `sync`
-- `/workspace_sync status`
-- `/workspace_sync diff`
-- `/workspace_sync log 20`
-- `/workspace_sync sync Manual sync from chat`
-- `/workspace_sync commit Update state`
-- `/workspace_sync gh repo view owner/repo`
-
-When called via slash command, execution bypasses the model and dispatches directly to the `workspace-sync` tool.
+Remotes stay credential-free. HTTPS auth uses an ephemeral `GIT_ASKPASS` helper reading `WORKSPACE_REPO_TOKEN` from the environment (no persisted `~/.git-credentials`); `gh` commands inherit it as `GH_TOKEN`.
 
 ## Available Actions
 
 ### status
-Refresh user-owned skill registration, then show git status, branch, remote URL,
-and list tracked files from `.sync-manifest`.
-
-```bash
-echo '{"action": "status"}' | workspace-sync
-```
+NOT strictly read-only: refreshes user-owned skill registration (writes `.sync-manifest` entries for new `skills/<name>/SKILL.md` trees), then shows git status, branch, remote URL, and tracked files from `.sync-manifest`.
 
 Returns:
 - `branch`: current git branch
@@ -79,70 +88,36 @@ Returns:
 ### diff
 Refresh user-owned skill registration, then show pending changes (unstaged and staged).
 
-```bash
-echo '{"action": "diff"}' | workspace-sync
-```
-
 ### log
-Show recent commit history.
-
-```bash
-echo '{"action": "log"}' | workspace-sync
-echo '{"action": "log", "count": 10}' | workspace-sync
-```
+Show recent commit history: `workspace-sync log [COUNT]` (default 10).
 
 ### commit
-Stage files matching `.sync-manifest` and commit with a message. Does NOT push.
-
-```bash
-echo '{"action": "commit", "message": "Update skills"}' | workspace-sync
-```
+Stage files matching `.sync-manifest` and commit with a message: `workspace-sync commit [MESSAGE...]` (default `Manual commit`). Does NOT push.
 
 ### push
-Push current branch to remote. Configures authentication automatically.
-
-```bash
-echo '{"action": "push"}' | workspace-sync
-```
-
-Returns `success: false` with error details if push fails.
+Push current branch to remote: `workspace-sync push`. Returns `success: false` with error details if push fails.
 
 ### pull
-Fetch from remote and merge (remote wins on conflicts).
-
-```bash
-echo '{"action": "pull"}' | workspace-sync
-```
+Fetch from remote and merge (remote wins on conflicts): `workspace-sync pull`.
 
 ### sync
-Full sync: commit manifest files, then push to remote.
-
-```bash
-echo '{"action": "sync", "message": "Auto-sync"}' | workspace-sync
-```
-
-Returns `success: false` if either commit or push fails. Does not silently succeed when push fails.
+Full sync: commit manifest files, then push to remote: `workspace-sync sync [MESSAGE...]` (default `Auto-sync`). Returns `success: false` if either commit or push fails; never silently succeeds.
 
 ### gh
-Run any `gh` CLI command. Pass the full command as a string.
-
-```bash
-echo '{"action": "gh", "command": "repo view owner/repo"}' | workspace-sync
-echo '{"action": "gh", "command": "issue list --repo owner/repo"}' | workspace-sync
-echo '{"action": "gh", "command": "pr create --title fix --body desc"}' | workspace-sync
-```
+Run any `gh` CLI command: `workspace-sync gh <args...>`. Args reach the binary losslessly (never through a shell); the JSON `command` field is a display echo only.
 
 ## Notes
 
 - Only files listed in `.sync-manifest` are staged/committed
-- User-owned skill files under `skills/<name>/` are auto-registered in
-  `.sync-manifest` when the skill directory contains `SKILL.md`; `status`,
-  `diff`, `commit`, `pull`, and `sync` all refresh this registration.
+- User-owned skill files under `skills/<name>/` are auto-registered in `.sync-manifest` when the skill directory contains `SKILL.md`; `status`, `diff`, `commit`, `pull`, and `sync` all refresh this registration
 - Merge conflicts use remote-wins strategy
 - The state worktree directory is `/opt/data` inside the container
-- `gh` commands run in the context of the state git repo
-- Credentials are automatically configured from environment variables
-- Remote URLs are kept clean (no embedded tokens) to prevent duplication issues
+- Remote URLs are kept clean (no embedded tokens)
+
+## Troubleshooting
+
+- With the pinned Hermes v2026.8.3 gateway terminal, invoke the bare PATH command (`workspace-sync status`); the absolute form `/usr/local/bin/workspace-sync status` is falsely rejected by the referenced-script guard.
+- The gateway's referenced-script guard may also flag `gh` command bodies containing lifecycle-shaped words (e.g. "startup"/"periodic"); such bodies are not guaranteed to evade the scanner — prefer plain non-lifecycle phrasing.
 
 ## Environment Variables
 

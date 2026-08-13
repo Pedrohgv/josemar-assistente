@@ -1,12 +1,26 @@
 #!/usr/bin/env python3
-"""Canonical workspace sync — one executable for tool, startup, and periodic modes.
+"""Canonical workspace sync — one executable for tool, terminal, and lifecycle modes.
 
 Standard-library only. Installed at /usr/local/bin/workspace-sync.
 
 Modes:
   No arg:  JSON stdin/stdout tool (Hermes command-dispatch contract).
+  status|diff|push|pull:  Terminal actions — exact action argv only.
+  log [COUNT]:  Terminal log; COUNT defaults to 10, otherwise exactly
+                one positive decimal integer.
+  commit [MESSAGE...]:  Terminal commit; zero args default to
+                        "Manual commit", otherwise args joined with
+                        single spaces.
+  sync [MESSAGE...]:  Terminal sync; zero args default to "Auto-sync",
+                      otherwise args joined with single spaces.
+  gh ARGS...:  Terminal gh; argv is passed losslessly to the gh
+               binary (never re-serialized through a shell).
   startup: Initial clone or bidirectional sync (WORKSPACE_SYNC_ON_START).
   periodic: Bidirectional sync with remote-wins merge.
+
+Terminal modes validate the full argv BEFORE any chdir/lock/manifest/
+git/stdin access, never read stdin, and reject invalid action/arity/
+count with nonzero, concise stderr usage, and zero stdout.
 
 Authentication:
   Remotes stay credential-free. HTTPS auth uses ephemeral GIT_ASKPASS
@@ -94,6 +108,12 @@ ALLOWED_WILDCARD_PATHSPECS: frozenset[str] = frozenset({
 })
 
 VALID_ACTIONS = ("status", "diff", "log", "commit", "push", "pull", "sync", "gh")
+
+# Maximum digit length accepted for a terminal `log` COUNT. The count
+# is bounded for numeric safety: `git log -n` consumes it as a number,
+# so anything beyond 6 digits (999,999 — far beyond any repo history)
+# is rejected before dispatch instead of being passed to git.
+MAX_LOG_COUNT_DIGITS = 6
 
 LOCK_DIR = WORKSPACE_DIR / ".locks"
 LOCK_FILE = LOCK_DIR / "workspace-sync.lock"
@@ -953,23 +973,35 @@ def _do_sync(payload: dict[str, Any], command_payload: str, action_source: str) 
         sys.exit(1)
 
 
-def _do_gh(payload: dict[str, Any], command_payload: str, action_source: str) -> None:
-    command_str = str(payload.get("command", ""))
-    if action_source == "command":
-        command_str = command_payload
-    if not command_str.strip():
-        _emit_json({"success": False, "error": "No gh command specified"})
-        sys.exit(1)
-    try:
-        args = shlex.split(command_str)
-    except ValueError as exc:
-        _emit_json({"success": False, "error": f"Invalid gh command syntax: {exc}"})
-        sys.exit(1)
+def _do_gh(payload: dict[str, Any], command_payload: str, action_source: str,
+           argv: list[str] | None = None) -> None:
+    """Run ``gh`` with exactly the resolved argv.
+
+    JSON/slash paths resolve the ``command`` string exactly as before
+    and shlex-split it. The terminal path passes argv losslessly —
+    the list is handed straight to subprocess, never joined and
+    re-parsed through a shell. The echoed ``command`` field is display
+    only (single-space join); it is never executed.
+    """
+    if argv is None:
+        command_str = str(payload.get("command", ""))
+        if action_source == "command":
+            command_str = command_payload
+        if not command_str.strip():
+            _emit_json({"success": False, "error": "No gh command specified"})
+            sys.exit(1)
+        try:
+            argv = shlex.split(command_str)
+        except ValueError as exc:
+            _emit_json({"success": False, "error": f"Invalid gh command syntax: {exc}"})
+            sys.exit(1)
+    else:
+        command_str = " ".join(argv)
     gh_env = os.environ.copy()
     if REPO_TOKEN and not gh_env.get("GH_TOKEN"):
         gh_env["GH_TOKEN"] = REPO_TOKEN
     try:
-        completed = subprocess.run(["gh", *args], capture_output=True, text=True, env=gh_env)
+        completed = subprocess.run(["gh", *argv], capture_output=True, text=True, env=gh_env)
     except FileNotFoundError:
         _emit_json({"success": False, "error": "gh CLI not found"})
         sys.exit(1)
@@ -982,17 +1014,15 @@ def _do_gh(payload: dict[str, Any], command_payload: str, action_source: str) ->
         sys.exit(1)
 
 
-def _run_tool_mode() -> int:
-    raw_input = sys.stdin.read()
-    try:
-        payload = json.loads(raw_input)
-    except (json.JSONDecodeError, ValueError):
-        _emit_error("Malformed JSON input")
-        return 1
-    if not isinstance(payload, dict):
-        _emit_error("Input must be a JSON object")
-        return 1
+def _run_tool_payload(payload: dict[str, Any], *, gh_argv: list[str] | None = None) -> int:
+    """Dispatch one validated JSON tool payload.
 
+    Shared by the no-argv JSON stdin mode and every bare-argv terminal
+    mode so all route through the exact same action resolution, locking,
+    and dispatch path (no JSON re-serialization, no stdin replacement).
+    ``gh_argv`` carries lossless terminal gh arguments; when None the gh
+    command string is resolved from the payload/slash command as before.
+    """
     action = str(payload.get("action", ""))
     command_text = str(payload.get("command", ""))
     command_name = str(payload.get("commandName", ""))
@@ -1044,7 +1074,7 @@ def _run_tool_mode() -> int:
                 elif action == "sync":
                     _do_sync(payload, command_payload, action_source)
                 elif action == "gh":
-                    _do_gh(payload, command_payload, action_source)
+                    _do_gh(payload, command_payload, action_source, argv=gh_argv)
             except (ManifestError, RemoteTreeError) as exc:
                 _error(str(exc))
                 _emit_error(str(exc))
@@ -1058,6 +1088,20 @@ def _run_tool_mode() -> int:
         _emit_error(str(exc))
         return 1
     return 0
+
+
+def _run_tool_mode() -> int:
+    """No-argv JSON stdin/stdout tool mode (Hermes command-dispatch contract)."""
+    raw_input = sys.stdin.read()
+    try:
+        payload = json.loads(raw_input)
+    except (json.JSONDecodeError, ValueError):
+        _emit_error("Malformed JSON input")
+        return 1
+    if not isinstance(payload, dict):
+        _emit_error("Input must be a JSON object")
+        return 1
+    return _run_tool_payload(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -1218,14 +1262,82 @@ def _run_lifecycle(mode: str) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _terminal_usage_line() -> str:
+    return (
+        f"Usage: {sys.argv[0]} [startup|periodic] | "
+        f"{sys.argv[0]} status | {sys.argv[0]} diff | {sys.argv[0]} push | "
+        f"{sys.argv[0]} pull | {sys.argv[0]} log [COUNT] | "
+        f"{sys.argv[0]} commit [MESSAGE...] | {sys.argv[0]} sync [MESSAGE...] | "
+        f"{sys.argv[0]} gh ARGS..."
+    )
+
+
+def _reject_terminal_argv(args: list[str], reason: str) -> int:
+    _error(f"{reason}: {' '.join(args)}")
+    _error(_terminal_usage_line())
+    return 1
+
+
+def _is_positive_decimal_count(value: str) -> bool:
+    # ASCII-only digits: isdigit() alone admits unicode digits (e.g. ²)
+    # that int() cannot convert. No int() conversion is performed at
+    # all, so an ASCII digit string beyond Python's 4300-digit int()
+    # limit can never raise ValueError; the MAX_LOG_COUNT_DIGITS bound
+    # rejects oversized counts before dispatch. Positive means at least
+    # one nonzero digit (all-zeros is "0" and stays rejected).
+    if not value.isascii() or not value.isdigit():
+        return False
+    if len(value) > MAX_LOG_COUNT_DIGITS:
+        return False
+    return any(char != "0" for char in value)
+
+
+def _run_terminal_mode(args: list[str]) -> int:
+    """Bare-argv terminal dispatch (issue #114).
+
+    The full argv is validated BEFORE any chdir/lock/manifest/git/stdin
+    access; invalid action/arity/count returns nonzero with concise
+    stderr usage and zero stdout (no workspace mutation). Never reads
+    stdin. Actions route through the exact JSON payload dispatch path.
+    """
+    action = args[0]
+    rest = args[1:]
+    if action in ("status", "diff", "push", "pull"):
+        if rest:
+            return _reject_terminal_argv(args, f"'{action}' takes no arguments")
+        return _run_tool_payload({"action": action})
+    if action == "log":
+        if len(rest) > 1:
+            return _reject_terminal_argv(args, "'log' takes at most one COUNT argument")
+        payload = {"action": "log"}
+        if rest:
+            if not _is_positive_decimal_count(rest[0]):
+                return _reject_terminal_argv(
+                    args, "'log' COUNT must be a positive decimal integer"
+                )
+            payload["count"] = rest[0]
+        return _run_tool_payload(payload)
+    if action in ("commit", "sync"):
+        payload = {"action": action}
+        if rest:
+            payload["message"] = " ".join(rest)
+        return _run_tool_payload(payload)
+    # action == "gh": require at least one token; argv passed losslessly.
+    if not rest:
+        return _reject_terminal_argv(args, "'gh' requires a command")
+    return _run_tool_payload({"action": "gh"}, gh_argv=rest)
+
+
 def main() -> int:
     args = sys.argv[1:]
     if not args:
         return _run_tool_mode()
     if len(args) == 1 and args[0] in ("startup", "periodic"):
         return _run_lifecycle(args[0])
+    if args[0] in VALID_ACTIONS:
+        return _run_terminal_mode(args)
     _error(f"Unknown mode: {' '.join(args)}")
-    _error(f"Usage: {sys.argv[0]} [startup|periodic]")
+    _error(_terminal_usage_line())
     return 1
 
 
