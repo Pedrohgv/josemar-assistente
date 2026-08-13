@@ -1050,6 +1050,19 @@ class SubprocessTests(unittest.TestCase):
                     "GBRAIN_BRAIN_REPO", "GBRAIN_SKIP_STARTUP_HOOKS"}
         self.assertEqual(set(env.keys()), expected)
 
+    def test_gbrain_env_skip_startup_hooks_always_one(self) -> None:
+        """Issue #112: _build_gbrain_env must assign
+        GBRAIN_SKIP_STARTUP_HOOKS="1" (never inherit it), so a hostile caller
+        environment cannot re-enable gbrain startup hooks through the private
+        launcher."""
+        for hostile in ("0", ""):
+            with self.subTest(caller_value=hostile):
+                with mock.patch.dict(
+                    os.environ, {"GBRAIN_SKIP_STARTUP_HOOKS": hostile}, clear=True
+                ):
+                    env = self.core._build_gbrain_env(self.tmpdir, self.tmpdir)
+                self.assertEqual(env["GBRAIN_SKIP_STARTUP_HOOKS"], "1")
+
     def test_subprocess_timeout_kills_process_group(self) -> None:
         script = self.tmpdir / "sleep.py"
         script.write_text(

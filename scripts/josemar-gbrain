@@ -37,8 +37,9 @@
 # Design:
 #   - Native gbrain CLI only; no custom indexing/retrieval/ranking/authoring.
 #   - Chat-facing actions (search, get, capture, put, link, backlinks, status)
-#     are invoked directly via the `gbrain` CLI; this wrapper no longer gates,
-#     bounds, or re-implements them.
+#     run through the gbrain-chat-run adapter (issue #110): pinned native
+#     binary, canonical env, root drop, and the shared lock. This wrapper is
+#     operator/cron-only and never serves chat paths directly.
 #   - reindex is manual only; nothing in startup/deploy calls it.
 #   - refresh is safe for cron after activation. It deliberately uses
 #     `--no-embed` while Josemar runs keyword-only; revisit when embeddings are
@@ -53,23 +54,60 @@
 #   - refresh-embeddings is the sole chat-allowed maintenance command, but only
 #     after an explicit user request. It owns the TaskNotes lock, reconciles
 #     files without embedding, then embeds stale rows at concurrency 1.
+#   - refresh and reindex acquire the shared tasknotes lock nonblocking before
+#     any gbrain access (issue #110), so direct manual runs cannot open PGLite
+#     while another holder is active. When the lock runner (refresh cron)
+#     holds the lock it passes the lock fd to its child (TASKNOTES_LOCK_FD);
+#     the wrapper validates that the inherited fd refers to the exact
+#     configured lock and that a flock is actually held on it before skipping
+#     self-acquisition — no env boolean can forge the skip.
 #   - GBRAIN_SKIP_STARTUP_HOOKS=1 is exported for every wrapper-invoked gbrain
 #     command to prevent gbrain's detached update-check network call.
 #   - Results are returned in JSON envelopes.
 
 set -eu
 
-GBRAIN_HOME="${GBRAIN_HOME:-/opt/data}"
-GBRAIN_BRAIN_REPO="${GBRAIN_BRAIN_REPO:-/opt/data/obsidian}"
+# Fixed deployment locations: never env-overridable. GBRAIN_HOME and
+# GBRAIN_BRAIN_REPO would redirect gbrain at a caller-chosen PGLite/brain
+# repo and GBRAIN_SCHEMA_SOURCE_ROOT at a caller-chosen pack source; all are
+# security/location boundaries, so they are constants. Tests substitute
+# these literals in a fixture copy. GBRAIN_SCHEMA_PACK stays an operational
+# setting (which pack is active), as do the embedding configuration knobs.
+GBRAIN_HOME="/opt/data"
+GBRAIN_BRAIN_REPO="/opt/data/obsidian"
 GBRAIN_SCHEMA_PACK="${GBRAIN_SCHEMA_PACK:-josemar}"
-GBRAIN_SCHEMA_SOURCE_ROOT="${GBRAIN_SCHEMA_SOURCE_ROOT:-/opt/data/.gbrain/schema-packs}"
+GBRAIN_SCHEMA_SOURCE_ROOT="/opt/data/.gbrain/schema-packs"
 
-GBRAIN_BIN="${GBRAIN_BIN:-/usr/local/bin/gbrain}"
+# Fixed production paths: never env-overridable. GBRAIN_BIN would execute an
+# arbitrary binary and GBRAIN_TASKNOTES_LOCK would redirect the shared lock
+# to a decoy; both are lock/binary security boundaries, so they are
+# constants. Tests substitute these literals in a fixture copy.
+GBRAIN_BIN="/opt/josemar/libexec/gbrain-native"
+GBRAIN_TASKNOTES_LOCK="/opt/data/.locks/tasknotes.lock"
 GBRAIN_STATE_DIR="${GBRAIN_HOME}/.gbrain"
+GBRAIN_SCHEMA_PACK_MARKER="${GBRAIN_STATE_DIR}/active-schema-pack"
+
+# Fixed interpreter/tool paths: no PATH resolution for anything that touches
+# the lock, executes gbrain, or drops privileges.
+PYTHON_BIN="/opt/hermes/.venv/bin/python3"
+FLOCK_BIN="/usr/bin/flock"
+SU_BIN="/usr/bin/su"
+GETENT_BIN="/usr/bin/getent"
+ID_BIN="/usr/bin/id"
+
+# Lock runner re-entry: the wrapper acquires the flock itself (safe
+# no-follow open) and then exec-replaces itself with the lock runner, which
+# validates the inherited fd and protects the whole chain with a bounded
+# process group. The runner ships at a fixed path in the image.
+TASKNOTES_LOCK_RUNNER="/opt/josemar/scripts/tasknotes_lock_run.py"
+
+# Manual/direct runs are unbounded by default (operator Ctrl-C is forwarded
+# by the runner); cron invocations pass their own bounded --timeout.
+LOCK_RUN_TIMEOUT="${GBRAIN_LOCK_RUN_TIMEOUT:-0}"
+LOCK_RUN_KILL_GRACE="${GBRAIN_LOCK_RUN_KILL_GRACE:-5}"
 
 # Lock shared with the TaskNotes MCP. embed-backfill acquires this lock
 # nonblocking before any gbrain access to avoid concurrent vault writes.
-GBRAIN_TASKNOTES_LOCK="${GBRAIN_TASKNOTES_LOCK:-/opt/data/.locks/tasknotes.lock}"
 GBRAIN_EMBEDDING_MARKER="${GBRAIN_STATE_DIR}/embedding-backfill-complete.json"
 
 # Schema pack install directory (native gbrain user-pack discovery location).
@@ -92,9 +130,145 @@ export_gbrain_env() {
     export GBRAIN_SKIP_STARTUP_HOOKS=1
 }
 
+# Verify the lock runner handed this process an inherited, actually-held
+# lock fd (issue #110). Succeeds only when TASKNOTES_LOCK_FD refers to the
+# exact configured lock file AND that fd's own open file description holds an
+# EXCLUSIVE flock (writer) right now. The kernel exposes flock ownership per
+# open file description in /proc/self/fdinfo: an unflocked fd (or an fd to
+# any other file) shows no FLOCK lock line, and a shared LOCK_SH lock shows
+# READ rather than the exclusive WRITE state — so an attacker-supplied
+# boolean, shared lock, or fd to another file can never forge the skip;
+# anything invalid fails closed and the caller falls back to self-acquisition.
+lock_held_by_runner() {
+    [ -n "${TASKNOTES_LOCK_FD:-}" ] || return 1
+    "$PYTHON_BIN" -I - "$TASKNOTES_LOCK_FD" "$GBRAIN_TASKNOTES_LOCK" <<'PY'
+import os, sys
+try:
+    fd = int(sys.argv[1])
+    st_fd = os.fstat(fd)
+    st_path = os.stat(sys.argv[2])
+except (OSError, ValueError):
+    sys.exit(1)
+if (st_fd.st_dev, st_fd.st_ino) != (st_path.st_dev, st_path.st_ino):
+    sys.exit(1)
+try:
+    with open(f"/proc/self/fdinfo/{fd}", encoding="utf-8") as fh:
+        info = fh.read()
+except OSError:
+    sys.exit(1)
+for line in info.splitlines():
+    # Exclusive flock: "FLOCK ... WRITE". Shared (LOCK_SH) shows READ and
+    # must NOT satisfy the check — a shared lock does not exclude other
+    # exclusive holders.
+    if line.startswith("lock:") and "FLOCK" in line and "WRITE" in line:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+# Open the shared tasknotes lock on fd 9, creating it safely on a fresh
+# deployment (the parent dir is created, the file is opened O_RDWR|O_CREAT
+# without truncation) and rejecting symlinks with no check→open TOCTOU:
+# after the open, a fixed-interpreter verification refuses any fd whose
+# inode does not match a no-follow open of the path. Any failure emits the
+# structured ${action}_lock_unavailable JSON and returns 1.
+open_tasknotes_lock_fd() {
+    action="$1"
+    err_tag="$2"
+    mkdir -p "${GBRAIN_TASKNOTES_LOCK%/*}" 2>/dev/null || {
+        emit_json "{\"success\": false, \"action\": \"$action\", \"error\": \"${err_tag}_lock_unavailable\", \"message\": \"Could not open the tasknotes lock file.\"}"
+        return 1
+    }
+    # Probe openability in a subshell first: a failed `exec` redirection
+    # terminates the whole shell, so the probe keeps the failure in-shell.
+    # The real open below is authoritative; any later failure stays
+    # fail-closed (nonzero exit, no gbrain work).
+    if ! ( : ) 9<>"$GBRAIN_TASKNOTES_LOCK" 2>/dev/null; then
+        emit_json "{\"success\": false, \"action\": \"$action\", \"error\": \"${err_tag}_lock_unavailable\", \"message\": \"Could not open the tasknotes lock file.\"}"
+        return 1
+    fi
+    exec 9<>"$GBRAIN_TASKNOTES_LOCK" 2>/dev/null
+    if ! "$PYTHON_BIN" -I - "$GBRAIN_TASKNOTES_LOCK" <<'PY'
+import os, sys
+path = sys.argv[1]
+try:
+    st = os.fstat(9)
+    probe = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+except OSError:
+    sys.exit(1)
+try:
+    ok = (st.st_dev, st.st_ino) == (os.fstat(probe).st_dev, os.fstat(probe).st_ino)
+finally:
+    os.close(probe)
+sys.exit(0 if ok else 1)
+PY
+    then
+        exec 9<&- 2>/dev/null || true
+        emit_json "{\"success\": false, \"action\": \"$action\", \"error\": \"${err_tag}_lock_unavailable\", \"message\": \"Could not open the tasknotes lock file.\"}"
+        return 1
+    fi
+    return 0
+}
+
+# Acquire the shared TaskNotes/gbrain lock before any gbrain access so direct
+# manual runs cannot open PGLite while another holder is active (issue #110),
+# then re-enter through the lock runner so the whole chain is bounded and
+# process-group protected.
+#
+# When the lock runner (refresh cron) already holds the lock it passes the
+# lock fd to this process (TASKNOTES_LOCK_FD); lock_held_by_runner validates
+# that the fd refers to the exact configured lock and that an exclusive
+# flock is actually held on it, and only then does this become a no-op — no
+# env boolean can forge the skip.
+#
+# Once THIS process acquires the flock (safe no-follow open, nonblocking),
+# it exec-replaces itself with the lock runner (fixed interpreter, isolated
+# mode): the runner validates the inherited fd, skips its own acquisition,
+# and manages the process group, timeout, and signal cleanup. The flock is
+# never released between the wrapper and the runner (same process via exec).
+#
+# Return codes: 0 = under the lock (skip or acquired+re-entered);
+# 2 = lock busy (caller emits its specific busy JSON); 1 = unavailable.
+run_under_lock() {
+    action="$1"
+    err_tag="$2"
+    if lock_held_by_runner; then
+        return 0
+    fi
+    open_tasknotes_lock_fd "$action" "$err_tag" || return 1
+    if ! "$FLOCK_BIN" -n 9; then
+        return 2
+    fi
+    export TASKNOTES_LOCK_FD=9
+    exec "$PYTHON_BIN" -I "$TASKNOTES_LOCK_RUNNER" \
+        --lock-path "$GBRAIN_TASKNOTES_LOCK" \
+        --timeout "$LOCK_RUN_TIMEOUT" \
+        --kill-grace "$LOCK_RUN_KILL_GRACE" \
+        -- "$0" "$action"
+    # Unreachable on success: exec replaces this process. On exec failure the
+    # shell exits nonzero and the flock is released — fail closed.
+    return 1
+}
+
+acquire_tasknotes_lock() {
+    action="$1"
+    run_under_lock "$action" "$action" || {
+        case $? in
+            2)
+                emit_json "{\"success\": false, \"action\": \"$action\", \"error\": \"${action}_lock_busy\", \"message\": \"Could not acquire tasknotes lock; another holder is active.\"}"
+                return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    }
+    return 0
+}
+
 # Resolve a realpath safely (portable, no readlink -f dependency on busybox).
 resolve_realpath() {
-    python3 - "$1" <<'PY' 2>/dev/null || echo ""
+    "$PYTHON_BIN" -I - "$1" <<'PY' 2>/dev/null || echo ""
 import os, sys
 try:
     print(os.path.realpath(sys.argv[1]))
@@ -217,7 +391,7 @@ validate_installed_pack() {
     )
     rc=$?
     if [ "$rc" -ne 0 ]; then
-        emit_json "$(python3 - "$pack_name" <<'PY'
+        emit_json "$("$PYTHON_BIN" -I - "$pack_name" <<'PY'
 import json, sys
 pack = sys.argv[1]
 print(json.dumps({
@@ -259,7 +433,7 @@ run_sync_extract_links() {
         sync_full_flag="--full"
     fi
     sync_output=$("$GBRAIN_BIN" sync $sync_full_flag --no-embed --yes --no-pull --json --repo "$GBRAIN_BRAIN_REPO" 2>&1) || {
-        emit_json "$(python3 - "$sync_output" <<'PY'
+        emit_json "$("$PYTHON_BIN" -I - "$sync_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -272,7 +446,7 @@ PY
         return 1
     }
     if echo "$sync_output" | grep -iE "\"status\"[: ]*\"(partial|blocked|failed|error)\"|\b(fatal|blocked|aborted|panic)\b" | grep -viE "no embedding|embedding disabled|warn|no_embed" >/dev/null 2>&1; then
-        emit_json "$(python3 - "$sync_output" <<'PY'
+        emit_json "$("$PYTHON_BIN" -I - "$sync_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -286,7 +460,7 @@ PY
     fi
 
     extract_output=$("$GBRAIN_BIN" extract --stale --json 2>&1) || {
-        emit_json "$(python3 - "$extract_output" <<'PY'
+        emit_json "$("$PYTHON_BIN" -I - "$extract_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -300,7 +474,7 @@ PY
     }
 
     extract_links_output=$("$GBRAIN_BIN" extract links --source db --json 2>&1) || {
-        emit_json "$(python3 - "$extract_links_output" <<'PY'
+        emit_json "$("$PYTHON_BIN" -I - "$extract_links_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -325,8 +499,10 @@ do_reindex() {
     fi
 
     export_gbrain_env
+    acquire_tasknotes_lock reindex || {
+        return 1
+    }
     mkdir -p "$GBRAIN_STATE_DIR"
-
     # Mark the vault repo as a git safe.directory before any native gbrain
     # operation that may inspect the repo. The command is idempotent and
     # best-effort; run this wrapper as the Hermes runtime user so the global
@@ -339,7 +515,7 @@ do_reindex() {
         # Custom pack: must have a source file. Fail early before init.
         src_path=$(source_pack_path "$GBRAIN_SCHEMA_PACK")
         if [ -z "$src_path" ]; then
-            emit_json "$(python3 - "$GBRAIN_SCHEMA_PACK" <<'PY'
+            emit_json "$("$PYTHON_BIN" -I - "$GBRAIN_SCHEMA_PACK" <<'PY'
 import json, sys
 pack = sys.argv[1]
 print(json.dumps({
@@ -369,7 +545,7 @@ PY
 
     # --- Native init: PGLite, no embedding ---
     init_output=$("$GBRAIN_BIN" init --pglite --no-embedding 2>&1) || {
-        emit_json "$(python3 - "$init_output" <<'PY'
+        emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -382,7 +558,7 @@ PY
         return 1
     }
     if echo "$init_output" | grep -iE "\b(error|fatal|blocked|aborted|panic)\b" | grep -viE "no embedding|embedding disabled|warn|error_|_error|errors_|migration" >/dev/null 2>&1; then
-        emit_json "$(python3 - "$init_output" <<'PY'
+        emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -396,7 +572,7 @@ PY
     fi
 
     config_output=$("$GBRAIN_BIN" config set sync.repo_path "$GBRAIN_BRAIN_REPO" 2>&1) || {
-        emit_json "$(python3 - "$config_output" <<'PY'
+        emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -410,7 +586,7 @@ PY
     }
 
     config_output=$("$GBRAIN_BIN" config set link_resolution.global_basename true 2>&1) || {
-        emit_json "$(python3 - "$config_output" <<'PY'
+        emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -424,7 +600,7 @@ PY
     }
 
     config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
-        emit_json "$(python3 - "$config_output" <<'PY'
+        emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -443,7 +619,7 @@ PY
     # chain before producing output, so raise it to 8000 at activation.
     # This replaces the old source patch that bumped the hardcoded 1500.
     config_output=$("$GBRAIN_BIN" config set chronicle.judge_max_tokens 8000 2>&1) || {
-        emit_json "$(python3 - "$config_output" <<'PY'
+        emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -464,7 +640,7 @@ PY
     # Run only when a custom schema pack is in use.
     if ! is_bundled_pack "$GBRAIN_SCHEMA_PACK"; then
         schema_sync_output=$("$GBRAIN_BIN" schema sync --apply --json 2>&1) || {
-            emit_json "$(python3 - "$schema_sync_output" <<'PY'
+            emit_json "$("$PYTHON_BIN" -I - "$schema_sync_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -478,14 +654,64 @@ PY
         }
     fi
 
-    emit_json "$(python3 - "$GBRAIN_SCHEMA_PACK" <<'PY'
+    # Persist the activated schema pack as the runtime source of truth for
+    # agent-facing calls (gbrain-chat-run reads this fixed path instead of
+    # guessing; the adapter fails closed to the canonical pack when missing).
+    # The write is REQUIRED and atomic: temp file in the same directory,
+    # fsync, rename (atomically replacing any stale marker), then a directory
+    # fsync for durability. Path safety is fail-closed: a symlinked marker or
+    # symlinked parent is refused (no clobber of a decoy), and any failure is
+    # a structured nonzero error — reindex must not report success without
+    # the marker. The lock is held throughout (acquired at the top of
+    # do_reindex and released only when the wrapper exits).
+    if ! "$PYTHON_BIN" -I - "$GBRAIN_SCHEMA_PACK_MARKER" "$GBRAIN_SCHEMA_PACK" <<'PY'
+import os, sys, tempfile
+path, pack = sys.argv[1:3]
+parent = os.path.dirname(path)
+tmp = None
+try:
+    # Fail closed: the parent must be a real directory, not a symlink.
+    if os.path.islink(parent) or not os.path.isdir(parent):
+        sys.exit(1)
+    # Fail closed: the marker itself must not be a symlink.
+    if os.path.islink(path):
+        sys.exit(1)
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix="active-schema-pack.", suffix=".tmp")
+    try:
+        os.write(fd, (pack + "\n").encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)  # atomic replacement of any stale marker
+    tmp = None
+    dfd = os.open(parent, os.O_RDONLY)
+    try:
+        os.fsync(dfd)  # durability: make the rename itself persistent
+    finally:
+        os.close(dfd)
+except (OSError, ValueError):
+    if tmp is not None:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    sys.exit(1)
+sys.exit(0)
+PY
+    then
+        emit_json '{"success": false, "action": "reindex", "error": "schema_pack_marker_write_failed", "message": "Could not persist the active schema pack marker; reindex is not complete."}'
+        return 1
+    fi
+
+    emit_json "$("$PYTHON_BIN" -I - "$GBRAIN_SCHEMA_PACK" <<'PY'
 import json, sys
 schema = sys.argv[1]
 print(json.dumps({
     "success": True,
     "action": "reindex",
     "schema_pack": schema,
-    "message": "Activation complete. gbrain is ready for direct CLI use.",
+    "message": "Activation complete. Operator access: josemar-gbrain; agent-facing access: gbrain-chat-run.",
 }, indent=2, ensure_ascii=False))
 PY
 )"
@@ -493,6 +719,9 @@ PY
 
 do_refresh() {
     export_gbrain_env
+    acquire_tasknotes_lock refresh || {
+        return 1
+    }
     mkdir -p "$GBRAIN_STATE_DIR"
     mark_brain_repo_safe_directory
 
@@ -505,22 +734,24 @@ do_refresh() {
 
 # Explicit-request semantic refresh. The shared lock is owned here (not by the
 # Hermes cron entrypoint) and validation is performed while it is held.
+# Under the lock, the wrapper re-enters through the lock runner so the whole
+# chain is process-group and timeout protected even for direct chat
+# invocations; a busy lock skips gracefully (the embedding cron's contract).
 do_refresh_embeddings() {
     export_gbrain_env
     mkdir -p "$GBRAIN_STATE_DIR"
     mark_brain_repo_safe_directory
-    # Pre-check before `exec 9<`: a failed redirection on the special builtin
-    # `exec` terminates the shell immediately, which would skip the structured
-    # lock_unavailable error. The -r probe keeps that failure path in-shell.
-    if [ ! -r "$GBRAIN_TASKNOTES_LOCK" ]; then
-        emit_json '{"success": false, "action": "refresh-embeddings", "error": "refresh_embeddings_lock_unavailable", "message": "Could not open the tasknotes lock file."}'
-        return 1
-    fi
-    exec 9<"$GBRAIN_TASKNOTES_LOCK" 2>/dev/null
-    if ! flock -n 9; then
-        emit_json '{"success": true, "action": "refresh-embeddings", "status": "skipped", "reason": "lock_busy"}'
-        return 0
-    fi
+    run_under_lock refresh-embeddings refresh_embeddings || {
+        case $? in
+            2)
+                emit_json '{"success": true, "action": "refresh-embeddings", "status": "skipped", "reason": "lock_busy"}'
+                return 0
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    }
         keyword_only=$("$GBRAIN_BIN" config get search.mcp_keyword_only 2>/dev/null) || {
             emit_json '{"success": false, "action": "refresh-embeddings", "error": "refresh_embeddings_config_read_failed", "message": "Could not read search.mcp_keyword_only from gbrain."}'
             exit 1
@@ -533,7 +764,7 @@ do_refresh_embeddings() {
             emit_json '{"success": false, "action": "refresh-embeddings", "error": "refresh_embeddings_semantic_mode_invalid", "message": "gbrain config get search.mcp_keyword_only must print exactly false"}'
             exit 1
         fi
-        validation=$(python3 - "$GBRAIN_STATE_DIR/config.json" "$GBRAIN_EMBEDDING_MARKER" "${GBRAIN_EMBEDDING_MODEL:-}" "${GBRAIN_EMBEDDING_DIMENSIONS:-}" "${GBRAIN_EMBEDDING_MODEL_REVISION:-}" <<'PY'
+        validation=$("$PYTHON_BIN" -I - "$GBRAIN_STATE_DIR/config.json" "$GBRAIN_EMBEDDING_MARKER" "${GBRAIN_EMBEDDING_MODEL:-}" "${GBRAIN_EMBEDDING_DIMENSIONS:-}" "${GBRAIN_EMBEDDING_MODEL_REVISION:-}" <<'PY'
 import json, os, sys
 config_path, marker_path, model, dimensions, revision = sys.argv[1:]
 def result(status, **extra):
@@ -571,12 +802,12 @@ result("run")
 PY
         )
         case "$validation" in
-            *'"status": "skip"'*) emit_json "$(python3 - "$validation" <<'PY'
+            *'"status": "skip"'*) emit_json "$("$PYTHON_BIN" -I - "$validation" <<'PY'
 import json, sys
 r=json.loads(sys.argv[1]); print(json.dumps({"success": True, "action": "refresh-embeddings", "status": "skipped", "reason": r["reason"]}))
 PY
 )"; exit 0 ;;
-            *'"status": "fail"'*) emit_json "$(python3 - "$validation" <<'PY'
+            *'"status": "fail"'*) emit_json "$("$PYTHON_BIN" -I - "$validation" <<'PY'
 import json, sys
 r=json.loads(sys.argv[1]); print(json.dumps({"success": False, "action": "refresh-embeddings", "error": r["error"], "message": r["message"]}))
 PY
@@ -584,7 +815,7 @@ PY
         esac
         run_sync_extract_links || exit 1
         embed_output=$(GBRAIN_EMBED_CONCURRENCY=1 "$GBRAIN_BIN" embed --stale 2>&1) || {
-            emit_json "$(python3 - "$embed_output" <<'PY'
+            emit_json "$("$PYTHON_BIN" -I - "$embed_output" <<'PY'
 import json, sys
 print(json.dumps({"success": False, "action": "refresh-embeddings", "error": "gbrain_embed_failed", "message": sys.argv[1][:4000]}))
 PY
@@ -616,20 +847,26 @@ do_embed_backfill() {
     mkdir -p "$GBRAIN_STATE_DIR"
     mark_brain_repo_safe_directory
 
-    # Acquire the tasknotes lock nonblocking before any gbrain access.
-    # The lock fd (9) is held open for the duration of the compound block so
-    # the flock is released when the block exits.
-    {
-        flock -n 9 || {
-            emit_json '{"success": false, "error": "embed_backfill_lock_busy", "message": "Could not acquire tasknotes lock; another holder is active."}'
-            exit 1
-        }
+    # Acquire the tasknotes lock nonblocking before any gbrain access (safe
+    # no-follow open with creation), then re-enter under the lock runner for
+    # process-group/timeout protection.
+    run_under_lock embed-backfill embed_backfill || {
+        case $? in
+            2)
+                emit_json '{"success": false, "error": "embed_backfill_lock_busy", "message": "Could not acquire tasknotes lock; another holder is active."}'
+                return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    }
 
         # Run the embedding backfill at concurrency 1.
         embed_output=$(
             GBRAIN_EMBED_CONCURRENCY=1 "$GBRAIN_BIN" embed --stale --include-null-signature 2>&1
         ) || {
-            emit_json "$(python3 - "$embed_output" <<'PY'
+            emit_json "$("$PYTHON_BIN" -I - "$embed_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -646,7 +883,7 @@ PY
         verify_output=$(
             GBRAIN_EMBED_CONCURRENCY=1 "$GBRAIN_BIN" embed --stale --include-null-signature --dry-run 2>&1
         ) || {
-            emit_json "$(python3 - "$verify_output" <<'PY'
+            emit_json "$("$PYTHON_BIN" -I - "$verify_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -659,7 +896,7 @@ PY
             exit 1
         }
         if echo "$verify_output" | grep -iE "\bstale\b" | grep -viE "no stale|0 stale|no rows|0 rows" >/dev/null 2>&1; then
-            emit_json "$(python3 - "$verify_output" <<'PY'
+            emit_json "$("$PYTHON_BIN" -I - "$verify_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -677,7 +914,7 @@ PY
         # failure is an explicit structured nonzero error — it cannot claim
         # success and must not fall through to the block-level
         # lock_unavailable handler.
-        if ! python3 - "$GBRAIN_EMBEDDING_MARKER" "$GBRAIN_EMBEDDING_MODEL" "$GBRAIN_EMBEDDING_DIMENSIONS" "$GBRAIN_EMBEDDING_MODEL_REVISION" <<'PY'
+        if ! "$PYTHON_BIN" -I - "$GBRAIN_EMBEDDING_MARKER" "$GBRAIN_EMBEDDING_MODEL" "$GBRAIN_EMBEDDING_DIMENSIONS" "$GBRAIN_EMBEDDING_MODEL_REVISION" <<'PY'
 import json, os, sys, tempfile
 path, model, dimensions, revision = sys.argv[1:]
 parent = os.path.dirname(path)
@@ -705,11 +942,6 @@ PY
         fi
 
         emit_json '{"success": true, "action": "embed-backfill", "message": "Embedding backfill complete; no stale embeddings remain."}'
-    } 9<"$GBRAIN_TASKNOTES_LOCK" 2>/dev/null || {
-        # Block failed (e.g. lock path missing) and did not already emit JSON.
-        emit_json '{"success": false, "error": "embed_backfill_lock_unavailable", "message": "Could not open the tasknotes lock file."}'
-        return 1
-    }
 }
 
 # ---------------------------------------------------------------------------
@@ -749,18 +981,25 @@ do_enable_embeddings() {
     mkdir -p "$GBRAIN_STATE_DIR"
     mark_brain_repo_safe_directory
 
-    # Acquire the tasknotes lock nonblocking before any gbrain access.
-    {
-        flock -n 9 || {
-            emit_json '{"success": false, "error": "enable_embeddings_lock_busy", "message": "Could not acquire tasknotes lock; another holder is active."}'
-            exit 1
-        }
+    # Acquire the tasknotes lock nonblocking before any gbrain access (safe
+    # no-follow open with creation), then re-enter under the lock runner.
+    run_under_lock enable-embeddings enable_embeddings || {
+        case $? in
+            2)
+                emit_json '{"success": false, "error": "enable_embeddings_lock_busy", "message": "Could not acquire tasknotes lock; another holder is active."}'
+                return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    }
 
         # FIRST force keyword-only true so any error path leaves keyword-only
         # enabled. This is the safe default: even if migration fails, retrieval
         # degrades gracefully to keyword search.
         config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
-            emit_json "$(python3 - "$config_output" <<'PY'
+            emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -790,7 +1029,7 @@ PY
         migrate_output=$(
             "$GBRAIN_BIN" migrate embeddings --to "$GBRAIN_EMBEDDING_MODEL" --dim "$GBRAIN_EMBEDDING_DIMENSIONS" --yes --no-embed --ignore-env-override 2>&1
         ) || {
-            emit_json "$(python3 - "$migrate_output" <<'PY'
+            emit_json "$("$PYTHON_BIN" -I - "$migrate_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -806,7 +1045,7 @@ PY
         # output for hard failure markers the migrate command prints on
         # refused/failed apply (it does not always exit nonzero on --json).
         if echo "$migrate_output" | grep -iE "\"status\"[: ]*\"(refused|failed)\"|\b(fatal|aborted|panic)\b" | grep -viE "warn|no_embed|no-embed" >/dev/null 2>&1; then
-            emit_json "$(python3 - "$migrate_output" <<'PY'
+            emit_json "$("$PYTHON_BIN" -I - "$migrate_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -823,7 +1062,7 @@ PY
         # semantic search. On any migration failure above, we exit before
         # reaching this line, so keyword-only stays enabled (true).
         config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only false 2>&1) || {
-            emit_json "$(python3 - "$config_output" <<'PY'
+            emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -837,10 +1076,6 @@ PY
         }
 
         emit_json '{"success": true, "action": "enable-embeddings", "message": "Embeddings enabled: file-plane config persisted and schema migrated. Keyword-only disabled. Run embed-backfill separately to populate vectors."}'
-    } 9<"$GBRAIN_TASKNOTES_LOCK" 2>/dev/null || {
-        emit_json '{"success": false, "error": "enable_embeddings_lock_unavailable", "message": "Could not open the tasknotes lock file."}'
-        return 1
-    }
 }
 
 # ---------------------------------------------------------------------------
@@ -868,18 +1103,25 @@ do_disable_embeddings() {
     mkdir -p "$GBRAIN_STATE_DIR"
     mark_brain_repo_safe_directory
 
-    # Acquire the tasknotes lock nonblocking before any gbrain access.
-    {
-        flock -n 9 || {
-            emit_json '{"success": false, "error": "disable_embeddings_lock_busy", "message": "Could not acquire tasknotes lock; another holder is active."}'
-            exit 1
-        }
+    # Acquire the tasknotes lock nonblocking before any gbrain access (safe
+    # no-follow open with creation), then re-enter under the lock runner.
+    run_under_lock disable-embeddings disable_embeddings || {
+        case $? in
+            2)
+                emit_json '{"success": false, "error": "disable_embeddings_lock_busy", "message": "Could not acquire tasknotes lock; another holder is active."}'
+                return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    }
 
         # Set keyword-only true FIRST so retrieval immediately falls back to
         # keyword search. This is the safe rollback: even if a later step were
         # to fail, keyword search remains functional.
         config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
-            emit_json "$(python3 - "$config_output" <<'PY'
+            emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -913,7 +1155,7 @@ PY
         # fails with a structured error. This prevents clobbering a corrupt
         # or hand-edited config with a fresh `{embedding_disabled: true}`
         # object that would lose the operator's prior config.
-        python3 - "$GBRAIN_STATE_DIR" <<'PY'
+        "$PYTHON_BIN" -I - "$GBRAIN_STATE_DIR" <<'PY'
 import json, os, sys, tempfile
 state_dir = sys.argv[1]
 config_path = os.path.join(state_dir, "config.json")
@@ -965,7 +1207,7 @@ PY
             # error fired so the wrapper surfaces the right structured JSON.
             # If the Python block raised (uncaught), fall back to the generic
             # sentinel_write_failed error.
-            py_output=$(python3 - "$GBRAIN_STATE_DIR" <<'PY_CHECK' 2>/dev/null || true
+            py_output=$("$PYTHON_BIN" -I - "$GBRAIN_STATE_DIR" <<'PY_CHECK' 2>/dev/null || true
 import json, os, sys
 state_dir = sys.argv[1]
 config_path = os.path.join(state_dir, "config.json")
@@ -997,10 +1239,6 @@ PY_CHECK
         fi
 
         emit_json '{"success": true, "action": "disable-embeddings", "message": "Embeddings disabled: keyword-only re-enabled and embedding_disabled sentinel written. Vectors preserved (not removed). Re-run enable-embeddings to re-activate (clears sentinel on migration success)."}'
-    } 9<"$GBRAIN_TASKNOTES_LOCK" 2>/dev/null || {
-        emit_json '{"success": false, "error": "disable_embeddings_lock_unavailable", "message": "Could not open the tasknotes lock file."}'
-        return 1
-    }
 }
 
 # ---------------------------------------------------------------------------
@@ -1014,25 +1252,39 @@ usage() {
 
 drop_root_if_possible() {
     subcommand="$1"
-    if [ "${JOSEMAR_GBRAIN_DROPPED_PRIVS:-}" = "1" ]; then
+    # Root must always drop to the hermes runtime user before any gbrain
+    # access; the only skip is a PROVEN non-root effective UID. Fail closed:
+    # a failed `id` lookup (missing binary, garbage output) is treated as
+    # identity-unavailable and refuses to continue, never as non-root. No
+    # env sentinel can bypass the drop. The su re-exec below lands as hermes,
+    # so the re-entered wrapper passes this check and proceeds without
+    # re-dropping.
+    uid="$("$ID_BIN" -u 2>/dev/null)" || {
+        emit_json '{"success": false, "error": "runtime_identity_unavailable", "message": "Could not determine the effective UID; refusing to run."}'
+        return 1
+    }
+    case "$uid" in
+        ""|*[!0-9]*)
+            emit_json '{"success": false, "error": "runtime_identity_unavailable", "message": "Could not determine the effective UID; refusing to run."}'
+            return 1
+            ;;
+    esac
+    if [ "$uid" != "0" ]; then
         return 0
     fi
-    if [ "$(id -u 2>/dev/null || printf '1')" != "0" ]; then
-        return 0
-    fi
-    if ! getent passwd hermes >/dev/null 2>&1; then
+    if ! "$GETENT_BIN" passwd hermes >/dev/null 2>&1; then
         emit_json '{"success": false, "error": "runtime_identity_unavailable", "message": "Root execution refused: the hermes runtime user does not exist."}'
         return 1
     fi
-    if ! command -v su >/dev/null 2>&1; then
+    if [ ! -x "$SU_BIN" ]; then
         emit_json '{"success": false, "error": "runtime_identity_unavailable", "message": "Root execution refused: su is unavailable for the hermes runtime user."}'
         return 1
     fi
 
     runtime_home="${HERMES_HOME:-/opt/data}"
-    runtime_gbrain_home="${GBRAIN_HOME:-/opt/data}"
+    runtime_gbrain_home="$GBRAIN_HOME"
     runtime_xdg_config="${XDG_CONFIG_HOME:-/opt/data/.config}"
-    exec su -p -s /bin/sh -- hermes -c '
+    exec "$SU_BIN" -p -s /bin/sh -- hermes -c '
         runtime_home="$1"
         runtime_hermes_home="$2"
         runtime_gbrain_home="$3"
@@ -1043,7 +1295,6 @@ drop_root_if_possible() {
         export HERMES_HOME="$runtime_hermes_home"
         export GBRAIN_HOME="$runtime_gbrain_home"
         export XDG_CONFIG_HOME="$runtime_xdg_config"
-        export JOSEMAR_GBRAIN_DROPPED_PRIVS=1
         exec "$wrapper" "$subcommand"
     ' sh "$runtime_home" "${HERMES_HOME:-$runtime_home}" "$runtime_gbrain_home" "$runtime_xdg_config" "$0" "$subcommand"
 }

@@ -62,6 +62,13 @@ PROFILE = {
 }
 
 
+# The public `gbrain` on PATH is the issue #110 adapter (which rejects admin
+# commands), so this built-image smoke harness calls the private native CLI
+# directly — the same fixed path TaskNotes uses in production. An explicit
+# override is allowed only for local development against a scratch install.
+GBRAIN_NATIVE = os.environ.get("REAL_GBRAIN_E2E_NATIVE_BIN", "/opt/josemar/libexec/gbrain-native")
+
+
 def run(command: list[str], *, env: dict[str, str], cwd: Path | None = None) -> str:
     completed = subprocess.run(
         command,
@@ -120,11 +127,11 @@ def prepare(root: Path) -> tuple[Path, dict[str, str]]:
     run(["git", "add", "-A"], env=env, cwd=vault)
     run(["git", "commit", "-q", "-m", "Initialize disposable vault"], env=env, cwd=vault)
 
-    run(["gbrain", "init", "--pglite", "--no-embedding"], env=env)
-    run(["gbrain", "config", "set", "sync.repo_path", str(vault)], env=env)
+    run([GBRAIN_NATIVE, "init", "--pglite", "--no-embedding"], env=env)
+    run([GBRAIN_NATIVE, "config", "set", "sync.repo_path", str(vault)], env=env)
     run(
         [
-            "gbrain",
+            GBRAIN_NATIVE,
             "sync",
             "--full",
             "--no-embed",
@@ -136,7 +143,7 @@ def prepare(root: Path) -> tuple[Path, dict[str, str]]:
         ],
         env=env,
     )
-    sources = json.loads(run(["gbrain", "sources", "list", "--json"], env=env))
+    sources = json.loads(run([GBRAIN_NATIVE, "sources", "list", "--json"], env=env))
     matching = [source for source in sources["sources"] if source.get("local_path") == str(vault)]
     if len(matching) != 1:
         raise AssertionError(f"expected one matching source, got {matching!r}")

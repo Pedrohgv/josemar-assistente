@@ -309,12 +309,10 @@ class ServerContractTests(unittest.TestCase):
         )
 
     def test_engine_uses_runtime_environment(self) -> None:
+        """Locations are fixed constants; only the non-location operational
+        settings (lock timeout, TZ) come from the environment."""
         setattr(self.server, "_ENGINE", None)
         env = {
-            "GBRAIN_BRAIN_REPO": "/vault",
-            "GBRAIN_HOME": "/state",
-            "TASKNOTES_GBRAIN_BIN": "/bin/gbrain-test",
-            "TASKNOTES_LOCK_DIR": "/locks",
             "TASKNOTES_LOCK_TIMEOUT": "3.5",
             "TZ": "America/Sao_Paulo",
         }
@@ -323,13 +321,53 @@ class ServerContractTests(unittest.TestCase):
                 instance = self.server._get_engine()
         self.assertIs(instance, engine_class.return_value)
         engine_class.assert_called_once_with(
-            vault=Path("/vault"),
-            gbrain_bin="/bin/gbrain-test",
-            gbrain_home=Path("/state"),
-            lock_dir=Path("/locks"),
+            vault=Path("/opt/data/obsidian"),
+            gbrain_bin="/opt/josemar/libexec/gbrain-native",
+            gbrain_home=Path("/opt/data"),
+            lock_dir=Path("/opt/data/.locks"),
             lock_timeout=3.5,
             tz="America/Sao_Paulo",
         )
+
+    def test_engine_fixed_locations_ignore_forged_env(self) -> None:
+        """Forged GBRAIN_BRAIN_REPO / GBRAIN_HOME / TASKNOTES_LOCK_DIR env
+        values must not redirect the vault, state, or shared lock."""
+        setattr(self.server, "_ENGINE", None)
+        env = {
+            "GBRAIN_BRAIN_REPO": "/forged/vault",
+            "GBRAIN_HOME": "/forged/state",
+            "TASKNOTES_GBRAIN_BIN": "/bin/forged-gbrain",
+            "TASKNOTES_LOCK_DIR": "/forged/locks",
+            "TASKNOTES_LOCK_TIMEOUT": "3.5",
+            "TZ": "America/Sao_Paulo",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            with mock.patch.object(self.server, "TaskNotesEngine") as engine_class:
+                self.server._get_engine()
+        engine_class.assert_called_once_with(
+            vault=Path("/opt/data/obsidian"),
+            gbrain_bin="/opt/josemar/libexec/gbrain-native",
+            gbrain_home=Path("/opt/data"),
+            lock_dir=Path("/opt/data/.locks"),
+            lock_timeout=3.5,
+            tz="America/Sao_Paulo",
+        )
+
+    def test_engine_refuses_to_run_as_root(self) -> None:
+        """The MCP must enforce the hermes runtime identity before any native
+        gbrain work: root execution is refused (fail-closed)."""
+        setattr(self.server, "_ENGINE", None)
+        with mock.patch.object(self.server.os, "geteuid", return_value=0):
+            with self.assertRaises(RuntimeError):
+                self.server._get_engine()
+        self.assertIsNone(self.server._ENGINE)
+
+    def test_engine_accepts_non_root_identity(self) -> None:
+        setattr(self.server, "_ENGINE", None)
+        with mock.patch.object(self.server.os, "geteuid", return_value=10000):
+            with mock.patch.object(self.server, "TaskNotesEngine") as engine_class:
+                instance = self.server._get_engine()
+        self.assertIs(instance, engine_class.return_value)
 
     def test_invalid_timeout_becomes_tool_error(self) -> None:
         setattr(self.server, "_ENGINE", None)
@@ -338,6 +376,34 @@ class ServerContractTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(FakeToolError, "must be a number"):
                 self.server.task_get("t1")
+
+    def test_lock_timeout_rejects_non_finite_values(self) -> None:
+        """nan/inf/-inf must be rejected before the engine/Lock is
+        constructed: they would make the lock wait unbounded or nonsensical.
+        The existing ValidationError->tool-error surface is preserved."""
+        for bad in ("nan", "inf", "-inf"):
+            with self.subTest(bad=bad):
+                setattr(self.server, "_ENGINE", None)
+                with mock.patch.dict(
+                    os.environ, {"TASKNOTES_LOCK_TIMEOUT": bad}, clear=False
+                ):
+                    with self.assertRaisesRegex(
+                        FakeToolError, "must be a finite number"
+                    ):
+                        self.server.task_get("t1")
+                self.assertIsNone(self.server._ENGINE)
+
+    def test_lock_timeout_accepts_finite_positive_values(self) -> None:
+        """A valid finite positive timeout reaches the engine unchanged; the
+        engine/Lock is constructed with it."""
+        setattr(self.server, "_ENGINE", None)
+        with mock.patch.object(self.server.os, "geteuid", return_value=10000):
+            with mock.patch.dict(
+                os.environ, {"TASKNOTES_LOCK_TIMEOUT": "3.5"}, clear=False
+            ):
+                with mock.patch.object(self.server, "TaskNotesEngine") as engine_class:
+                    self.server._get_engine()
+        self.assertEqual(engine_class.call_args.kwargs["lock_timeout"], 3.5)
 
     def test_main_uses_stdio_transport(self) -> None:
         self.server.main()

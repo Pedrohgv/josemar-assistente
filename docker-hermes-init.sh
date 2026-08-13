@@ -243,11 +243,23 @@ PY
         || log "WARNING: failed to create Hermes workspace-sync cron job"
 }
 
+remove_gbrain_refresh_cron_job() {
+    su -s /bin/sh -- hermes -c '
+        HOME=$1
+        HERMES_HOME=$1
+        HERMES_CLI=$2
+        export HOME HERMES_HOME HERMES_CLI
+        shift 2
+        exec "$HERMES_CLI" cron remove "$@"
+    ' sh "$HERMES_HOME" "$HERMES_CLI" gbrain-refresh
+}
+
 install_gbrain_refresh_cron() {
     script_source="/opt/josemar/scripts/hermes-gbrain-refresh-cron.sh"
     script_dir="${HERMES_HOME}/scripts"
     script_path="${script_dir}/hermes-gbrain-refresh-cron.sh"
     refresh_interval="${GBRAIN_REFRESH_INTERVAL:-5}"
+    jobs_file="${HERMES_HOME}/cron/jobs.json"
 
     if [ ! -x "$script_source" ]; then
         return 0
@@ -261,30 +273,43 @@ install_gbrain_refresh_cron() {
     case "$refresh_interval" in
         ""|0|*[!0-9]*)
             log "Hermes gbrain-refresh cron disabled (GBRAIN_REFRESH_INTERVAL=${refresh_interval:-unset})"
+            remove_gbrain_refresh_cron_job
             return 0
             ;;
     esac
 
-    if python3 - "${HERMES_HOME}/cron/jobs.json" <<'PY'
-import json
-import sys
-
+    # Reconcile by full expected state, not merely by name: the interval
+    # schedule (kind=interval, minutes), script name, no_agent flag, and
+    # workdir must all match. Hermes persists `every Nm` as
+    # {"kind":"interval","minutes":N,"display":"every Nm"}.
+    if python3 - "$jobs_file" "$refresh_interval" "$WORKSPACE_DIR" <<'PY'
+import json, sys
 try:
-    with open(sys.argv[1], "r", encoding="utf-8") as fh:
-        data = json.load(fh)
-except Exception:
-    sys.exit(1)
-
-for job in data.get("jobs", []):
-    if job.get("name") == "gbrain-refresh":
-        sys.exit(0)
-
-sys.exit(1)
+    with open(sys.argv[1], encoding="utf-8") as f: data=json.load(f)
+    minutes=int(sys.argv[2]); workdir=sys.argv[3]
+    found=False
+    for j in data.get("jobs",[]):
+        if not isinstance(j,dict) or j.get("name") != "gbrain-refresh": continue
+        s=j.get("schedule")
+        actual = s.get("minutes") if isinstance(s,dict) else None
+        found = (isinstance(s,dict) and s.get("kind") == "interval"
+                 and isinstance(actual, int) and not isinstance(actual, bool)
+                 and actual == minutes
+                 and j.get("script") == "hermes-gbrain-refresh-cron.sh"
+                 and j.get("no_agent") is True and j.get("workdir") == workdir)
+        break
+except Exception: found=False
+sys.exit(0 if found else 1)
 PY
     then
         log "Hermes gbrain-refresh cron job already exists"
         return 0
     fi
+
+    # A same-name job with drift must be removed before recreation; otherwise
+    # Hermes would retain the stale schedule/script/workdir.
+    log "Reconciling Hermes gbrain-refresh cron job drift"
+    remove_gbrain_refresh_cron_job
 
     log "Creating Hermes gbrain-refresh cron job"
     su -s /bin/sh -- hermes -c '

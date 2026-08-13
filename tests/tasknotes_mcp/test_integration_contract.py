@@ -37,6 +37,76 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertIn(name, text)
         self.assertIn("/opt/hermes/.venv/bin/python3 -m compileall -q", text)
 
+    def test_image_installs_gbrain_public_layout(self) -> None:
+        """The PUBLIC /usr/local/bin/gbrain must be the issue #110 adapter;
+        gbrain-chat-run must remain only as a backwards-compatible symlink
+        alias, not a duplicate script."""
+        text = (REPO_ROOT / "Dockerfile.hermes").read_text(encoding="utf-8")
+        self.assertIn(
+            "COPY scripts/gbrain_chat_run.py /usr/local/bin/gbrain", text
+        )
+        self.assertIn(
+            "ln -s /usr/local/bin/gbrain /usr/local/bin/gbrain-chat-run", text
+        )
+        self.assertNotIn(
+            "COPY scripts/gbrain_chat_run.py /usr/local/bin/gbrain-chat-run", text
+        )
+
+    def test_image_installs_native_cli_at_private_path(self) -> None:
+        """The native CLI must live at the private non-PATH path; no native
+        wrapper may be installed at the public /usr/local/bin/gbrain."""
+        text = (REPO_ROOT / "Dockerfile.hermes").read_text(encoding="utf-8")
+        self.assertIn("/opt/josemar/libexec/gbrain-native", text)
+        self.assertNotIn(
+            "> /usr/local/bin/gbrain", text
+        )
+
+    def test_tasknotes_mcp_uses_private_native_path_without_env_override(self) -> None:
+        """TaskNotes is a trusted internal native user: it must invoke the
+        private native CLI directly (never the public adapter) through a
+        fixed constant with no environment escape hatch."""
+        text = (REPO_ROOT / "scripts" / "tasknotes_mcp.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('TASKNOTES_GBRAIN_NATIVE = "/opt/josemar/libexec/gbrain-native"', text)
+        self.assertNotIn("TASKNOTES_GBRAIN_BIN", text)
+        self.assertNotIn("/usr/local/bin/gbrain", text)
+
+    def test_tasknotes_mcp_locations_are_fixed(self) -> None:
+        """The vault, gbrain state, and the shared lock must be fixed
+        constants — no GBRAIN_BRAIN_REPO / GBRAIN_HOME / TASKNOTES_LOCK_DIR
+        environment overrides."""
+        text = (REPO_ROOT / "scripts" / "tasknotes_mcp.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('TASKNOTES_VAULT = "/opt/data/obsidian"', text)
+        self.assertIn('TASKNOTES_GBRAIN_HOME = "/opt/data"', text)
+        self.assertIn('TASKNOTES_LOCK_DIR = "/opt/data/.locks"', text)
+        self.assertNotIn('os.environ.get("GBRAIN_BRAIN_REPO"', text)
+        self.assertNotIn('os.environ.get("GBRAIN_HOME"', text)
+        self.assertNotIn('os.environ.get("TASKNOTES_LOCK_DIR"', text)
+
+    def test_tasknotes_mcp_enforces_runtime_identity(self) -> None:
+        text = (REPO_ROOT / "scripts" / "tasknotes_mcp.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def _assert_runtime_identity", text)
+        self.assertIn("os.geteuid() == 0", text)
+        self.assertIn("refuses to run as root", text)
+
+    def test_crons_enforce_non_root_identity_before_lock(self) -> None:
+        """Both cron entrypoints must enforce the hermes runtime identity
+        (fail-closed non-root check) before touching the lock, instead of
+        relying on base-image behavior."""
+        for cron in (
+            "hermes-gbrain-refresh-cron.sh",
+            "hermes-gbrain-embedding-refresh-cron.sh",
+        ):
+            text = (REPO_ROOT / "scripts" / cron).read_text(encoding="utf-8")
+            self.assertIn("/usr/bin/id -u", text)
+            self.assertIn("refuses to run as root", text)
+            self.assertIn("*[!0-9]*", text)
+
     def test_refresh_cron_uses_shared_nonblocking_lock(self) -> None:
         text = (REPO_ROOT / "scripts" / "hermes-gbrain-refresh-cron.sh").read_text(
             encoding="utf-8"
@@ -46,6 +116,17 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn("--timeout", text)
         self.assertIn('if [ "$status" -eq 75 ]', text)
         self.assertIn("refresh skipped", text)
+
+    def test_refresh_cron_invokes_runner_with_fixed_isolated_interpreter(self) -> None:
+        """The cron must start the lock runner with the literal fixed image
+        interpreter in isolated mode (-I) so PYTHONPATH/sitecustomize from
+        the cron environment cannot execute code before the flock; no
+        interpreter override may exist."""
+        text = (REPO_ROOT / "scripts" / "hermes-gbrain-refresh-cron.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"/opt/hermes/.venv/bin/python3" -I "$lock_runner"', text)
+        self.assertNotIn("GBRAIN_PYTHON_BIN", text)
 
     def test_skill_names_only_the_six_supported_tools(self) -> None:
         text = (REPO_ROOT / "skills-factory" / "tasknotes" / "SKILL.md").read_text(

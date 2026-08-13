@@ -90,10 +90,49 @@ When modifying user state, commit/push inside `agent-state` repo when requested.
 
 - Repo-owned skills: `skills-factory/*` -> copied to `/opt/josemar/skills`.
 - User-owned skills: `agent-state/skills/*` -> synced into `/opt/data/skills`.
-- Keep native gbrain (`skills-factory/gbrain` + `scripts/josemar-gbrain`) as the canonical vault interface. Josemar uses the pinned `gbrain` CLI directly for general vault work; the bounded `tasknotes` MCP is the only specialized exception and still uses short-lived native gbrain commands as the sole task writer. `josemar-gbrain` provides operator-only `reindex` activation and lightweight `refresh` for periodic manual Obsidian edit reconciliation.
+- Keep native gbrain (`skills-factory/gbrain` + `scripts/josemar-gbrain`) as the canonical vault interface. The bounded `tasknotes` MCP is the only specialized exception and still uses short-lived native gbrain commands as the sole task writer. `josemar-gbrain` provides operator-only `reindex` activation and lightweight `refresh` for periodic manual Obsidian edit reconciliation. Agent-facing vault access (chat, skills, external general vault actions) runs through the public `gbrain` command, which is safe by default (issue #110): it transparently provides the safe-adapter behavior — `hermes` runtime user, shared lock. The internal private native gbrain path is never presented as an agent command; it is limited to the locked operator/cron paths (`josemar-gbrain` wrapper and both refresh crons) and the TaskNotes MCP implementation, which cooperate on the same lock and do NOT use the public wrapper (see the safe-access non-negotiables below).
 - Automatic skill creation, patching, and curation are intentionally disabled (`skills.creation_nudge_interval: 0`, `skills.write_approval: true`, `curator.enabled: false`). Keep these guards until issue #69's re-enable criteria pass against a pinned Hermes release.
 - Until issue #69 is resolved, intentional user-skill authoring must be explicit and use the flat `/opt/data/skills/<name>/SKILL.md` layout so workspace sync can version it. Never route runtime writes into `/opt/josemar/skills`.
 - Per-profile skill enable/disable choices are user state under `hermes/skill-toggles/`; never version the full Hermes `config.yaml`.
+
+## gbrain Safe-Access Non-Negotiables (issue #110)
+
+Applies to every assistant, cron, and skill that touches gbrain state. The
+operator runbook is `docs/gbrain-operations.md` → "Issue #110: Safe gbrain
+Adapter"; TaskNotes specifics are in `docs/tasknotes-mcp.md`.
+
+1. **No root execution.** Never run gbrain, `josemar-gbrain`, or vault Git
+   operations as root. Always run as the Hermes runtime user (e.g.
+   `docker compose exec hermes su -s /bin/sh hermes -c '...'`). Runtime gbrain
+   state under `/opt/data/.gbrain` belongs to that user.
+2. **Public `gbrain` is the safe agent-facing command.** ALL chat, skill, and
+   external general vault actions use the public `gbrain` command, which
+   transparently provides the issue #110 safe-adapter behavior (runs as the
+   `hermes` runtime user under the shared lock). `gbrain-chat-run` is a
+   temporary compatibility alias for that behavior and is not recommended in
+   new instructions. The internal private native gbrain path
+   (`/opt/josemar/libexec/gbrain-native`; used by the `josemar-gbrain`
+   operator wrapper, both refresh crons, and the TaskNotes MCP) must never be
+   presented as an agent command; those paths cooperate on the same lock
+   (rules 4–6) and must avoid nesting. The wrapper prevents accidental,
+   prompt-driven, and cooperative-concurrency misuse — it is NOT a security
+   boundary against a compromised same-UID container/shell (defense in depth,
+   not a complete security boundary); do not overstate protection.
+3. **No concurrent PGLite opens.** The gbrain database is single-writer PGLite.
+   Never open or mutate it from two processes at once.
+4. **Cooperative flock.** The global lock at `/opt/data/.locks/tasknotes.lock`
+   serializes cooperative access today: TaskNotes transactions, both refresh
+   crons, backfills, and every other gbrain-touching path cooperate on it.
+5. **Pause both crons for maintenance windows.** For recovery, reindex/rebuild,
+   migrations, vault swaps, and unadapted/third-party diagnostics, the
+   operator pauses BOTH `gbrain-refresh` and `gbrain-embedding-refresh`.
+   Routine adapted access does NOT require pausing the crons.
+6. **No nested wrapper usage in TaskNotes.** TaskNotes remains a bounded MCP
+   adapter on short-lived native gbrain commands and is the sole task-file
+   writer. It retains its transaction-level global lock and internal native
+   invocation; it must never route through the public `gbrain` wrapper's lock
+   path internally, nor be invoked from it. Task mutations go through the
+   `task_*` MCP tools only.
 
 ### Skill Organization: SKILL.md vs. references/
 

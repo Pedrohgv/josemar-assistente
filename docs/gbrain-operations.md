@@ -7,14 +7,23 @@ interface and later vault swaps.
 
 The Josemar gbrain integration is intentionally minimal:
 
-- The pinned `gbrain` CLI is installed in the Hermes image under `/opt/gbrain`
-  with a `/usr/local/bin/gbrain` wrapper that `cd`s to `/opt/gbrain` and runs
-  `bun src/cli.ts`.
-- Josemar uses the native `gbrain` CLI directly from chat for general retrieval,
-  authoring, and linking (`gbrain status`, `gbrain search`, `gbrain get`,
-  `gbrain capture`, `gbrain put`, `gbrain link`, `gbrain backlinks`, plus
-  `gbrain tags`, `gbrain timeline`, `gbrain graph`, `gbrain delete`,
-  `gbrain history`, `gbrain revert` where useful). The bounded TaskNotes MCP is
+- The public `/usr/local/bin/gbrain` is the issue #110 safe adapter
+  (transparent wrapper). The pinned native `gbrain` CLI is installed privately
+  at `/opt/josemar/libexec/gbrain-native`; it must never be used as an agent
+  command — only the locked operator/cron paths (`josemar-gbrain`, both
+  refresh crons) and the TaskNotes MCP implementation invoke it.
+- Chat and external general vault actions use the public `gbrain` command,
+  which is safe by default (issue #110): it transparently provides the
+  safe-adapter behavior — it executes the
+  native `gbrain` CLI under the shared TaskNotes/gbrain lock as the `hermes`
+  runtime user. Chat-facing invocations use `gbrain status`,
+  `gbrain search`, `gbrain get`, `gbrain capture`,
+  `gbrain put`, `gbrain link`, `gbrain backlinks`,
+  plus `gbrain tags`, `gbrain timeline`,
+  `gbrain graph`, `gbrain delete`,
+  `gbrain history`, `gbrain revert` where useful (the
+  public command passes arguments through unchanged; see "Issue #110: Safe
+  gbrain Adapter" below). The bounded TaskNotes MCP is
   the only specialized exception; it uses short-lived native gbrain commands
   and is the required interface for TaskNotes task-file mutations.
 - `scripts/josemar-gbrain` (installed at `/usr/local/bin/josemar-gbrain`) is
@@ -46,12 +55,84 @@ The Josemar gbrain integration is intentionally minimal:
   refresh therefore proves the vault Git prerequisite already exists. This
   repository is local-only and has no remote consumer.
 
+## Issue #110: Safe gbrain Adapter — Access Non-Negotiables
+
+The public `gbrain` command is the single agent-facing gateway for vault
+access and is safe by default: it transparently provides the issue #110
+safe-adapter behavior — it executes only the pinned native `gbrain` CLI,
+never as root (it drops to the `hermes` runtime user before the shared lock is
+touched), and it serializes the call through the shared TaskNotes/gbrain lock
+with bounded lock acquisition and process runtime. `gbrain-chat-run` is a
+temporary compatibility alias for this behavior (source
+`scripts/gbrain_chat_run.py`); existing instructions and scripts may still
+invoke it, but new instructions MUST use the public `gbrain` command. The
+safe-adapter behavior is deliberately NOT used internally by the TaskNotes
+MCP (already the lock owner) and not by the `josemar-gbrain` operator wrapper
+(which self-locks its own gbrain access).
+
+The wrapper is being hardened separately. Implementation details (flags,
+timeouts, exported environment, exit codes) are not a stable contract: read
+`scripts/gbrain_chat_run.py` for the current behavior, and treat only the
+non-negotiables below as policy.
+
+**Threat model and deployment scope.** The issue #110 wrapper prevents
+accidental, prompt-driven, and cooperative-concurrency PGLite access: it
+enforces the `hermes` runtime user and serializes every call through the
+shared lock (single-writer). It is NOT a security boundary against a
+compromised process running as the same UID (`hermes`) in the container or on
+the host shell — the private native path (`/opt/josemar/libexec/gbrain-native`)
+is defense in depth, not a complete security boundary, and issue #110 does not
+protect against a fully compromised container/session. Do not overstate the
+protection in agent-facing instructions. Deployment paths are fixed:
+`/opt/data` (runtime state), `/opt/data/obsidian` (vault), and the global lock
+at `/opt/data/.locks/tasknotes.lock`; no relocatable overrides are supported
+in this deployment.
+
+**Startup-hook suppression (issue #112).** The private native launcher
+(`/opt/josemar/libexec/gbrain-native`) enforces `GBRAIN_SKIP_STARTUP_HOOKS=1`
+on every invocation, so gbrain's startup upgrade notice is never emitted and
+cannot corrupt notes when a caller merges stderr into stdin (`2>&1`). This is
+defense in depth, not generic stderr filtering: `put --stdin` remains
+forbidden, public agent-facing calls use `gbrain`, and TaskNotes uses the
+private native launcher only under its transaction-level lock.
+
+Immediate non-negotiables:
+
+1. **No root execution.** Never run gbrain, `josemar-gbrain`, or vault Git
+   operations as root. All commands run as the Hermes runtime user, exactly as
+   the activation sections below do (`docker compose exec hermes su -s /bin/sh
+   hermes -c '...'`). Runtime gbrain state under `/opt/data/.gbrain` belongs
+   to that user; root-run writes corrupt ownership and break every later path.
+2. **Public `gbrain` is mandatory for agent-facing access.** ALL chat, skill,
+   and external general vault actions use the public `gbrain` command (safe by
+   default). The internal private native gbrain path
+   (`/opt/josemar/libexec/gbrain-native`; raw CLI execution used by the
+   `josemar-gbrain` operator wrapper, both refresh crons, and the
+   TaskNotes MCP) must never be presented as an agent command; those paths
+   already own or self-serialize their gbrain access through the same lock and
+   must avoid nesting.
+3. **No concurrent PGLite opens.** The gbrain database is single-writer PGLite.
+   No two processes may open or mutate it concurrently — including during
+   maintenance. Plan maintenance inside a paused window (see "Cron
+   Pause/Resume for Maintenance Windows" below).
+4. **Cooperative flock.** The global lock at `/opt/data/.locks/tasknotes.lock`
+   serializes cooperative access: TaskNotes transactions, both refresh crons,
+   backfills, and every adapted path take it (crons nonblockingly, skipping
+   when busy). The public `gbrain` command acquires it through the same lock
+   runner.
+5. **No nested wrapper usage in TaskNotes.** TaskNotes remains a bounded MCP
+   adapter implemented on short-lived native gbrain commands, the sole
+   task-file writer. It retains its transaction-level global lock and internal
+   native invocation; it must never route through the public `gbrain`
+   wrapper's lock path internally, nor be invoked from it. Task mutations go
+   through the `task_*` MCP tools only. See `docs/tasknotes-mcp.md`.
+
 ## Pinned Values
 
 - Bun: `1.3.14`
 - gbrain ref: `15b9863d13635d173562a54f55a1d388bfcf546b`
 - gbrain version: `0.42.73.2`
-- Schema pack: `gbrain-base-v2`
+- Schema pack: `josemar` (state-owned custom pack extending `gbrain-base-v2`; the active schema marker in this deployment)
 
 ## gbrain Upgrade Checklist
 
@@ -76,9 +157,10 @@ operator MUST verify the following after rebuild and before deploying:
 
 3. **Chronicle / Life Chronicle features.** If chronicle is enabled by the
    time of the upgrade, verify the `auto_chronicle` config key and the
-   chronicle commands (`gbrain day`, `gbrain since`, `gbrain last-seen`,
-   `gbrain orient`, `gbrain chronicle-backfill`) still exist and behave as
-   documented. As of v0.42.73.2, `auto_chronicle` is a registered
+   chronicle commands (`gbrain day`, `gbrain since`,
+   `gbrain last-seen`, `gbrain orient`) still exist and behave as
+   documented; `gbrain chronicle-backfill` (operator-only) is verified the
+   same way. As of v0.42.73.2, `auto_chronicle` is a registered
    `KNOWN_CONFIG_KEYS` entry, so it no longer requires the `--force` flag that
    the v0.42.57.0 config-key registry bug forced. The chronicle judge token
    limit is now raised through the supported `chronicle.judge_max_tokens=8000`
@@ -139,16 +221,20 @@ operator MUST verify the following after rebuild and before deploying:
 |---|---|---|
 | `GBRAIN_HOME` | `/opt/data` | Parent directory; gbrain stores state under `$GBRAIN_HOME/.gbrain` (PGLite DB, config, cache). Lives inside the existing writable `/opt/data` volume. |
 | `GBRAIN_BRAIN_REPO` | `/opt/data/obsidian` | Vault path gbrain indexes. |
-| `GBRAIN_SCHEMA_PACK` | `gbrain-base-v2` | Schema pack selector. Set to `josemar-user` to use the custom user-owned pack. |
+| `GBRAIN_SCHEMA_PACK` | `josemar` | Active schema pack selector: the state-owned custom pack extending `gbrain-base-v2` (the active schema marker in this deployment). Bundled fallbacks: `gbrain-base`, `gbrain-base-v2`, `gbrain-recommended`. |
 | `GBRAIN_SCHEMA_SOURCE_ROOT` | `/opt/data/.gbrain/schema-packs` | Source root for custom schema packs. The source pack for the selected `GBRAIN_SCHEMA_PACK` must exist at `<root>/<pack>/pack.yaml`. |
 | `GBRAIN_REFRESH_INTERVAL` | `5` | Hermes cron interval, in minutes, for `josemar-gbrain refresh`. Set to `0` to disable. Refresh deliberately uses `gbrain sync --no-embed` even after issue #65 activation; embedding stale pages is a separate scheduled job, not folded into the periodic refresh. See "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval" below and `docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation. |
 | `GBRAIN_REFRESH_TIMEOUT` | `240` | Maximum seconds for the refresh child while it holds the shared TaskNotes/gbrain lock. |
+| `GBRAIN_EMBED_REFRESH_SCHEDULE` | `0 5 * * *` | Cron expression (local time) for the daily `gbrain-embedding-refresh` job. Set to `0` to disable (removes the owned job at init). See "Cron Pause/Resume for Maintenance Windows". |
 
 No new Docker volume is added. `GBRAIN_HOME` (`/opt/data`) is the parent;
 gbrain stores its state under `$GBRAIN_HOME/.gbrain`, which lives inside the
 existing `/opt/data` (hermes-data) volume, already writable by the Hermes
 runtime user. `HERMES_WRITABLE_VOLUMES` is not altered. `.gbrain` is the
 protected workspace runtime path (never versioned by workspace sync).
+Deployment paths are fixed — `/opt/data` (state), `/opt/data/obsidian`
+(vault), `/opt/data/.locks/tasknotes.lock` (global lock); no relocatable
+overrides are supported in this deployment.
 
 ## Safe Initial Production Activation
 
@@ -183,13 +269,15 @@ protected workspace runtime path (never versioned by workspace sync).
    ```
    Confirm gbrain reports a healthy runtime/config state.
 
-5. **Verify from chat (native CLI):**
+5. **Verify from chat (public `gbrain`):**
    ```bash
    docker compose exec hermes su -s /bin/sh hermes -c 'gbrain status'
    docker compose exec hermes su -s /bin/sh hermes -c 'gbrain search "test query" --limit 5'
    docker compose exec hermes su -s /bin/sh hermes -c 'gbrain capture "smoke test" --slug inbox/smoke-test --json'
    docker compose exec hermes su -s /bin/sh hermes -c 'gbrain get inbox/smoke-test'
    ```
+   This exercises the exact path chat agents use (public wrapper → shared lock →
+   native CLI).
 
 ## Later Vault Swaps
 
@@ -210,7 +298,8 @@ When the Obsidian vault is swapped or materially changed:
    docker compose exec hermes su -s /bin/sh hermes -c 'gbrain status'
    ```
 
-5. **Smoke-test from chat** with `gbrain search` and `gbrain get` as above.
+5. **Smoke-test from chat** with `gbrain search` and
+   `gbrain get` as above.
 
 ## Periodic Refresh for Manual Obsidian Edits
 
@@ -244,13 +333,76 @@ be vectorized. See "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval" below
 and `docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation, the
 shared embedding service design, and the staged activation/rollback plan.
 
+## Cron Pause/Resume for Maintenance Windows
+
+Two Hermes script crons touch gbrain state and BOTH must be paused together for
+exclusive maintenance windows:
+
+- `gbrain-refresh` — every `GBRAIN_REFRESH_INTERVAL` minutes (default `5`);
+  runs `josemar-gbrain refresh` (incremental `sync --no-embed`).
+- `gbrain-embedding-refresh` — daily at `GBRAIN_EMBED_REFRESH_SCHEDULE`
+  (default `0 5 * * *`, local time); runs `josemar-gbrain refresh-embeddings`
+  (stale-only embed, concurrency 1).
+
+Neither cron uses the public `gbrain` wrapper: each runs the self-locking
+`josemar-gbrain` wrapper, which serializes its own gbrain access through the
+same shared lock. Crons and the public wrapper never nest inside each other.
+
+**When to pause (both crons):** recovery (TaskNotes recovery marker, corrupted
+or uncertain state), reindex/rebuild, database migrations, vault swaps, and
+unadapted/third-party diagnostics (any tool that opens the PGLite database
+outside the wrapper/flock contract). Public `gbrain` is safe by default, but
+that does not replace maintenance windows: operator maintenance still pauses
+BOTH crons exactly as documented here. **Routine adapted access does NOT
+require pausing** — the crons are nonblocking flock cooperators and skip
+cleanly when
+the lock is busy (exit 0).
+
+**Pause (immediate, no restart)** — as the Hermes runtime user:
+
+```bash
+docker compose exec hermes su -s /bin/sh hermes -c \
+  '/opt/hermes/.venv/bin/hermes cron remove gbrain-refresh'
+docker compose exec hermes su -s /bin/sh hermes -c \
+  '/opt/hermes/.venv/bin/hermes cron remove gbrain-embedding-refresh'
+```
+
+Also set `GBRAIN_REFRESH_INTERVAL=0` and `GBRAIN_EMBED_REFRESH_SCHEDULE=0` in
+`.env` for the duration of the window so a container restart during maintenance
+does not recreate the jobs. Note that `GBRAIN_REFRESH_INTERVAL=0` only prevents
+creation at init — it does not remove an already-installed `gbrain-refresh`
+job, so remove the job at runtime as shown above.
+
+**Resume** — restore the normal env values (`GBRAIN_REFRESH_INTERVAL=5`,
+`GBRAIN_EMBED_REFRESH_SCHEDULE=0 5 * * *`) and restart the container:
+`docker-hermes-init.sh` reconciles and recreates both owned jobs. To resume
+without a restart, recreate the jobs manually with the same flags the init
+script uses:
+
+```bash
+docker compose exec hermes su -s /bin/sh hermes -c \
+  '/opt/hermes/.venv/bin/hermes cron create "every 5m" --no-agent \
+   --script hermes-gbrain-refresh-cron.sh --workdir /opt/data \
+   --name gbrain-refresh'
+docker compose exec hermes su -s /bin/sh hermes -c \
+  '/opt/hermes/.venv/bin/hermes cron create "0 5 * * *" --no-agent \
+   --script hermes-gbrain-embedding-refresh-cron.sh --workdir /opt/data \
+   --name gbrain-embedding-refresh'
+```
+
+Verify both jobs are scheduled again before ending the maintenance window.
+
 ## Native Write-Through
 
 For TaskNotes task files, use the bounded `task_*` MCP tools rather than direct
 native capture/put. The tools preserve TaskNotes fields and add Git/profile/read-
-back guards. The native commands below remain valid for general vault pages.
+back guards. The native commands below describe the underlying CLI behavior;
+from chat they are invoked through the public `gbrain` command (safe by
+default),
+while operator maintenance may call them natively.
 
-Native gbrain writes (`gbrain capture`, `gbrain put`) aim to update both the
+Native gbrain writes (`gbrain capture`, `gbrain put`) aim to
+update both the
 database and the on-disk vault files, but a successful process exit does NOT
 by itself guarantee the on-disk write-through completed. A write-through can
 fail or be skipped (disk error, permission issue, or config) even when the
@@ -371,7 +523,8 @@ or deploys. Do not run it before the overlay-enabled deploy.
    the backfill of any remaining stale/null-signature rows. Do not run it
    through the periodic refresh path.
 
-5. **`gbrain search` and `gbrain query --no-expand` both become hybrid/semantic.**
+5. **`gbrain search` and `gbrain query --no-expand` both
+   become hybrid/semantic.**
    `enable-embeddings` sets `search.mcp_keyword_only=false` and clears the
    `embedding_disabled` sentinel on migration success, so both `gbrain search`
    and `gbrain query --no-expand` use the hybrid/semantic provider path (not
@@ -464,7 +617,9 @@ No `/shared`, Obsidian, credentials, or Hermes state mounts are added to the
 The schema pack defines page types, link types, filing rules, and other
 taxonomy for the brain. Custom schema packs are user-owned source files that
 live in the private agent-state repo and are installed into gbrain's native
-user-pack directory during operator activation.
+user-pack directory during operator activation. This deployment's active
+schema marker is `josemar` (see "Pinned Values"); the source pack lives at
+`gbrain/schema-packs/josemar/pack.yaml` in the agent-state repo.
 
 ### Source-First Approval Workflow
 
@@ -474,19 +629,19 @@ Schema editing is **never** done silently or from chat. The workflow is:
    `pack.yaml` with impact analysis.
 2. **Approve**: The user explicitly approves the change.
 3. **Update**: The source `pack.yaml` is edited and committed to agent-state
-   under `gbrain/schema-packs/josemar-user/pack.yaml`.
+   under `gbrain/schema-packs/josemar/pack.yaml`.
 4. **Activate**: An operator runs `josemar-gbrain reindex` to validate the
-   source pack, install it to `$GBRAIN_HOME/.gbrain/schema-packs/josemar-user/`,
+   source pack, install it to `$GBRAIN_HOME/.gbrain/schema-packs/josemar/`,
    and run native schema sync. **No redeploy is required** — activation
    happens in the running deployment.
 
 ### Switching to the Custom Pack
 
-1. Set `GBRAIN_SCHEMA_PACK=josemar-user` in `.env`.
+1. Set `GBRAIN_SCHEMA_PACK=josemar` in `.env`.
 2. Ensure the source pack exists at
-   `$GBRAIN_SCHEMA_SOURCE_ROOT/josemar-user/pack.yaml` (default:
-   `/opt/data/.gbrain/schema-packs/josemar-user/pack.yaml`, which maps to the
-   agent-state `gbrain/schema-packs/josemar-user/` path).
+   `$GBRAIN_SCHEMA_SOURCE_ROOT/josemar/pack.yaml` (default:
+   `/opt/data/.gbrain/schema-packs/josemar/pack.yaml`, which maps to the
+   agent-state `gbrain/schema-packs/josemar/` path).
 3. Run `josemar-gbrain reindex`.
 
 ### Bundled Pack Fallback
@@ -499,11 +654,14 @@ workflow: set the env, run reindex.
 ## Troubleshooting
 
 - **`gbrain` command not found** — Confirm the image was rebuilt with the new
-  Dockerfile. The native CLI lives at `/usr/local/bin/gbrain`.
+  Dockerfile. The public safe adapter lives at `/usr/local/bin/gbrain`; the
+  private native CLI lives at `/opt/josemar/libexec/gbrain-native` and must
+  never be invoked as an agent command.
 - **Non-zero exit from `gbrain search`** — Check the native CLI error message.
   Confirm the PGLite database at `$GBRAIN_HOME/.gbrain` is intact and that
   reindex has been run.
-- **Non-zero exit from `gbrain put` or `gbrain capture`** — Check the native CLI
+- **Non-zero exit from `gbrain put` or `gbrain capture`** —
+  Check the native CLI
   error message. The vault files remain the user-facing artifact; inspect the
   vault if needed.
 - **Write-through failure** — The native gbrain write succeeded in the

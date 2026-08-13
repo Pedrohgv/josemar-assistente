@@ -21,6 +21,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -30,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WRAPPER_PATH = REPO_ROOT / "scripts" / "josemar-gbrain"
 HELPER_PATH = REPO_ROOT / "scripts" / "hermes-gbrain-embedding-refresh.py"
 CRON_SCRIPT_PATH = REPO_ROOT / "scripts" / "hermes-gbrain-embedding-refresh-cron.sh"
+RUNNER_PATH = REPO_ROOT / "scripts" / "tasknotes_lock_run.py"
 
 MODEL = "llama-server:intfloat/multilingual-e5-small"
 DIMENSIONS = "384"
@@ -39,6 +41,68 @@ REVISION = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def patched_wrapper(tmp: Path, fake_gbrain: Path, lock_path: Path) -> Path:
+    """Fixture copy of the production wrapper with the fixed production
+    literals substituted for local equivalents (no production env seam)."""
+    src = WRAPPER_PATH.read_text(encoding="utf-8")
+    patched = (
+        src.replace('GBRAIN_BIN="/opt/josemar/libexec/gbrain-native"', f'GBRAIN_BIN="{fake_gbrain}"')
+        .replace(
+            'GBRAIN_TASKNOTES_LOCK="/opt/data/.locks/tasknotes.lock"',
+            f'GBRAIN_TASKNOTES_LOCK="{lock_path}"',
+        )
+        .replace('GBRAIN_HOME="/opt/data"', f'GBRAIN_HOME="{tmp / "state"}"')
+        .replace(
+            'GBRAIN_BRAIN_REPO="/opt/data/obsidian"',
+            f'GBRAIN_BRAIN_REPO="{tmp / "brain"}"',
+        )
+        .replace(
+            'PYTHON_BIN="/opt/hermes/.venv/bin/python3"',
+            f'PYTHON_BIN="{sys.executable}"',
+        )
+        .replace(
+            'TASKNOTES_LOCK_RUNNER="/opt/josemar/scripts/tasknotes_lock_run.py"',
+            f'TASKNOTES_LOCK_RUNNER="{RUNNER_PATH}"',
+        )
+    )
+    script = tmp / "josemar-gbrain"
+    script.write_text(patched, encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+def patched_helper(tmp: Path, fake_cmd: Path) -> Path:
+    """Fixture copy of the embedding-refresh helper with the immutable
+    REFRESH_CMD constant substituted for a fake command (the production path
+    has no env override)."""
+    src = HELPER_PATH.read_text(encoding="utf-8")
+    patched = src.replace(
+        'REFRESH_CMD = "/usr/local/bin/josemar-gbrain refresh-embeddings"',
+        f'REFRESH_CMD = "{fake_cmd}"',
+    )
+    script = tmp / "embedding-refresh-helper.py"
+    script.write_text(patched, encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+def patched_embedding_cron(tmp: Path, helper: Path) -> Path:
+    """Fixture copy of the embedding cron with the fixed interpreter and
+    helper-path literals substituted for local equivalents."""
+    src = CRON_SCRIPT_PATH.read_text(encoding="utf-8")
+    patched = (
+        src.replace('"/opt/hermes/.venv/bin/python3"', f'"{sys.executable}"')
+        .replace(
+            '"/opt/josemar/scripts/hermes-gbrain-embedding-refresh.py"',
+            f'"{helper}"',
+        )
+    )
+    script = tmp / "embedding-refresh-cron.sh"
+    script.write_text(patched, encoding="utf-8")
+    script.chmod(0o755)
+    return script
 
 
 class FakeGbrain:
@@ -95,6 +159,7 @@ class RefreshEmbeddingsBehaviorBase(unittest.TestCase):
         _write(self.config, json.dumps({"search": {"mcp_keyword_only": False}}))
         _write(self.marker,
                json.dumps({"model": MODEL, "dimensions": 384, "revision": REVISION}))
+        self.wrapper = patched_wrapper(self.tmp, self.fake.script, self.lock_path)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -103,11 +168,6 @@ class RefreshEmbeddingsBehaviorBase(unittest.TestCase):
         env = os.environ.copy()
         env.update(
             {
-                "JOSEMAR_GBRAIN_DROPPED_PRIVS": "1",
-                "GBRAIN_BIN": str(self.fake.script),
-                "GBRAIN_HOME": str(self.state.parent),
-                "GBRAIN_BRAIN_REPO": str(self.brain),
-                "GBRAIN_TASKNOTES_LOCK": str(self.lock_path),
                 "GBRAIN_EMBEDDING_MODEL": MODEL,
                 "GBRAIN_EMBEDDING_DIMENSIONS": DIMENSIONS,
                 "GBRAIN_EMBEDDING_MODEL_REVISION": REVISION,
@@ -120,7 +180,7 @@ class RefreshEmbeddingsBehaviorBase(unittest.TestCase):
     def run_wrapper(self, subcommand: str = "refresh-embeddings",
                     **extra) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [str(WRAPPER_PATH), subcommand],
+            [str(self.wrapper), subcommand],
             env=self.env(**extra),
             capture_output=True,
             text=True,
@@ -227,10 +287,18 @@ class RefreshEmbeddingsLockTests(RefreshEmbeddingsBehaviorBase):
                          "no gbrain command may run while the lock is busy")
 
     def test_lock_unavailable_fails(self) -> None:
-        missing = self.tmp / "no-such-dir" / "tasknotes.lock"
-        result = self.run_wrapper(**{"GBRAIN_TASKNOTES_LOCK": str(missing)})
-        self.assertEqual(result.returncode, 1)
+        """An unwritable lock directory must produce the structured
+        unavailable error (the lock path is a fixed production constant, so
+        it cannot be redirected by env)."""
+        self.lock_path.unlink()
+        self.lock_path.parent.chmod(0o500)
+        try:
+            result = self.run_wrapper()
+        finally:
+            self.lock_path.parent.chmod(0o700)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("refresh_embeddings_lock_unavailable", result.stdout)
+        self.assertEqual(self.fake.calls(), [])
 
 
 class EmbeddingsMarkerLifecycleTests(RefreshEmbeddingsBehaviorBase):
@@ -296,13 +364,15 @@ class EmbeddingRefreshTimeoutBehaviorTests(unittest.TestCase):
 
     def _run_helper(self, cmd: Path, timeout: float = 1.0, grace: float = 0.3,
                     **extra) -> subprocess.CompletedProcess:
+        """Run a fixture copy of the helper with the immutable REFRESH_CMD
+        constant substituted for the fake command (no production env seam)."""
         env = os.environ.copy()
-        env["GBRAIN_EMBED_REFRESH_CMD"] = str(cmd)
         env["GBRAIN_EMBED_REFRESH_TIMEOUT"] = str(timeout)
         env["GBRAIN_EMBED_REFRESH_KILL_GRACE"] = str(grace)
         env.update(extra)
+        helper = patched_helper(self.tmp, cmd)
         return subprocess.run(
-            ["python3", str(HELPER_PATH)],
+            [sys.executable, str(helper)],
             env=env,
             capture_output=True,
             text=True,
@@ -401,25 +471,15 @@ exec 9<>"{lock_file}"
 flock -n 9 || exit 7
 sleep 60
 """)
-        env = os.environ.copy()
-        env.update(
-            {
-                "GBRAIN_EMBED_REFRESH_CMD": str(fake),
-                "HERMES_CRON_SCRIPT_TIMEOUT": "3",
-                "GBRAIN_EMBED_REFRESH_TIMEOUT": "0.2",
-                "GBRAIN_EMBED_REFRESH_KILL_GRACE": "0.1",
-                "GBRAIN_EMBED_REFRESH_GROUP_DRAIN": "0.1",
-                "GBRAIN_EMBED_REFRESH_TIMEOUT_MARGIN": "0.2",
-            }
-        )
+        env = {
+            "HERMES_CRON_SCRIPT_TIMEOUT": "3",
+            "GBRAIN_EMBED_REFRESH_TIMEOUT": "0.2",
+            "GBRAIN_EMBED_REFRESH_KILL_GRACE": "0.1",
+            "GBRAIN_EMBED_REFRESH_GROUP_DRAIN": "0.1",
+            "GBRAIN_EMBED_REFRESH_TIMEOUT_MARGIN": "0.2",
+        }
         try:
-            result = subprocess.run(
-                ["python3", str(HELPER_PATH)],
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=2.8,
-            )
+            result = self._run_helper(fake, timeout=0.2, grace=0.1, **env)
         except subprocess.TimeoutExpired as exc:  # pragma: no cover - assertion path
             self.fail(f"outer Hermes timeout preempted helper cleanup: {exc}")
         self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
@@ -444,11 +504,11 @@ echo $$ > "{pid_file}"
 trap '' TERM
 sleep 60
 """)
+        helper = patched_helper(self.tmp, fake)
+        cron = patched_embedding_cron(self.tmp, helper)
         env = os.environ.copy()
         env.update(
             {
-                "GBRAIN_EMBED_REFRESH_CMD": str(fake),
-                "GBRAIN_EMBED_REFRESH_HELPER": str(HELPER_PATH),
                 # outer=5, grace=1, drain=1, margin=1 -> safe_timeout=1
                 "HERMES_CRON_SCRIPT_TIMEOUT": "5",
                 "GBRAIN_EMBED_REFRESH_TIMEOUT": str(requested_timeout),
@@ -459,7 +519,7 @@ sleep 60
         )
         try:
             return subprocess.run(
-                ["bash", str(CRON_SCRIPT_PATH)],
+                ["bash", str(cron)],
                 env=env,
                 capture_output=True,
                 text=True,
