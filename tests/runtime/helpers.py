@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 
 
@@ -128,6 +130,43 @@ COMPOSE_SELECTOR_ENV_KEYS = (
     "COMPOSE_PROFILES",
 )
 
+# The aux-ml image build (aux-ml/Dockerfile) copies the repo's local model
+# files (aux-ml/models/, the build context) into /models and then verifies
+# them against SHA256 build args. The compose defaults describe the
+# DOWNLOAD sources (URL + expected hash), which may not match the local
+# files actually present in the repo. ComposeRuntime pins each build arg to
+# the sha256 of the LOCAL file when it exists (authoritative build context),
+# so the checksum verification passes against the real files; when a file
+# is absent the arg is left unset and the build downloads it with the
+# default URL/hash. Values are hashes, never secrets — this does not weaken
+# secret isolation.
+AUX_ML_MODEL_SHA256_BUILD_ARGS = {
+    "glm-ocr.gguf": "AUX_ML_GLM_OCR_SHA256",
+    "mmproj-glm-ocr.gguf": "AUX_ML_GLM_OCR_MMPROJ_SHA256",
+    "granite-speech-4.1-2b-Q8_0.gguf": "AUX_ML_GRANITE_SPEECH_SHA256",
+    "mmproj-granite-speech-4.1-2b-f16.gguf": "AUX_ML_GRANITE_SPEECH_MMPROJ_SHA256",
+}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def aux_ml_model_sha256_env() -> dict[str, str]:
+    """Build-arg SHA256 env for the aux-ml image build, pinned to the repo's
+    local model files (see AUX_ML_MODEL_SHA256_BUILD_ARGS). Only files that
+    exist are pinned; missing files fall back to the compose defaults."""
+    out: dict[str, str] = {}
+    for filename, key in AUX_ML_MODEL_SHA256_BUILD_ARGS.items():
+        path = REPO_ROOT / "aux-ml" / "models" / filename
+        if path.is_file():
+            out[key] = _sha256_file(path)
+    return out
+
 # The ONLY caller-environment keys passed through into the sanitized test
 # env (and thus into the disposable env-file). Everything else in the
 # runner environment is deliberately NOT copied: unknown runner secrets
@@ -195,6 +234,30 @@ def write_disposable_env_file(env: dict[str, str], path: Path) -> Path:
     return path
 
 
+# Paths the runtime tests depend on being writable by the hermes runtime
+# user before any exec probe. Mirrors the writable surface the permission
+# contract asserts: HERMES_HOME, the aux-ml handoff volume, the obsidian
+# vault (a fresh named volume's ownership comes from the base image copy —
+# the init deliberately does NOT chown this cross-service volume), and the
+# vault-recovery staging dir (chowned by the init allowlist).
+HERMES_WRITABLE_PROBE_PATHS = (
+    "/opt/data",
+    "/shared",
+    "/opt/data/obsidian",
+    "/opt/data/vault-recovery/staging",
+)
+
+
+def hermes_writable_probe_command() -> str:
+    """`sh -lc` body asserting every HERMES_WRITABLE_PROBE_PATHS entry is
+    writable by the hermes runtime user (issue #110 conventions: never as
+    root), by touching and removing a probe file in each path."""
+    probes = " ".join(
+        f"{path}/.runtime-perm-probe" for path in HERMES_WRITABLE_PROBE_PATHS
+    )
+    return "su -s /bin/sh hermes -c " f"'touch {probes} && rm -f {probes}'"
+
+
 class ComposeRuntime:
     def __init__(self, *, include_aux_ml: bool = False) -> None:
         token = uuid.uuid4().hex[:12]
@@ -235,6 +298,10 @@ class ComposeRuntime:
         )
         if include_aux_ml:
             env["COMPOSE_PROFILES"] = "aux-ml"
+            # Pin the aux-ml image build-arg SHA256 values to the repo's
+            # local model files (build context), so the Dockerfile's
+            # checksum verification matches the files actually present.
+            env.update(aux_ml_model_sha256_env())
         self.env = env
 
     def _ensure_disposable_mounts(self) -> None:
@@ -296,6 +363,37 @@ class ComposeRuntime:
     def up(self, *services: str, timeout: int = 600) -> None:
         args = ["up", "-d", "--build", *services]
         self.run(*args, timeout=timeout)
+
+    def wait_until_hermes_writable(self, timeout: int = 90) -> None:
+        """Wait until every HERMES_WRITABLE_PROBE_PATHS entry is writable
+        by the hermes runtime user.
+
+        `docker compose up -d` returns as soon as the container STARTS,
+        while docker-hermes-init.sh chowns the root-owned named volumes
+        asynchronously during s6 cont-init — an immediate `exec` can race
+        it and hit "Permission denied" on /shared (and /opt/data/obsidian
+        is a fresh named volume whose ownership comes from the image copy,
+        never from the init allowlist). Probes the exact writable state
+        the runtime tests depend on (as the hermes runtime user, issue
+        #110 conventions) and fails with the last probe output on
+        timeout."""
+        deadline = time.monotonic() + timeout
+        last: subprocess.CompletedProcess[str] | None = None
+        while time.monotonic() < deadline:
+            proc = self.exec(
+                "hermes", "sh", "-lc", hermes_writable_probe_command(),
+                check=False, timeout=30,
+            )
+            if proc.returncode == 0:
+                return
+            last = proc
+            time.sleep(2)
+        detail = ""
+        if last is not None:
+            detail = f": {(last.stderr or last.stdout).strip()[-800:]}"
+        raise AssertionError(
+            f"hermes writable paths not ready within {timeout}s{detail}"
+        )
 
     def exec(self, service: str, *command: str, check: bool = True, timeout: int = 120) -> subprocess.CompletedProcess[str]:
         return self.run("exec", "-T", service, *command, check=check, timeout=timeout)

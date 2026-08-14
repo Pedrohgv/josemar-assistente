@@ -455,6 +455,30 @@ print("VECTOR_ROWS=%d" % vector_rows)
                 timeout=180,
             )
             self.assertEqual(export.returncode, 0, export.stdout + export.stderr)
+
+            # The uploader daemon started in the main lifecycle `up -d`
+            # above; assert it is still running before we stop it, so the
+            # daemon-start coverage is explicit and the stop below is
+            # meaningful.
+            daemon = self.compose(
+                "ps", "--status", "running", "mnemosyne-backup-uploader",
+                timeout=60,
+            )
+            self.assertEqual(daemon.returncode, 0, daemon.stdout + daemon.stderr)
+            self.assertIn("mnemosyne-backup-uploader", daemon.stdout)
+
+            # Stop the daemon gracefully (SIGTERM, 30s timeout) so its TERM
+            # trap releases a live upload lock before the one-shot run below.
+            # Regression: the polling daemon and the one-shot invocation
+            # previously raced for the mkdir upload lock, and whichever lost
+            # failed closed with exit 1 (the uploader's fail-closed lock
+            # semantics), making this assertion nondeterministic. With the
+            # daemon stopped, the one-shot is the sole lock contender; the
+            # uploader script itself is unchanged.
+            stopped = self.compose(
+                "stop", "-t", "30", "mnemosyne-backup-uploader", timeout=120,
+            )
+            self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
             upload = self.compose(
                 # The production uploader is a daemon; this disposable
                 # integration invocation must use its explicit one-shot mode

@@ -1,19 +1,54 @@
 #!/usr/bin/env python3
-"""Disposable built-image TaskNotes MCP lifecycle smoke test."""
+"""Disposable built-image TaskNotes MCP lifecycle smoke test.
+
+This script may ONLY run inside the opt-in Docker harness
+(tests/tasknotes_mcp/test_docker_runtime.py). It proves the harness
+container before touching anything: the fixed image interpreter, the
+read-only harness mount path of this script, Docker-native evidence
+(/.dockerenv or container cgroup), the bind-mounted disposable /opt/data, a
+fresh (empty) mount, a read-only script mount, and an exact match of the
+runtime identity with the validated Hermes UID/GID. There is deliberately NO
+host-execution, environment, or executable-override escape hatch: host runs
+and caller-provided bypasses are refused.
+
+The script never deletes anything under /opt/data: the outer host test
+fixture owns the fresh temporary directory and removes it after the
+container exits.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-import shutil
 import subprocess
-import tempfile
+import sys
 from pathlib import Path
+from typing import Any, NoReturn
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 
+# Fixed deployment contract (issue #110): the vault, gbrain state, and the
+# shared lock are pinned constants in the MCP — never environment-driven.
+# The Docker harness provisions a fresh disposable mount at exactly these
+# paths, so a path-contract drift in the built image fails this test instead
+# of silently running against a different location.
+VAULT = Path("/opt/data/obsidian")
+GBRAIN_HOME = Path("/opt/data")
+LOCK_DIR = Path("/opt/data/.locks")
+
+# The harness container is the only allowed execution environment: this
+# script runs from the read-only harness mount under the image's own venv
+# interpreter. Neither may be overridden.
+HARNESS_SCRIPT_MOUNT = Path("/tmp/real_gbrain_e2e.py")
+HARNESS_INTERPRETER = "/opt/hermes/.venv/bin/python3"
+
+# TaskNotes invokes the private native gbrain CLI at a fixed path; the
+# harness pins the same fixed constant — no executable override.
+GBRAIN_NATIVE = "/opt/josemar/libexec/gbrain-native"
+
+# Hard upper bound for uid/gid sanity validation (2**32 - 2); 0 (root) is
+# always rejected because the MCP and the harness refuse root execution.
+MAX_RUNTIME_ID = (1 << 32) - 2
 
 MANIFEST = {
     "id": "tasknotes",
@@ -62,11 +97,116 @@ PROFILE = {
 }
 
 
-# The public `gbrain` on PATH is the issue #110 adapter (which rejects admin
-# commands), so this built-image smoke harness calls the private native CLI
-# directly — the same fixed path TaskNotes uses in production. An explicit
-# override is allowed only for local development against a scratch install.
-GBRAIN_NATIVE = os.environ.get("REAL_GBRAIN_E2E_NATIVE_BIN", "/opt/josemar/libexec/gbrain-native")
+def _refuse(reason: str) -> NoReturn:
+    raise RuntimeError(f"tasknotes runtime harness refuses to run: {reason}")
+
+
+def _validated_id(name: str) -> int:
+    """Only a validated positive non-root uid/gid is accepted as the
+    expected identity; anything else (missing, garbage, 0, out of range) is
+    refused."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        _refuse(f"missing required environment variable {name}")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        _refuse(f"{name} must be an integer, got {raw!r}")
+    if not 1 <= value <= MAX_RUNTIME_ID:
+        _refuse(f"{name} must be a valid non-root uid/gid (1..{MAX_RUNTIME_ID}), got {value}")
+    return value
+
+
+def _is_disposable_mount() -> bool:
+    try:
+        return os.path.ismount(GBRAIN_HOME)
+    except OSError:
+        return False
+
+
+def _has_docker_native_evidence() -> bool:
+    """Docker-native container evidence, never env-driven: the daemon places
+    /.dockerenv in the container root, or the cgroup path names the docker
+    container (cgroup v1)."""
+    if os.path.exists("/.dockerenv"):
+        return True
+    try:
+        cgroup = Path("/proc/self/cgroup").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "docker" in cgroup
+
+
+def _harness_script_is_readonly() -> bool:
+    """True when the harness script mount is read-only. The /proc/self/mounts
+    entry must carry the ro option; otherwise an effective write attempt
+    (open-for-append without writing, which cannot alter the source) must
+    fail. Environment variables are never consulted."""
+    try:
+        mounts = Path("/proc/self/mounts").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        mounts = ""
+    target = str(HARNESS_SCRIPT_MOUNT)
+    for line in mounts.splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[1] == target:
+            return "ro" in fields[3].split(",")
+    try:
+        with open(HARNESS_SCRIPT_MOUNT, "a"):
+            pass
+    except OSError:
+        return True
+    return False
+
+
+def _prove_docker_harness(expected_uid: int, expected_gid: int) -> None:
+    """Refuse unless every signal of the disposable Docker harness holds:
+    harness interpreter, harness script mount, Docker-native evidence, a
+    bind-mounted /opt/data, a fresh (empty) mount, a read-only script mount,
+    and an exact match of the runtime identity with the validated Hermes
+    UID/GID. No signal is caller-controllable to a degree that would permit
+    a host run."""
+    if sys.executable != HARNESS_INTERPRETER:
+        _refuse(
+            f"not running under the harness interpreter {HARNESS_INTERPRETER} "
+            f"(got {sys.executable!r})"
+        )
+    script_path = Path(__file__).resolve()
+    if script_path != HARNESS_SCRIPT_MOUNT:
+        _refuse(
+            f"not running from the harness mount {HARNESS_SCRIPT_MOUNT} "
+            f"(got {script_path!r})"
+        )
+    if not _has_docker_native_evidence():
+        _refuse(
+            "no Docker-native evidence (/.dockerenv or container cgroup); "
+            "this script only runs inside the Docker harness"
+        )
+    if not _is_disposable_mount():
+        _refuse(f"{GBRAIN_HOME} is not a mountpoint; refusing to touch a host directory")
+    try:
+        entries = list(GBRAIN_HOME.iterdir())
+    except OSError as exc:
+        _refuse(f"cannot inspect {GBRAIN_HOME}: {exc}")
+    if entries:
+        _refuse(
+            f"{GBRAIN_HOME} is not a fresh disposable mount "
+            f"({len(entries)} entries present)"
+        )
+    if not _harness_script_is_readonly():
+        _refuse(f"harness script mount {HARNESS_SCRIPT_MOUNT} is not read-only")
+    if os.geteuid() != expected_uid or os.getegid() != expected_gid:
+        _refuse(
+            f"identity mismatch: running as {os.geteuid()}:{os.getegid()}, "
+            f"expected Hermes runtime user {expected_uid}:{expected_gid}"
+        )
+
+
+def _recheck_mount_safety() -> None:
+    """Explicit recheck immediately before the harness starts mutating
+    /opt/data: the disposable mount must still be in place."""
+    if not _is_disposable_mount():
+        _refuse(f"{GBRAIN_HOME} is no longer a mountpoint; aborting before any mutation")
 
 
 def run(command: list[str], *, env: dict[str, str], cwd: Path | None = None) -> str:
@@ -87,28 +227,26 @@ def run(command: list[str], *, env: dict[str, str], cwd: Path | None = None) -> 
     return completed.stdout
 
 
-def prepare(root: Path) -> tuple[Path, dict[str, str]]:
-    vault = root / "vault"
-    state = root / "state"
-    home = root / "home"
+def prepare() -> tuple[Path, dict[str, str]]:
+    _recheck_mount_safety()
+    vault = VAULT
     plugin = vault / ".obsidian" / "plugins" / "tasknotes"
     tasks = vault / "tasks"
-    for directory in (plugin, tasks, state, home):
+    for directory in (plugin, tasks):
         directory.mkdir(parents=True, exist_ok=True)
     (plugin / "manifest.json").write_text(json.dumps(MANIFEST), encoding="utf-8")
     (plugin / "data.json").write_text(json.dumps(PROFILE), encoding="utf-8")
     (vault / ".placeholder").write_text("disposable vault\n", encoding="utf-8")
 
     env = {
-        "HOME": str(home),
+        "HOME": str(GBRAIN_HOME),
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "TZ": "UTC",
-        "GBRAIN_HOME": str(state),
+        "GBRAIN_HOME": str(GBRAIN_HOME),
         "GBRAIN_BRAIN_REPO": str(vault),
         "GBRAIN_SKIP_STARTUP_HOOKS": "1",
-        "TASKNOTES_LOCK_DIR": str(state / ".locks"),
         "TELEGRAM_BOT_TOKEN": "",
         "PRIMARY_TELEGRAM_ID": "",
         "TELEGRAM_ALLOWED_USERS": "",
@@ -156,7 +294,7 @@ def prepare(root: Path) -> tuple[Path, dict[str, str]]:
     return vault, env
 
 
-async def call(session: ClientSession, name: str, arguments: dict) -> dict:
+async def call(session: Any, name: str, arguments: dict) -> dict:
     result = await session.call_tool(name, arguments)
     if result.isError:
         rendered = " ".join(getattr(item, "text", repr(item)) for item in result.content)
@@ -166,6 +304,11 @@ async def call(session: ClientSession, name: str, arguments: dict) -> dict:
 
 
 async def lifecycle(vault: Path, env: dict[str, str]) -> None:
+    # The MCP client lives in the image venv; it is imported lazily so the
+    # harness-proof guards above can run even on hosts without the package.
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
     params = StdioServerParameters(
         command="/opt/hermes/.venv/bin/python3",
         args=["/opt/josemar/scripts/tasknotes_mcp.py"],
@@ -272,14 +415,26 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
     assert "Disposable body preserved by gbrain." in task_text
 
 
+def _assert_fixed_contract_paths_used() -> None:
+    """Runtime proof that the built-image MCP honored the fixed-path
+    contract: gbrain state landed in /opt/data/.gbrain and the shared lock
+    file exists at /opt/data/.locks/tasknotes.lock (created by the engine
+    during the mutations). A silent path drift would fail here."""
+    if not (GBRAIN_HOME / ".gbrain").is_dir():
+        raise AssertionError("gbrain state missing at fixed path /opt/data/.gbrain")
+    lock_file = LOCK_DIR / "tasknotes.lock"
+    if not lock_file.is_file():
+        raise AssertionError(f"lock file missing at fixed path {lock_file}")
+
+
 def main() -> None:
-    root = Path(tempfile.mkdtemp(prefix="tasknotes-real-e2e-"))
-    try:
-        vault, env = prepare(root)
-        asyncio.run(lifecycle(vault, env))
-        print("real-gbrain MCP lifecycle: PASS")
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+    expected_uid = _validated_id("TASKNOTES_E2E_UID")
+    expected_gid = _validated_id("TASKNOTES_E2E_GID")
+    _prove_docker_harness(expected_uid, expected_gid)
+    vault, env = prepare()
+    asyncio.run(lifecycle(vault, env))
+    _assert_fixed_contract_paths_used()
+    print("real-gbrain MCP lifecycle: PASS")
 
 
 if __name__ == "__main__":
