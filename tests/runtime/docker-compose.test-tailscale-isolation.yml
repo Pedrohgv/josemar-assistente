@@ -1,0 +1,32 @@
+# Dedicated test-only Compose overlay (never used by production deploys):
+# hardens the base `tailscale` service for gated Docker tests that start it
+# (the vault-recovery DR drill starts a genuinely RUNNING Syncthing, which
+# shares the tailscale network namespace via `network_mode: service:tailscale`).
+#
+# Defense in depth so a test Tailscale can NEVER authenticate or join a
+# tailnet, while preserving the Syncthing test's lifecycle intent (the
+# tailscale container must stay RUNNING):
+#   - TS_AUTHKEY and TS_EXTRA_ARGS are hard-forced to EMPTY at the compose
+#     layer (later files win on merge), so a host/.env value can never reach
+#     the container even if the sanitized process env missed a key — without
+#     an auth key (and without a smuggled `--auth-key` via TS_EXTRA_ARGS)
+#     tailscaled cannot authenticate and sits at NeedsLogin forever;
+#   - the /dev/net/tun device is removed (`devices: !reset []`) and ALL
+#     capabilities are dropped: `cap_drop: [ALL]` alone would only subtract
+#     from the base's explicit `cap_add: [net_admin, net_raw]` (which would
+#     still render and be added), so the base cap_add list is RESET to empty
+#     too (`cap_add: !reset []`) — the test Tailscale can never hold
+#     NET_ADMIN/NET_RAW and can never create a kernel TUN interface;
+#   - TS_USERSPACE=true keeps tailscaled alive WITHOUT a TUN device
+#     (userspace networking), so the Syncthing container's lifecycle
+#     (asserted running/stopped by the drill) is preserved.
+services:
+  tailscale:
+    environment:
+      - TS_AUTHKEY=
+      - TS_EXTRA_ARGS=
+      - TS_USERSPACE=true
+    devices: !reset []
+    cap_add: !reset []
+    cap_drop:
+      - ALL

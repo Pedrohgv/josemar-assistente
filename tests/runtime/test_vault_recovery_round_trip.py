@@ -43,9 +43,14 @@ import unittest
 import uuid
 from pathlib import Path
 
+from .helpers import sanitized_test_env, write_disposable_env_file
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASE_COMPOSE = REPO_ROOT / "docker-compose.yml"
 VAULT_RECOVERY_OVERLAY = REPO_ROOT / "docker-compose.vault-recovery.yml"
+TAILSCALE_ISOLATION_OVERLAY = (
+    REPO_ROOT / "tests" / "runtime" / "docker-compose.test-tailscale-isolation.yml"
+)
 RCLONE_IMAGE = "rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548"
 
 GBRAIN_ENV = (
@@ -128,7 +133,16 @@ class VaultRecoveryRoundTripTests(unittest.TestCase):
             ).lstrip().replace("__VOLUMES__", volumes),
             encoding="utf-8",
         )
-        self.env = os.environ.copy()
+        # Fail-closed test env (security hardening): the CENTRALIZED
+        # sanitizer (helpers.sanitized_test_env) blanks every production-
+        # influencing key (Telegram/gateway, provider/API keys, TS_AUTHKEY
+        # and TS_EXTRA_ARGS, workspace/Git, dashboard, backup remotes, ...)
+        # and removes the Compose selector vars — a production-like host env
+        # or repo `.env` can never reach the disposable compose stack. The
+        # disposable env-file (pinned via `--env-file` on every invocation)
+        # replaces the repo `.env` as a second independent layer. Only
+        # deterministic test values and round-trip switches are set here.
+        self.env = sanitized_test_env()
         self.env.update(
             {
                 "COMPOSE_PROJECT_NAME": self.project,
@@ -141,17 +155,6 @@ class VaultRecoveryRoundTripTests(unittest.TestCase):
                 "HERMES_DASHBOARD": "0",
                 "WORKSPACE_SYNC_ON_START": "false",
                 "WORKSPACE_SYNC_INTERVAL": "0",
-                "WORKSPACE_STATE_REPO": "",
-                "WORKSPACE_REPO_TOKEN": "",
-                "TELEGRAM_BOT_TOKEN": "",
-                "PRIMARY_TELEGRAM_ID": "",
-                "TELEGRAM_ALLOWED_USERS": "",
-                "TELEGRAM_HOME_CHANNEL": "",
-                "GATEWAY_ALLOWED_USERS": "",
-                "HERMES_TELEGRAM_BOT_TOKEN": "",
-                "HERMES_TELEGRAM_ALLOWED_USERS": "",
-                "HERMES_TELEGRAM_HOME_CHANNEL": "",
-                "HERMES_GATEWAY_ALLOWED_USERS": "",
                 # Disable the three owned Hermes cron jobs for the round trip:
                 # the verify/install/rollback steps take the shared
                 # TaskNotes/gbrain lock (fix 5), so a cron firing mid-test
@@ -162,13 +165,13 @@ class VaultRecoveryRoundTripTests(unittest.TestCase):
                 "VAULT_RECOVERY_EXPORT_ENABLED": "false",
                 "VAULT_RECOVERY_RCLONE_REMOTE": "vault-recovery-crypt",
                 "VAULT_RECOVERY_RCLONE_PATH": "Josemar/vault-recovery",
-                "COMPOSE_PROFILES": "",
             }
         )
+        self.env_file = write_disposable_env_file(self.env, self.tmp / "compose.env")
 
     def compose(self, *args: str, timeout: int = 120, check: bool = False) -> subprocess.CompletedProcess[str]:
-        command = ["docker", "compose"]
-        for path in (BASE_COMPOSE, VAULT_RECOVERY_OVERLAY, self.override):
+        command = ["docker", "compose", "--env-file", str(self.env_file)]
+        for path in (BASE_COMPOSE, VAULT_RECOVERY_OVERLAY, TAILSCALE_ISOLATION_OVERLAY, self.override):
             command.extend(("-f", str(path)))
         command.extend(("-p", self.project, *args))
         return subprocess.run(

@@ -68,11 +68,20 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from .helpers import docker_available
+from .helpers import (
+    FORCED_EMPTY_CONTROL_SECRET_KEYS,
+    FORCED_EMPTY_ENV_KEYS,
+    docker_available,
+    sanitized_test_env,
+    write_disposable_env_file,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASE_COMPOSE = REPO_ROOT / "docker-compose.yml"
 VAULT_RECOVERY_OVERLAY = REPO_ROOT / "docker-compose.vault-recovery.yml"
+TAILSCALE_ISOLATION_OVERLAY = (
+    REPO_ROOT / "tests" / "runtime" / "docker-compose.test-tailscale-isolation.yml"
+)
 RCLONE_IMAGE = "rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548"
 
 # The three owned Hermes cron jobs that must be paused/disabled for the
@@ -243,7 +252,16 @@ class VaultRecoveryDrDrillTests(unittest.TestCase):
             ).lstrip().replace("__VOLUMES__", volumes),
             encoding="utf-8",
         )
-        self.env = os.environ.copy()
+        # Fail-closed test env (security hardening): the CENTRALIZED
+        # sanitizer (helpers.sanitized_test_env) blanks every production-
+        # influencing key (Telegram/gateway, provider/API keys, TS_AUTHKEY
+        # and TS_EXTRA_ARGS, workspace/Git, dashboard, backup remotes, ...)
+        # and removes the Compose selector vars — a production-like host env
+        # or repo `.env` can never reach the disposable compose stack. The
+        # disposable env-file (pinned via `--env-file` on every invocation)
+        # replaces the repo `.env` as a second independent layer. Only
+        # deterministic test values and drill-specific switches are set here.
+        self.env = sanitized_test_env()
         self.env.update(
             {
                 "COMPOSE_PROJECT_NAME": self.project,
@@ -275,26 +293,15 @@ class VaultRecoveryDrDrillTests(unittest.TestCase):
                 "GBRAIN_REFRESH_INTERVAL": "0",
                 "GBRAIN_EMBED_REFRESH_SCHEDULE": "0",
                 "VAULT_RECOVERY_EXPORT_ENABLED": "false",
-                "WORKSPACE_STATE_REPO": "",
-                "WORKSPACE_REPO_TOKEN": "",
-                "TELEGRAM_BOT_TOKEN": "",
-                "PRIMARY_TELEGRAM_ID": "",
-                "TELEGRAM_ALLOWED_USERS": "",
-                "TELEGRAM_HOME_CHANNEL": "",
-                "GATEWAY_ALLOWED_USERS": "",
-                "HERMES_TELEGRAM_BOT_TOKEN": "",
-                "HERMES_TELEGRAM_ALLOWED_USERS": "",
-                "HERMES_TELEGRAM_HOME_CHANNEL": "",
-                "HERMES_GATEWAY_ALLOWED_USERS": "",
                 "VAULT_RECOVERY_RCLONE_REMOTE": "vault-recovery-crypt",
                 "VAULT_RECOVERY_RCLONE_PATH": "Josemar/vault-recovery",
-                "COMPOSE_PROFILES": "",
             }
         )
+        self.env_file = write_disposable_env_file(self.env, self.tmp / "compose.env")
 
     def compose(self, *args: str, timeout: int = 120, check: bool = False) -> subprocess.CompletedProcess[str]:
-        command = ["docker", "compose"]
-        for path in (BASE_COMPOSE, VAULT_RECOVERY_OVERLAY, self.override):
+        command = ["docker", "compose", "--env-file", str(self.env_file)]
+        for path in (BASE_COMPOSE, VAULT_RECOVERY_OVERLAY, TAILSCALE_ISOLATION_OVERLAY, self.override):
             command.extend(("-f", str(path)))
         command.extend(("-p", self.project, *args))
         return subprocess.run(
@@ -874,6 +881,219 @@ class VaultRecoveryDrDrillGateTests(unittest.TestCase):
             ):
                 with self.assertRaises(unittest.SkipTest):
                     case.test_disaster_drill_destroy_both_restore_and_rollback()
+
+
+class VaultRecoveryTestIsolationTests(unittest.TestCase):
+    """Test-isolation regression (security hardening): sentinel
+    production-like values in the caller environment must NEVER reach the
+    disposable compose invocations — neither the Hermes service nor the
+    Tailscale service, and TS_AUTHKEY must be empty. The core assertions
+    run WITHOUT Docker (white-box on the sanitized env + disposable
+    env-file + the compose invocation); the `docker compose config` render
+    check is added when the docker CLI is available."""
+
+    # Production-like sentinels covering every finding category: Tailscale
+    # auth (including an auth key smuggled via TS_EXTRA_ARGS), provider/API
+    # keys, remote-control/control-plane secrets, Git/workspace tokens,
+    # Telegram/gateway identity, dashboard credentials, backup remotes and
+    # the Compose selector variables. Unique values so a single
+    # `assertNotIn` over any env/render is a complete leak check.
+    SENTINELS = {
+        "TS_AUTHKEY": "sentinel-not-a-tailscale-key",
+        "TS_EXTRA_ARGS": "--auth-key=sentinel-extra-key",
+        "TELEGRAM_BOT_TOKEN": "123456789:prod-telegram-SENTINEL",
+        "PRIMARY_TELEGRAM_ID": "999999999",
+        "GATEWAY_ALLOWED_USERS": "999999999",
+        "HERMES_TELEGRAM_BOT_TOKEN": "123456789:prod-hermes-telegram-SENTINEL",
+        "ZAI_API_KEY": "prod-zai-SENTINEL",
+        "GLM_API_KEY": "prod-glm-SENTINEL",
+        "DEEPSEEK_API_KEY": "prod-deepseek-SENTINEL",
+        "OLLAMA_API_KEY": "prod-ollama-SENTINEL",
+        "TAVILY_API_KEY": "prod-tavily-SENTINEL",
+        "APOLLO_IO_API_KEY": "prod-apollo-SENTINEL",
+        "GOG_KEYRING_PASSWORD": "prod-gog-SENTINEL",
+        "HERMES_API_SERVER_KEY": "prod-server-key-SENTINEL",
+        "CONTROL_UI_ALLOWED_ORIGIN_1": "https://prod-control-SENTINEL",
+        "HERMES_DASHBOARD_SESSION_TOKEN": "prod-session-SENTINEL",
+        "WORKSPACE_STATE_REPO": "git@prod:repo-SENTINEL.git",
+        "WORKSPACE_REPO_TOKEN": "prod-ws-token-SENTINEL",
+        "OBSIDIAN_GDRIVE_REMOTE": "prod-gdrive-SENTINEL",
+        "VAULT_RECOVERY_RCLONE_REMOTE": "prod-crypt-SENTINEL",
+        "MNEMOSYNE_PROVIDER": "prod-mnemo-SENTINEL",
+        "COMPOSE_FILE": "/prod/docker-compose.yml:/prod/overlay.yml",
+        "COMPOSE_PATH_SEPARATOR": "SENTINEL-SEP",
+        "COMPOSE_PROJECT_NAME": "SENTINEL-PROD-PROJECT",
+        "COMPOSE_PROFILES": "SENTINEL-PROD-PROFILES",
+        # An UNKNOWN runner secret (NOT in FORCED_EMPTY_ENV_KEYS): the
+        # allowlist-only sanitizer must not copy it into the compose process
+        # environment or the disposable env-file.
+        "SOME_RUNNER_SECRET": "runner-secret-SENTINEL",
+    }
+
+    def _case(self, required: bool = False):
+        """A DR drill case with setUp already run (no docker touched)."""
+        case = VaultRecoveryDrDrillTests(
+            methodName="test_disaster_drill_destroy_both_restore_and_rollback"
+        )
+        case.required = required
+        case.setUp()
+        self.addCleanup(shutil.rmtree, case.tmp, True)
+        return case
+
+    def test_sanitized_env_and_disposable_env_file_blank_every_secret(self) -> None:
+        """The centralized sanitizer blanks the FULL forced-empty key set,
+        drops the Compose selectors, and copies NOTHING else from the
+        caller environment: an UNKNOWN runner secret (absent from the
+        forced-empty set) must be absent from both the sanitized env and
+        the disposable env-file — while the safe passthrough keys still
+        flow through. With sentinel production-like values in the caller
+        environment."""
+        with mock.patch.dict(os.environ, self.SENTINELS, clear=False):
+            env = sanitized_test_env()
+            for key in FORCED_EMPTY_ENV_KEYS:
+                self.assertEqual(env.get(key, ""), "", key)
+            for key in FORCED_EMPTY_CONTROL_SECRET_KEYS:
+                self.assertEqual(env.get(key, ""), "", key)
+            for key in ("COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR",
+                        "COMPOSE_PROJECT_NAME", "COMPOSE_PROFILES"):
+                self.assertNotIn(key, env, key)
+            # The unknown runner secret never enters the sanitized env.
+            self.assertNotIn("SOME_RUNNER_SECRET", env)
+            # Safe passthrough still works (PATH is always present).
+            self.assertIn("PATH", env)
+            for sentinel in self.SENTINELS.values():
+                self.assertNotIn(sentinel, json.dumps(env))
+            env_dir = Path(tempfile.mkdtemp(prefix="vr-isolation-"))
+            self.addCleanup(shutil.rmtree, env_dir, True)
+            env_file = write_disposable_env_file(env, env_dir / "compose.env")
+            lines = set(env_file.read_text("utf-8").splitlines())
+            for key in FORCED_EMPTY_ENV_KEYS:
+                self.assertIn(f"{key}=", lines, key)
+            for key in FORCED_EMPTY_CONTROL_SECRET_KEYS:
+                self.assertIn(f"{key}=", lines, key)
+            self.assertNotIn("SOME_RUNNER_SECRET", "\n".join(lines))
+            self.assertNotIn(self.SENTINELS["SOME_RUNNER_SECRET"], "\n".join(lines))
+            for sentinel in self.SENTINELS.values():
+                self.assertNotIn(sentinel, "\n".join(lines))
+
+    def test_test_runtime_env_and_compose_invocation_never_carry_sentinels(self) -> None:
+        """White-box (no docker): with sentinel production-like values in
+        the caller environment, the DR drill's (and round-trip's) compose
+        env + disposable env-file carry NO sentinel, TS_AUTHKEY is empty,
+        and EVERY manual compose invocation pins `--env-file <disposable>`
+        plus the tailscale isolation overlay."""
+        from .test_vault_recovery_round_trip import VaultRecoveryRoundTripTests
+
+        with mock.patch.dict(os.environ, self.SENTINELS, clear=False):
+            # The cases' setUp must run INSIDE the sentinel patch: the
+            # sanitized env is built from the caller environment.
+            dr_case = VaultRecoveryDrDrillTests(
+                methodName="test_disaster_drill_destroy_both_restore_and_rollback"
+            )
+            dr_case.required = False
+            rt_case = VaultRecoveryRoundTripTests(
+                methodName="test_encrypted_round_trip_upload_recover_verify_install_rollback"
+            )
+            for case in (dr_case, rt_case):
+                case.setUp()
+                self.addCleanup(shutil.rmtree, case.tmp, True)
+            for case in (dr_case, rt_case):
+                self.assertEqual(case.env.get("TS_AUTHKEY", ""), "", type(case).__name__)
+                self.assertEqual(case.env.get("TS_EXTRA_ARGS", ""), "", type(case).__name__)
+                # Compose selectors are removed by the sanitizer; the cases
+                # re-set ONLY their own unique test project name.
+                self.assertNotIn("COMPOSE_FILE", case.env, type(case).__name__)
+                self.assertNotIn("COMPOSE_PROFILES", case.env, type(case).__name__)
+                self.assertEqual(
+                    case.env.get("COMPOSE_PROJECT_NAME"), case.project, type(case).__name__
+                )
+                self.assertNotEqual(
+                    case.env.get("COMPOSE_PROJECT_NAME"),
+                    self.SENTINELS["COMPOSE_PROJECT_NAME"],
+                    type(case).__name__,
+                )
+                # The unknown runner secret never enters the case env, while
+                # the REQUIRED test values still work (safe passthrough PATH,
+                # deterministic dashboard token, unique test project).
+                self.assertNotIn("SOME_RUNNER_SECRET", case.env, type(case).__name__)
+                self.assertIn("PATH", case.env, type(case).__name__)
+                self.assertTrue(
+                    case.env["HERMES_DASHBOARD_SESSION_TOKEN"].startswith("test-session-"),
+                    type(case).__name__,
+                )
+                for sentinel in self.SENTINELS.values():
+                    self.assertNotIn(sentinel, json.dumps(case.env), type(case).__name__)
+                lines = set(case.env_file.read_text("utf-8").splitlines())
+                self.assertIn("TS_AUTHKEY=", lines, type(case).__name__)
+                self.assertIn("TS_EXTRA_ARGS=", lines, type(case).__name__)
+                self.assertNotIn("SOME_RUNNER_SECRET", "\n".join(lines), type(case).__name__)
+                for sentinel in self.SENTINELS.values():
+                    self.assertNotIn(sentinel, "\n".join(lines), type(case).__name__)
+                # Every compose invocation carries the disposable env-file
+                # (replacing the repo `.env`) and the tailscale isolation
+                # overlay, with the sanitized env.
+                with mock.patch("subprocess.run") as run:
+                    run.return_value = subprocess.CompletedProcess(
+                        args=[], returncode=0, stdout="", stderr=""
+                    )
+                    case.compose("config")
+                    args, kwargs = run.call_args
+                    self.assertIn("--env-file", args[0], type(case).__name__)
+                    env_file_idx = args[0].index("--env-file")
+                    self.assertEqual(args[0][env_file_idx + 1], str(case.env_file))
+                    self.assertIn(
+                        str(TAILSCALE_ISOLATION_OVERLAY), args[0], type(case).__name__
+                    )
+                    self.assertEqual(kwargs["env"]["TS_AUTHKEY"], "", type(case).__name__)
+                    self.assertNotIn("SOME_RUNNER_SECRET", kwargs["env"], type(case).__name__)
+                    for sentinel in self.SENTINELS.values():
+                        self.assertNotIn(
+                            sentinel, json.dumps(kwargs["env"]), type(case).__name__
+                        )
+
+    @unittest.skipUnless(
+        shutil.which("docker") is not None,
+        "docker CLI not available for the rendered-config isolation check",
+    )
+    def test_rendered_compose_config_reaches_neither_hermes_nor_tailscale(self) -> None:
+        """Effective-config proof (docker CLI, no daemon needed): with
+        sentinel production-like values in the caller environment, the
+        JSON-rendered `docker compose config` contains NO sentinel anywhere
+        (neither the hermes nor the tailscale service), and the tailscale
+        service renders TS_AUTHKEY/TS_EXTRA_ARGS EMPTY, userspace mode
+        forced, cap_add EMPTY (the base `net_admin`/`net_raw` are reset —
+        `cap_drop: ALL` alone would still render them) and devices EMPTY
+        (no TUN device)."""
+        with mock.patch.dict(os.environ, self.SENTINELS, clear=False):
+            case = self._case(required=False)
+            proc = case.compose("config", "--format", "json", timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            render = proc.stdout + proc.stderr
+            for sentinel in self.SENTINELS.values():
+                self.assertNotIn(sentinel, render, sentinel)
+            cfg = json.loads(proc.stdout)
+            ts = cfg["services"]["tailscale"]
+            ts_env = ts["environment"]
+            self.assertEqual(ts_env.get("TS_AUTHKEY"), "", ts_env)
+            self.assertEqual(ts_env.get("TS_EXTRA_ARGS"), "", ts_env)
+            self.assertEqual(ts_env.get("TS_USERSPACE"), "true", ts_env)
+            # Empty lists are omitted from the JSON render (None == []):
+            # cap_add must NOT carry the base net_admin/net_raw, and no
+            # device (TUN) may remain.
+            self.assertIn(ts.get("cap_add"), (None, []), ts)
+            self.assertIn(ts.get("devices"), (None, []), ts)
+            self.assertEqual(ts.get("cap_drop"), ["ALL"], ts)
+            # The hermes service environment never receives any sentinel
+            # (covered globally above) and its interpolation surface stays
+            # deterministic: the dashboard token is the test value.
+            hermes_env = cfg["services"]["hermes"].get("environment", {})
+            self.assertNotIn("TS_AUTHKEY", hermes_env)
+            self.assertTrue(
+                hermes_env.get("HERMES_DASHBOARD_SESSION_TOKEN", "").startswith(
+                    "test-session-"
+                ),
+                hermes_env,
+            )
 
 
 if __name__ == "__main__":

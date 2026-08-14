@@ -65,6 +65,9 @@ FORCED_EMPTY_ENV_KEYS = (
     "APOLLO_IO_API_KEY",
     "HERMES_MODEL",
     # Tailscale / keyring secrets and control-plane credentials.
+    # TS_EXTRA_ARGS (which could smuggle an `--auth-key=...` into
+    # tailscaled) is blanked separately via FORCED_EMPTY_CONTROL_SECRET_KEYS
+    # to keep this tuple's contract with the Mnemosyne eval runner intact.
     "TS_AUTHKEY",
     "GOG_KEYRING_PASSWORD",
     "HERMES_API_SERVER_KEY",
@@ -99,6 +102,99 @@ FORCED_EMPTY_ENV_KEYS = (
 )
 
 
+# Control-plane secrets that can smuggle credentials via CLI arguments even
+# when the main secret is blanked: TS_EXTRA_ARGS could carry
+# `--auth-key=...` into tailscaled. Kept OUT of FORCED_EMPTY_ENV_KEYS
+# because the Mnemosyne eval runner (scripts/mnemosyne_retrieval_eval/
+# runner.py) maintains its own parallel tuple that the pilot tests assert
+# against that tuple's contract; these keys are blanked by
+# sanitized_test_env() AND hard-blanked at the compose layer by the
+# tailscale isolation overlay, which covers every test stack that starts
+# Tailscale.
+FORCED_EMPTY_CONTROL_SECRET_KEYS = (
+    "TS_EXTRA_ARGS",
+)
+
+# Compose selector variables: never inherited from the caller environment
+# (a leaked COMPOSE_FILE/COMPOSE_PROFILES could select production overlays,
+# and a leaked COMPOSE_PROJECT_NAME could collide with the production
+# project). sanitized_test_env() never copies them in the first place (the
+# env is built from an explicit allowlist), so they cannot appear at all;
+# tests set their own explicit values where needed.
+COMPOSE_SELECTOR_ENV_KEYS = (
+    "COMPOSE_FILE",
+    "COMPOSE_PATH_SEPARATOR",
+    "COMPOSE_PROJECT_NAME",
+    "COMPOSE_PROFILES",
+)
+
+# The ONLY caller-environment keys passed through into the sanitized test
+# env (and thus into the disposable env-file). Everything else in the
+# runner environment is deliberately NOT copied: unknown runner secrets
+# (shell/editor/agent tokens, ...) can neither reach the compose process
+# environment nor be serialized into the disposable env-file, and can never
+# become interpolation sources for future compose keys. These are the
+# minimum the docker CLI / subprocess plumbing needs; none of them is
+# interpolated by any compose file, so they cannot leak into rendered
+# service environments.
+SAFE_PASSTHROUGH_ENV_KEYS = (
+    "PATH",      # docker CLI and tool lookup
+    "HOME",      # docker CLI config lookup (also ssh/git behavior)
+    "TMPDIR",    # temp-file placement for the CLI/subprocesses
+    # Daemon selectors: gated tests must reach the SAME docker daemon the
+    # runner uses (e.g. docker-in-docker CI). Not interpolated by the
+    # compose files, so safe to pass through.
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_CONFIG",
+)
+
+
+def sanitized_test_env() -> dict[str, str]:
+    """A fail-closed environment for gated Docker tests, built from an
+    EXPLICIT SAFE ALLOWLIST — never a copy of the caller environment.
+
+    Contains ONLY:
+      1. the SAFE_PASSTHROUGH_ENV_KEYS values present in the caller
+         environment (docker CLI plumbing; not interpolated by compose),
+      2. every FORCED_EMPTY_ENV_KEYS key blanked (compose gives the shell
+         env precedence over the repo `.env` file, so empty values here
+         defeat a production `.env` too),
+      3. whatever deterministic test-only values callers add on top
+         (project name, dashboard credentials, ...).
+
+    Unknown runner secrets are absent by construction, so they can neither
+    reach the compose process environment nor the disposable env-file, and
+    cannot be picked up by future compose interpolation.
+    """
+    env: dict[str, str] = {}
+    for key in SAFE_PASSTHROUGH_ENV_KEYS:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    for key in FORCED_EMPTY_ENV_KEYS:
+        env[key] = ""
+    for key in FORCED_EMPTY_CONTROL_SECRET_KEYS:
+        env[key] = ""
+    return env
+
+
+def write_disposable_env_file(env: dict[str, str], path: Path) -> Path:
+    """Write ``env`` as a docker compose env-file (KEY=VALUE lines).
+
+    Passed via ``docker compose --env-file <file>`` so the repository's
+    real ``.env`` file is NEVER read by test compose invocations. Combined
+    with the sanitized process env (shell env wins over the env-file),
+    production-like values are defeated by two independent layers: even if
+    a future key is forgotten in one of them, the other still blanks it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(f"{key}={value}\n" for key, value in env.items()),
+        encoding="utf-8",
+    )
+    return path
+
+
 class ComposeRuntime:
     def __init__(self, *, include_aux_ml: bool = False) -> None:
         token = uuid.uuid4().hex[:12]
@@ -111,18 +207,12 @@ class ComposeRuntime:
         self.include_aux_ml = include_aux_ml
         self._state_dir: Path | None = None
         self._credentials_dir: Path | None = None
-        env = os.environ.copy()
-        # Fail-closed: blank every inherited production-influencing value BEFORE
-        # the test values below are applied. Compose gives the shell env
-        # precedence over the repo `.env` file, so empty values here defeat a
-        # production `.env` too.
-        for key in FORCED_EMPTY_ENV_KEYS:
-            env[key] = ""
-        # Compose selection itself must never be inherited either.
-        env.pop("COMPOSE_FILE", None)
-        env.pop("COMPOSE_PATH_SEPARATOR", None)
-        env.pop("COMPOSE_PROJECT_NAME", None)
-        env.pop("COMPOSE_PROFILES", None)
+        self._env_file: Path | None = None
+        # Fail-closed: the centralized sanitizer blanks every inherited
+        # production-influencing value BEFORE the test values below are
+        # applied. Compose gives the shell env precedence over the repo
+        # `.env` file, so empty values here defeat a production `.env` too.
+        env = sanitized_test_env()
         env.update(
             {
                 "COMPOSE_PROJECT_NAME": self.project,
@@ -149,12 +239,19 @@ class ComposeRuntime:
 
     def _ensure_disposable_mounts(self) -> None:
         """Create (once) disposable EMPTY dirs that replace the repository's
-        real agent-state/credentials bind mounts, and expose them to compose."""
+        real agent-state/credentials bind mounts, and expose them to compose.
+        Also (re)writes the disposable env-file so it always reflects the
+        CURRENT env (callers mutate ``self.env`` after construction)."""
         if self._state_dir is None:
             self._state_dir = Path(tempfile.mkdtemp(prefix=f"{self.project}-state-"))
             self._credentials_dir = Path(tempfile.mkdtemp(prefix=f"{self.project}-creds-"))
+            self._env_file = (
+                Path(tempfile.mkdtemp(prefix=f"{self.project}-env-")) / "compose.env"
+            )
         self.env["JOSEMAR_TEST_STATE_DIR"] = str(self._state_dir)
         self.env["JOSEMAR_TEST_CREDENTIALS_DIR"] = str(self._credentials_dir)
+        assert self._env_file is not None
+        write_disposable_env_file(self.env, self._env_file)
 
     def disposable_mounts(self) -> tuple[Path, Path]:
         """Return the (state, credentials) disposable mount dirs, creating them
@@ -166,11 +263,16 @@ class ComposeRuntime:
     def compose_command(self) -> list[str]:
         """Base `docker compose` invocation, always carrying the dedicated
         test-isolation overlay so the real agent-state/credentials bind mounts
-        from docker-compose.yml are replaced with disposable empty dirs."""
+        from docker-compose.yml are replaced with disposable empty dirs, and
+        always pinning the disposable env-file so the repo `.env` is never
+        read (defense in depth against production-like values)."""
         self._ensure_disposable_mounts()
+        assert self._env_file is not None
         return [
             "docker",
             "compose",
+            "--env-file",
+            str(self._env_file),
             "-f",
             "docker-compose.yml",
             "-f",
@@ -212,3 +314,6 @@ class ComposeRuntime:
                 shutil.rmtree(path, ignore_errors=True)
         self._state_dir = None
         self._credentials_dir = None
+        if self._env_file is not None:
+            shutil.rmtree(self._env_file.parent, ignore_errors=True)
+            self._env_file = None
