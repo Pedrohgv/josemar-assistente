@@ -182,6 +182,18 @@ COPY scripts/hermes-gbrain-refresh-cron.sh /opt/josemar/scripts/hermes-gbrain-re
 COPY scripts/hermes-gbrain-embedding-refresh-cron.sh /opt/josemar/scripts/hermes-gbrain-embedding-refresh-cron.sh
 COPY scripts/hermes-gbrain-embedding-refresh.py /opt/josemar/scripts/hermes-gbrain-embedding-refresh.py
 COPY scripts/tasknotes_mcp_core.py scripts/tasknotes_mcp.py scripts/tasknotes_lock_run.py /opt/josemar/scripts/
+# Vault-recovery export (Phase 1): Hermes-side exporter core + cron entrypoint
+# + thin wrapper. Local staged immutable generations only; the remote
+# uploader is phase 2 and ships in its own container.
+COPY scripts/vault_recovery_core.py /opt/josemar/scripts/vault_recovery_core.py
+COPY scripts/vault-recovery-export.sh /opt/josemar/scripts/vault-recovery-export.sh
+COPY scripts/hermes-vault-recovery-export-cron.sh /opt/josemar/scripts/hermes-vault-recovery-export-cron.sh
+# Vault-recovery restore (Phase 2): Hermes-side verify/install/rollback core
+# + thin wrapper. The separate rclone uploader/recover services run in their
+# own containers (docker-compose.vault-recovery.yml) and mount their scripts
+# read-only; Hermes never sees the rclone config.
+COPY scripts/vault_recovery_restore_core.py /opt/josemar/scripts/vault_recovery_restore_core.py
+COPY scripts/vault-recovery-restore.sh /opt/josemar/scripts/vault-recovery-restore.sh
 # Mnemosyne encrypted-backup core (Phase 2): Hermes-side exporter + restore
 # helper. The separate rclone uploader service runs in its own container
 # (docker-compose.mnemosyne-backup.yml) and mounts these scripts read-only.
@@ -196,11 +208,16 @@ RUN chmod +x /opt/josemar/scripts/hermes-workspace-sync-cron.sh \
     /opt/josemar/scripts/tasknotes_lock_run.py \
     /opt/josemar/scripts/mnemosyne-backup-export.sh \
     /opt/josemar/scripts/mnemosyne-backup-restore.sh \
+    /opt/josemar/scripts/vault-recovery-export.sh \
+    /opt/josemar/scripts/hermes-vault-recovery-export-cron.sh \
+    /opt/josemar/scripts/vault-recovery-restore.sh \
     && /opt/hermes/.venv/bin/python3 -m compileall -q \
         /opt/josemar/scripts/tasknotes_mcp_core.py \
         /opt/josemar/scripts/tasknotes_mcp.py \
         /opt/josemar/scripts/tasknotes_lock_run.py \
-        /opt/josemar/scripts/mnemosyne_backup_core.py
+        /opt/josemar/scripts/mnemosyne_backup_core.py \
+        /opt/josemar/scripts/vault_recovery_core.py \
+        /opt/josemar/scripts/vault_recovery_restore_core.py
 
 COPY config/hermes-config.yaml /opt/josemar/hermes/config.yaml
 COPY docker-hermes-init.sh /etc/cont-init.d/00-josemar-setup

@@ -68,7 +68,6 @@ class MnemosyneGatewayIntegrationTests(unittest.TestCase):
             "aux-ml-shared": f"{self.project}-aux-shared",
             "obsidian-vault": f"{self.project}-obsidian",
             "obsidian-rclone-config": f"{self.project}-rclone-config",
-            "obsidian-backup-state": f"{self.project}-obsidian-backup-state",
             "mnemosyne-backup-staging": f"{self.project}-backup-staging",
             "mnemosyne-backup-state": f"{self.project}-backup-state",
             "mnemosyne-backup-recovery": f"{self.project}-backup-recovery",
@@ -93,11 +92,6 @@ class MnemosyneGatewayIntegrationTests(unittest.TestCase):
                       - {self.credentials}:/opt/josemar/credentials-source:ro
                   tailscale:
                     ports: !reset []
-                  obsidian-backup:
-                    volumes:
-                      - obsidian-rclone-config:/config/rclone
-                      - obsidian-vault:/data/obsidian:ro
-                      - obsidian-backup-state:/state
                   mnemosyne-backup-uploader:
                     # Keep the overlay's read-only boundary; this test only
                     # initializes the config with a separate docker run.

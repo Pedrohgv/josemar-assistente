@@ -205,7 +205,8 @@ and never touches a live DB.
 
 ```sh
 # From the repo root (or on the operator host with the compose files):
-docker compose -f docker-compose.yml -f docker-compose.embeddings.yml \
+docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml \
+  -f docker-compose.embeddings.yml \
   -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml \
   --profile recovery run --rm mnemosyne-backup-recover <slot>
 ```
@@ -221,7 +222,8 @@ Consumes the handoff, re-verifies SHA/manifest, and restores to a **NEW
 disposable path**. Requires NO rclone and NO rclone config:
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.embeddings.yml \
+docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml \
+  -f docker-compose.embeddings.yml \
   -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml \
   run --rm --no-deps \
   -v mnemosyne-backup-recovery:/recovery \
@@ -248,7 +250,8 @@ retained. The same recovery volume is mounted into this separate short-lived
 Hermes container.
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.embeddings.yml \
+docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml \
+  -f docker-compose.embeddings.yml \
   -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml \
   run --rm --no-deps \
   -v mnemosyne-backup-recovery:/recovery \
@@ -276,15 +279,16 @@ selected generation. The long-running Hermes service never mounts recovery.
 
 ### Drill (exact steps)
 
-1. **Stop writers** (stop the hermes container or pause the agent).
+1. **Stop writers** (stop the hermes container or pause the agent; pause the
+   gbrain/embedding-refresh and export cron jobs for the maintenance window).
 2. Download + verify the handoff:
-   `docker compose -f docker-compose.yml -f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml --profile recovery run --rm mnemosyne-backup-recover <slot>`.
+   `docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml -f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml --profile recovery run --rm mnemosyne-backup-recover <slot>`.
 3. In a new short-lived Hermes container, verify restore to the durable handoff
    (`verify-restore /recovery /recovery/verified.db`) and confirm integrity and
    marker recall.
 4. Set `GENERATION_ID` to the first line of `RECOVERY_READY`, then install in
    a fresh container with explicit confirmation:
-   `docker compose -f docker-compose.yml -f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml run --rm --no-deps -v mnemosyne-backup-recovery:/recovery hermes /opt/josemar/scripts/mnemosyne-backup-restore.sh install-restore /recovery /opt/data/mnemosyne/data/mnemosyne.db --generation "$GENERATION_ID" --i-confirm-this-overwrites-production`.
+   `docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml -f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml run --rm --no-deps -v mnemosyne-backup-recovery:/recovery hermes /opt/josemar/scripts/mnemosyne-backup-restore.sh install-restore /recovery /opt/data/mnemosyne/data/mnemosyne.db --generation "$GENERATION_ID" --i-confirm-this-overwrites-production`.
 5. Restart writers.
 6. If anything is wrong, **rollback**: copy the `.rollback` file back over
    the live DB (and restore its `-wal`/`-shm` if present), then restart
@@ -292,10 +296,11 @@ selected generation. The long-running Hermes service never mounts recovery.
 
 ## Compose Overlay
 
-`docker-compose.mnemosyne-backup.yml` is opt-in and layered last:
+`docker-compose.mnemosyne-backup.yml` is opt-in and layered last, AFTER the
+always-applied vault-recovery overlay (the default deployment lane, Phase 3):
 
 ```sh
-COMPOSE_FILE=docker-compose.yml:docker-compose.embeddings.yml:docker-compose.mnemosyne.yml:docker-compose.mnemosyne-backup.yml
+COMPOSE_FILE=docker-compose.yml:docker-compose.vault-recovery.yml:docker-compose.embeddings.yml:docker-compose.mnemosyne.yml:docker-compose.mnemosyne-backup.yml
 ```
 
 It adds only:
@@ -319,9 +324,9 @@ unchanged until the operator explicitly opts in.
 
 | Value | Overlays applied (in fixed order) | Prerequisites |
 | --- | --- | --- |
-| `off` (default / unset) | base only | none |
-| `pilot` | base + embeddings + mnemosyne | none beyond the base deploy secrets |
-| `backup` | base + embeddings + mnemosyne + mnemosyne-backup | `MNEMOSYNE_BACKUP_EXPORT_INTERVAL` (positive integer, no leading zeros, <= 10080 minutes) and `RCLONE_CONFIG_B64` (base64 rclone config with a `crypt` remote named `mnemosyne-crypt` and the baseline `gdrive` remote) |
+| `off` (default / unset) | base + vault-recovery (the default encrypted backup lane is ALWAYS applied, Phase 3) | `RCLONE_CONFIG_B64` (required for EVERY deployment: the `vault-recovery-crypt` remote) |
+| `pilot` | base + vault-recovery + embeddings + mnemosyne | `RCLONE_CONFIG_B64` (vault-recovery lane) |
+| `backup` | base + vault-recovery + embeddings + mnemosyne + mnemosyne-backup | `MNEMOSYNE_BACKUP_EXPORT_INTERVAL` (positive integer, no leading zeros, <= 10080 minutes) and `RCLONE_CONFIG_B64` (base64 rclone config with a `crypt` remote named `mnemosyne-crypt` in addition to the always-required `vault-recovery-crypt`) |
 
 There is **no embeddings-only mode**: `pilot` is the smallest Mnemosyne-enabled
 mode and always includes the embeddings overlay (the mnemosyne overlay requires
@@ -346,7 +351,8 @@ down prior services.
 ### Compose-file ordering
 
 The deploy workflow builds `COMPOSE_FILE` with strict ordering:
-`base; optional browser-control; embeddings; mnemosyne; backup last`.
+`base; vault-recovery (ALWAYS, the default encrypted backup lane); optional
+browser-control; embeddings; mnemosyne; backup last`.
 `browser-control` is the only overlay whose presence depends on a separate
 repo variable (`BROWSER_CONTROL_ENABLED`); the Mnemosyne overlays are appended
 in fixed order based on `MNEMOSYNE_DEPLOY_MODE`.
@@ -354,10 +360,11 @@ in fixed order based on `MNEMOSYNE_DEPLOY_MODE`.
 ### Maximal fail-closed teardown
 
 Before rebuild/start, the deploy workflow tears down with the **superset** of
-overlays (base + browser-control + embeddings + mnemosyne + backup, plus the
-`aux-ml`, `browser-control`, and `recovery` profiles — recovery only to remove
-a stale recovery service) so any prior overlay service is removed even when
-switching to `off` or dropping an overlay. The teardown is **fail-closed**
+overlays (base + vault-recovery + browser-control + embeddings + mnemosyne +
+backup, plus the `aux-ml`, `browser-control`, and `recovery` profiles —
+recovery only to remove a stale recovery service) so any prior overlay
+service is removed even when switching to `off` or dropping an overlay. The
+teardown is **fail-closed**
 (`set -euo pipefail`, no `|| true`): a teardown failure stops the deploy rather
 than proceeding against unknown state. **No `-v`**: named volumes are always
 preserved. The selected config is rendered with `docker compose config --quiet`
@@ -377,16 +384,17 @@ or teardown. It requires THREE independent field checks:
 - `remote` is present and nonempty (the underlying storage remote),
 - `password` is present and nonempty (the crypt remote password).
 
-It also requires the baseline `gdrive` remote so replacing the shared
-`obsidian-rclone-config` volume does not break `obsidian-backup`. The crypt
-remote name `mnemosyne-crypt` is hardcoded in the workflow validation and
-written explicitly to `.env` as `MNEMOSYNE_BACKUP_RCLONE_REMOTE=mnemosyne-crypt`
-so validation and runtime cannot diverge. No config or secrets are printed.
-The config is published atomically into the shared volume (temp file + cp +
-chmod + mv) only after all validation passes. The existing non-backup behavior
-for the shared rclone config (publishing for the obsidian-backup container
-without crypt validation) remains supported when `MNEMOSYNE_DEPLOY_MODE` is not
-`backup`.
+The crypt remote name `mnemosyne-crypt` is hardcoded in the workflow
+validation and written explicitly to `.env` as
+`MNEMOSYNE_BACKUP_RCLONE_REMOTE=mnemosyne-crypt` so validation and runtime
+cannot diverge. No config or secrets are printed. The config is published
+atomically into the shared volume (temp file + cp + chmod + mv) only after
+all validation passes. Since Phase 3 (vault-recovery as the default backup
+lane), the `vault-recovery-crypt` remote is validated on EVERY deployment
+independently of this mode, and the retired plaintext `obsidian-backup`
+service no longer requires a baseline `gdrive` remote; the shared
+`obsidian-rclone-config` volume serves the vault-recovery lane by default and
+the Mnemosyne lane in `backup` mode.
 
 ### Mode-specific post-start verification
 
@@ -395,9 +403,11 @@ container health alone is not enough. The deploy workflow adds mode-specific
 checks after start, using `hermes_cli.config.load_config()` to load
 `/opt/data/config.yaml` and assert the exact `memory` subtree (not grep):
 
-- **off**: confirms the `embeddings`, `mnemosyne-backup-uploader`, and
+- **off**: confirms the `mnemosyne-backup-uploader` and
   `mnemosyne-backup-recover` services are absent (queried with the MAXIMAL
-  compose file set so orphan containers from a failed teardown are detected),
+  compose file set so orphan containers from a failed teardown are detected;
+  the standalone `embeddings` service is verified separately by its own
+  post-start step and deliberately not part of this stale-services loop),
   `memory.provider` is blank/empty, static memory flags restored
   (`memory_enabled=true`, `user_profile_enabled=true`), nested `memory.mnemosyne`
   config absent, and no `mnemosyne-backup-export` cron job installed.
@@ -412,7 +422,7 @@ checks after start, using `hermes_cli.config.load_config()` to load
   `jobs.json` schema: `{"jobs": [...]}` with
   `schedule.kind == "interval"`, integer `schedule.minutes` matching
   `MNEMOSYNE_BACKUP_EXPORT_INTERVAL`, `script == "mnemosyne-backup-export.sh"`,
-  `no_agent == true`, and a nonempty `workdir`.
+  `no_agent == true`, and `workdir == "/opt/data"` exactly.
 
 The `recovery` profile is never enabled for a normal deploy; it is only
 passed to the teardown superset to remove a stale recovery service, and to

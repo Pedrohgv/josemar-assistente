@@ -13,6 +13,7 @@ COMPOSE = REPO_ROOT / "docker-compose.yml"
 OVERLAY = REPO_ROOT / "docker-compose.browser-control.yml"
 EMBED_OVERLAY = REPO_ROOT / "docker-compose.embeddings.yml"
 MNEMOSYNE_OVERLAY = REPO_ROOT / "docker-compose.mnemosyne.yml"
+VAULT_RECOVERY_OVERLAY = REPO_ROOT / "docker-compose.vault-recovery.yml"
 
 
 def service_block(text: str, service: str) -> str:
@@ -40,14 +41,18 @@ class ComposeContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.text = COMPOSE.read_text(encoding="utf-8")
         self.overlay = OVERLAY.read_text(encoding="utf-8")
+        self.vr_overlay = VAULT_RECOVERY_OVERLAY.read_text(encoding="utf-8")
 
     def test_container_names_are_parameterized_for_runtime_test_isolation(self) -> None:
-        # browser-tunnel lives in the overlay; the rest in base.
-        for service in ["aux-ml", "hermes", "syncthing", "tailscale", "obsidian-backup"]:
+        # browser-tunnel and vault-recovery-uploader live in overlays; the
+        # rest in base.
+        for service in ["aux-ml", "hermes", "syncthing", "tailscale"]:
             with self.subTest(service=service):
                 block = service_block(self.text, service)
                 self.assertIn("container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-", block)
         block = service_block(self.overlay, "browser-tunnel")
+        self.assertIn("container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-", block)
+        block = service_block(self.vr_overlay, "vault-recovery-uploader")
         self.assertIn("container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-", block)
 
     def test_hermes_volume_contract(self) -> None:
@@ -67,10 +72,81 @@ class ComposeContractTests(unittest.TestCase):
         self.assertIn('user: "${HERMES_UID:-10000}:${HERMES_GID:-10000}"', block)
         self.assertIn("- obsidian-vault:/var/syncthing/data/obsidian", block)
 
-    def test_backup_vault_mount_is_read_only(self) -> None:
-        block = service_block(self.text, "obsidian-backup")
-        self.assertIn("- obsidian-vault:/data/obsidian:ro", block)
-        self.assertIn("- obsidian-backup-state:/state", block)
+    # --- Vault-recovery encrypted lane (Phase 3): default composition ---
+
+    def test_base_plaintext_obsidian_backup_retired(self) -> None:
+        # The plaintext obsidian-backup service and its state volume are
+        # GONE from the base compose (retired, Phase 3).
+        self.assertNotIn("obsidian-backup:", self.text)
+        self.assertNotIn("obsidian-backup-state", self.text)
+        self.assertNotIn("OBSIDIAN_GDRIVE_PATH", self.text)
+        self.assertNotIn("OBSIDIAN_BACKUP_TIME", self.text)
+        self.assertNotIn("obsidian-backup.sh", self.text)
+
+    def test_legacy_plaintext_scripts_removed(self) -> None:
+        # The legacy upload scripts are deleted from the repo (manual
+        # historical recovery uses direct rclone commands, operator-only).
+        self.assertFalse((REPO_ROOT / "scripts" / "obsidian-backup.sh").exists())
+        self.assertFalse((REPO_ROOT / "scripts" / "obsidian-backup-daemon.sh").exists())
+
+    def test_vault_recovery_uploader_boundaries(self) -> None:
+        # The uploader NEVER mounts hermes-data or /opt/data; staging and the
+        # rclone config are READ-ONLY; its state volume is writable — plus
+        # ONE strictly-bounded exception: the SAME staging volume is mounted
+        # read-WRITE at /staging-prune, used EXCLUSIVELY for ack-based local
+        # retention (the uploader deletes only full generation dirs beyond
+        # the newest VAULT_RECOVERY_LOCAL_RETENTION that the remote
+        # acknowledged; invalid states skip the whole prune).
+        block = service_block(self.vr_overlay, "vault-recovery-uploader")
+        self.assertNotIn("- hermes-data", block)
+        self.assertNotIn("- /opt/data", block)
+        self.assertNotIn("- obsidian-vault", block)
+        self.assertIn("- obsidian-rclone-config:/config/rclone:ro", block)
+        self.assertIn("- vault-recovery-staging:/staging:ro", block)
+        # The bounded local-retention writable mount (same staging volume).
+        self.assertIn("- vault-recovery-staging:/staging-prune", block)
+        self.assertIn("- VAULT_RECOVERY_PRUNE_DIR=/staging-prune", block)
+        self.assertIn("- vault-recovery-uploader-state:/state", block)
+        self.assertIn("restart: unless-stopped", block)
+        self.assertIn("depends_on:", block)
+        self.assertIn("- hermes", block)
+
+    def test_vault_recovery_uploader_env_defaults(self) -> None:
+        block = service_block(self.vr_overlay, "vault-recovery-uploader")
+        # Runtime remote immutability: the validated/probed remote identity
+        # is a LITERAL, never ${...}-interpolated (Compose interpolation
+        # would prefer the runner environment over the .env file and could
+        # silently re-route backups to a different remote than the one the
+        # deploy preflight validated).
+        self.assertIn("- VAULT_RECOVERY_RCLONE_REMOTE=vault-recovery-crypt", block)
+        self.assertIn("- VAULT_RECOVERY_RCLONE_PATH=Josemar/vault-recovery", block)
+        self.assertNotIn("${VAULT_RECOVERY_RCLONE_REMOTE", block)
+        self.assertNotIn("${VAULT_RECOVERY_RCLONE_PATH", block)
+        self.assertIn("- VAULT_RECOVERY_RETENTION=${VAULT_RECOVERY_RETENTION:-14}", block)
+        self.assertIn("- VAULT_RECOVERY_LOCAL_RETENTION=${VAULT_RECOVERY_LOCAL_RETENTION:-14}", block)
+        self.assertIn("- VAULT_RECOVERY_POLL_INTERVAL=${VAULT_RECOVERY_POLL_INTERVAL:-300}", block)
+        self.assertIn("- VAULT_RECOVERY_RUN_ON_START=${VAULT_RECOVERY_RUN_ON_START:-true}", block)
+
+    def test_vault_recovery_recover_is_profile_gated(self) -> None:
+        block = service_block(self.vr_overlay, "vault-recovery-recover")
+        self.assertIn('profiles: ["recovery"]', block)
+        self.assertNotIn("- hermes-data", block)
+        self.assertNotIn("- /opt/data", block)
+        self.assertIn("- obsidian-rclone-config:/config/rclone:ro", block)
+        self.assertIn("- vault-recovery-recovery:/recovery", block)
+
+    def test_vault_recovery_overlay_volumes_declared(self) -> None:
+        volumes_block = top_level_block(self.vr_overlay, "volumes")
+        self.assertIn("vault-recovery-uploader-state:", volumes_block)
+        self.assertIn("vault-recovery-recovery:", volumes_block)
+
+    def test_vault_recovery_overlay_does_not_touch_base_services(self) -> None:
+        # The overlay only augments/defines its own services; it must not
+        # re-define base services (hermes stays in base).
+        self.assertNotIn("  hermes:", self.vr_overlay)
+        self.assertNotIn("  syncthing:", self.vr_overlay)
+        self.assertNotIn("  tailscale:", self.vr_overlay)
+        self.assertNotIn("  obsidian-backup:", self.vr_overlay)
 
     def test_public_ports_are_localhost_bound_by_default(self) -> None:
         block = service_block(self.text, "hermes")
@@ -188,6 +264,85 @@ class ComposeContractTests(unittest.TestCase):
         block = service_block(self.overlay, "hermes")
         self.assertIn("hermes-browser-tunnel", block)
         self.assertIn("ipv4_address: ${BROWSER_CONTROL_HERMES_IP:-172.31.250.2}", block)
+
+    # --- Vault-recovery export (Phase 1): base, default-enabled ---
+
+    def test_hermes_mounts_vault_recovery_staging_only(self) -> None:
+        # Hermes-only staging volume: no other service may mount it.
+        block = service_block(self.text, "hermes")
+        self.assertIn("- vault-recovery-staging:/opt/data/vault-recovery/staging", block)
+        for service in ("aux-ml", "syncthing", "tailscale"):
+            with self.subTest(service=service):
+                self.assertNotIn(
+                    "vault-recovery-staging", service_block(self.text, service)
+                )
+
+    def test_vault_recovery_staging_volume_declared(self) -> None:
+        volumes_block = top_level_block(self.text, "volumes")
+        self.assertIn("vault-recovery-staging:", volumes_block)
+
+    def test_vault_recovery_export_env_defaults(self) -> None:
+        block = service_block(self.text, "hermes")
+        self.assertIn("- VAULT_RECOVERY_EXPORT_ENABLED=${VAULT_RECOVERY_EXPORT_ENABLED:-true}", block)
+        self.assertIn("- VAULT_RECOVERY_EXPORT_SCHEDULE=${VAULT_RECOVERY_EXPORT_SCHEDULE:-0 4 * * *}", block)
+        self.assertIn("- VAULT_RECOVERY_EXPORT_TIMEOUT=${VAULT_RECOVERY_EXPORT_TIMEOUT:-240}", block)
+        self.assertIn("- VAULT_RECOVERY_STAGING_DIR=/opt/data/vault-recovery/staging", block)
+
+    def test_init_allowlists_vault_recovery_staging_and_installs_cron(self) -> None:
+        init = (REPO_ROOT / "docker-hermes-init.sh").read_text(encoding="utf-8")
+        self.assertIn("HERMES_WRITABLE_VOLUMES=\"${HERMES_HOME} /shared /opt/data/vault-recovery/staging\"", init)
+        self.assertIn("install_vault_recovery_export_cron()", init)
+        self.assertIn("--name vault-recovery-export", init)
+        self.assertIn("--script hermes-vault-recovery-export-cron.sh", init)
+
+    def test_dockerfile_ships_vault_recovery_scripts(self) -> None:
+        dockerfile = (REPO_ROOT / "Dockerfile.hermes").read_text(encoding="utf-8")
+        self.assertIn("COPY scripts/vault_recovery_core.py /opt/josemar/scripts/vault_recovery_core.py", dockerfile)
+        self.assertIn("COPY scripts/vault-recovery-export.sh /opt/josemar/scripts/vault-recovery-export.sh", dockerfile)
+        self.assertIn("COPY scripts/hermes-vault-recovery-export-cron.sh /opt/josemar/scripts/hermes-vault-recovery-export-cron.sh", dockerfile)
+
+    # --- credentials/README restart commands (Phase 3 default composition) ---
+
+    def test_credentials_readme_restart_commands_use_default_composition_and_consumers_only(self) -> None:
+        """credentials/README.md restart commands must pass the default
+        deployment composition explicitly (base + vault-recovery overlay) and
+        restart ONLY the services that consume the changed mount: hermes for
+        the credentials bind mount, the rclone-config uploaders for the
+        volume — never hermes for the rclone volume."""
+        readme = (REPO_ROOT / "credentials" / "README.md").read_text(encoding="utf-8")
+        # 1. Credentials bind mount: hermes is the sole consumer, restarted
+        #    with the explicit default composition.
+        self.assertIn(
+            "docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml restart hermes",
+            readme,
+        )
+        # 2. Rclone config volume: the long-running default-lane uploader is
+        #    restarted with the same explicit composition...
+        self.assertIn(
+            "docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml restart vault-recovery-uploader",
+            readme,
+        )
+        # 3. ...and the backup-mode command restarts the Mnemosyne uploader
+        #    with the full deployment file set.
+        self.assertIn(
+            "docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml "
+            "-f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml "
+            "-f docker-compose.mnemosyne-backup.yml restart vault-recovery-uploader mnemosyne-backup-uploader",
+            readme,
+        )
+        # 4. hermes does not mount obsidian-rclone-config, so the rclone
+        #    restart must never include hermes.
+        self.assertNotIn("restart hermes vault-recovery-uploader", readme)
+        self.assertNotIn("obsidian-rclone-config", service_block(self.text, "hermes"))
+
+    def test_dr_drill_has_no_unconditional_debug_probes(self) -> None:
+        """The Phase-3 drill must not spawn probe containers / print debug
+        output unconditionally; only failure diagnostics (e.g. the LEFTOVER
+        FAILURE DIAG block) are retained."""
+        source = (REPO_ROOT / "tests" / "runtime" / "test_vault_recovery_dr_drill.py").read_text(encoding="utf-8")
+        self.assertNotIn("=== DBG", source)
+        self.assertIn("LEFTOVER FAILURE DIAG", source)
+
 
     def test_overlay_tailscale_has_browser_control_static_ip(self) -> None:
         block = service_block(self.overlay, "tailscale")
@@ -322,8 +477,8 @@ class EmbeddingsOverlayContractTests(unittest.TestCase):
         self.assertIn("embeddings-net", embeddings)
         hermes = service_block(self.overlay, "hermes")
         self.assertIn("embeddings-net", hermes)
-        # aux-ml, syncthing, tailscale, obsidian-backup must not join.
-        for svc in ["aux-ml", "syncthing", "tailscale", "obsidian-backup"]:
+        # aux-ml, syncthing, tailscale must not join.
+        for svc in ["aux-ml", "syncthing", "tailscale"]:
             self.assertNotIn(f"  {svc}:", self.overlay)
 
     def test_overlay_cache_volume_declared(self) -> None:

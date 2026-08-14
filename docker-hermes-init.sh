@@ -26,13 +26,19 @@ mkdir -p "$HERMES_HOME" "$WORKSPACE_DIR" "$OBSIDIAN_VAULT_DIR" "$CREDENTIALS_DIR
 # excluded to avoid host-side ownership changes and conflicts with
 # other containers that manage their own perms.
 #
+# The vault-recovery staging volume is a BASE feature (the daily export cron
+# is default-enabled), so its path is always allowlisted — unlike the
+# Mnemosyne backup staging dir, which is phase-2 opt-in and gated on its
+# exact expected path.
+#
 # Phase 2 opt-in: when the backup overlay marker env
 # MNEMOSYNE_BACKUP_STAGING_DIR equals the exact expected path
 # /opt/data/mnemosyne-backup/staging, append that path to the allowlist so
 # the startup mkdir/chown/write-probe loop handles it before the Hermes
 # runtime. Do NOT append arbitrary env paths, bind mounts, uploader state,
-# or base-only paths. Base-only startup remains exactly HERMES_HOME + /shared.
-HERMES_WRITABLE_VOLUMES="${HERMES_HOME} /shared"
+# or base-only paths. Base-only startup remains exactly HERMES_HOME + /shared
+# + the vault-recovery staging volume.
+HERMES_WRITABLE_VOLUMES="${HERMES_HOME} /shared /opt/data/vault-recovery/staging"
 if [ "${MNEMOSYNE_BACKUP_STAGING_DIR:-}" = "/opt/data/mnemosyne-backup/staging" ]; then
     HERMES_WRITABLE_VOLUMES="$HERMES_WRITABLE_VOLUMES /opt/data/mnemosyne-backup/staging"
 fi
@@ -432,6 +438,122 @@ PY
     fi
 }
 
+# Vault-recovery export cron (default-enabled). Installs a no-agent
+# cron job that runs the vault-recovery export script on a daily schedule.
+# The script sources /opt/josemar/scripts/hermes-vault-recovery-export-cron.sh
+# and runs without an agent (no memory capture/LLM invocation). It creates
+# ONLY local staged immutable generations on the vault-recovery staging
+# volume; the encrypted remote uploader (default deployment lane) ships in
+# its own container and mounts that staging volume read-only.
+#
+# Gating: VAULT_RECOVERY_EXPORT_ENABLED (default true) — false/0/empty
+# removes the owned job with a clear log. The schedule is a five-field cron
+# expression (VAULT_RECOVERY_EXPORT_SCHEDULE, default "0 4 * * *" = 04:00
+# local container time); malformed schedules are rejected and remove the job
+# rather than passing shell-looking input to the CLI. Failure is non-fatal to
+# gateway startup. Idempotent by stable name; drift is reconciled safely.
+install_vault_recovery_export_cron() {
+    script_source="/opt/josemar/scripts/hermes-vault-recovery-export-cron.sh"
+    script_dir="${HERMES_HOME}/scripts"
+    script_path="${script_dir}/hermes-vault-recovery-export-cron.sh"
+    schedule="${VAULT_RECOVERY_EXPORT_SCHEDULE:-0 4 * * *}"
+    enabled="${VAULT_RECOVERY_EXPORT_ENABLED:-true}"
+    jobs_file="${HERMES_HOME}/cron/jobs.json"
+
+    case "$enabled" in
+        true|1|yes)
+            ;;
+        *)
+            log "Hermes vault-recovery-export cron disabled (VAULT_RECOVERY_EXPORT_ENABLED=${enabled})"
+            remove_vault_recovery_export_cron_job
+            return 0
+            ;;
+    esac
+
+    # Hermes accepts a five-field cron expression here. Reject malformed
+    # values rather than passing shell-looking input to the CLI.
+    if ! python3 - "$schedule" <<'PY'
+import re, sys
+s=sys.argv[1]
+sys.exit(0 if len(s.split()) == 5 and all(re.fullmatch(r'[0-9*/?,\-]+', x) for x in s.split()) else 1)
+PY
+    then
+        log "WARNING: invalid VAULT_RECOVERY_EXPORT_SCHEDULE; vault-recovery-export cron disabled"
+        remove_vault_recovery_export_cron_job
+        return 0
+    fi
+
+    if [ ! -x "$script_source" ]; then
+        log "Vault-recovery-export cron disabled (source script missing)"
+        remove_vault_recovery_export_cron_job
+        return 0
+    fi
+
+    mkdir -p "$script_dir"
+    cp "$script_source" "$script_path"
+    chmod 700 "$script_path"
+    chown -R "${HERMES_UID_VALUE}:${HERMES_GID_VALUE}" "${HERMES_HOME}/scripts" "${HERMES_HOME}/cron" 2>/dev/null || true
+
+    # Reconcile by full expected state, not merely by name: the schedule
+    # expression, script name, no_agent flag, and workdir must all match.
+    # Hermes persists cron schedules as {"kind":"cron","expr":"0 4 * * *"}.
+    if python3 - "$jobs_file" "$schedule" "$HERMES_HOME" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f: data=json.load(f)
+    wanted=sys.argv[2]
+    workdir=sys.argv[3]
+    found=False
+    for j in data.get("jobs",[]):
+        if not isinstance(j,dict) or j.get("name") != "vault-recovery-export": continue
+        s=j.get("schedule")
+        actual = s.get("expr") if isinstance(s,dict) else None
+        found = (isinstance(s,dict) and s.get("kind") == "cron" and actual == wanted
+                 and j.get("script") == "hermes-vault-recovery-export-cron.sh"
+                 and j.get("no_agent") is True and j.get("workdir") == workdir)
+        break
+except Exception: found=False
+sys.exit(0 if found else 1)
+PY
+    then
+        log "Hermes vault-recovery-export cron job already exists"
+        return 0
+    fi
+
+    # A same-name job with drift must be removed before recreation; otherwise
+    # Hermes would retain the stale schedule/script/workdir.
+    log "Reconciling Hermes vault-recovery-export cron job drift"
+    remove_vault_recovery_export_cron_job
+
+    log "Creating Hermes vault-recovery-export cron job"
+    su -s /bin/sh -- "$HERMES_USER" -c '
+        HOME=$1; HERMES_HOME=$1; WORKSPACE_DIR=$2; HERMES_CLI=$3
+        export HOME HERMES_HOME WORKSPACE_DIR HERMES_CLI
+        shift 3
+        exec "$HERMES_CLI" cron create "$@"
+    ' sh "$HERMES_HOME" "$WORKSPACE_DIR" "$HERMES_CLI" "$schedule" \
+        --no-agent --script hermes-vault-recovery-export-cron.sh \
+        --workdir "$HERMES_HOME" --name vault-recovery-export \
+        || log "WARNING: failed to create Hermes vault-recovery-export cron job"
+}
+
+# Remove the owned vault-recovery-export cron job when present. Safe to call
+# when jobs.json is missing or malformed; failure is non-fatal.
+remove_vault_recovery_export_cron_job() {
+    [ -f "$jobs_file" ] || return 0
+    if python3 - "$jobs_file" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f: data=json.load(f)
+    found=any(isinstance(j,dict) and j.get("name")=="vault-recovery-export" for j in data.get("jobs",[]))
+except Exception: found=False
+sys.exit(0 if found else 1)
+PY
+    then
+        su -s /bin/sh -- "$HERMES_USER" -c 'HOME="$1"; HERMES_HOME="$1"; export HOME HERMES_HOME; exec "$2" cron remove vault-recovery-export' sh "$HERMES_HOME" "$HERMES_CLI" || true
+    fi
+}
+
 # Mnemosyne backup export cron (Phase 2, opt-in). Installs a no-agent cron
 # job that runs the backup export script on a minute-based schedule. The
 # script sources /opt/josemar/scripts/mnemosyne-backup-export.sh and runs
@@ -669,6 +791,7 @@ fi
 install_workspace_sync_cron
 install_gbrain_refresh_cron
 install_gbrain_embedding_refresh_cron
+install_vault_recovery_export_cron || log "WARNING: vault-recovery-export cron setup failed; continuing"
 
 # Bridge provider API keys from the container env into gbrain's config file.
 # s6-overlay stores container env vars in /run/s6/container_environment/, but

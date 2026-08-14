@@ -1,0 +1,189 @@
+# Vault-recovery encrypted upload/recovery overlay (default deployment lane).
+#
+# The deploy workflow ALWAYS applies this overlay (base +
+# docker-compose.vault-recovery.yml): the encrypted remote lane is the
+# DEFAULT backup composition that replaces the retired plaintext
+# obsidian-backup service. Local development may run the base compose alone;
+# the overlay is layered on top:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.vault-recovery.yml
+#
+# It adds ONLY:
+#   - the `vault-recovery-uploader` service (separate pinned rclone uploader),
+#   - the `vault-recovery-recover` service (short-lived operator recovery
+#     download step, `recovery` profile only; never part of `docker compose
+#     up`),
+#   - the `vault-recovery-uploader-state` named volume (writable in the
+#     uploader only),
+#   - the `vault-recovery-recovery` disposable handoff volume (written by the
+#     short-lived recover step, mounted transiently into short-lived hermes
+#     runs only),
+#   - the vault-recovery env surface (encrypted remote, retention, polling).
+#
+# Boundaries (mirror the Mnemosyne encrypted lane; see
+# docs/vault-recovery-operations.md):
+#   - The uploader NEVER mounts hermes-data or /opt/data. Its staging mount
+#     (vault-recovery-staging) is READ-ONLY, its rclone config
+#     (obsidian-rclone-config) is READ-ONLY, and ONLY its own state volume
+#     is writable — with ONE strictly-bounded exception: the SAME staging
+#     volume is additionally mounted read-WRITE at /staging-prune
+#     exclusively for ack-based LOCAL retention (the uploader deletes only
+#     staged generations beyond the newest VAULT_RECOVERY_LOCAL_RETENTION
+#     that the remote acknowledged; it never touches READY/latest/artifacts
+#     of retained generations, and any invalid state skips the whole prune).
+#   - The recover step is profile-gated (`--profile recovery`), runs in the
+#     rclone image with a READ-ONLY rclone config and ONLY the disposable
+#     recovery volume writable; it never mounts hermes-data or /opt/data.
+#   - The LONG-RUNNING hermes service NEVER mounts the recovery volume; only
+#     short-lived `docker compose run` invocations mount it transiently for
+#     the verify/install steps.
+#   - The remote MUST be rclone type `crypt` with a non-empty underlying
+#     remote and password AND the metadata-encryption standard
+#     (filename_encryption `standard`, directory_name_encryption enabled —
+#     never `off`/`obfuscate`/`false`, which would leak plaintext
+#     file/directory names in the ciphertext metadata); validated before
+#     any transfer; the deploy workflow fails the deployment when the
+#     `vault-recovery-crypt` remote is missing or non-conforming from
+#     RCLONE_CONFIG_B64 — the encrypted lane must never silently fall back
+#     to no backup. The remote namespace is `Josemar/vault-recovery`
+#     by default.
+#   - Uploaded generations go to an uncommitted namespace, are verified
+#     decrypted, then committed; only committed generations are
+#     listable/recoverable. Retention defaults to the newest 14 committed
+#     generations (remote) and the newest 14 acked staged generations
+#     (local), pruned only after validation.
+#   - The retired plaintext obsidian-backup service is GONE from the base
+#     compose (Phase 3). Existing plaintext GDrive slots are NOT deleted
+#     automatically; manual historical recovery is operator-only (see
+#     docs/obsidian-operations.md → "Retired plaintext lane").
+#
+# SEQUENCE / DEPENDENCIES:
+#   - The uploader depends on `hermes` (so the staging volume exists), reads
+#     the staging mount read-only and polls it idempotently.
+#   - RECOVERY: operators run
+#       docker compose --profile recovery run --rm vault-recovery-recover download <gen-id>
+#     to download one committed generation into the disposable recovery
+#     volume and verify it; then short-lived `docker compose run` hermes
+#     invocations verify (disposable doctor) and install (journaled two-tree
+#     transaction) from that handoff without any rclone credentials.
+
+services:
+  vault-recovery-uploader:
+    # Separate rclone uploader service. NEVER mounts hermes-data or /opt/data.
+    # Pinned by digest for supply-chain integrity (same pin as the Mnemosyne
+    # backup lane).
+    image: rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548
+    container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-vault-recovery-uploader
+    restart: unless-stopped
+    depends_on:
+      - hermes
+    environment:
+      - TZ=${TZ:-America/Sao_Paulo}
+      - RCLONE_CONFIG=/config/rclone/rclone.conf
+      # Staging mount is READ-ONLY (see volumes below); local retention
+      # deletes go through the dedicated /staging-prune mount.
+      - VAULT_RECOVERY_UPLOADER_STAGING_DIR=/staging
+      - VAULT_RECOVERY_PRUNE_DIR=/staging-prune
+      # State volume is the ONLY other writable mount in this service.
+      - VAULT_RECOVERY_UPLOADER_STATE_DIR=/state
+      # REQUIRED crypt remote name. Must be rclone type 'crypt' with a
+      # non-empty underlying remote, password AND the metadata-encryption
+      # standard (filename_encryption `standard` + directory-name
+      # encryption enabled; `off`/`obfuscate`/`false` are rejected before
+      # any transfer). The deploy workflow hardcodes `vault-recovery-crypt`
+      # in its validation and the values below are LITERALS — they are
+      # deliberately NOT ${...}-interpolated so the runner environment (or
+      # a stale `.env`) can never override the validated, probed remote:
+      # shell environment takes precedence over the `.env` file in Compose
+      # interpolation, so an interpolated value could silently route
+      # backups to a different remote than the one the deploy preflight
+      # validated and the readiness gate probed.
+      - VAULT_RECOVERY_RCLONE_REMOTE=vault-recovery-crypt
+      - VAULT_RECOVERY_RCLONE_PATH=Josemar/vault-recovery
+      - VAULT_RECOVERY_RETENTION=${VAULT_RECOVERY_RETENTION:-14}
+      - VAULT_RECOVERY_LOCAL_RETENTION=${VAULT_RECOVERY_LOCAL_RETENTION:-14}
+      - VAULT_RECOVERY_POLL_INTERVAL=${VAULT_RECOVERY_POLL_INTERVAL:-300}
+      - VAULT_RECOVERY_RUN_ON_START=${VAULT_RECOVERY_RUN_ON_START:-true}
+    volumes:
+      # Reuse the existing secret-managed obsidian-rclone-config volume
+      # (read-only). It can hold a dedicated vault-recovery crypt remote.
+      - obsidian-rclone-config:/config/rclone:ro
+      # Phase-1 staging mount, READ-ONLY. The uploader never writes here and
+      # never deletes READY/latest/artifacts.
+      - vault-recovery-staging:/staging:ro
+      # SAME staging volume mounted read-WRITE at a separate path, used
+      # EXCLUSIVELY for ack-based local retention (see the header comment):
+      # only full generation dirs beyond the newest
+      # VAULT_RECOVERY_LOCAL_RETENTION that the remote acknowledged are
+      # deleted; invalid states skip the whole prune.
+      - vault-recovery-staging:/staging-prune
+      # Own state volume: the ONLY other writable mount. Ledger, retention
+      # and verification temp files live here.
+      - vault-recovery-uploader-state:/state
+      # Mount the uploader script and the strict JSON/schema/lsjson
+      # validators read-only.
+      - ./scripts/vault-recovery-uploader.sh:/scripts/vault-recovery-uploader.sh:ro
+      - ./scripts/vault-recovery-json.awk:/scripts/vault-recovery-json.awk:ro
+      - ./scripts/vault-recovery-manifest-schema.awk:/scripts/vault-recovery-manifest-schema.awk:ro
+      - ./scripts/vault-recovery-lsjson.awk:/scripts/vault-recovery-lsjson.awk:ro
+    entrypoint: ["/bin/sh", "/scripts/vault-recovery-uploader.sh"]
+    networks:
+      - josemar-network
+
+  vault-recovery-recover:
+    # Short-lived operator RECOVERY DOWNLOAD step (rclone image). Runs ONLY on
+    # demand via:
+    #   docker compose --profile recovery run --rm vault-recovery-recover <command>
+    # It is profile-gated so a plain `docker compose up` never starts it.
+    # Least privilege: read-only rclone crypt config + a disposable recovery
+    # handoff volume; NEVER mounts hermes-data or /opt/data. Downloads the
+    # selected COMMITTED generation, fully validates it (READY, manifest,
+    # entries digest, full tree/hashes, path containment) and writes the
+    # RECOVERY_READY handoff sentinel. The Hermes-side verify/install steps
+    # (short-lived `docker compose run hermes`) consume the handoff and never
+    # see rclone credentials.
+    # Pinned by digest for supply-chain integrity (same pin as the uploader
+    # and the Mnemosyne backup lane).
+    image: rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548
+    profiles: ["recovery"]
+    environment:
+      - RCLONE_CONFIG=/config/rclone/rclone.conf
+      # Disposable recovery handoff volume (writable here only).
+      - VAULT_RECOVERY_RECOVERY_DIR=/recovery
+      # REQUIRED crypt remote name (validated before download). LITERALS,
+      # never ${...}-interpolated: the runner environment / `.env` can never
+      # override the remote the deploy preflight validated (see the
+      # uploader service comment).
+      - VAULT_RECOVERY_RCLONE_REMOTE=vault-recovery-crypt
+      - VAULT_RECOVERY_RCLONE_PATH=Josemar/vault-recovery
+      # The handoff volume is chowned to the Hermes runtime uid (when this
+      # container runs as root) so the short-lived verify/install runs can
+      # write VERIFIED_READY into it.
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+    volumes:
+      # Reuse the existing secret-managed obsidian-rclone-config volume
+      # (read-only). It can hold a dedicated vault-recovery crypt remote.
+      - obsidian-rclone-config:/config/rclone:ro
+      # Disposable recovery handoff volume. This is NEVER mounted into the
+      # long-running hermes service; only short-lived `docker compose run`
+      # invocations mount it (transiently).
+      - vault-recovery-recovery:/recovery
+      # Mount the recovery script and the strict JSON/schema/lsjson
+      # validators read-only.
+      - ./scripts/vault-recovery-recover.sh:/scripts/vault-recovery-recover.sh:ro
+      - ./scripts/vault-recovery-json.awk:/scripts/vault-recovery-json.awk:ro
+      - ./scripts/vault-recovery-manifest-schema.awk:/scripts/vault-recovery-manifest-schema.awk:ro
+      - ./scripts/vault-recovery-lsjson.awk:/scripts/vault-recovery-lsjson.awk:ro
+    entrypoint: ["/bin/sh", "/scripts/vault-recovery-recover.sh"]
+    networks:
+      - josemar-network
+
+networks:
+  josemar-network:
+    driver: bridge
+
+volumes:
+  vault-recovery-uploader-state:
+    driver: local
+  vault-recovery-recovery:
+    driver: local

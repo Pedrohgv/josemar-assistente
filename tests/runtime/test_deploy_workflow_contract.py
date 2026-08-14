@@ -14,18 +14,28 @@ They cover the remediated behaviors from the architecture review:
     --quiet, rclone decode+validation all precede any docker volume create /
     volume write / service teardown),
   - required compose ordering with and without browser-control
-    (base; optional browser-control; embeddings; mnemosyne; backup last),
+    (base; vault-recovery always; optional browser-control; embeddings;
+    mnemosyne; backup last),
   - no recovery profile enabled for a normal deploy,
-  - maximal fail-closed no-volume teardown (superset overlays, aux-ml profile,
-    no `-v`, no `|| true`, no `set +e`, named volumes preserved, removes prior
-    overlay services when switching to off),
-  - rclone digest pin + direct invocation (no `sh -c`), THREE independent
-    crypt field checks, hardcoded mnemosyne-crypt, baseline gdrive remote
-    requirement, non-backup behavior preserved,
+  - maximal fail-closed no-volume teardown (superset overlays incl.
+    vault-recovery, aux-ml profile, no `-v`, no `|| true`, no `set +e`,
+    named volumes preserved, removes prior overlay services when switching
+    to off),
+  - rclone digest pin + direct invocation (no `sh -c`), FOUR independent
+    crypt field checks (type, remote, password + the metadata-encryption
+    standard: filename_encryption `standard`, directory_name_encryption
+    enabled), hardcoded vault-recovery-crypt (validated on EVERY
+    deployment, independent of MNEMOSYNE_DEPLOY_MODE) and mnemosyne-crypt
+    (backup mode only); RCLONE_CONFIG_B64 required for every deployment
+    (Phase 3: fail rather than silently lose backups),
   - mode-specific verification commands (off/pilot/backup post-start checks;
     Hermes init nonfatal activation failure handled; hermes_cli.config
     load_config() against /opt/data/config.yaml; TEI 600s wait budget with
-    immediate exit failure; real jobs.json cron schema).
+    immediate exit failure; real jobs.json cron schema),
+  - Phase-3 vault-recovery post-start checks (uploader running, exactly one
+    vault-recovery-export cron with the real cron schema, plaintext
+    obsidian-backup absence) and the retirement of the plaintext lane from
+    compose/.env/stop-service.
 
 No Docker, no GitHub Actions execution.
 """
@@ -50,6 +60,7 @@ MNEMOSYNE_OVERLAY = REPO_ROOT / "docker-compose.mnemosyne.yml"
 EMBEDDINGS_OVERLAY = REPO_ROOT / "docker-compose.embeddings.yml"
 BROWSER_OVERLAY = REPO_ROOT / "docker-compose.browser-control.yml"
 BASE_COMPOSE = REPO_ROOT / "docker-compose.yml"
+VAULT_RECOVERY_OVERLAY = REPO_ROOT / "docker-compose.vault-recovery.yml"
 
 RCLONE_DIGEST = "rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548"
 
@@ -274,6 +285,7 @@ class DeployWorkflowContractTests(unittest.TestCase):
         superset = stop.split("Tearing down any prior overlay-enabled stack")[1].split("Tearing down with selected config")[0]
         for overlay in (
             "docker-compose.yml",
+            "docker-compose.vault-recovery.yml",
             "docker-compose.browser-control.yml",
             "docker-compose.embeddings.yml",
             "docker-compose.mnemosyne.yml",
@@ -339,22 +351,40 @@ class DeployWorkflowContractTests(unittest.TestCase):
         # Direct invocation: IMAGE --config /tmp/rclone.conf config show ...
         self.assertIn("--config /tmp/rclone.conf config show", decode)
 
-    def test_rclone_remote_name_hardcoded(self) -> None:
+    def test_rclone_remote_names_hardcoded(self) -> None:
         decode = _step_text(self.workflow, "Decode and validate rclone config")
         # Hardcoded (not interpolated from an env var that could diverge).
-        self.assertIn('REMOTE_NAME="mnemosyne-crypt"', decode)
-        # Must NOT interpolate from MNEMOSYNE_BACKUP_RCLONE_REMOTE env var.
+        self.assertIn('VAULT_RECOVERY_REMOTE_NAME="vault-recovery-crypt"', decode)
+        self.assertIn('MNEMOSYNE_REMOTE_NAME="mnemosyne-crypt"', decode)
+        # Must NOT interpolate from the runtime env vars.
+        self.assertNotIn("${VAULT_RECOVERY_RCLONE_REMOTE", decode)
         self.assertNotIn("${MNEMOSYNE_BACKUP_RCLONE_REMOTE", decode)
 
-    def test_rclone_three_independent_crypt_field_checks(self) -> None:
+    def test_rclone_four_independent_crypt_field_checks(self) -> None:
         decode = _step_text(self.workflow, "Decode and validate rclone config")
-        # THREE independent checks, not OR. Each field parsed separately.
+        # FOUR independent checks (type, remote, password + the
+        # metadata-encryption standard), not OR. Each field parsed
+        # separately.
         self.assertIn("type must be exactly crypt", decode)
         self.assertIn("REMOTE_TYPE", decode)
         self.assertIn("CRYPT_REMOTE", decode)
         self.assertIn("CRYPT_PASSWORD", decode)
+        self.assertIn("CRYPT_FILENAME_ENC", decode)
+        self.assertIn("CRYPT_DIRNAME_ENC", decode)
         # Must NOT use the old OR-based grep that combined remote|password.
         self.assertNotIn("grep -E '^(remote|password)", decode)
+
+    def test_rclone_vault_recovery_crypt_validated_independent_of_mnemosyne_mode(self) -> None:
+        # The vault-recovery-crypt remote is validated on EVERY deployment,
+        # OUTSIDE the MNEMOSYNE_DEPLOY_MODE=backup gate (Phase 3: the
+        # encrypted vault-recovery lane is the default backup composition).
+        decode = _step_text(self.workflow, "Decode and validate rclone config")
+        # The unconditional validation call happens before the backup gate.
+        before_gate = decode.split('"${MNEMOSYNE_DEPLOY_MODE:-off}" = "backup"')[0]
+        self.assertIn('validate_crypt_remote "$VAULT_RECOVERY_REMOTE_NAME"', before_gate)
+        # mnemosyne-crypt stays gated on backup mode.
+        backup_gate = decode.split('"${MNEMOSYNE_DEPLOY_MODE:-off}" = "backup"')[1]
+        self.assertIn('validate_crypt_remote "$MNEMOSYNE_REMOTE_NAME"', backup_gate)
 
     def test_rclone_backup_branch_validates_crypt_before_publish(self) -> None:
         decode = _step_text(self.workflow, "Decode and validate rclone config")
@@ -367,34 +397,348 @@ class DeployWorkflowContractTests(unittest.TestCase):
         # The publish step creates the volume.
         self.assertIn("docker volume create", publish)
 
-    def test_rclone_backup_branch_requires_baseline_gdrive_remote(self) -> None:
+    def test_rclone_config_required_for_every_deployment(self) -> None:
+        # Phase 3: RCLONE_CONFIG_B64 is required even when
+        # MNEMOSYNE_DEPLOY_MODE=off — the vault-recovery lane is the default
+        # backup and the deploy must FAIL rather than silently lose backups.
+        validate = _step_text(self.workflow, "Validate required repository variables")
+        self.assertIn(
+            "ERROR: RCLONE_CONFIG_B64 secret is required: the vault-recovery encrypted backup lane is the default deployment composition",
+            validate,
+        )
+        # The requirement is OUTSIDE the backup-mode section: it appears
+        # after the backup-mode `fi` (the mnemosyne export-interval block)
+        # and before the GITHUB_ENV write.
+        tail = validate.split('MNEMOSYNE_DEPLOY_MODE="$MNEMOSYNE_DEPLOY_MODE" >> "$GITHUB_ENV"')[0]
+        after_backup_block = tail.split("RCLONE_CONFIG_B64 secret is required when MNEMOSYNE_DEPLOY_MODE=backup")[1]
+        self.assertNotIn(
+            'if [ "$MNEMOSYNE_DEPLOY_MODE" = "backup" ]; then', after_backup_block
+        )
+        # Defensive duplicate in the decode step too.
         decode = _step_text(self.workflow, "Decode and validate rclone config")
-        self.assertIn("BASELINE_REMOTE", decode)
-        self.assertIn('"gdrive"', decode)
-        self.assertIn("obsidian-backup would break", decode)
+        self.assertIn(
+            "ERROR: RCLONE_CONFIG_B64 secret is required: the vault-recovery encrypted backup lane is the default deployment composition",
+            decode,
+        )
+
+    def test_rclone_backup_branch_does_not_require_baseline_gdrive(self) -> None:
+        # The retired plaintext obsidian-backup lane no longer exists, so the
+        # deploy must NOT require a baseline gdrive remote for it.
+        decode = _step_text(self.workflow, "Decode and validate rclone config")
+        self.assertNotIn("BASELINE_REMOTE", decode)
+        self.assertNotIn("obsidian-backup would break", decode)
+        self.assertNotIn('"gdrive"', decode)
 
     def test_rclone_backup_branch_does_not_print_config(self) -> None:
         decode = _step_text(self.workflow, "Decode and validate rclone config")
         self.assertNotIn("echo \"$REMOTE_SHOW\"", decode)
         self.assertNotIn("cat \"$TMP_RCLONE_CONF\"", decode)
 
-    def test_rclone_non_backup_behavior_preserved(self) -> None:
-        decode = _step_text(self.workflow, "Decode and validate rclone config")
-        publish = _step_text(self.workflow, "Publish rclone config into shared volume")
-        # Non-backup with RCLONE_CONFIG_B64 set: decode without crypt
-        # validation, then publish.
-        self.assertIn("rclone config loaded into Docker volume", publish)
-        # The crypt validation is gated on backup mode.
-        self.assertIn('"${MNEMOSYNE_DEPLOY_MODE:-off}" = "backup"', decode)
-
     def test_rclone_publish_is_atomic(self) -> None:
         publish = _step_text(self.workflow, "Publish rclone config into shared volume")
         self.assertIn("rclone.conf.new", publish)
         self.assertIn("mv /config/rclone/rclone.conf.new /config/rclone/rclone.conf", publish)
 
-    def test_env_writes_hardcoded_rclone_remote(self) -> None:
+    # --- crypt metadata-encryption standard (council fix 1) ---
+
+    def test_rclone_validates_metadata_encryption_standard(self) -> None:
+        """The deploy preflight enforces the metadata-encryption standard on
+        the crypt remote: filename_encryption must be `standard` (absent =
+        rclone default `standard`; `off`/`obfuscate` rejected) and
+        directory_name_encryption must not be `false` (absent = default
+        `true`) — otherwise plaintext file/directory names would leak in
+        the ciphertext metadata and the ciphertext non-leak proof would be
+        void."""
+        decode = _step_text(self.workflow, "Decode and validate rclone config")
+        self.assertIn("CRYPT_FILENAME_ENC", decode)
+        self.assertIn("CRYPT_DIRNAME_ENC", decode)
+        self.assertIn(
+            "must be 'standard'", decode,
+        )
+        self.assertIn(
+            "plaintext file names would leak in the ciphertext metadata", decode,
+        )
+        self.assertIn(
+            "directory_name_encryption is 'false'", decode,
+        )
+        self.assertIn(
+            "plaintext directory names would leak in the ciphertext metadata", decode,
+        )
+
+    # --- real remote readiness gate (council fix 2: migration cutover) ---
+
+    def test_remote_readiness_gate_runs_before_teardown(self) -> None:
+        """A syntactically valid but UNREACHABLE remote must abort the
+        deploy BEFORE any teardown: the readiness gate runs between the
+        decode step and the publish step, all before the first mutation
+        ("Stop existing services"). The existing deployment and any legacy
+        lane state are retained untouched on failure."""
+        names = _step_names(self.workflow)
+        gate_name = "Vault-recovery remote readiness gate (real upload probe)"
+        self.assertIn(gate_name, names)
+        decode_idx = names.index("Decode and validate rclone config")
+        gate_idx = names.index(gate_name)
+        publish_idx = names.index("Publish rclone config into shared volume")
+        stop_idx = names.index("Stop existing services")
+        self.assertLess(decode_idx, gate_idx)
+        self.assertLess(gate_idx, publish_idx)
+        self.assertLess(publish_idx, stop_idx)
+        # The gate runs immediately after the decode step: no step between
+        # them can fail with the decoded secret temp file still on disk.
+        self.assertEqual(gate_idx, decode_idx + 1)
+
+    def test_remote_readiness_gate_does_real_round_trip(self) -> None:
+        gate = _step_text(self.workflow, "Vault-recovery remote readiness gate (real upload probe)")
+        # REAL write (rcat), read-back (cat) and cleanup (deletefile)
+        # against the production crypt remote — not just config syntax.
+        self.assertIn("rcat", gate)
+        self.assertIn("cat \"$REMOTE_BASE/$PROBE\"", gate)
+        self.assertIn("deletefile", gate)
+        # The probe never lands in the committed namespace (it can never be
+        # mistaken for a generation by listing/retention/recovery).
+        self.assertIn("vault-recovery-crypt:Josemar/vault-recovery", gate)
+        self.assertNotIn("committed/", gate)
+        # Unreachable remote -> abort BEFORE any teardown.
+        self.assertIn("UNREACHABLE", gate)
+        self.assertIn("ABORTED BEFORE ANY TEARDOWN", gate)
+        self.assertIn("legacy lane state are retained untouched", gate)
+        # Read-back mismatch also aborts.
+        self.assertIn("read-back probe", gate)
+
+    # --- deploy temp rclone config cleanup (council fix 6) ---
+
+    def test_decode_step_traps_temp_config_cleanup(self) -> None:
+        """The decode step traps removal of the decoded secret temp file on
+        ALL failure paths (after mktemp+chmod) and disarms the trap on
+        success so the publish step can still use the file."""
+        decode = _step_text(self.workflow, "Decode and validate rclone config")
+        self.assertIn("trap 'rm -f \"$TMP_RCLONE_CONF\"' EXIT", decode)
+        # Disarmed on success right before the GITHUB_ENV export.
+        success_part = decode.split('echo "RCLONE_TEMP_CONF=$TMP_RCLONE_CONF"')[1]
+        self.assertIn("trap - EXIT", success_part)
+        # No failure path leaves the file behind (no bare `trap - EXIT`
+        # before `exit 1` error branches — the trap handles them).
+        self.assertNotIn("rm -f \"$TMP_RCLONE_CONF\"\n            trap - EXIT", decode)
+
+    def test_publish_step_traps_temp_config_cleanup_on_every_exit(self) -> None:
+        """The publish step owns the temp config and traps its removal on
+        EVERY exit (success AND failure): the decoded secret never lingers
+        on the runner."""
+        publish = _step_text(self.workflow, "Publish rclone config into shared volume")
+        self.assertIn("trap 'rm -f \"$TMP_RCLONE_CONF\"' EXIT", publish)
+        self.assertIn("Cleanup on EVERY exit path", publish)
+        # No explicit rm outside the trap: the trap is the single cleanup
+        # path.
+        self.assertNotIn("rm -f \"$TMP_RCLONE_CONF\"\n          echo", publish)
+
+    def test_readiness_gate_traps_temp_config_cleanup_on_every_exit(self) -> None:
+        """The readiness gate is the step between the decode step (trap
+        disarmed on success) and the publish step (final owner). It can
+        itself FAIL (unreachable remote -> deploy aborted BEFORE any
+        teardown), so it must keep a cleanup trap active through the remote
+        readiness failure and the final probe cleanup, and disarm it ONLY
+        on success (so the publish step can still use the file). Otherwise
+        the decoded secret would linger on the runner whenever the remote
+        readiness gate aborts the deploy."""
+        gate = _step_text(self.workflow, "Vault-recovery remote readiness gate (real upload probe)")
+        # The trap is registered right after TMP_RCLONE_CONF is read and
+        # BEFORE any failure path (missing/empty config, write probe,
+        # read-back probe) — so every readiness failure cleans the secret.
+        self.assertIn("trap 'rm -f \"$TMP_RCLONE_CONF\"' EXIT", gate)
+        self.assertLess(
+            gate.index("trap 'rm -f \"$TMP_RCLONE_CONF\"' EXIT"),
+            gate.index('if [ -z "$TMP_RCLONE_CONF" ] || [ ! -s "$TMP_RCLONE_CONF" ]'),
+        )
+        self.assertLess(
+            gate.index("trap 'rm -f \"$TMP_RCLONE_CONF\"' EXIT"),
+            gate.index("UNREACHABLE"),
+        )
+        # Disarmed ONLY after the final success line (the publish step owns
+        # the file from then on); no failure path disarms before exiting.
+        success_part = gate.split("readiness gate PASSED")[1]
+        self.assertIn("trap - EXIT", success_part)
+        self.assertNotIn("trap - EXIT", gate.split("readiness gate PASSED")[0])
+        # The trap is the single cleanup path: no explicit rm outside it.
+        self.assertNotIn("rm -f \"$TMP_RCLONE_CONF\"\n          exit", gate)
+
+    def test_env_writes_hardcoded_rclone_remotes(self) -> None:
         env_step = _step_text(self.workflow, "Create .env file")
         self.assertIn('write_env MNEMOSYNE_BACKUP_RCLONE_REMOTE "mnemosyne-crypt"', env_step)
+        # Phase 3: the vault-recovery remote is written for EVERY deployment.
+        self.assertIn('write_env VAULT_RECOVERY_RCLONE_REMOTE "vault-recovery-crypt"', env_step)
+
+    def test_final_cleanup_removes_rclone_temp_config(self) -> None:
+        """The always() final cleanup removes BOTH `.env` and the decoded
+        rclone temp config: a run cancelled BETWEEN the rclone steps (after
+        the decode step exported RCLONE_TEMP_CONF but before the publish
+        step's trap armed) would otherwise leave the decoded secret on the
+        runner — the step-local traps only cover in-step failures, this
+        final sweep covers the between-step cancellation window."""
+        names = _step_names(self.workflow)
+        self.assertIn("Cleanup sensitive files", names)
+        cleanup = self.workflow["jobs"]["deploy"]["steps"][names.index("Cleanup sensitive files")]
+        self.assertEqual(cleanup.get("if"), "always()")
+        run = cleanup["run"]
+        self.assertIn("rm -f .env", run)
+        self.assertIn('"${RCLONE_TEMP_CONF:-}"', run)
+        self.assertIn("rm -f \"$RCLONE_TEMP_CONF\"", run)
+        # It is the LAST step of the job (nothing after it can fail with
+        # the temp file still on disk).
+        self.assertEqual(names[-1], "Cleanup sensitive files")
+
+    def test_vault_recovery_overlay_hardcodes_remote_identity(self) -> None:
+        """Runtime remote immutability (council fix): the overlay wires the
+        validated/probed remote identity as LITERALS in BOTH services. The
+        values are never ${...}-interpolated, so the runner environment or
+        a stale `.env` (which Compose interpolation prefers over the `.env`
+        file) can never silently re-route backups to a different remote
+        than the one the deploy preflight validated and the readiness gate
+        probed."""
+        overlay = VAULT_RECOVERY_OVERLAY.read_text(encoding="utf-8")
+        for service in ("vault-recovery-uploader", "vault-recovery-recover"):
+            self.assertIn(
+                f"- VAULT_RECOVERY_RCLONE_REMOTE=vault-recovery-crypt",
+                overlay,
+                f"{service} must hardcode the validated remote name",
+            )
+            self.assertIn(
+                f"- VAULT_RECOVERY_RCLONE_PATH=Josemar/vault-recovery",
+                overlay,
+                f"{service} must hardcode the validated remote path",
+            )
+        # No interpolation may re-introduce override precedence for either
+        # key anywhere in the overlay.
+        self.assertNotIn("${VAULT_RECOVERY_RCLONE_REMOTE", overlay)
+        self.assertNotIn("${VAULT_RECOVERY_RCLONE_PATH", overlay)
+
+    # --- Phase 3: vault-recovery as the default deployment lane ---
+
+    def test_compose_file_always_includes_vault_recovery_overlay(self) -> None:
+        # The vault-recovery overlay is appended unconditionally right after
+        # the base file, BEFORE any optional overlay and before the
+        # MNEMOSYNE_DEPLOY_MODE case.
+        derive = _step_text(self.workflow, "Derive compose file and validate config")
+        self.assertIn(
+            'COMPOSE_FILE_VALUE="${COMPOSE_FILE_VALUE}:docker-compose.vault-recovery.yml"',
+            derive,
+        )
+        self.assertEqual(derive.count("docker-compose.vault-recovery.yml"), 1)
+        case_idx = derive.index('case "${MNEMOSYNE_DEPLOY_MODE:-off}" in')
+        self.assertLess(derive.index("docker-compose.vault-recovery.yml"), case_idx)
+        # The overlay is applied regardless of mode: it is outside the case.
+        case_branches = derive[case_idx:]
+        self.assertNotIn("docker-compose.vault-recovery.yml", case_branches)
+
+    def test_vault_recovery_portability_gate_precedes_teardown(self) -> None:
+        names = _step_names(self.workflow)
+        self.assertIn("Vault-recovery portability proof (mandatory release gate)", names)
+        gate_idx = names.index("Vault-recovery portability proof (mandatory release gate)")
+        stop_idx = names.index("Stop existing services")
+        self.assertLess(gate_idx, stop_idx)
+        gate = self.workflow["jobs"]["deploy"]["steps"][gate_idx]
+        self.assertIn("test_vault_recovery_portability", gate["run"])
+        self.assertEqual(gate["env"].get("RUN_DOCKER_TESTS"), "1")
+        self.assertEqual(gate["env"].get("VAULT_RECOVERY_PORTABILITY_REQUIRED"), "1")
+
+    def test_vault_recovery_dr_drill_gate_precedes_teardown_and_is_mandatory(self) -> None:
+        # Phase 3: the FULL disaster-recovery drill is a MANDATORY release
+        # gate (not recommended): it runs before any teardown/mutation with
+        # VAULT_RECOVERY_DR_DRILL_REQUIRED=1, so a missing docker CLI or any
+        # failed assertion FAILS the deploy.
+        names = _step_names(self.workflow)
+        self.assertIn("Vault-recovery disaster-recovery drill (mandatory release gate)", names)
+        gate_idx = names.index("Vault-recovery disaster-recovery drill (mandatory release gate)")
+        stop_idx = names.index("Stop existing services")
+        self.assertLess(gate_idx, stop_idx)
+        gate = self.workflow["jobs"]["deploy"]["steps"][gate_idx]
+        self.assertIn("test_vault_recovery_dr_drill", gate["run"])
+        self.assertEqual(gate["env"].get("RUN_DOCKER_TESTS"), "1")
+        self.assertEqual(gate["env"].get("VAULT_RECOVERY_DR_DRILL_REQUIRED"), "1")
+
+    def test_post_start_vault_recovery_checks_present(self) -> None:
+        step = _step_text(self.workflow, "Verify vault-recovery deployment (uploader + export cron + plaintext absence)")
+        self.assertIn("vault-recovery-uploader is running", step)
+        self.assertIn("ps vault-recovery-uploader", step)
+        # Export cron with the real jobs.json schema.
+        self.assertIn("vault-recovery-export", step)
+        self.assertIn("schedule.get(\"kind\") != \"cron\"", step)
+        self.assertIn('expected_expr = "0 4 * * *"', step)
+        self.assertIn("hermes-vault-recovery-export-cron.sh", step)
+        self.assertIn("no_agent is not true", step)
+        # workdir must equal /opt/data EXACTLY (not merely nonempty).
+        self.assertIn('if workdir != "/opt/data":', step)
+        self.assertIn('workdir is not \'/opt/data\'', step)
+        # Plaintext absence.
+        self.assertIn("retired plaintext obsidian-backup container still exists", step)
+        # Runs after start.
+        self.assertLess(
+            _step_index(self.workflow, "Start services"),
+            _step_index(self.workflow, "Verify vault-recovery deployment (uploader + export cron + plaintext absence)"),
+        )
+
+    def test_maximal_compose_set_includes_vault_recovery_overlay(self) -> None:
+        verify = _step_text(self.workflow, "Verify embeddings overlay selection")
+        self.assertIn("docker-compose.vault-recovery.yml", verify)
+        off = _step_text(self.workflow, "Verify Mnemosyne off (overlays absent, provider disabled)")
+        self.assertIn("docker-compose.vault-recovery.yml", off)
+
+    def test_stop_workflow_retires_obsidian_backup(self) -> None:
+        stop_wf = (REPO_ROOT / ".github" / "workflows" / "stop-service.yml").read_text(encoding="utf-8")
+        self.assertNotIn("obsidian-backup", stop_wf)
+        self.assertIn("vault-recovery-uploader", stop_wf)
+        self.assertIn("docker-compose.vault-recovery.yml", stop_wf)
+
+    def test_stop_workflow_tears_down_maximal_superset_with_orphans(self) -> None:
+        # Blocker: stop-service must down the MAXIMAL overlay set/profiles (or
+        # remove orphans), not just the base + vault-recovery composition, so
+        # any prior overlay service (browser-control, embeddings, mnemosyne,
+        # mnemosyne-backup) is removed too.
+        stop_wf = (REPO_ROOT / ".github" / "workflows" / "stop-service.yml").read_text(encoding="utf-8")
+        for overlay in (
+            "docker-compose.yml",
+            "docker-compose.vault-recovery.yml",
+            "docker-compose.browser-control.yml",
+            "docker-compose.embeddings.yml",
+            "docker-compose.mnemosyne.yml",
+            "docker-compose.mnemosyne-backup.yml",
+        ):
+            self.assertIn(overlay, stop_wf, f"stop workflow missing {overlay}")
+        for profile in ("--profile aux-ml", "--profile browser-control", "--profile recovery"):
+            self.assertIn(profile, stop_wf, f"stop workflow missing {profile}")
+        self.assertIn("down --remove-orphans", stop_wf)
+        # No -v: named volumes are preserved.
+        self.assertNotIn("down --remove-orphans -v", stop_wf)
+        self.assertNotIn("down -v", stop_wf)
+
+    def test_stop_workflow_verifies_all_overlay_services_absent(self) -> None:
+        # The stop workflow must verify browser/embeddings/Mnemosyne/
+        # vault-recovery overlay services are absent, not just the base
+        # services.
+        stop_wf = (REPO_ROOT / ".github" / "workflows" / "stop-service.yml").read_text(encoding="utf-8")
+        for service in (
+            "hermes",
+            "aux-ml",
+            "syncthing",
+            "tailscale",
+            "vault-recovery-uploader",
+            "vault-recovery-recover",
+            "browser-tunnel",
+            "embeddings",
+            "mnemosyne-backup-uploader",
+            "mnemosyne-backup-recover",
+        ):
+            self.assertIn(service, stop_wf, f"stop workflow does not verify {service} absent")
+
+    def test_env_example_retires_plaintext_vars(self) -> None:
+        env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+        self.assertNotIn("OBSIDIAN_BACKUP_TIME=", env_example)
+        self.assertNotIn("OBSIDIAN_BACKUP_SLOTS=", env_example)
+        self.assertNotIn("OBSIDIAN_GDRIVE_REMOTE=", env_example)
+        self.assertNotIn("OBSIDIAN_GDRIVE_PATH=", env_example)
+        # The retired lane is documented, and the vault-recovery remote is
+        # the default.
+        self.assertIn("RETIRED: plaintext obsidian-backup lane", env_example)
+        self.assertIn("VAULT_RECOVERY_RCLONE_REMOTE=vault-recovery-crypt", env_example)
 
     # --- mode-specific verification commands (blockers #5,#6,#7,#8) ---
 
@@ -520,6 +864,9 @@ class DeployWorkflowContractTests(unittest.TestCase):
         self.assertIn("workdir", backup)
         # Must assert script == mnemosyne-backup-export.sh.
         self.assertIn("mnemosyne-backup-export.sh", backup)
+        # workdir must equal /opt/data EXACTLY (not merely nonempty).
+        self.assertIn('if workdir != "/opt/data":', backup)
+        self.assertIn('workdir is not \'/opt/data\'', backup)
 
     def test_backup_check_rejects_bool_minutes(self) -> None:
         backup = _step_text(
@@ -734,7 +1081,9 @@ class CronSchemaFixtureTests(unittest.TestCase):
         self.assertEqual(minutes, 30)
         self.assertEqual(job.get("script"), "mnemosyne-backup-export.sh")
         self.assertIs(job.get("no_agent"), True)
-        self.assertTrue(job.get("workdir"))
+        # workdir must equal /opt/data exactly (the deploy check rejects any
+        # other value, not just empty).
+        self.assertEqual(job.get("workdir"), "/opt/data")
 
     def test_bool_minutes_rejected_by_schema_contract(self) -> None:
         """A bool `minutes` (True/False are ints in Python) must be rejected."""
@@ -896,7 +1245,9 @@ class DocsContractTests(unittest.TestCase):
         # Remediated behaviors documented.
         self.assertIn("fail-closed", agents.lower())
         self.assertIn("aux-ml", agents)
-        self.assertIn("gdrive", agents)
+        # Phase 3: the default-lane crypt remote is documented (the retired
+        # baseline gdrive requirement is gone).
+        self.assertIn("vault-recovery-crypt", agents)
         self.assertIn("hermes_cli.config.load_config()", agents)
         self.assertIn("/opt/data/config.yaml", agents)
 
@@ -912,7 +1263,9 @@ class DocsContractTests(unittest.TestCase):
         self.assertIn("MNEMOSYNE_BACKUP_EXPORT_INTERVAL", readme)
         self.assertIn("RCLONE_CONFIG_B64", readme)
         self.assertIn("mnemosyne-crypt", readme)
-        self.assertIn("gdrive", readme)
+        # Phase 3: the default-lane crypt remote is documented (the retired
+        # baseline gdrive requirement is gone).
+        self.assertIn("vault-recovery-crypt", readme)
         # The 10080-minute ceiling is referenced.
         self.assertIn("10080", readme)
 

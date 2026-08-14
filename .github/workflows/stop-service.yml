@@ -17,7 +17,24 @@ jobs:
           JOSEMAR_CONTAINER_PREFIX_INPUT: ${{ vars.JOSEMAR_CONTAINER_PREFIX }}
         run: |
           export JOSEMAR_CONTAINER_PREFIX="${JOSEMAR_CONTAINER_PREFIX_INPUT:-josemar}"
-          docker compose down
+          # Tear down with the MAXIMAL overlay superset (base +
+          # vault-recovery + browser-control + embeddings + mnemosyne +
+          # mnemosyne-backup) plus the aux-ml, browser-control, and recovery
+          # profiles, so ANY prior overlay-enabled service is removed even
+          # when the current deployment runs a smaller set. --remove-orphans
+          # additionally removes containers no longer in the composition.
+          # NO -v: named volumes are preserved.
+          docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.vault-recovery.yml \
+            -f docker-compose.browser-control.yml \
+            -f docker-compose.embeddings.yml \
+            -f docker-compose.mnemosyne.yml \
+            -f docker-compose.mnemosyne-backup.yml \
+            --profile aux-ml \
+            --profile browser-control \
+            --profile recovery \
+            down --remove-orphans
 
       - name: Verify services stopped
         env:
@@ -29,7 +46,13 @@ jobs:
           fi
           PREFIX="${PREFIX:-josemar}"
           RUNNING_CONTAINERS="$(docker ps --format '{{.Names}}')"
-          for service in hermes aux-ml syncthing tailscale obsidian-backup; do
+          # Core services plus every overlay service: browser control,
+          # embeddings, both Mnemosyne overlay services, and both
+          # vault-recovery services (uploader + profile-gated recover).
+          for service in hermes aux-ml syncthing tailscale \
+              vault-recovery-uploader vault-recovery-recover \
+              browser-tunnel embeddings \
+              mnemosyne-backup-uploader mnemosyne-backup-recover; do
             if printf '%s\n' "$RUNNING_CONTAINERS" | grep -Fxq "${PREFIX}-${service}"; then
               echo "ERROR: ${PREFIX}-${service} is still running!"
               exit 1

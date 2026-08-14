@@ -231,8 +231,52 @@ jobs:
             fi
           fi
 
+          # ---- Vault-recovery encrypted lane (default backup, Phase 3) ----
+          # The encrypted vault-recovery lane REPLACED the retired plaintext
+          # obsidian-backup service and is part of the default deployment
+          # composition. RCLONE_CONFIG_B64 is therefore REQUIRED for every
+          # deployment: without the vault-recovery-crypt remote the deploy
+          # FAILS here, before any volume mutation or teardown, rather than
+          # silently deploying without backups.
+          if [ -z "$RCLONE_CONFIG_B64_SECRET" ]; then
+            echo "ERROR: RCLONE_CONFIG_B64 secret is required: the vault-recovery encrypted backup lane is the default deployment composition and its crypt remote must be configured (set the RCLONE_CONFIG_B64 secret)"
+            exit 1
+          fi
+
           echo "MNEMOSYNE_DEPLOY_MODE=$MNEMOSYNE_DEPLOY_MODE" >> "$GITHUB_ENV"
           echo "GBRAIN_EMBEDDINGS_ENABLED=$GBRAIN_EMBEDDINGS_ENABLED" >> "$GITHUB_ENV"
+
+      - name: Vault-recovery portability proof (mandatory release gate)
+        # The phase-1 vault-recovery feature is release-blocked on the
+        # physical-copy portability proof: a full `.gbrain` tree with REAL
+        # vector-bearing DB state must copy and open on the pinned image
+        # (doctor, vectors, DB-only records, config, schema packs/markers)
+        # without reindex/rebuild/sync. This gate runs BEFORE any volume
+        # mutation or service teardown and FAILS the deploy when the proof
+        # does not pass. VAULT_RECOVERY_PORTABILITY_REQUIRED=1 makes a
+        # missing docker CLI a failure, not a skip — there is no
+        # RUN_DOCKER_TESTS opt-in bypass on the release path.
+        run: |
+          python3 -m unittest tests.runtime.test_vault_recovery_portability -v
+        env:
+          RUN_DOCKER_TESTS: "1"
+          VAULT_RECOVERY_PORTABILITY_REQUIRED: "1"
+
+      - name: Vault-recovery disaster-recovery drill (mandatory release gate)
+        # Phase 3: the FULL disaster-recovery drill is a mandatory
+        # release/deploy gate, not a recommendation: disposable runtime,
+        # real vector-bearing state, export + encrypted upload, ordered
+        # maintenance window (all three owned jobs paused, Hermes and server
+        # Syncthing stopped), DESTROY of both live trees, recover/verify/
+        # install, controlled restart, survival proofs, rollback. A missing
+        # docker CLI or any failed assertion FAILS the deploy —
+        # VAULT_RECOVERY_DR_DRILL_REQUIRED=1 makes the opt-in env var
+        # irrelevant and a missing docker CLI a failure, not a skip.
+        run: |
+          python3 -m unittest tests.runtime.test_vault_recovery_dr_drill -v
+        env:
+          RUN_DOCKER_TESTS: "1"
+          VAULT_RECOVERY_DR_DRILL_REQUIRED: "1"
 
       - name: Create .env file
         env:
@@ -527,6 +571,13 @@ jobs:
           # cannot diverge. This matches the overlay default and the value
           # validated in the "Decode and validate rclone config" step.
           write_env MNEMOSYNE_BACKUP_RCLONE_REMOTE "mnemosyne-crypt"
+          # Hardcode the vault-recovery crypt remote name in .env so the
+          # deploy validation (which hardcodes vault-recovery-crypt) and the
+          # runtime Compose overlay cannot diverge. This matches the overlay
+          # default and the value validated in the "Decode and validate
+          # rclone config" step. The vault-recovery encrypted lane is the
+          # DEFAULT backup composition (Phase 3).
+          write_env VAULT_RECOVERY_RCLONE_REMOTE "vault-recovery-crypt"
           write_env GBRAIN_EMBEDDINGS_ENABLED "$GBRAIN_EMBEDDINGS_ENABLED"
 
           chmod 600 .env
@@ -548,17 +599,22 @@ jobs:
         # `docker compose config --quiet` BEFORE any volume mutation, volume
         # write, or service teardown. This is the fail-closed preflight: an
         # invalid overlay combination exits non-zero without touching state.
-        # Ordering: base; optional browser-control; embeddings; mnemosyne;
-        # backup last. browser-control is the only overlay whose presence
-        # depends on a separate repo variable (BROWSER_CONTROL_ENABLED). The
-        # embeddings overlay is appended exactly once when
-        # GBRAIN_EMBEDDINGS_ENABLED=true OR MNEMOSYNE_DEPLOY_MODE is
-        # pilot/backup (standalone gbrain embeddings is valid with mode off).
-        # The Mnemosyne overlays are appended in fixed order based on
-        # MNEMOSYNE_DEPLOY_MODE.
+        # Ordering: base; vault-recovery (DEFAULT encrypted backup lane,
+        # Phase 3 — always applied, replacing the retired plaintext
+        # obsidian-backup service); optional browser-control; embeddings;
+        # mnemosyne; backup last. browser-control is the only overlay whose
+        # presence depends on a separate repo variable
+        # (BROWSER_CONTROL_ENABLED). The embeddings overlay is appended
+        # exactly once when GBRAIN_EMBEDDINGS_ENABLED=true OR
+        # MNEMOSYNE_DEPLOY_MODE is pilot/backup (standalone gbrain embeddings
+        # is valid with mode off). The Mnemosyne overlays are appended in
+        # fixed order based on MNEMOSYNE_DEPLOY_MODE.
         run: |
           set -euo pipefail
           COMPOSE_FILE_VALUE="docker-compose.yml"
+          # The vault-recovery overlay is ALWAYS part of the deployment
+          # composition (default encrypted backup lane).
+          COMPOSE_FILE_VALUE="${COMPOSE_FILE_VALUE}:docker-compose.vault-recovery.yml"
           if [ "${BROWSER_CONTROL_ENABLED}" = "true" ]; then
             COMPOSE_FILE_VALUE="${COMPOSE_FILE_VALUE}:docker-compose.browser-control.yml"
           fi
@@ -593,114 +649,222 @@ jobs:
       - name: Decode and validate rclone config
         # Decode RCLONE_CONFIG_B64 to a 0600 temp file and validate the
         # required remotes BEFORE any volume mutation or service teardown.
-        # In backup mode: require a `crypt` remote named `mnemosyne-crypt`
-        # (hardcoded — must match the Compose overlay default) with type=crypt,
-        # a nonempty remote, and a nonempty password, AND require the baseline
-        # `gdrive` remote so replacing the shared volume does not break
-        # obsidian-backup. The pinned rclone image entrypoint is `["rclone"]`,
-        # so we invoke rclone directly (no `sh -c`). No config/secrets are
-        # printed. The temp file path is exported for the later publish step.
-        # Non-backup with RCLONE_CONFIG_B64 set: decode only (no crypt
-        # validation); the baseline publish behavior is preserved later.
+        # The vault-recovery-crypt remote is REQUIRED FOR EVERY DEPLOYMENT
+        # (the encrypted vault-recovery lane is the default backup
+        # composition, Phase 3): type=crypt, nonempty remote, nonempty
+        # password, AND the metadata-encryption standard (filename
+        # encryption `standard`, directory-name encryption enabled) —
+        # validated INDEPENDENTLY of MNEMOSYNE_DEPLOY_MODE, so backup-mode
+        # toggles can never skip the default lane's preflight. In backup
+        # mode the mnemosyne-crypt remote is validated the same way. The
+        # pinned rclone image entrypoint is `["rclone"]`, so we invoke
+        # rclone directly (no `sh -c`). No config/secrets are printed.
+        # The temp file path is exported for the later publish step; the
+        # publish step owns the cleanup (it traps removal on EVERY exit),
+        # and this step traps removal on every FAILURE path below
+        # (disarmed on success so the publish step can still use the file).
         env:
           RCLONE_CONFIG_B64_SECRET: ${{ secrets.RCLONE_CONFIG_B64 }}
         run: |
           set -euo pipefail
           RCLONE_PINNED_IMAGE="rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548"
-          # Hardcoded remote name — must match the Compose overlay default
-          # and the value written to .env. Do NOT interpolate from an env var
-          # that could diverge from Compose.
-          REMOTE_NAME="mnemosyne-crypt"
-          BASELINE_REMOTE="gdrive"
+          # Hardcoded remote names — must match the Compose overlay defaults
+          # and the values written to .env. Do NOT interpolate from an env
+          # var that could diverge from Compose.
+          VAULT_RECOVERY_REMOTE_NAME="vault-recovery-crypt"
+          MNEMOSYNE_REMOTE_NAME="mnemosyne-crypt"
 
           if [ -z "$RCLONE_CONFIG_B64_SECRET" ]; then
-            if [ "${MNEMOSYNE_DEPLOY_MODE:-off}" = "backup" ]; then
-              echo "ERROR: RCLONE_CONFIG_B64 secret is required for MNEMOSYNE_DEPLOY_MODE=backup"
-              exit 1
-            fi
-            echo "WARNING: RCLONE_CONFIG_B64 secret not set. Obsidian backups will fail until configured."
-            echo "RCLONE_TEMP_CONF=" >> "$GITHUB_ENV"
-            exit 0
+            echo "ERROR: RCLONE_CONFIG_B64 secret is required: the vault-recovery encrypted backup lane is the default deployment composition"
+            exit 1
           fi
 
           TMP_RCLONE_CONF="$(mktemp)"
-          # Persist the temp path to GITHUB_ENV so the later publish step can
-          # use it. Do NOT trap-rm on EXIT here: the publish step owns cleanup
-          # (rm -f after a successful copy). Error paths below rm explicitly
-          # before exiting.
+          chmod 600 "$TMP_RCLONE_CONF"
+          # Trap cleanup on ALL failure paths after mktemp+chmod: the
+          # decoded secret must never linger on the runner when this step
+          # fails. Disarmed on success (the publish step owns the file and
+          # traps its removal on every exit).
+          trap 'rm -f "$TMP_RCLONE_CONF"' EXIT
           if ! printf '%s' "$RCLONE_CONFIG_B64_SECRET" | base64 --decode > "$TMP_RCLONE_CONF" 2>/dev/null; then
             echo "ERROR: RCLONE_CONFIG_B64 is not valid base64"
-            rm -f "$TMP_RCLONE_CONF"
-            trap - EXIT
             exit 1
           fi
           if [ ! -s "$TMP_RCLONE_CONF" ]; then
             echo "ERROR: RCLONE_CONFIG_B64 decoded to an empty config"
-            rm -f "$TMP_RCLONE_CONF"
-            trap - EXIT
             exit 1
           fi
-          chmod 600 "$TMP_RCLONE_CONF"
 
-          if [ "${MNEMOSYNE_DEPLOY_MODE:-off}" = "backup" ]; then
-            # Validate the crypt remote exists. The pinned image entrypoint is
-            # `["rclone"]`, so we invoke rclone directly (no `sh -c`).
+          # FOUR independent field checks (not OR). Parse each field
+          # separately. We never print the config output. Uses the pinned
+          # image with a direct `rclone` invocation (image entrypoint).
+          validate_crypt_remote() {
+            REMOTE_NAME="$1"
             if ! docker run --rm \
                 -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
                 "$RCLONE_PINNED_IMAGE" \
                 --config /tmp/rclone.conf config show "${REMOTE_NAME}:" \
                 >/dev/null 2>&1; then
               echo "ERROR: rclone remote '${REMOTE_NAME}' not found in RCLONE_CONFIG_B64"
-              rm -f "$TMP_RCLONE_CONF"
-              trap - EXIT
               exit 1
             fi
             REMOTE_SHOW="$(docker run --rm \
               -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
               "$RCLONE_PINNED_IMAGE" \
               --config /tmp/rclone.conf config show "${REMOTE_NAME}:" 2>/dev/null || true)"
-            # THREE independent field checks (not OR). Parse each field
-            # separately. We never print REMOTE_SHOW.
             # 1. type must be exactly crypt.
             REMOTE_TYPE="$(printf '%s\n' "$REMOTE_SHOW" | sed -n 's/^type[[:space:]]*=[[:space:]]*//p' | tr -d '[:space:]')"
             if [ "$REMOTE_TYPE" != "crypt" ]; then
               echo "ERROR: rclone remote '${REMOTE_NAME}' is not type crypt (got: '${REMOTE_TYPE}')"
-              rm -f "$TMP_RCLONE_CONF"
-              trap - EXIT
               exit 1
             fi
             # 2. remote must be present and nonempty (the underlying storage).
             CRYPT_REMOTE="$(printf '%s\n' "$REMOTE_SHOW" | sed -n 's/^remote[[:space:]]*=[[:space:]]*//p' | tr -d '[:space:]')"
             if [ -z "$CRYPT_REMOTE" ]; then
               echo "ERROR: rclone crypt remote '${REMOTE_NAME}' must have a nonempty remote"
-              rm -f "$TMP_RCLONE_CONF"
-              trap - EXIT
               exit 1
             fi
             # 3. password must be present and nonempty (obscured by rclone).
             CRYPT_PASSWORD="$(printf '%s\n' "$REMOTE_SHOW" | sed -n 's/^password[[:space:]]*=[[:space:]]*//p' | tr -d '[:space:]')"
             if [ -z "$CRYPT_PASSWORD" ]; then
               echo "ERROR: rclone crypt remote '${REMOTE_NAME}' must have a nonempty password"
-              rm -f "$TMP_RCLONE_CONF"
-              trap - EXIT
               exit 1
             fi
-            # Also require the baseline gdrive remote so obsidian-backup is
-            # not broken by replacing the shared volume.
-            if ! docker run --rm \
-                -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
-                "$RCLONE_PINNED_IMAGE" \
-                --config /tmp/rclone.conf config show "${BASELINE_REMOTE}:" \
-                >/dev/null 2>&1; then
-              echo "ERROR: baseline rclone remote '${BASELINE_REMOTE}' not found in RCLONE_CONFIG_B64; obsidian-backup would break"
-              rm -f "$TMP_RCLONE_CONF"
-              trap - EXIT
+            # 4. metadata-encryption standard: filename_encryption must be
+            #    `standard` (absent = rclone default `standard`; `off`/
+            #    `obfuscate` would leak plaintext file names in the
+            #    ciphertext metadata) and directory_name_encryption must
+            #    not be `false` (absent = rclone default `true`).
+            CRYPT_FILENAME_ENC="$(printf '%s\n' "$REMOTE_SHOW" | sed -n 's/^filename_encryption[[:space:]]*=[[:space:]]*//p' | tr -d '[:space:]')"
+            if [ -n "$CRYPT_FILENAME_ENC" ] && [ "$CRYPT_FILENAME_ENC" != "standard" ]; then
+              echo "ERROR: rclone crypt remote '${REMOTE_NAME}' filename_encryption is '${CRYPT_FILENAME_ENC}' (must be 'standard'): plaintext file names would leak in the ciphertext metadata"
               exit 1
             fi
-            echo "rclone crypt remote '${REMOTE_NAME}' and baseline '${BASELINE_REMOTE}' validated"
+            CRYPT_DIRNAME_ENC="$(printf '%s\n' "$REMOTE_SHOW" | sed -n 's/^directory_name_encryption[[:space:]]*=[[:space:]]*//p' | tr -d '[:space:]')"
+            if [ "$CRYPT_DIRNAME_ENC" = "false" ]; then
+              echo "ERROR: rclone crypt remote '${REMOTE_NAME}' directory_name_encryption is 'false' (must be 'true'): plaintext directory names would leak in the ciphertext metadata"
+              exit 1
+            fi
+            echo "rclone crypt remote '${REMOTE_NAME}' validated"
+          }
+
+          # Default lane: vault-recovery-crypt is required on EVERY deploy,
+          # independent of the Mnemosyne backup mode.
+          validate_crypt_remote "$VAULT_RECOVERY_REMOTE_NAME"
+          if [ "${MNEMOSYNE_DEPLOY_MODE:-off}" = "backup" ]; then
+            validate_crypt_remote "$MNEMOSYNE_REMOTE_NAME"
           fi
 
           echo "RCLONE_TEMP_CONF=$TMP_RCLONE_CONF" >> "$GITHUB_ENV"
+          # Success: the publish step (the next step) owns the temp file and
+          # removes it on every exit; disarm the failure trap so the file
+          # survives this step's shell exit.
+          trap - EXIT
+
+      - name: Vault-recovery remote readiness gate (real upload probe)
+        # Migration cutover proof (council fix 2): a SYNTACTICALLY VALID but
+        # UNREACHABLE crypt remote must abort the deploy BEFORE any teardown
+        # — the existing deployment (and any legacy lane state) is retained
+        # untouched. The config-level validation above proves the remote is
+        # well-formed; this gate proves the REAL production remote accepts a
+        # write, a read-back, and a delete through the crypt boundary (the
+        # initial generation's round trip must be possible before the old
+        # lane is retired). The probe object lives under the remote base
+        # path, NOT inside the committed namespace, so it can never be
+        # mistaken for a generation by listing/retention/recovery. The
+        # decoded temp config is read-only here; the step traps its removal
+        # on EVERY exit (a readiness failure must never leave the decoded
+        # secret on the runner) and disarms the trap on success, when the
+        # publish step (next) takes over as the final cleanup owner.
+        run: |
+          set -euo pipefail
+          TMP_RCLONE_CONF="${RCLONE_TEMP_CONF:-}"
+          # Cleanup ownership (council fix): this step itself can FAIL (an
+          # unreachable remote aborts the deploy here), and the decode step
+          # already disarmed its failure trap on success. Trap removal of
+          # the decoded secret on EVERY exit of this step so a readiness
+          # failure can never leave it on the runner; disarmed only on
+          # success so the publish step (the final owner) can still use it.
+          trap 'rm -f "$TMP_RCLONE_CONF"' EXIT
+          if [ -z "$TMP_RCLONE_CONF" ] || [ ! -s "$TMP_RCLONE_CONF" ]; then
+            echo "ERROR: rclone temp config missing or empty at readiness-gate time"
+            exit 1
+          fi
+          RCLONE_PINNED_IMAGE="rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548"
+          # Hardcoded — must match the decode step and the Compose overlay.
+          REMOTE_BASE="vault-recovery-crypt:Josemar/vault-recovery"
+          PROBE=".deploy-probe-$(date +%s)"
+          PROBE_CONTENT="vault-recovery deploy probe $(date -u +%FT%TZ)"
+
+          # 1. REAL WRITE through the crypt boundary: a syntactically valid
+          #    but unreachable remote fails here, BEFORE any teardown.
+          if ! printf '%s' "$PROBE_CONTENT" | docker run --rm -i \
+              -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+              "$RCLONE_PINNED_IMAGE" \
+              --config /tmp/rclone.conf rcat "$REMOTE_BASE/$PROBE" >/dev/null 2>&1; then
+            echo "ERROR: vault-recovery remote '$REMOTE_BASE' is UNREACHABLE (write probe failed). The encrypted lane cannot accept an initial generation. Deployment ABORTED BEFORE ANY TEARDOWN — the existing deployment and any legacy lane state are retained untouched."
+            exit 1
+          fi
+          # 2. REAL READ-BACK through the crypt boundary (the generation
+          #    verification round trip must work against the real remote).
+          PROBE_BACK="$(docker run --rm \
+              -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+              "$RCLONE_PINNED_IMAGE" \
+              --config /tmp/rclone.conf cat "$REMOTE_BASE/$PROBE" 2>/dev/null || true)"
+          if [ "$PROBE_BACK" != "$PROBE_CONTENT" ]; then
+            echo "ERROR: vault-recovery remote '$REMOTE_BASE' failed the read-back probe (crypt round trip broken). Deployment ABORTED BEFORE ANY TEARDOWN — the existing deployment and any legacy lane state are retained untouched."
+            docker run --rm \
+              -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+              "$RCLONE_PINNED_IMAGE" \
+              --config /tmp/rclone.conf deletefile "$REMOTE_BASE/$PROBE" >/dev/null 2>&1 || true
+            exit 1
+          fi
+          # 3. Cleanup the probe object (best effort; a leftover probe is
+          #    harmless: it is not a generation and is never listed).
+          docker run --rm \
+            -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+            "$RCLONE_PINNED_IMAGE" \
+            --config /tmp/rclone.conf deletefile "$REMOTE_BASE/$PROBE" >/dev/null 2>&1 || \
+            echo "WARNING: could not remove the deploy probe object $REMOTE_BASE/$PROBE; remove it manually (it is not a generation)"
+          echo "vault-recovery remote readiness gate PASSED: real write + read-back round trip confirmed on '$REMOTE_BASE'"
+          # Success: the publish step (the next step) owns the temp file and
+          # removes it on every exit; disarm the failure trap so the file
+          # survives this step's shell exit.
+          trap - EXIT
+
+      - name: Publish rclone config into shared volume
+        # Publish the already-decoded/validated rclone config into the shared
+        # obsidian-rclone-config volume atomically. The temp file was created
+        # and validated in the "Decode and validate rclone config" step and
+        # probed by the readiness gate. This step is the OWNER of the temp
+        # file: it traps removal on EVERY exit (success AND failure), so the
+        # decoded secret never lingers on the runner. Runs immediately after
+        # the readiness gate so no intermediate step can fail with the temp
+        # file still on disk.
+        run: |
+          set -euo pipefail
+          TMP_RCLONE_CONF="${RCLONE_TEMP_CONF:-}"
+          if [ -z "$TMP_RCLONE_CONF" ]; then
+            # No rclone config to publish (secret was unset — already failed
+            # in the decode step for the default lane).
+            exit 0
+          fi
+          # Cleanup on EVERY exit path of this step (success or failure).
+          trap 'rm -f "$TMP_RCLONE_CONF"' EXIT
+          if [ ! -s "$TMP_RCLONE_CONF" ]; then
+            echo "ERROR: rclone temp config missing or empty at publish time"
+            exit 1
+          fi
+          COMPOSE_PROJECT="$(basename "$PWD")"
+          RCLONE_VOLUME="${COMPOSE_PROJECT}_obsidian-rclone-config"
+          docker volume create "$RCLONE_VOLUME" >/dev/null
+          # Atomic publish into the shared obsidian-rclone-config volume.
+          docker run --rm \
+            -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+            -v "$RCLONE_VOLUME:/config/rclone" \
+            alpine:3.20 \
+            sh -c 'cp /tmp/rclone.conf /config/rclone/rclone.conf.new && chmod 600 /config/rclone/rclone.conf.new && mv /config/rclone/rclone.conf.new /config/rclone/rclone.conf'
+          echo "rclone config loaded into Docker volume"
 
       - name: Populate browser-control persistent volumes
         env:
@@ -777,36 +941,6 @@ jobs:
             echo "No local mmproj model found; compose default URL will be used"
           fi
 
-      - name: Publish rclone config into shared volume
-        # Publish the already-decoded/validated rclone config into the shared
-        # obsidian-rclone-config volume atomically. The temp file was created
-        # and validated in the "Decode and validate rclone config" step. This
-        # step only performs the volume write (no decode/validation here).
-        run: |
-          set -euo pipefail
-          TMP_RCLONE_CONF="${RCLONE_TEMP_CONF:-}"
-          if [ -z "$TMP_RCLONE_CONF" ]; then
-            # No rclone config to publish (secret was unset and mode was not
-            # backup — already warned in the decode step).
-            exit 0
-          fi
-          if [ ! -s "$TMP_RCLONE_CONF" ]; then
-            echo "ERROR: rclone temp config missing or empty at publish time"
-            rm -f "$TMP_RCLONE_CONF"
-            exit 1
-          fi
-          COMPOSE_PROJECT="$(basename "$PWD")"
-          RCLONE_VOLUME="${COMPOSE_PROJECT}_obsidian-rclone-config"
-          docker volume create "$RCLONE_VOLUME" >/dev/null
-          # Atomic publish into the shared obsidian-rclone-config volume.
-          docker run --rm \
-            -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
-            -v "$RCLONE_VOLUME:/config/rclone" \
-            alpine:3.20 \
-            sh -c 'cp /tmp/rclone.conf /config/rclone/rclone.conf.new && chmod 600 /config/rclone/rclone.conf.new && mv /config/rclone/rclone.conf.new /config/rclone/rclone.conf'
-          rm -f "$TMP_RCLONE_CONF"
-          echo "rclone config loaded into Docker volume"
-
       - name: FRESH START - Remove Hermes data volume
         if: github.event.inputs.fresh_start == 'true'
         run: |
@@ -816,10 +950,10 @@ jobs:
 
       - name: Stop existing services
         # Maximal, fail-closed teardown. We tear down with the SUPERSET of
-        # overlays (base + browser-control + embeddings + mnemosyne + backup,
-        # plus the aux-ml, browser-control, and recovery profiles — recovery
-        # only to remove a stale recovery service) so any prior
-        # overlay-enabled service is removed even when this deploy is
+        # overlays (base + vault-recovery + browser-control + embeddings +
+        # mnemosyne + backup, plus the aux-ml, browser-control, and recovery
+        # profiles — recovery only to remove a stale recovery service) so any
+        # prior overlay-enabled service is removed even when this deploy is
         # switching to off or dropping an overlay. NO -v: named volumes are
         # always preserved. Both the superset teardown and the
         # selected-config teardown fail closed (set -euo pipefail, no || true).
@@ -828,6 +962,7 @@ jobs:
           echo "Tearing down any prior overlay-enabled stack (maximal superset, no -v)..."
           docker compose \
             -f docker-compose.yml \
+            -f docker-compose.vault-recovery.yml \
             -f docker-compose.browser-control.yml \
             -f docker-compose.embeddings.yml \
             -f docker-compose.mnemosyne.yml \
@@ -859,9 +994,9 @@ jobs:
       - name: Verify embeddings overlay selection
         run: |
           set -euo pipefail
-          MAXIMAL_ARGS=(-f docker-compose.yml -f docker-compose.browser-control.yml \
-            -f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml \
-            -f docker-compose.mnemosyne-backup.yml)
+          MAXIMAL_ARGS=(-f docker-compose.yml -f docker-compose.vault-recovery.yml \
+            -f docker-compose.browser-control.yml -f docker-compose.embeddings.yml \
+            -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml)
           if [ "${GBRAIN_EMBEDDINGS_ENABLED}" = "true" ] || [ "${MNEMOSYNE_DEPLOY_MODE}" = "pilot" ] || [ "${MNEMOSYNE_DEPLOY_MODE}" = "backup" ]; then
             echo "Checking selected embeddings service health..."
             if ! docker compose "${MAXIMAL_ARGS[@]}" ps embeddings --format json | grep -q '"Health":"healthy"'; then
@@ -1024,9 +1159,9 @@ jobs:
           # permitted and are verified solely by the dedicated "Verify
           # embeddings overlay selection" step.
           echo "Confirming no Mnemosyne overlay services are running (maximal compose set)..."
-          MAXIMAL_ARGS=(-f docker-compose.yml -f docker-compose.browser-control.yml \
-            -f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml \
-            -f docker-compose.mnemosyne-backup.yml)
+          MAXIMAL_ARGS=(-f docker-compose.yml -f docker-compose.vault-recovery.yml \
+            -f docker-compose.browser-control.yml -f docker-compose.embeddings.yml \
+            -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml)
           for svc in mnemosyne-backup-uploader mnemosyne-backup-recover; do
             if docker compose "${MAXIMAL_ARGS[@]}" ps --format json "$svc" 2>/dev/null | grep -q '"Name"'; then
               echo "ERROR: Mnemosyne overlay service '$svc' is still running in off mode (stale teardown)"
@@ -1277,13 +1412,102 @@ jobs:
               print(f"ERROR: no_agent is not true (got: {job.get('no_agent')!r})", file=sys.stderr)
               sys.exit(1)
           workdir = job.get("workdir")
-          if not workdir:
-              print("ERROR: workdir is not set", file=sys.stderr)
+          if workdir != "/opt/data":
+              print(f"ERROR: workdir is not '/opt/data' (got: {workdir!r})", file=sys.stderr)
               sys.exit(1)
           print(f"BACKUP_CRON_OK minutes={minutes} workdir={workdir}")
           PY
           echo "Mnemosyne backup verified"
 
+      - name: Verify vault-recovery deployment (uploader + export cron + plaintext absence)
+        run: |
+          set -euo pipefail
+          # Phase 3: the encrypted vault-recovery lane is the DEFAULT backup
+          # composition (the retired plaintext obsidian-backup service is
+          # gone). The Hermes init logs cron failures nonfatally, so
+          # container health alone is not enough — we explicitly assert the
+          # uploader is running, exactly one vault-recovery-export cron job
+          # exists with the real jobs.json schema, and NO obsidian-backup
+          # container lingers.
+          echo "Checking vault-recovery-uploader is running..."
+          if ! docker compose ps vault-recovery-uploader 2>/dev/null | grep -q "Up"; then
+            echo "ERROR: vault-recovery-uploader service is not running"
+            docker compose ps
+            docker compose logs --tail=120 vault-recovery-uploader
+            exit 1
+          fi
+          echo "vault-recovery-uploader is running"
+
+          echo "Confirming exactly one vault-recovery-export cron job with the real schema..."
+          # The actual jobs.json shape is {"jobs": [...], "updated_at": ...}
+          # with schedule objects {"kind":"cron","expr":"0 4 * * *"},
+          # script="hermes-vault-recovery-export-cron.sh", no_agent=true,
+          # workdir=/opt/data. The expr must match the base compose default
+          # VAULT_RECOVERY_EXPORT_SCHEDULE.
+          docker compose exec -T hermes /opt/hermes/.venv/bin/python3 - <<'PY'
+          import json, sys
+          expected_expr = "0 4 * * *"
+          try:
+              with open("/opt/data/cron/jobs.json", encoding="utf-8") as fh:
+                  data = json.load(fh)
+          except Exception as exc:
+              print(f"ERROR: could not read /opt/data/cron/jobs.json: {exc}", file=sys.stderr)
+              sys.exit(1)
+          jobs = data.get("jobs")
+          if not isinstance(jobs, list):
+              print("ERROR: jobs.json 'jobs' is not a list", file=sys.stderr)
+              sys.exit(1)
+          export_jobs = [j for j in jobs if isinstance(j, dict) and j.get("name") == "vault-recovery-export"]
+          if len(export_jobs) != 1:
+              print(f"ERROR: expected exactly 1 vault-recovery-export cron job, got {len(export_jobs)}", file=sys.stderr)
+              sys.exit(1)
+          job = export_jobs[0]
+          schedule = job.get("schedule")
+          if not isinstance(schedule, dict):
+              print("ERROR: schedule is not an object", file=sys.stderr)
+              sys.exit(1)
+          if schedule.get("kind") != "cron":
+              print(f"ERROR: schedule.kind is not 'cron' (got: {schedule.get('kind')!r})", file=sys.stderr)
+              sys.exit(1)
+          expr = schedule.get("expr")
+          if expr != expected_expr:
+              print(f"ERROR: schedule.expr {expr!r} does not match VAULT_RECOVERY_EXPORT_SCHEDULE {expected_expr!r}", file=sys.stderr)
+              sys.exit(1)
+          if job.get("script") != "hermes-vault-recovery-export-cron.sh":
+              print(f"ERROR: script is not 'hermes-vault-recovery-export-cron.sh' (got: {job.get('script')!r})", file=sys.stderr)
+              sys.exit(1)
+          if job.get("no_agent") is not True:
+              print(f"ERROR: no_agent is not true (got: {job.get('no_agent')!r})", file=sys.stderr)
+              sys.exit(1)
+          workdir = job.get("workdir")
+          if workdir != "/opt/data":
+              print(f"ERROR: workdir is not '/opt/data' (got: {workdir!r})", file=sys.stderr)
+              sys.exit(1)
+          print(f"VAULT_RECOVERY_CRON_OK expr={expr} workdir={workdir}")
+          PY
+
+          echo "Confirming the plaintext obsidian-backup container is absent..."
+          PREFIX="${JOSEMAR_CONTAINER_PREFIX:-josemar}"
+          if docker ps -a --format '{{.Names}}' | grep -Fxq "${PREFIX}-obsidian-backup"; then
+            echo "ERROR: retired plaintext obsidian-backup container still exists after deploy"
+            docker ps -a --filter "name=${PREFIX}-obsidian-backup"
+            exit 1
+          fi
+          echo "obsidian-backup absent (plaintext lane retired)"
+          echo "Vault-recovery deployment verified"
+
       - name: Cleanup sensitive files
         if: always()
-        run: rm -f .env
+        # Final sweep on EVERY exit path, including a cancelled run: the
+        # decoded rclone temp config must never linger on the runner even
+        # when the run is cancelled BETWEEN the rclone steps (a step-local
+        # trap only fires inside its own shell; the decode/readiness/publish
+        # traps cover in-step failures, this always() step covers the
+        # between-step cancellation window). RCLONE_TEMP_CONF is exported to
+        # GITHUB_ENV by the decode step, so it is visible here whenever it
+        # was created; the guard also covers the case where decode never ran.
+        run: |
+          rm -f .env
+          if [ -n "${RCLONE_TEMP_CONF:-}" ]; then
+            rm -f "$RCLONE_TEMP_CONF"
+          fi

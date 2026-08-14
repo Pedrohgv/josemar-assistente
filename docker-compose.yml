@@ -68,6 +68,10 @@ services:
       - aux-ml-shared:/shared
       # Dedicated Obsidian vault volume shared with the current deployment
       - obsidian-vault:/opt/data/obsidian
+      # Vault-recovery staging volume (Hermes-only): daily export generations
+      # land here. The encrypted uploader (default deployment lane) mounts
+      # this volume read-only, never hermes-data or the vault.
+      - vault-recovery-staging:/opt/data/vault-recovery/staging
       # Mounted state repo can seed local development when WORKSPACE_STATE_REPO is absent
       - ./agent-state:/opt/josemar/source-agent-state:ro
       # Credentials are copied into /opt/data/credentials by the Hermes init hook
@@ -126,6 +130,15 @@ services:
       - GBRAIN_EMBED_REFRESH_KILL_GRACE=${GBRAIN_EMBED_REFRESH_KILL_GRACE:-5}
       - GBRAIN_EMBED_REFRESH_GROUP_DRAIN=${GBRAIN_EMBED_REFRESH_GROUP_DRAIN:-2}
       - GBRAIN_EMBED_REFRESH_TIMEOUT_MARGIN=${GBRAIN_EMBED_REFRESH_TIMEOUT_MARGIN:-10}
+      # Vault-recovery export (Phase 1): default-enabled daily local staging
+      # export. VAULT_RECOVERY_EXPORT_ENABLED=false removes the owned cron job.
+      - VAULT_RECOVERY_EXPORT_ENABLED=${VAULT_RECOVERY_EXPORT_ENABLED:-true}
+      - VAULT_RECOVERY_EXPORT_SCHEDULE=${VAULT_RECOVERY_EXPORT_SCHEDULE:-0 4 * * *}
+      - VAULT_RECOVERY_EXPORT_TIMEOUT=${VAULT_RECOVERY_EXPORT_TIMEOUT:-240}
+      - VAULT_RECOVERY_KILL_GRACE=${VAULT_RECOVERY_KILL_GRACE:-5}
+      - VAULT_RECOVERY_GROUP_DRAIN=${VAULT_RECOVERY_GROUP_DRAIN:-2}
+      - VAULT_RECOVERY_TIMEOUT_MARGIN=${VAULT_RECOVERY_TIMEOUT_MARGIN:-10}
+      - VAULT_RECOVERY_STAGING_DIR=/opt/data/vault-recovery/staging
       - HERMES_CRON_SCRIPT_TIMEOUT=${HERMES_CRON_SCRIPT_TIMEOUT:-300}
       - TZ=${TZ:-America/Sao_Paulo}
       - JOSEMAR_TIMEZONE=${JOSEMAR_TIMEZONE:-America/Sao_Paulo}
@@ -189,29 +202,6 @@ services:
     networks:
       - josemar-network
 
-  obsidian-backup:
-    image: rclone/rclone:latest
-    container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-obsidian-backup
-    restart: unless-stopped
-    depends_on:
-      - syncthing
-    environment:
-      - TZ=${TZ:-America/Sao_Paulo}
-      - RCLONE_CONFIG=/config/rclone/rclone.conf
-      - OBSIDIAN_BACKUP_TIME=${OBSIDIAN_BACKUP_TIME:-03:15}
-      - OBSIDIAN_BACKUP_RUN_ON_START=${OBSIDIAN_BACKUP_RUN_ON_START:-false}
-      - OBSIDIAN_GDRIVE_REMOTE=${OBSIDIAN_GDRIVE_REMOTE:-gdrive}
-      - OBSIDIAN_GDRIVE_PATH=${OBSIDIAN_GDRIVE_PATH:-Josemar/obsidian-backups}
-      - OBSIDIAN_BACKUP_SLOTS=${OBSIDIAN_BACKUP_SLOTS:-5}
-    volumes:
-      - ./scripts:/scripts:ro
-      - obsidian-rclone-config:/config/rclone
-      - obsidian-vault:/data/obsidian:ro
-      - obsidian-backup-state:/state
-    entrypoint: ["/bin/sh", "/scripts/obsidian-backup-daemon.sh"]
-    networks:
-      - josemar-network
-
 networks:
   josemar-network:
     driver: bridge
@@ -223,11 +213,15 @@ volumes:
     driver: local
   obsidian-vault:
     driver: local
+  # Vault-recovery staging volume: mounted ONLY in Hermes. The encrypted
+  # uploader (docker-compose.vault-recovery.yml, wired into the default
+  # deployment composition) mounts it read-only; it never mounts hermes-data
+  # or the vault.
+  vault-recovery-staging:
+    driver: local
   syncthing-config:
     driver: local
   obsidian-rclone-config:
-    driver: local
-  obsidian-backup-state:
     driver: local
   tailscale-state:
     driver: local
