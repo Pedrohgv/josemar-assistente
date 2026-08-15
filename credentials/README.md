@@ -114,20 +114,36 @@ way in `MNEMOSYNE_DEPLOY_MODE=backup`.
    docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml -f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml restart vault-recovery-uploader mnemosyne-backup-uploader
    ```
 
-The volume is mounted **read-only into every consumer** (the
-`vault-recovery-uploader`, the profile-gated `vault-recovery-recover`, and
-the Mnemosyne uploader/recover services): the config contains remote
-credentials, not refresh tokens, so consumers never write to it. Optional
+The volume is the **read-only deploy-published seed** and is mounted
+read-only into every consumer (the `vault-recovery-uploader`, the
+profile-gated `vault-recovery-recover`, and the Mnemosyne uploader/recover
+services). Consumers never write to the seed itself: Google OAuth access
+tokens refresh continuously and rclone must rewrite the config to persist
+them, so long-running uploaders run against a **private active copy in
+their own state volume** and short-lived recovery/probe steps against an
+**ephemeral writable copy**. See `docs/vault-recovery-operations.md` →
+"rclone OAuth-refresh configuration design" for the full design, the reseed
+behavior on `RCLONE_CONFIG_B64` rotation, and troubleshooting. Optional
 verification:
 
 ```bash
 docker run --rm -v "$PWD/credentials/rclone:/config/rclone" -e RCLONE_CONFIG=/config/rclone/rclone.conf rclone/rclone:latest lsd vault-recovery-crypt:
 ```
 
+**Rotation / reseed.** Changing the GitHub secret `RCLONE_CONFIG_B64` and
+redeploying re-publishes the seed into `obsidian-rclone-config`. The
+uploader re-copies the reseeded config on its next start (the deploy
+recreates the container); short-lived recovery/probe steps always start
+from the fresh seed. No manual volume surgery is required.
+
 ## Security Rules
 
 - **NEVER** commit credential files to git (this directory is in `.gitignore`)
 - **NEVER** store API keys, tokens, or passwords in plaintext outside this directory
 - Use GitHub Secrets for deployment-time secrets
-- Credential mounts are read-only; the `obsidian-rclone-config` volume is
-  read-only for all consuming services (no token-refresh writes)
+- Credential mounts are read-only; the `obsidian-rclone-config` seed is
+  never writable by consuming services — token-refresh writes go only to
+  private active/ephemeral copies, never to the seed
+- Active config copies live in the uploader state volumes
+  (`vault-recovery-uploader-state`, `mnemosyne-backup-state`), which are
+  **secret-bearing**: never inspect, log, or archive them

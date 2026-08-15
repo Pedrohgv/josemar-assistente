@@ -47,15 +47,19 @@ generations.
 | vault-recovery- | -------------> |  uncommitted/<gen> ->  |   (validated,      | short-lived hermes   |
 | uploader        |  (upload +     |  verified -> committed |    decrypted)      | run: verify (doctor  |
 | (staging RO,    |   remote       |  (only committed gens  |   <----------------| on a DISPOSABLE     |
-|  config RO, own |   verify,      |   are recoverable)     |  vault-recovery-   | copy) -> VERIFIED_   |
-|  state RW)      |   retention)   |                        |  recover (rclone,  | READY -> install     |
+| seed RO -> own  |   verify,      |   are recoverable)     |  vault-recovery-   | copy) -> VERIFIED_   |
+|  active copy RW)|   retention)   |                        |  recover (rclone,  | READY -> install     |
 +-----------------+                +------------------------+  profile-gated)    | (journaled two-tree)|
                                                                                   +----------------------+
 ```
 
 - **Uploader** (`vault-recovery-uploader`): NEVER mounts `hermes-data` or
-  `/opt/data`; the staging mount is READ-ONLY and the rclone config is
-  READ-ONLY; only its own state volume is writable — with one strictly
+  `/opt/data`; the staging mount is READ-ONLY and the shared rclone config
+  seed (`obsidian-rclone-config`) is READ-ONLY — the uploader copies it into
+  a PRIVATE ACTIVE copy inside its own state volume at start and runs rclone
+  against that copy, because Google OAuth access-token refresh must be able
+  to write the config (see "rclone OAuth-refresh configuration design"
+  below); only its own state volume is writable — with one strictly
   bounded exception: the SAME staging volume is additionally mounted
   read-write at `/staging-prune`, used EXCLUSIVELY for ack-based local
   retention (see below). Requires an rclone
@@ -145,7 +149,10 @@ generations.
   generation that is already READY-visible in the committed namespace is
   re-validated and acknowledged — never mutated, never re-uploaded.
 - **Recover** (`vault-recovery-recover`, `--profile recovery`, short-lived
-  `docker compose run` only): `list-remote` lists only committed
+  `docker compose run` only; runs rclone against an EPHEMERAL writable copy
+  of the config seed — a token refresh during a long download must be able
+  to persist, and the copy dies with the container): `list-remote` lists
+  only committed
   generations whose **remote `READY` marker is queried and validated as
   bound to the manifest** (content == generation id == manifest
   `generation_id`); markerless or invalid committed dirs (interrupted
@@ -240,6 +247,106 @@ generations.
   `<live-vault>/.vault-recovery-install/` and
   `/opt/data/.vault-recovery-install/` (the journal itself stays until the
   rollback window expires).
+
+### rclone OAuth-refresh configuration design
+
+The encrypted lanes (vault-recovery by default, Mnemosyne in `backup` mode)
+share one rclone configuration volume, `obsidian-rclone-config`. It is a
+**read-only deploy-published seed**, never a runtime working file:
+
+- **The deploy is the only writer of the seed — and its publish step may
+  carry a probe-refreshed config.** Every deployment decodes
+  `RCLONE_CONFIG_B64` into a DISPOSABLE WORKING DIRECTORY on the runner,
+  validates the remotes with real rclone probes, and then atomically
+  publishes the config into `obsidian-rclone-config` (temp file + rename;
+  never a partial write). Every consumer mounts the volume READ-ONLY. No
+  runtime service ever writes to the seed; the ONLY writer is the deploy's
+  atomic publish step, which may legitimately publish the config bytes the
+  probes produced (see the probe bullet below).
+- **Google OAuth access tokens refresh — rclone must write config.** Google
+  Drive remotes use OAuth: access tokens expire (~1h) and rclone refreshes
+  them transparently by REWRITING the config file to persist the new token.
+  A consumer pointing `RCLONE_CONFIG` directly at the read-only seed fails
+  every refresh once the access token expires — uploads and recovery then
+  die with auth errors. Real transfers can therefore never run against the
+  seed itself.
+- **Long-running uploaders use a private persistent ACTIVE copy.** On
+  start, the uploader copies the seed into its OWN state volume (its only
+  writable mount), chmod 600, and points `RCLONE_CONFIG` at that active
+  copy. Refreshed tokens persist there and survive container restarts; the
+  seed stays untouched.
+- **Deploy probes: disposable WRITABLE working directory — distinct from
+  the promoted seed.** The deploy's probe containers mount the runner's
+  disposable temp DIRECTORY writable (never the seed volume) and run rclone
+  against the config copy inside it. rclone may refresh an OAuth token
+  during the probe by REWRITING that working copy (sibling temp file +
+  atomic rename), which is exactly why the directory — not a single
+  read-only file — is mounted writable. The refreshed working config is
+  then ATOMICALLY PROMOTED: the publish step compares the working config's
+  checksum against the pre-probe checksum recorded before the probes,
+  detects the probe-time refresh, and publishes the UPDATED config into the
+  persistent read-only seed volume. The disposable working directory and
+  the promoted seed config are therefore two DIFFERENT artifacts: the
+  directory is the ephemeral probe workspace (removed on every exit, never
+  persisted as a workspace), while the seed volume is the persistent
+  deploy-published artifact every consumer mounts read-only — which may
+  legitimately carry the refreshed token the probe produced.
+- **Recovery steps and operator verification use EPHEMERAL writable
+  copies.** Short-lived consumers (recover download / `list-remote`,
+  operator verification commands) copy the seed to a container-temp path
+  and point `RCLONE_CONFIG` there: writable so a refresh mid-transfer does
+  not fail, ephemeral so the copy — and any refreshed token in it — is
+  discarded when the container exits, never persisted. Unlike the deploy
+  probe, nothing promotes these copies into the seed.
+- **Never make the shared seed writable.** The seed is the rotation point
+  and the deploy-published artifact. Making it writable breaks the reseed
+  contract (a service could leave a half-written or token-dirty config in a
+  volume shared by every lane), spreads live tokens across services, and
+  makes rotation ineffective. Any write a consumer needs belongs in its
+  private active/ephemeral copy.
+- **No-secret guarantees hold through the probe/publish flow.** Neither the
+  probe step nor the publish step prints config content or hashes: the
+  probes validate remote type/fields only, the pre-probe vs post-probe
+  checksum is compared (never logged), and the working config is chmod 600
+  inside a disposable directory that the steps trap-remove on EVERY exit.
+  The disposable working directory, the seed volume, and the active
+  config volumes are all secret-bearing: never inspect, log, or archive
+  any of them.
+- **The vault-recovery active state volume is secret-bearing.** The active
+  copy carries the config plus live refresh tokens, so
+  `vault-recovery-uploader-state` is secret-bearing: never inspect, log, or
+  archive it; treat it like credentials. It is a Docker named volume,
+  outside every repo and backup. (Mnemosyne `backup` mode keeps its ACTIVE
+  config in the uploader-only `mnemosyne-backup-rclone-config` volume; its
+  `mnemosyne-backup-state` volume holds only the non-secret ack ledger and
+  is mounted read-only into Hermes.)
+- **GitHub secret rotation causes a reseed.** Changing `RCLONE_CONFIG_B64`
+  and redeploying republishes the seed into `obsidian-rclone-config`.
+  Consumers pick up the new seed on their next start: the deploy recreates
+  the uploader, which re-copies the seed to its active copy; ephemeral
+  copies are always created fresh from the seed. No manual volume surgery
+  is needed — rotation takes effect with the deploy.
+- **Troubleshooting read-only config errors.** Symptom: rclone errors such
+  as `failed to save config file` / `read-only file system` on refresh,
+  `token refresh failed`, or Google `invalid_grant` after a period of
+  successful transfers. Cause: the consumer runs rclone against the
+  read-only seed directly, so the refreshed token cannot be persisted.
+  Fix: run against a writable copy — the uploader's private active copy or
+  an ephemeral copy for short-lived steps — verify `RCLONE_CONFIG` points
+  at the copy (not `/config/rclone/rclone.conf`, the seed path), and after
+  a   rotation restart the uploader so it re-copies the reseeded seed. NEVER
+  "fix" it by making the seed writable.
+- **Upgrade migration: Mnemosyne `backup` mode only.** The first iteration
+  of the fix stored the Mnemosyne ACTIVE config inside
+  `mnemosyne-backup-state`; the corrected design moved it to the
+  uploader-only `mnemosyne-backup-rclone-config` volume. Deployments
+  upgrading from that iteration remove exactly two legacy artifacts
+  (`rclone.active.conf` and `rclone.active.conf.seed-fp`) from the Mnemosyne
+  state volume before Hermes starts — see `docs/mnemosyne-operations.md` →
+  "Upgrade migration: pre-fix active-config cleanup (Oracle fix)". The
+  vault-recovery lane needs NO migration: its active config always lived in
+  its own uploader-only state volume (`vault-recovery-uploader-state`),
+  which Hermes never mounts.
 
 ### Phase-2 environment
 

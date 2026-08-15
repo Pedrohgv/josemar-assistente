@@ -28,6 +28,34 @@ They cover the remediated behaviors from the architecture review:
     deployment, independent of MNEMOSYNE_DEPLOY_MODE) and mnemosyne-crypt
     (backup mode only); RCLONE_CONFIG_B64 required for every deployment
     (Phase 3: fail rather than silently lose backups),
+  - rclone OAuth-refresh fix: the decoded config lives in a disposable
+    temp DIRECTORY (mode-0600 file) mounted WRITABLE into the probe
+    containers, because rclone refreshes the working config via sibling
+    temp file + atomic rename (impossible with a read-only single-file
+    mount); every cleanup owner recursively removes the temp directory on
+    every exit/cancellation, and when rclone changes the working config
+    during the probes the publish step detects it via the pre-probe
+    checksum and publishes the UPDATED file atomically,
+  - Oracle upgrade-migration blocker: after old services are stopped and
+    before Hermes/new services start, a fail-closed step migrates legacy
+    deployments that retain `/state/rclone.active.conf` and
+    `/state/rclone.active.conf.seed-fp` in the persistent
+    mnemosyne-backup-state volume (mounted read-only into Hermes): it
+    deletes ONLY those two exact legacy files at the volume root (never
+    the ledger/slot acknowledgement state), resolves the Compose project
+    name from Compose's rendered config metadata (honoring
+    COMPOSE_PROJECT_NAME, never `basename "$PWD"`) and locates the volume
+    by project + `com.docker.compose.volume` label — 0 matches is the
+    only safe skip, while a Docker list/inspect operational failure or >1
+    matches fails the deploy; it never prints secrets and fails the
+    deploy when the removal does not happen,
+  - override-safe seed publish: the shared obsidian-rclone-config seed
+    volume is resolved from Compose's rendered config metadata + the
+    `com.docker.compose.volume` label (honoring COMPOSE_PROJECT_NAME /
+    `-p`, never `basename "$PWD"`); 0 matches creates the volume with
+    compose labels (or reuses a pre-labeling volume of the same
+    compose-convention name), while a Docker list/inspect failure or >1
+    matches fails the deploy,
   - mode-specific verification commands (off/pilot/backup post-start checks;
     Hermes init nonfatal activation failure handled; hermes_cli.config
     load_config() against /opt/data/config.yaml; TEI 600s wait budget with
@@ -63,6 +91,10 @@ BASE_COMPOSE = REPO_ROOT / "docker-compose.yml"
 VAULT_RECOVERY_OVERLAY = REPO_ROOT / "docker-compose.vault-recovery.yml"
 
 RCLONE_DIGEST = "rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548"
+
+LEGACY_MIGRATION_STEP_NAME = (
+    "Migrate legacy rclone active config out of Mnemosyne backup state volume"
+)
 
 
 def _step_text(workflow: dict, name: str) -> str:
@@ -336,11 +368,14 @@ class DeployWorkflowContractTests(unittest.TestCase):
         decode = _step_text(self.workflow, "Decode and validate rclone config")
         self.assertIn(RCLONE_DIGEST, decode)
 
-    def test_rclone_step_strict_base64_decode_to_0600_temp(self) -> None:
+    def test_rclone_step_strict_base64_decode_to_0600_config(self) -> None:
         decode = _step_text(self.workflow, "Decode and validate rclone config")
         self.assertIn("base64 --decode", decode)
         self.assertIn("chmod 600", decode)
         self.assertIn("decoded to an empty config", decode)
+        # The 0600 file lives inside a disposable temp DIRECTORY.
+        self.assertIn('RCLONE_CONF="$TMP_RCLONE_DIR/rclone.conf"', decode)
+        self.assertIn('chmod 600 "$RCLONE_CONF"', decode)
 
     def test_rclone_direct_invocation_no_sh_c(self) -> None:
         # The pinned rclone image entrypoint is ["rclone"], so we invoke
@@ -348,8 +383,8 @@ class DeployWorkflowContractTests(unittest.TestCase):
         decode = _step_text(self.workflow, "Decode and validate rclone config")
         self.assertNotIn("sh -c 'rclone", decode)
         self.assertNotIn('sh -c "rclone', decode)
-        # Direct invocation: IMAGE --config /tmp/rclone.conf config show ...
-        self.assertIn("--config /tmp/rclone.conf config show", decode)
+        # Direct invocation: IMAGE --config <in-container path> config show ...
+        self.assertIn("--config /tmp/rclone-conf/rclone.conf config show", decode)
 
     def test_rclone_remote_names_hardcoded(self) -> None:
         decode = _step_text(self.workflow, "Decode and validate rclone config")
@@ -432,7 +467,7 @@ class DeployWorkflowContractTests(unittest.TestCase):
     def test_rclone_backup_branch_does_not_print_config(self) -> None:
         decode = _step_text(self.workflow, "Decode and validate rclone config")
         self.assertNotIn("echo \"$REMOTE_SHOW\"", decode)
-        self.assertNotIn("cat \"$TMP_RCLONE_CONF\"", decode)
+        self.assertNotIn("cat \"$RCLONE_CONF\"", decode)
 
     def test_rclone_publish_is_atomic(self) -> None:
         publish = _step_text(self.workflow, "Publish rclone config into shared volume")
@@ -507,59 +542,55 @@ class DeployWorkflowContractTests(unittest.TestCase):
 
     # --- deploy temp rclone config cleanup (council fix 6) ---
 
-    def test_decode_step_traps_temp_config_cleanup(self) -> None:
-        """The decode step traps removal of the decoded secret temp file on
-        ALL failure paths (after mktemp+chmod) and disarms the trap on
-        success so the publish step can still use the file."""
+    def test_decode_step_traps_temp_dir_cleanup(self) -> None:
+        """The decode step traps RECURSIVE removal of the decoded-secret
+        temp DIRECTORY on ALL failure paths (after mktemp -d) and disarms
+        the trap on success so the publish step can still use it."""
         decode = _step_text(self.workflow, "Decode and validate rclone config")
-        self.assertIn("trap 'rm -f \"$TMP_RCLONE_CONF\"' EXIT", decode)
+        self.assertIn("trap 'rm -rf \"$TMP_RCLONE_DIR\"' EXIT", decode)
         # Disarmed on success right before the GITHUB_ENV export.
-        success_part = decode.split('echo "RCLONE_TEMP_CONF=$TMP_RCLONE_CONF"')[1]
+        success_part = decode.split('echo "RCLONE_TEMP_DIR=$TMP_RCLONE_DIR"')[1]
         self.assertIn("trap - EXIT", success_part)
-        # No failure path leaves the file behind (no bare `trap - EXIT`
-        # before `exit 1` error branches — the trap handles them).
-        self.assertNotIn("rm -f \"$TMP_RCLONE_CONF\"\n            trap - EXIT", decode)
 
-    def test_publish_step_traps_temp_config_cleanup_on_every_exit(self) -> None:
-        """The publish step owns the temp config and traps its removal on
-        EVERY exit (success AND failure): the decoded secret never lingers
-        on the runner."""
+    def test_publish_step_traps_temp_dir_cleanup_on_every_exit(self) -> None:
+        """The publish step owns the temp DIRECTORY and traps its RECURSIVE
+        removal on EVERY exit (success AND failure): the decoded secret
+        never lingers on the runner."""
         publish = _step_text(self.workflow, "Publish rclone config into shared volume")
-        self.assertIn("trap 'rm -f \"$TMP_RCLONE_CONF\"' EXIT", publish)
+        self.assertIn("trap 'rm -rf \"$TMP_RCLONE_DIR\"' EXIT", publish)
         self.assertIn("Cleanup on EVERY exit path", publish)
         # No explicit rm outside the trap: the trap is the single cleanup
         # path.
-        self.assertNotIn("rm -f \"$TMP_RCLONE_CONF\"\n          echo", publish)
+        self.assertNotIn("rm -rf \"$TMP_RCLONE_DIR\"\n          echo", publish)
 
-    def test_readiness_gate_traps_temp_config_cleanup_on_every_exit(self) -> None:
+    def test_readiness_gate_traps_temp_dir_cleanup_on_every_exit(self) -> None:
         """The readiness gate is the step between the decode step (trap
         disarmed on success) and the publish step (final owner). It can
         itself FAIL (unreachable remote -> deploy aborted BEFORE any
         teardown), so it must keep a cleanup trap active through the remote
         readiness failure and the final probe cleanup, and disarm it ONLY
-        on success (so the publish step can still use the file). Otherwise
-        the decoded secret would linger on the runner whenever the remote
-        readiness gate aborts the deploy."""
+        on success (so the publish step can still use the temp directory).
+        Otherwise the decoded secret would linger on the runner whenever
+        the remote readiness gate aborts the deploy."""
         gate = _step_text(self.workflow, "Vault-recovery remote readiness gate (real upload probe)")
-        # The trap is registered right after TMP_RCLONE_CONF is read and
-        # BEFORE any failure path (missing/empty config, write probe,
+        # The trap is registered right after the temp dir/config are read
+        # and BEFORE any failure path (missing/empty config, write probe,
         # read-back probe) — so every readiness failure cleans the secret.
-        self.assertIn("trap 'rm -f \"$TMP_RCLONE_CONF\"' EXIT", gate)
+        self.assertIn("trap 'rm -rf \"$TMP_RCLONE_DIR\"' EXIT", gate)
         self.assertLess(
-            gate.index("trap 'rm -f \"$TMP_RCLONE_CONF\"' EXIT"),
-            gate.index('if [ -z "$TMP_RCLONE_CONF" ] || [ ! -s "$TMP_RCLONE_CONF" ]'),
+            gate.index("trap 'rm -rf \"$TMP_RCLONE_DIR\"' EXIT"),
+            gate.index('if [ -z "$TMP_RCLONE_DIR" ] || [ ! -s "$RCLONE_CONF" ]'),
         )
         self.assertLess(
-            gate.index("trap 'rm -f \"$TMP_RCLONE_CONF\"' EXIT"),
+            gate.index("trap 'rm -rf \"$TMP_RCLONE_DIR\"' EXIT"),
             gate.index("UNREACHABLE"),
         )
         # Disarmed ONLY after the final success line (the publish step owns
-        # the file from then on); no failure path disarms before exiting.
+        # the directory from then on); no failure path disarms before
+        # exiting.
         success_part = gate.split("readiness gate PASSED")[1]
         self.assertIn("trap - EXIT", success_part)
         self.assertNotIn("trap - EXIT", gate.split("readiness gate PASSED")[0])
-        # The trap is the single cleanup path: no explicit rm outside it.
-        self.assertNotIn("rm -f \"$TMP_RCLONE_CONF\"\n          exit", gate)
 
     def test_env_writes_hardcoded_rclone_remotes(self) -> None:
         env_step = _step_text(self.workflow, "Create .env file")
@@ -567,24 +598,364 @@ class DeployWorkflowContractTests(unittest.TestCase):
         # Phase 3: the vault-recovery remote is written for EVERY deployment.
         self.assertIn('write_env VAULT_RECOVERY_RCLONE_REMOTE "vault-recovery-crypt"', env_step)
 
-    def test_final_cleanup_removes_rclone_temp_config(self) -> None:
+    def test_final_cleanup_removes_rclone_temp_dir(self) -> None:
         """The always() final cleanup removes BOTH `.env` and the decoded
-        rclone temp config: a run cancelled BETWEEN the rclone steps (after
-        the decode step exported RCLONE_TEMP_CONF but before the publish
-        step's trap armed) would otherwise leave the decoded secret on the
-        runner — the step-local traps only cover in-step failures, this
-        final sweep covers the between-step cancellation window."""
+        rclone temp DIRECTORY (recursively): a run cancelled BETWEEN the
+        rclone steps (after the decode step exported RCLONE_TEMP_DIR but
+        before the publish step's trap armed) would otherwise leave the
+        decoded secret on the runner — the step-local traps only cover
+        in-step failures, this final sweep covers the between-step
+        cancellation window."""
         names = _step_names(self.workflow)
         self.assertIn("Cleanup sensitive files", names)
         cleanup = self.workflow["jobs"]["deploy"]["steps"][names.index("Cleanup sensitive files")]
         self.assertEqual(cleanup.get("if"), "always()")
         run = cleanup["run"]
         self.assertIn("rm -f .env", run)
-        self.assertIn('"${RCLONE_TEMP_CONF:-}"', run)
-        self.assertIn("rm -f \"$RCLONE_TEMP_CONF\"", run)
+        self.assertIn('"${RCLONE_TEMP_DIR:-}"', run)
+        self.assertIn("rm -rf \"$RCLONE_TEMP_DIR\"", run)
         # It is the LAST step of the job (nothing after it can fail with
-        # the temp file still on disk).
+        # the temp directory still on disk).
         self.assertEqual(names[-1], "Cleanup sensitive files")
+
+    def test_rclone_config_lives_in_writable_temp_dir(self) -> None:
+        """The rclone config must live in a disposable temp DIRECTORY
+        (mode-0600 file) mounted WRITABLE into the probe containers: rclone
+        refreshes the working config (OAuth token refresh) via sibling
+        temp file + atomic rename, which is impossible with the former
+        read-only single-file mount."""
+        decode = _step_text(self.workflow, "Decode and validate rclone config")
+        gate = _step_text(self.workflow, "Vault-recovery remote readiness gate (real upload probe)")
+        # Disposable writable directory, not a single file.
+        self.assertIn('TMP_RCLONE_DIR="$(mktemp -d)"', decode)
+        self.assertIn('RCLONE_CONF="$TMP_RCLONE_DIR/rclone.conf"', decode)
+        self.assertIn('chmod 600 "$RCLONE_CONF"', decode)
+        # The temp directory is mounted WRITABLE (explicit :rw, never :ro)
+        # into the rclone containers in BOTH the decode validation and the
+        # readiness probes, with the config at a fixed in-container path.
+        for step_text in (decode, gate):
+            self.assertIn('-v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw"', step_text)
+            self.assertIn("--config /tmp/rclone-conf/rclone.conf", step_text)
+        # The old read-only single-file mount is gone everywhere.
+        self.assertNotIn(":/tmp/rclone.conf:ro", decode + gate)
+        self.assertNotIn('TMP_RCLONE_CONF="$(mktemp)"', decode)
+
+    def test_temp_dir_cleanup_is_recursive_on_every_owner(self) -> None:
+        """Every cleanup owner recursively removes the temp DIRECTORY
+        (rm -rf, never rm -f): the decode failure trap, the readiness
+        gate's every-exit trap, the publish step's every-exit trap, and
+        the always() final sweep. A single-file rm -f would leave the
+        directory (and any rclone-refreshed sibling files) behind."""
+        decode = _step_text(self.workflow, "Decode and validate rclone config")
+        gate = _step_text(self.workflow, "Vault-recovery remote readiness gate (real upload probe)")
+        publish = _step_text(self.workflow, "Publish rclone config into shared volume")
+        for step_text in (decode, gate, publish):
+            self.assertIn("trap 'rm -rf \"$TMP_RCLONE_DIR\"' EXIT", step_text)
+            # No stale single-file cleanup may survive in any rclone step.
+            self.assertNotIn('rm -f "$TMP_RCLONE_CONF"', step_text)
+        cleanup = self.workflow["jobs"]["deploy"]["steps"][
+            _step_index(self.workflow, "Cleanup sensitive files")
+        ]
+        self.assertIn('rm -rf "$RCLONE_TEMP_DIR"', cleanup["run"])
+
+    def test_publish_publishes_rclone_refreshed_config(self) -> None:
+        """If rclone changes the working config (OAuth token refresh during
+        the readiness probes), the publish step must detect it via the
+        pre-probe checksum and publish the UPDATED file atomically into the
+        shared volume, so the runtime services consume the refreshed
+        tokens."""
+        decode = _step_text(self.workflow, "Decode and validate rclone config")
+        publish = _step_text(self.workflow, "Publish rclone config into shared volume")
+        # The decode step records the pre-probe checksum of the working
+        # config for the publish step's change detection.
+        self.assertIn('RCLONE_CONFIG_SHA256="$(sha256sum "$RCLONE_CONF"', decode)
+        self.assertIn(
+            'echo "RCLONE_CONFIG_SHA256=$RCLONE_CONFIG_SHA256" >> "$GITHUB_ENV"',
+            decode,
+        )
+        # The publish step recomputes it against the working config (which
+        # reflects any rclone refresh) and logs the updated-config path.
+        self.assertIn('sha256sum "$RCLONE_CONF"', publish)
+        self.assertIn("UPDATED config", publish)
+        # The (possibly refreshed) working file is published atomically:
+        # temp file + chmod 600 + mv inside the shared volume.
+        self.assertIn(
+            "cp /config/source/rclone.conf /config/rclone/rclone.conf.new",
+            publish,
+        )
+        self.assertIn("chmod 600 /config/rclone/rclone.conf.new", publish)
+        self.assertIn(
+            "mv /config/rclone/rclone.conf.new /config/rclone/rclone.conf",
+            publish,
+        )
+
+    # --- override-safe seed publish resolution (final Oracle blocker) ---
+
+    def test_seed_publish_resolves_volume_via_compose_metadata(self) -> None:
+        """The shared obsidian-rclone-config seed volume must be resolved
+        from Compose's rendered config metadata (top-level `name`,
+        honoring COMPOSE_PROJECT_NAME / -p) and the compose volume label —
+        never guessed from `basename "$PWD"`."""
+        publish = _step_text(self.workflow, "Publish rclone config into shared volume")
+        # Project name from Compose's own rendered config metadata.
+        self.assertIn(
+            'PROJECT_NAME="$(docker compose config --format json',
+            publish,
+        )
+        self.assertIn('json.load(sys.stdin)["name"]', publish)
+        # Volume located by project + compose volume label.
+        self.assertIn(
+            '--filter "label=com.docker.compose.project=$PROJECT_NAME"',
+            publish,
+        )
+        self.assertIn(
+            "--filter label=com.docker.compose.volume=obsidian-rclone-config",
+            publish,
+        )
+        self.assertIn("--format '{{.Name}}'", publish)
+        # No basename-guessed physical volume construct anywhere in the
+        # step.
+        self.assertNotIn('COMPOSE_PROJECT="$(basename "$PWD")"', publish)
+        self.assertNotIn('"${COMPOSE_PROJECT}_', publish)
+
+    def test_seed_publish_outcome_distinction(self) -> None:
+        """Outcome handling analogous to the legacy migration: 0 labeled
+        matches creates the volume WITH the compose labels (or reuses a
+        pre-labeling volume of the same compose-convention name); a Docker
+        volume ls operational failure and >1 matches FAIL the deploy
+        (never guess); the resolved volume is re-verified as an
+        inspectable named volume before the atomic seed publish."""
+        publish = _step_text(self.workflow, "Publish rclone config into shared volume")
+        # 0 matches -> create with compose labels from the RESOLVED project.
+        self.assertIn(
+            'RCLONE_VOLUME="${PROJECT_NAME}_obsidian-rclone-config"',
+            publish,
+        )
+        self.assertIn('--label "com.docker.compose.project=$PROJECT_NAME"', publish)
+        self.assertIn('--label "com.docker.compose.volume=obsidian-rclone-config"', publish)
+        self.assertIn("docker volume create", publish)
+        # Pre-labeling reuse fallback (an existing unlabeled volume must
+        # not break the upgrade).
+        self.assertIn("created before compose labeling", publish)
+        # Operational failure and ambiguity fail closed.
+        self.assertIn("cannot list Docker volumes", publish)
+        self.assertIn("expected exactly 1 obsidian-rclone-config volume", publish)
+        self.assertIn("exit 1", publish)
+        # Named-volume-only guard precedes the atomic publish.
+        self.assertIn("not an inspectable Docker named volume", publish)
+        self.assertLess(
+            publish.index("not an inspectable Docker named volume"),
+            publish.index("rclone.conf.new"),
+        )
+        # The atomic publish mounts the RESOLVED volume.
+        self.assertIn('-v "$RCLONE_VOLUME:/config/rclone"', publish)
+
+    def test_rclone_steps_never_guess_physical_volume_from_basename(self) -> None:
+        """No rclone seed/probe/publish/migration step may guess a physical
+        Compose volume from `basename "$PWD"` (breaks under
+        COMPOSE_PROJECT_NAME / -p overrides): the seed publish and the
+        legacy migration both resolve volumes via Compose metadata +
+        labels, and the decode/readiness steps only use the disposable
+        temp directory."""
+        for name in (
+            "Decode and validate rclone config",
+            "Vault-recovery remote readiness gate (real upload probe)",
+            "Publish rclone config into shared volume",
+            LEGACY_MIGRATION_STEP_NAME,
+        ):
+            step = _step_text(self.workflow, name)
+            self.assertNotIn(
+                'COMPOSE_PROJECT="$(basename "$PWD")"', step, msg=name
+            )
+            self.assertNotIn('"${COMPOSE_PROJECT}_', step, msg=name)
+
+    # --- legacy rclone active config migration (Oracle upgrade blocker) ---
+
+    def test_legacy_migration_runs_after_teardown_and_before_start(self) -> None:
+        """The migration must run AFTER the old services are stopped (so no
+        container holds the volume) and BEFORE Hermes/new services start
+        (so the legacy secret files are gone before the state volume is
+        mounted read-only into Hermes again)."""
+        names = _step_names(self.workflow)
+        self.assertIn(LEGACY_MIGRATION_STEP_NAME, names)
+        self.assertLess(
+            names.index("Stop existing services"),
+            names.index(LEGACY_MIGRATION_STEP_NAME),
+        )
+        self.assertLess(
+            names.index(LEGACY_MIGRATION_STEP_NAME),
+            names.index("Start services"),
+        )
+        # It also precedes the build of the new images.
+        self.assertLess(
+            names.index(LEGACY_MIGRATION_STEP_NAME),
+            names.index("Build Docker image"),
+        )
+
+    def test_legacy_migration_deletes_only_exact_legacy_files(self) -> None:
+        """Only the two exact legacy files at the volume root are removed:
+        rclone.active.conf + rclone.active.conf.seed-fp. The ledger/slot
+        acknowledgement state is never touched, and there is no recursive
+        delete at the volume root."""
+        step = _step_text(self.workflow, LEGACY_MIGRATION_STEP_NAME)
+        # Exactly one removal command, targeting exactly the two legacy
+        # files at the volume root (/state is the named-volume mount point
+        # inside the migration container).
+        self.assertEqual(step.count("rm -f"), 1)
+        self.assertIn(
+            "rm -f /state/rclone.active.conf /state/rclone.active.conf.seed-fp",
+            step,
+        )
+        # No recursive removal anywhere: the ledger/slot state and every
+        # other volume member must survive.
+        self.assertNotIn("rm -rf", step)
+        # The ledger/slot acknowledgement state is never a deletion target.
+        self.assertNotIn("uploaded-generations.jsonl", step)
+        self.assertNotIn("next-slot", step)
+        self.assertNotIn("last-uploaded-generation", step)
+        # Both exact files are re-checked after removal (still-present
+        # detection uses both regular-file and symlink checks).
+        self.assertIn("still present after removal", step)
+        self.assertIn("[ -e \"$f\" ] || [ -L \"$f\" ]", step)
+
+    def test_legacy_migration_project_resolution_respects_compose_overrides(self) -> None:
+        """The project name is resolved from Compose's rendered config
+        metadata (`docker compose config --format json` -> top-level
+        `name`), which honors COMPOSE_PROJECT_NAME / `-p` overrides. The
+        physical volume is NEVER guessed from `basename "$PWD"`."""
+        step = _step_text(self.workflow, LEGACY_MIGRATION_STEP_NAME)
+        # Project name comes from Compose's own rendered config metadata.
+        self.assertIn(
+            'PROJECT_NAME="$(docker compose config --format json',
+            step,
+        )
+        self.assertIn('docker compose config --format json', step)
+        self.assertIn('json.load(sys.stdin)["name"]', step)
+        # An empty resolved name fails closed instead of guessing.
+        self.assertIn("Compose project name resolved to empty", step)
+        # No directory-basename guessing for the volume anywhere in the
+        # step (basename is used only to report removed file names).
+        self.assertNotIn('COMPOSE_PROJECT="$(basename "$PWD")"', step)
+        self.assertNotIn('STATE_VOLUME="${COMPOSE_PROJECT}_', step)
+
+    def test_legacy_migration_outcome_distinction(self) -> None:
+        """The three outcomes are distinguished explicitly: 0 matching
+        volumes is the ONLY safe skip (after a SUCCESSFUL listing); a
+        Docker volume ls operational failure and >1 matching volumes both
+        FAIL the deploy. The skip path is reachable only after the list
+        succeeded and before any deletion."""
+        step = _step_text(self.workflow, LEGACY_MIGRATION_STEP_NAME)
+        # Listing outcome is captured, then branched on its count.
+        self.assertIn('if ! MATCHES="$(docker volume ls', step)
+        self.assertIn("MATCH_COUNT=", step)
+        self.assertIn('if [ "$MATCH_COUNT" -eq 0 ]; then', step)
+        self.assertIn('if [ "$MATCH_COUNT" -ne 1 ]; then', step)
+        # Operational failure is a hard error, never a skip.
+        self.assertIn("cannot list Docker volumes", step)
+        self.assertIn("exit 1", step.split("cannot list Docker volumes")[1])
+        # Ambiguity (>1 matches) is a hard error, never a guess.
+        self.assertIn("expected exactly 1", step)
+        # Ordering: list failure first, then skip, then ambiguity guard,
+        # then deletion.
+        self.assertLess(
+            step.index("cannot list Docker volumes"),
+            step.index("migration skipped"),
+        )
+        self.assertLess(
+            step.index("migration skipped"),
+            step.index("rm -f /state/rclone.active.conf"),
+        )
+        self.assertLess(
+            step.index("expected exactly 1"),
+            step.index("rm -f /state/rclone.active.conf"),
+        )
+
+    def test_legacy_migration_resolves_volume_via_docker_not_host_path(self) -> None:
+        """The intended Compose volume is located by the Compose project
+        AND the com.docker.compose.volume label — never guessed from a
+        host path; the deletion runs INSIDE a container mounting the named
+        volume, so an accidental host-path deletion is impossible."""
+        step = _step_text(self.workflow, LEGACY_MIGRATION_STEP_NAME)
+        # Volume located by project + compose volume label.
+        self.assertIn(
+            '--filter "label=com.docker.compose.project=$PROJECT_NAME"',
+            step,
+        )
+        self.assertIn(
+            "--filter label=com.docker.compose.volume=mnemosyne-backup-state",
+            step,
+        )
+        self.assertIn("--format '{{.Name}}'", step)
+        # The resolved name is re-verified as an existing named volume
+        # before anything is mounted or deleted.
+        self.assertIn('docker volume inspect "$STATE_VOLUME"', step)
+        # No basename-guessed physical volume construct anywhere in the
+        # step (the comment only names the guess that is avoided).
+        self.assertNotIn('COMPOSE_PROJECT="$(basename "$PWD")"', step)
+        self.assertNotIn('STATE_VOLUME="${COMPOSE_PROJECT}_', step)
+        self.assertNotIn('"${COMPOSE_PROJECT}_mnemosyne-backup-state"', step)
+        # The deletion runs inside a container mounting the NAMED volume at
+        # /state — never against a host path.
+        self.assertIn('-v "$STATE_VOLUME:/state"', step)
+        self.assertIn("alpine:3.20", step)
+        self.assertLess(
+            step.index('-v "$STATE_VOLUME:/state"'),
+            step.index("rm -f /state/rclone.active.conf"),
+        )
+        # The mountpoint is never resolved to delete on the host.
+        self.assertNotIn("Mountpoint", step)
+        self.assertNotIn("rm -f /var/lib/docker", step)
+        self.assertNotIn("rm -rf /", step)
+
+    def test_legacy_migration_fail_closed(self) -> None:
+        """A migration failure FAILS the deploy: project-resolution
+        failure, empty project name, list operational failure, >1 matches,
+        a resolved-but-not-inspectable volume, and a legacy file still
+        present after removal all exit non-zero under `set -euo pipefail`.
+        A missing volume (0 matches) is the ONLY clean skip."""
+        step = _step_text(self.workflow, LEGACY_MIGRATION_STEP_NAME)
+        self.assertIn("set -euo pipefail", step)
+        # Project-resolution failures fail closed.
+        self.assertIn("cannot resolve the Compose project name", step)
+        self.assertIn("resolved to empty", step)
+        # 0 matches -> clean, explicit skip (not a failure).
+        self.assertIn("migration skipped", step)
+        self.assertIn("exit 0", step)
+        # >1 matches and list/inspect failures fail closed.
+        self.assertIn("expected exactly 1", step)
+        self.assertIn("cannot list Docker volumes", step)
+        self.assertIn("not an inspectable Docker named volume", step)
+        self.assertIn("exit 1", step)
+        # Still-present legacy file after removal fails the deploy.
+        self.assertIn("still present after removal", step)
+        # The skip happens BEFORE any deletion.
+        self.assertLess(
+            step.index("exit 0"),
+            step.index("rm -f /state/rclone.active.conf"),
+        )
+
+    def test_legacy_migration_never_prints_secrets(self) -> None:
+        """The legacy config files are only removed, never read or
+        printed: no cat/head/hash of their content; only their basenames
+        are reported."""
+        step = _step_text(self.workflow, LEGACY_MIGRATION_STEP_NAME)
+        self.assertNotIn("cat /state/rclone.active.conf", step)
+        self.assertNotIn("sha256sum", step)
+        self.assertNotIn("head -", step)
+        # Only basenames of the removed files are logged.
+        self.assertIn("basename", step)
+
+    def test_legacy_migration_runs_unconditionally(self) -> None:
+        """The legacy volume can exist from a prior deploy even when the
+        current MNEMOSYNE_DEPLOY_MODE is off or the backup overlay is not
+        selected, so the migration step must not be gated on mode/overlay
+        variables."""
+        steps = self.workflow["jobs"]["deploy"]["steps"]
+        step = next(
+            s for s in steps if s.get("name") == LEGACY_MIGRATION_STEP_NAME
+        )
+        self.assertNotIn("MNEMOSYNE_DEPLOY_MODE", step.get("if", ""))
+        self.assertNotIn("vars.", step.get("if", ""))
 
     def test_vault_recovery_overlay_hardcodes_remote_identity(self) -> None:
         """Runtime remote immutability (council fix): the overlay wires the

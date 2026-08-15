@@ -136,8 +136,18 @@ no automatic pruning.
 
 - **Never** mounts `hermes-data` or `/opt/data`.
 - Staging mount is **read-only**.
-- rclone config is **read-only**.
-- Only the `mnemosyne-backup-state` volume is writable.
+- The shared rclone config seed (`obsidian-rclone-config`) is **read-only**;
+  the uploader runs rclone against a **private active copy** in a DEDICATED
+  uploader-only secret volume (`mnemosyne-backup-rclone-config`), because
+  Google OAuth access-token refresh must be able to write the config (see
+  `docs/vault-recovery-operations.md` →
+  "rclone OAuth-refresh configuration design").
+- The `mnemosyne-backup-state` volume holds **only non-secret
+  acknowledgement state** (ledger, slot pointer, `last-uploaded-generation`)
+  and is the ONLY uploader state exposed to Hermes (mounted **read-only**
+  for exporter pruning). The secret active rclone config NEVER lives there:
+  it stays in the uploader-only `mnemosyne-backup-rclone-config` volume,
+  which Hermes and the recover step NEVER mount.
 - Reuses the existing secret-managed `obsidian-rclone-config` volume because
   it can hold a separate `mnemosyne-crypt` remote.
 
@@ -177,6 +187,88 @@ plus a `slot-N.json` manifest.
 - Does not depend on deleting sentinels; uses the `latest` pointer and
   `last-uploaded-generation` state file.
 
+### rclone OAuth-refresh configuration
+
+The `obsidian-rclone-config` volume is a **read-only deploy-published seed**,
+never writable by any consumer. Google OAuth access tokens refresh
+continuously and rclone must rewrite the config to persist them, so no
+consumer runs rclone directly against the seed: the long-running uploader
+uses a **private persistent active copy** in the DEDICATED uploader-only
+secret volume `mnemosyne-backup-rclone-config` (mounted only into the
+uploader; the uploader state volume that Hermes observes read-only holds
+only the non-secret acknowledgement ledger and NEVER contains the active
+config), and the short-lived recover step uses an **ephemeral writable
+copy** that dies with the container. The deploy re-publishes (reseeds) the
+seed on every deployment, including `RCLONE_CONFIG_B64` rotations —
+consumers pick it up on their next start. (The deploy's validation probes
+run rclone against a disposable WRITABLE working directory; if a probe
+triggers an OAuth refresh there, the publish step atomically promotes that
+updated working config into the persistent seed volume — the seed is only
+ever written by the deploy's publish step, never by a runtime consumer.
+See `docs/vault-recovery-operations.md` → "rclone OAuth-refresh
+configuration design".) Active config copies are
+**secret-bearing**: never inspect, log, or archive the
+`mnemosyne-backup-rclone-config` volume. If rclone reports a read-only
+config / token-refresh failure, the consumer is running against the seed
+instead of a writable copy; never "fix" it by making the seed writable.
+Full design and troubleshooting: `docs/vault-recovery-operations.md`
+→ "rclone OAuth-refresh configuration design".
+
+### Upgrade migration: pre-fix active-config cleanup (Oracle fix)
+
+Deployments that ran the FIRST iteration of the OAuth-refresh runtime fix
+(before the uploader's ACTIVE rclone config was moved out of the state
+volume) may carry exactly **two legacy secret-bearing artifacts** inside
+`mnemosyne-backup-state` — the volume Hermes mounts READ-ONLY at
+`/opt/data/mnemosyne-backup/uploader-state`:
+
+1. `rclone.active.conf` — the private ACTIVE rclone config (OAuth/crypt
+   credentials, possibly holding a live refreshed token);
+2. `rclone.active.conf.seed-fp` — its seed-fingerprint sidecar (the sha256
+   of the seed the active copy was seeded from).
+
+The upgrade deployment removes **exactly these two artifacts** from the
+pre-fix Mnemosyne state volume **before Hermes starts**, and this is
+mandatory:
+
+- Hermes mounts that volume read-only for the exporter's ledger
+  observation; a lingering active config would sit inside the Hermes
+  filesystem for the entire runtime — the exact credential exposure the
+  fix closes.
+- The removal happens before Hermes starts so there is **no exposure
+  window**: no Hermes-side process ever observes the legacy secret.
+
+Everything else in the state volume is **non-secret acknowledgement state**
+and is **preserved untouched**:
+
+- `uploaded-generations.jsonl` — the ack ledger the exporter reads for
+  conservative pruning;
+- `next-slot` — the slot-rotation pointer;
+- `last-uploaded-generation` — the idempotency pointer.
+
+No other uploader state existed in that volume; the transient `.upload.lock`
+is unaffected, and stale-lock recovery remains operator-handled as
+documented. The ack ledger and slot pointer are exactly what keep the
+upgrade lossless: acknowledged generations are not re-uploaded and slot
+rotation continues where it left off.
+
+After the cleanup, the uploader seeds a fresh active config in the
+dedicated uploader-only secret volume `mnemosyne-backup-rclone-config` on
+its next start (see "rclone OAuth-refresh configuration" above); the state
+volume stays non-secret from then on. The cleanup is a **one-time
+migration**: the fixed uploader never writes the active config into the
+state volume again, so the two legacy artifacts cannot reappear there.
+
+**Never bypass the cleanup.** Skipping it leaves OAuth/crypt credentials
+exposed through the Hermes-visible read-only mount and violates the
+non-secret state-volume contract the exporter trusts; the deployment treats
+the removal as mandatory (fail closed), not as an optimization.
+
+The vault-recovery lane needs **no** such migration: its active config
+always lived in its own uploader-only state volume
+(`vault-recovery-uploader-state`, never mounted into Hermes), so no legacy
+artifacts exist there.
+
 ## Recovery Lane
 
 Restore is split into two short-lived, least-privilege steps plus an explicit
@@ -189,7 +281,7 @@ Python/Mnemosyne/live DB — so recovery is a two-container handoff:
    rclone image (short-lived)            hermes image (short-lived)
    mnemosyne-backup-recover.sh           mnemosyne-backup-restore.sh
   +----------------------------+        +-----------------------------+
-  | read-only crypt config     |        | NO rclone / NO crypt config |
+  | seed -> ephemeral copy      |        | NO rclone / NO crypt config |
   | disposable recovery volume | =====> | disposable recovery volume  |
   | download slot-N + verify   | handoff| verify-restore to NEW path  |
   | SHA/manifest, write READY  |        | install-restore (explicit)  |
@@ -200,7 +292,10 @@ Python/Mnemosyne/live DB — so recovery is a two-container handoff:
 
 Downloads one immutable slot through crypt into a disposable recovery handoff
 volume and verifies its manifest generation_id and artifact SHA-256 **before**
-writing the `RECOVERY_READY` sentinel. It never mounts `hermes-data`/`/opt/data`
+writing the `RECOVERY_READY` sentinel. It runs rclone against an **ephemeral
+writable copy** of the config seed (a token refresh during a long download
+must be able to persist; the copy is discarded when the container exits). It
+never mounts `hermes-data`/`/opt/data`
 and never touches a live DB.
 
 ```sh

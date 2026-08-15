@@ -620,6 +620,61 @@ class ComposeOverlayBoundaryTests(unittest.TestCase):
         self.assertIn("mnemosyne-backup-staging:", self.overlay_text)
         self.assertIn("mnemosyne-backup-state:", self.overlay_text)
 
+    def test_overlay_adds_uploader_only_secret_rclone_config_volume(self) -> None:
+        # The private ACTIVE rclone config (OAuth-refresh fix) lives in a
+        # DEDICATED uploader-only secret volume, NOT the state volume: the
+        # state volume is mounted READ-ONLY into Hermes and must hold no
+        # secrets.
+        self.assertIn("mnemosyne-backup-rclone-config:", self.overlay_text)
+        uploader_block = self._service_block(self.overlay_text, "mnemosyne-backup-uploader")
+        self.assertIn("mnemosyne-backup-rclone-config:/rclone-active", uploader_block)
+        self.assertNotIn("mnemosyne-backup-rclone-config:/rclone-active:ro", uploader_block)
+        self.assertIn("MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR=/rclone-active", uploader_block)
+
+    def test_uploader_script_never_seeds_active_config_into_state_dir(self) -> None:
+        # The uploader must seed the ACTIVE config into the dedicated
+        # uploader-only volume ($RCLONE_ACTIVE_DIR), never into the shared
+        # state volume that Hermes observes read-only.
+        src = (SCRIPTS_DIR / "mnemosyne-backup-uploader.sh").read_text("utf-8")
+        self.assertNotIn("$STATE_DIR/rclone.active.conf", src)
+        self.assertIn("$RCLONE_ACTIVE_DIR/rclone.active.conf", src)
+        self.assertIn('RCLONE_ACTIVE_DIR="${MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR:-/rclone-active}"',
+                      src)
+
+    def test_secret_rclone_config_volume_never_mounted_into_hermes_or_recover(self) -> None:
+        # Hermes must NEVER see the rclone config (seed or active): the
+        # uploader-state mount exposes ONLY the non-secret ledger. Check the
+        # actual MOUNT lines, not comments (which may mention the volume to
+        # explain the boundary).
+        def _mount_lines(block: str) -> list:
+            mounts = []
+            in_volumes = False
+            for line in block.splitlines():
+                if line.strip().startswith("volumes:"):
+                    in_volumes = True
+                    continue
+                if in_volumes:
+                    if line and not line.startswith(" ") and not line.startswith("\t"):
+                        break
+                    stripped = line.strip()
+                    if stripped.startswith("- "):
+                        mounts.append(stripped)
+            return mounts
+
+        hermes_block = self._service_block(self.overlay_text, "hermes")
+        hermes_mounts = _mount_lines(hermes_block)
+        self.assertNotIn("mnemosyne-backup-rclone-config", " ".join(hermes_mounts))
+        # The active-config env var is never injected into Hermes.
+        self.assertNotIn("MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR", hermes_block)
+        recover_mounts = _mount_lines(
+            self._service_block(self.overlay_text, "mnemosyne-backup-recover"))
+        self.assertNotIn("mnemosyne-backup-rclone-config", " ".join(recover_mounts))
+
+    def test_hermes_uploader_state_mount_is_read_only_ledger_exposure(self) -> None:
+        hermes_block = self._service_block(self.overlay_text, "hermes")
+        self.assertIn("mnemosyne-backup-state:/opt/data/mnemosyne-backup/uploader-state:ro",
+                      hermes_block)
+
     def test_uploader_never_mounts_hermes_data_or_opt_data(self) -> None:
         block = self._service_block(self.overlay_text, "mnemosyne-backup-uploader")
         # Extract only the volumes: sub-block (not comments) to avoid matching
@@ -649,11 +704,15 @@ class ComposeOverlayBoundaryTests(unittest.TestCase):
         block = self._service_block(self.overlay_text, "mnemosyne-backup-uploader")
         self.assertIn("obsidian-rclone-config:/config/rclone:ro", block)
 
-    def test_uploader_state_is_only_writable_mount(self) -> None:
+    def test_uploader_state_mount_is_writable_ledger_only(self) -> None:
         block = self._service_block(self.overlay_text, "mnemosyne-backup-uploader")
-        # state mount must NOT be read-only.
+        # state mount must NOT be read-only (the uploader owns the ledger).
         self.assertIn("mnemosyne-backup-state:/state", block)
         self.assertNotIn("mnemosyne-backup-state:/state:ro", block)
+        # The secret ACTIVE rclone config has its OWN uploader-only writable
+        # volume; it must not be mounted read-only either.
+        self.assertIn("mnemosyne-backup-rclone-config:/rclone-active", block)
+        self.assertNotIn("mnemosyne-backup-rclone-config:/rclone-active:ro", block)
 
     def test_uploader_has_no_host_ports(self) -> None:
         block = self._service_block(self.overlay_text, "mnemosyne-backup-uploader")
@@ -999,6 +1058,7 @@ exit 0
             "PATH": f"{self.bin}:{os.environ.get('PATH', '')}",
             "MNEMOSYNE_BACKUP_STAGING_DIR": str(self.staging),
             "MNEMOSYNE_BACKUP_STATE_DIR": str(self.state),
+            "MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR": str(self.tmp / "rclone-active"),
             "MNEMOSYNE_BACKUP_RCLONE_REMOTE": "mnemosyne-crypt",
             "MNEMOSYNE_BACKUP_RCLONE_PATH": "backups",
             "MNEMOSYNE_BACKUP_SLOTS": "3",
@@ -1455,6 +1515,7 @@ echo "=== 7. Upload gen1 via uploader wrapper (slot 1, one-shot mode) ==="
 mkdir -p "$WORK/state"
 MNEMOSYNE_BACKUP_STAGING_DIR="$WORK/staging" \
 MNEMOSYNE_BACKUP_STATE_DIR="$WORK/state" \
+MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR="$WORK/rclone-active" \
 MNEMOSYNE_BACKUP_RCLONE_REMOTE="mnemosyne-crypt" \
 MNEMOSYNE_BACKUP_RCLONE_PATH="backups" \
 MNEMOSYNE_BACKUP_SLOTS=3 \
@@ -1507,6 +1568,7 @@ EXPECTED_SLOT="$3"
 
 MNEMOSYNE_BACKUP_STAGING_DIR="$WORK/staging" \
 MNEMOSYNE_BACKUP_STATE_DIR="$WORK/state" \
+MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR="$WORK/rclone-active" \
 MNEMOSYNE_BACKUP_RCLONE_REMOTE="mnemosyne-crypt" \
 MNEMOSYNE_BACKUP_RCLONE_PATH="backups" \
 MNEMOSYNE_BACKUP_SLOTS=3 \
@@ -1530,6 +1592,7 @@ EXPECTED_GEN="$2"
 
 MNEMOSYNE_BACKUP_STAGING_DIR="$WORK/staging" \
 MNEMOSYNE_BACKUP_STATE_DIR="$WORK/state" \
+MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR="$WORK/rclone-active" \
 MNEMOSYNE_BACKUP_RCLONE_REMOTE="mnemosyne-crypt" \
 MNEMOSYNE_BACKUP_RCLONE_PATH="backups" \
 MNEMOSYNE_BACKUP_SLOTS=3 \
@@ -1551,6 +1614,7 @@ EXPECTED_GEN="$2"
 
 MNEMOSYNE_BACKUP_STAGING_DIR="$WORK/staging" \
 MNEMOSYNE_BACKUP_STATE_DIR="$WORK/state" \
+MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR="$WORK/rclone-active" \
 MNEMOSYNE_BACKUP_RCLONE_REMOTE="mnemosyne-crypt" \
 MNEMOSYNE_BACKUP_RCLONE_PATH="backups" \
 MNEMOSYNE_BACKUP_SLOTS=3 \
@@ -1761,6 +1825,7 @@ class MnemosyneBackupDockerRoundTripTests(unittest.TestCase):
                 "docker", "run", "--rm",
                 "-v", f"{work}:/work",
                 "-v", f"{SCRIPTS_DIR / 'mnemosyne-backup-uploader.sh'}:/scripts/mnemosyne-backup-uploader.sh:ro",
+                "-v", f"{SCRIPTS_DIR / 'rclone-active-config.sh'}:/scripts/rclone-active-config.sh:ro",
                 "--entrypoint", "sh",
                 "rclone/rclone:latest", "-lc", _DOCKER_RCLONE_SCRIPT, "sh", "/work",
             ]
@@ -1811,6 +1876,7 @@ class MnemosyneBackupDockerRoundTripTests(unittest.TestCase):
                 "docker", "run", "--rm",
                 "-v", f"{work}:/work",
                 "-v", f"{SCRIPTS_DIR / 'mnemosyne-backup-recover.sh'}:/scripts/mnemosyne-backup-recover.sh:ro",
+                "-v", f"{SCRIPTS_DIR / 'rclone-active-config.sh'}:/scripts/rclone-active-config.sh:ro",
                 "--entrypoint", "sh",
                 "rclone/rclone:latest", "-lc", _DOCKER_RECOVER_DL_SCRIPT, "sh", "/work", gen1, sha1,
             ]
@@ -1878,6 +1944,7 @@ class MnemosyneBackupDockerRoundTripTests(unittest.TestCase):
                 "docker", "run", "--rm",
                 "-v", f"{work}:/work",
                 "-v", f"{SCRIPTS_DIR / 'mnemosyne-backup-uploader.sh'}:/scripts/mnemosyne-backup-uploader.sh:ro",
+                "-v", f"{SCRIPTS_DIR / 'rclone-active-config.sh'}:/scripts/rclone-active-config.sh:ro",
                 "--entrypoint", "sh",
                 "rclone/rclone:latest", "-lc", _DOCKER_RCLONE_UPLOAD_SCRIPT, "sh", "/work", gen2, "3",
             ]
@@ -1896,6 +1963,7 @@ class MnemosyneBackupDockerRoundTripTests(unittest.TestCase):
                 "docker", "run", "--rm",
                 "-v", f"{work}:/work",
                 "-v", f"{SCRIPTS_DIR / 'mnemosyne-backup-uploader.sh'}:/scripts/mnemosyne-backup-uploader.sh:ro",
+                "-v", f"{SCRIPTS_DIR / 'rclone-active-config.sh'}:/scripts/rclone-active-config.sh:ro",
                 "--entrypoint", "sh",
                 "rclone/rclone:latest", "-lc", _DOCKER_RCLONE_NOOP_SCRIPT, "sh", "/work", gen2,
             ]
@@ -1948,6 +2016,7 @@ class MnemosyneBackupDockerRoundTripTests(unittest.TestCase):
                 "docker", "run", "--rm",
                 "-v", f"{work}:/work",
                 "-v", f"{SCRIPTS_DIR / 'mnemosyne-backup-uploader.sh'}:/scripts/mnemosyne-backup-uploader.sh:ro",
+                "-v", f"{SCRIPTS_DIR / 'rclone-active-config.sh'}:/scripts/rclone-active-config.sh:ro",
                 "--entrypoint", "sh",
                 "rclone/rclone:latest", "-lc", _DOCKER_RCLONE_FAIL_SCRIPT, "sh", "/work", gen3,
             ]
@@ -1973,6 +2042,328 @@ class MnemosyneBackupDockerRoundTripTests(unittest.TestCase):
         finally:
             runtime.down()
             shutil.rmtree(work, ignore_errors=True)
+
+
+# ===========================================================================
+# rclone OAuth-refresh fix: private ACTIVE config behavior (no Docker)
+# ===========================================================================
+#
+# The published obsidian-rclone-config seed stays READ-ONLY; rclone runs
+# against a private writable ACTIVE copy (scripts/rclone-active-config.sh).
+# The uploader keeps it in its own state volume (persistent across
+# restarts), the recover step uses an ephemeral private temp dir. The
+# active copy is PRESERVED while the seed is unchanged (a simulated rclone
+# config rewrite — OAuth token refresh — must survive) and atomically
+# RESEEDED when the seed changes; nothing is printed of either config.
+
+
+def _config_from_log_line(line: str) -> Optional[str]:
+    """Extract the `--config <path>` argument from a fake-rclone log line."""
+    parts = line.split()
+    for i, part in enumerate(parts):
+        if part == "--config" and i + 1 < len(parts):
+            return parts[i + 1]
+    return None
+
+
+class ActiveConfigOAuthRefreshTests(unittest.TestCase):
+    """Drive the Mnemosyne uploader and recover wrappers with a fake rclone
+    on PATH to prove the OAuth-refresh active-config contract."""
+
+    GEN = "20260802T012247123456Z-a1b2c3d4"
+    ORIGINAL_SECRET = "ORIGINAL_SECRET_9f2c1a"
+    REFRESHED_SECRET = "REFRESHED_TOKEN_9f2c1a"
+    ROTATED_SECRET = "rotated-fixture"
+    ACTIVE_NAME = "rclone.active.conf"
+
+    UPLOADER_FAKE_RCLONE = r"""#!/bin/sh
+# Fake rclone for active-config uploader tests: records invocations
+# (including the --config path), answers `config show` with type=crypt,
+# and no-ops sync/copyto.
+log() { printf '%s\n' "$*" >> "$FAKE_RCLONE_LOG"; }
+if [ "${1:-}" = "config" ]; then
+  log "config $*"
+  printf 'type = crypt\n'
+  exit 0
+fi
+if [ "${1:-}" = "sync" ]; then
+  log "sync $*"
+  exit 0
+fi
+if [ "${1:-}" = "copyto" ]; then
+  log "copyto $*"
+  exit 0
+fi
+log "other $*"
+exit 0
+"""
+
+    RECOVER_FAKE_RCLONE = r"""#!/bin/sh
+log() { printf '%s\n' "$*" >> "$FAKE_RCLONE_LOG"; }
+if [ "${1:-}" = "config" ]; then
+  log "config $*"
+  printf 'type = crypt\n'
+  exit 0
+fi
+if [ "${1:-}" = "copy" ]; then
+  log "copy $*"
+  dest="$3"
+  mkdir -p "$dest"
+  if [ -d "${FAKE_RCLONE_COPY_SRC:-}" ]; then
+    cp "$FAKE_RCLONE_COPY_SRC"/mnemosyne.db.gz "$FAKE_RCLONE_COPY_SRC"/manifest.json "$dest"/ 2>/dev/null || true
+  fi
+  exit 0
+fi
+log "other $*"
+exit 0
+"""
+
+    def _write_seed(self, secret: str) -> None:
+        (self.config_dir / "rclone.conf").write_text(
+            "[mnemosyne-crypt]\n"
+            "type = crypt\n"
+            "remote = local:/underlying\n"
+            f"password = {secret}\n",
+            encoding="utf-8",
+        )
+        os.chmod(self.config_dir / "rclone.conf", 0o600)
+
+    def _seed_generation(self) -> None:
+        gen_dir = self.staging / self.GEN
+        gen_dir.mkdir()
+        (gen_dir / "mnemosyne.db.gz").write_bytes(b"backup-artifact-bytes")
+        sha = hashlib.sha256(b"backup-artifact-bytes").hexdigest()
+        (gen_dir / "manifest.json").write_text(
+            json.dumps({
+                "generation_id": self.GEN,
+                "artifact": {"name": "mnemosyne.db.gz", "sha256": sha},
+            }),
+            encoding="utf-8",
+        )
+        (gen_dir / "READY").write_text(f"{self.GEN}\n{sha}\n", encoding="utf-8")
+        (self.staging / "latest").write_text(f"{self.GEN}\n", encoding="utf-8")
+
+    def _install_fake(self, body: str) -> None:
+        fake = self.bin / "rclone"
+        fake.write_text(body, encoding="utf-8")
+        fake.chmod(0o700)
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="mnem-active-cfg-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.staging = self.tmp / "staging"
+        self.state = self.tmp / "state"
+        self.bin = self.tmp / "bin"
+        self.config_dir = self.tmp / "rclone-config"
+        self.ephemeral_root = self.tmp / "ephemeral-root"
+        # Dedicated uploader-only SECRET volume for the ACTIVE rclone config
+        # (emulates mnemosyne-backup-rclone-config). Must be distinct from
+        # the state volume, which emulates the ledger state Hermes observes
+        # read-only.
+        self.active_dir = self.tmp / "rclone-active"
+        for d in (self.staging, self.state, self.bin, self.config_dir,
+                  self.ephemeral_root, self.active_dir):
+            d.mkdir()
+        self.log = self.tmp / "rclone.log"
+        self.active = self.active_dir / self.ACTIVE_NAME
+        self._write_seed(self.ORIGINAL_SECRET)
+        self._install_fake(self.UPLOADER_FAKE_RCLONE)
+        self._seed_generation()
+        self.base_env = {
+            **os.environ,
+            "PATH": f"{self.bin}:{os.environ.get('PATH', '')}",
+            "MNEMOSYNE_BACKUP_STAGING_DIR": str(self.staging),
+            "MNEMOSYNE_BACKUP_STATE_DIR": str(self.state),
+            "MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR": str(self.active_dir),
+            "MNEMOSYNE_BACKUP_RCLONE_REMOTE": "mnemosyne-crypt",
+            "MNEMOSYNE_BACKUP_RCLONE_PATH": "backups",
+            "MNEMOSYNE_BACKUP_SLOTS": "3",
+            "RCLONE_CONFIG": str(self.config_dir / "rclone.conf"),
+            "FAKE_RCLONE_LOG": str(self.log),
+        }
+
+    def _assert_state_dir_holds_no_secrets(self) -> None:
+        # The state volume emulates the ledger exposure Hermes sees
+        # READ-ONLY: it must never hold the active config or its fingerprint.
+        secrets = [
+            p for p in self.state.rglob("*")
+            if "rclone.active.conf" in p.name or p.name.endswith(".seed-fp")
+        ]
+        self.assertEqual(secrets, [],
+                         f"secret active config leaked into the shared state dir: {secrets}")
+
+    # ------------------------------------------------------------------
+    # Uploader (long-running lane): active copy in the uploader-only
+    # secret volume
+    # ------------------------------------------------------------------
+
+    def _run_uploader(self, extra_env: Optional[dict] = None) -> subprocess.CompletedProcess:
+        env = {**self.base_env, **(extra_env or {})}
+        return subprocess.run(
+            ["/bin/sh", str(SCRIPTS_DIR / "mnemosyne-backup-uploader.sh")],
+            env=env, capture_output=True, text=True, check=False, timeout=60,
+        )
+
+    def _log_configs(self) -> list:
+        if not self.log.exists():
+            return []
+        return [
+            cfg for cfg in (
+                _config_from_log_line(line)
+                for line in self.log.read_text("utf-8").splitlines()
+                if line.strip()
+            )
+            if cfg is not None
+        ]
+
+    def _assert_uploader_used_active_config(self) -> None:
+        configs = self._log_configs()
+        self.assertTrue(configs, "no rclone invocations recorded")
+        for cfg in configs:
+            self.assertEqual(
+                cfg, str(self.active),
+                f"rclone must run against the ACTIVE config, not the seed: {cfg}",
+            )
+
+    def _assert_no_leak(self, proc: subprocess.CompletedProcess, *markers: str) -> None:
+        output = f"{proc.stdout}\n{proc.stderr}"
+        for marker in markers:
+            self.assertNotIn(marker, output,
+                             f"config secret leaked into script output: {marker}")
+
+    def test_uploader_seeds_active_config_and_runs_rclone_against_it(self) -> None:
+        seed_before = (self.config_dir / "rclone.conf").read_bytes()
+        proc = self._run_uploader({"MNEMOSYNE_BACKUP_ONCE": "true"})
+        self.assertEqual(proc.returncode, 0,
+                         f"one-shot failed:\n{proc.stdout}\n{proc.stderr}")
+        # Active copy seeded in the DEDICATED uploader-only secret dir
+        # (never the state dir Hermes observes), 0600, seed content.
+        self.assertTrue(self.active.exists())
+        self.assertTrue(str(self.active).startswith(str(self.active_dir)))
+        self.assertNotIn(str(self.state), str(self.active))
+        self.assertEqual(self.active.read_bytes(), seed_before)
+        self.assertEqual(os.stat(self.active).st_mode & 0o777, 0o600)
+        # Seed fingerprint sidecar recorded privately.
+        fp = Path(str(self.active) + ".seed-fp")
+        self.assertTrue(fp.exists())
+        self.assertEqual(os.stat(fp).st_mode & 0o777, 0o600)
+        self.assertEqual(fp.read_text("utf-8").strip(),
+                         hashlib.sha256(seed_before).hexdigest())
+        # Every rclone call used the active copy; the seed is untouched.
+        self._assert_uploader_used_active_config()
+        self.assertEqual((self.config_dir / "rclone.conf").read_bytes(), seed_before)
+        # The shared state dir (Hermes-visible) holds no secrets.
+        self._assert_state_dir_holds_no_secrets()
+        self._assert_no_leak(proc, self.ORIGINAL_SECRET)
+
+    def test_uploader_restart_retention_preserves_simulated_rclone_rewrite(self) -> None:
+        first = self._run_uploader({"MNEMOSYNE_BACKUP_ONCE": "true"})
+        self.assertEqual(first.returncode, 0,
+                         f"first run failed:\n{first.stdout}\n{first.stderr}")
+        # Simulate rclone rewriting the ACTIVE config in place to persist an
+        # OAuth token refresh.
+        refreshed = (
+            "[mnemosyne-crypt]\n"
+            "type = crypt\n"
+            "remote = local:/underlying\n"
+            f"password = {self.REFRESHED_SECRET}\n"
+            'token = {"access_token": "a", "refresh_token": "r"}\n'
+        )
+        self.active.write_text(refreshed, encoding="utf-8")
+        os.chmod(self.active, 0o600)
+        # "Restart": a fresh uploader process over the same state volume.
+        second = self._run_uploader({"MNEMOSYNE_BACKUP_ONCE": "true"})
+        self.assertEqual(second.returncode, 0,
+                         f"restart run failed:\n{second.stdout}\n{second.stderr}")
+        # Seed unchanged -> the refreshed active copy survives the restart.
+        self.assertEqual(self.active.read_text("utf-8"), refreshed)
+        self.assertIn(self.REFRESHED_SECRET, self.active.read_text("utf-8"))
+        self._assert_uploader_used_active_config()
+        self.assertIn(self.ORIGINAL_SECRET,
+                      (self.config_dir / "rclone.conf").read_text("utf-8"))
+        # The shared state dir (Hermes-visible) still holds no secrets.
+        self._assert_state_dir_holds_no_secrets()
+        self._assert_no_leak(second, self.REFRESHED_SECRET, self.ORIGINAL_SECRET)
+
+    def test_uploader_reseeds_active_config_when_seed_rotated(self) -> None:
+        first = self._run_uploader({"MNEMOSYNE_BACKUP_ONCE": "true"})
+        self.assertEqual(first.returncode, 0,
+                         f"first run failed:\n{first.stdout}\n{first.stderr}")
+        # Operator rotates the published seed.
+        self._write_seed(self.ROTATED_SECRET)
+        rotated_before = (self.config_dir / "rclone.conf").read_bytes()
+        second = self._run_uploader({"MNEMOSYNE_BACKUP_ONCE": "true"})
+        self.assertEqual(second.returncode, 0,
+                         f"rotated run failed:\n{second.stdout}\n{second.stderr}")
+        # Active copy must now hold the rotated seed; old secret gone.
+        self.assertEqual(self.active.read_bytes(), rotated_before)
+        self.assertNotIn(self.ORIGINAL_SECRET, self.active.read_text("utf-8"))
+        fp = Path(str(self.active) + ".seed-fp")
+        self.assertEqual(fp.read_text("utf-8").strip(),
+                         hashlib.sha256(rotated_before).hexdigest())
+        self._assert_uploader_used_active_config()
+        # The shared state dir (Hermes-visible) still holds no secrets.
+        self._assert_state_dir_holds_no_secrets()
+        self._assert_no_leak(second, self.ORIGINAL_SECRET, self.ROTATED_SECRET)
+
+    # ------------------------------------------------------------------
+    # Recover (short-lived lane): ephemeral private config
+    # ------------------------------------------------------------------
+
+    def _run_recover(self, slot: str, timeout: int = 30) -> subprocess.CompletedProcess:
+        env = {
+            **self.base_env,
+            "MNEMOSYNE_BACKUP_RECOVERY_DIR": str(self.recovery),
+            "TMPDIR": str(self.ephemeral_root),
+            "FAKE_RCLONE_COPY_SRC": str(self.fake_slot),
+        }
+        return subprocess.run(
+            ["/bin/sh", str(SCRIPTS_DIR / "mnemosyne-backup-recover.sh"), slot],
+            env=env, capture_output=True, text=True, check=False, timeout=timeout,
+        )
+
+    def _prepare_recover_env(self) -> None:
+        self.recovery = self.tmp / "recovery"
+        self.fake_slot = self.tmp / "fake-slot"
+        self.recovery.mkdir()
+        self.fake_slot.mkdir()
+        self._install_fake(self.RECOVER_FAKE_RCLONE)
+        artifact = b"recovery-artifact-bytes"
+        sha = hashlib.sha256(artifact).hexdigest()
+        (self.fake_slot / "mnemosyne.db.gz").write_bytes(artifact)
+        (self.fake_slot / "manifest.json").write_text(
+            json.dumps({
+                "generation_id": self.GEN,
+                "artifact": {"name": "mnemosyne.db.gz", "sha256": sha},
+            }),
+            encoding="utf-8",
+        )
+
+    def test_recover_uses_ephemeral_private_config_and_cleans_up(self) -> None:
+        self._prepare_recover_env()
+        seed_before = (self.config_dir / "rclone.conf").read_bytes()
+        proc = self._run_recover("1")
+        self.assertEqual(proc.returncode, 0,
+                         f"recover failed:\n{proc.stdout}\n{proc.stderr}")
+        self.assertTrue((self.recovery / "RECOVERY_READY").exists())
+        # Every rclone call used an EPHEMERAL config under TMPDIR — never the
+        # recovery handoff volume, never the seed.
+        for cfg in self._log_configs():
+            self.assertTrue(
+                str(cfg).startswith(str(self.ephemeral_root / "mnemosyne-backup-rclone.")),
+                f"recover rclone must use the ephemeral private config: {cfg}",
+            )
+            self.assertNotIn(str(self.recovery), str(cfg))
+        self.assertEqual(
+            [p for p in self.recovery.rglob("rclone.conf")], [],
+            "no rclone config may leak into the recovery handoff volume",
+        )
+        # The ephemeral config dir is removed on exit (trap).
+        leftovers = list(self.ephemeral_root.glob("mnemosyne-backup-rclone.*"))
+        self.assertEqual(leftovers, [], "ephemeral config dir must be removed on exit")
+        # Seed immutability + no secrets in output.
+        self.assertEqual((self.config_dir / "rclone.conf").read_bytes(), seed_before)
+        self._assert_no_leak(proc, self.ORIGINAL_SECRET)
 
 
 if __name__ == "__main__":

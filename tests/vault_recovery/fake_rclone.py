@@ -19,6 +19,11 @@ fail-closed listing paths rely on.
 
 Every invocation is appended as one JSON line to $FAKE_RCLONE_LOG so tests
 can assert ordering (e.g. remote verify BEFORE commit, commit BEFORE ack).
+Each log line carries `"config"`: the `--config <path>` argument of the
+invocation (null when absent) so tests can assert which config file rclone
+was pointed at (e.g. the private ACTIVE copy of the OAuth-refresh fix, never
+the read-only seed). `config show` reads the remote section from the
+`--config` argument when present, falling back to $FAKE_RCLONE_CONFIG.
 
 Failure injection (deterministic, no sleeps):
   $FAKE_RCLONE_FAIL_CMDS     - comma-separated command names that exit 1
@@ -76,11 +81,13 @@ import sys
 from pathlib import Path
 
 
-def _log(args: list[str]) -> None:
+def _log(args: list[str], config: str | None = None) -> None:
     log = os.environ.get("FAKE_RCLONE_LOG")
     if log:
         with open(log, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"cmd": args[0], "args": args}) + "\n")
+            fh.write(
+                json.dumps({"cmd": args[0], "args": args, "config": config}) + "\n"
+            )
 
 
 def _log_count(cmd: str) -> int:
@@ -221,9 +228,9 @@ def _umask() -> int:
     return current
 
 
-def _cmd_config_show(args: list[str]) -> int:
+def _cmd_config_show(args: list[str], config_path: str | None) -> int:
     remote = args[0].rstrip(":")
-    cfg = Path(os.environ.get("FAKE_RCLONE_CONFIG", "/nonexistent"))
+    cfg = Path(config_path or os.environ.get("FAKE_RCLONE_CONFIG", "/nonexistent"))
     if not cfg.exists():
         print(f"error: config file not found: {cfg}", file=sys.stderr)
         return 1
@@ -406,8 +413,16 @@ def _cmd_purge(args: list[str]) -> int:
 
 
 def main(argv: list[str]) -> int:
-    # Strip `--config <path>`; KEEP `--create-empty-src-dirs` so the
+    # Capture the `--config <path>` argument (the config file rclone was
+    # pointed at) BEFORE stripping it; the scripts run rclone against the
+    # private ACTIVE config copy (OAuth-refresh fix), and `config show`
+    # must read that same file. Keep `--create-empty-src-dirs` so the
     # handlers can honor it (empty dirs are dropped without the flag).
+    config_path: str | None = None
+    for i, arg in enumerate(argv):
+        if arg == "--config" and i + 1 < len(argv):
+            config_path = argv[i + 1]
+            break
     args: list[str] = []
     for i, arg in enumerate(argv):
         if arg == "--config":
@@ -420,7 +435,7 @@ def main(argv: list[str]) -> int:
         return 2
     cmd = args[0]
     rest = args[1:]
-    _log([cmd, *rest])
+    _log([cmd, *rest], config=config_path)
     if cmd in _fail_cmds():
         print(f"error: simulated failure for command {cmd}", file=sys.stderr)
         return 1
@@ -436,7 +451,7 @@ def main(argv: list[str]) -> int:
             return 1
     if cmd == "config":
         if rest and rest[0] == "show":
-            return _cmd_config_show(rest[1:])
+            return _cmd_config_show(rest[1:], config_path)
         print("fake rclone: unsupported config subcommand", file=sys.stderr)
         return 2
     handler = {

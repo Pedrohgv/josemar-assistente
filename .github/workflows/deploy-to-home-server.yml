@@ -647,9 +647,14 @@ jobs:
           docker compose "${ARGS[@]}" config --quiet
 
       - name: Decode and validate rclone config
-        # Decode RCLONE_CONFIG_B64 to a 0600 temp file and validate the
-        # required remotes BEFORE any volume mutation or service teardown.
-        # The vault-recovery-crypt remote is REQUIRED FOR EVERY DEPLOYMENT
+        # Decode RCLONE_CONFIG_B64 to a mode-0600 config file inside a
+        # disposable temp DIRECTORY and validate the required remotes
+        # BEFORE any volume mutation or service teardown. The directory
+        # (NOT a single file) is mounted WRITABLE into the probe containers
+        # because rclone refreshes the working config (e.g. OAuth token
+        # refresh) via a sibling temp file + atomic rename, which a
+        # read-only single-file mount cannot support. The
+        # vault-recovery-crypt remote is REQUIRED FOR EVERY DEPLOYMENT
         # (the encrypted vault-recovery lane is the default backup
         # composition, Phase 3): type=crypt, nonempty remote, nonempty
         # password, AND the metadata-encryption standard (filename
@@ -659,10 +664,11 @@ jobs:
         # mode the mnemosyne-crypt remote is validated the same way. The
         # pinned rclone image entrypoint is `["rclone"]`, so we invoke
         # rclone directly (no `sh -c`). No config/secrets are printed.
-        # The temp file path is exported for the later publish step; the
-        # publish step owns the cleanup (it traps removal on EVERY exit),
-        # and this step traps removal on every FAILURE path below
-        # (disarmed on success so the publish step can still use the file).
+        # The temp directory path and the pre-probe config checksum are
+        # exported for the later publish step; the publish step owns the
+        # cleanup (it traps recursive removal on EVERY exit), and this step
+        # traps recursive removal on every FAILURE path below (disarmed on
+        # success so the publish step can still use the directory).
         env:
           RCLONE_CONFIG_B64_SECRET: ${{ secrets.RCLONE_CONFIG_B64 }}
         run: |
@@ -679,39 +685,47 @@ jobs:
             exit 1
           fi
 
-          TMP_RCLONE_CONF="$(mktemp)"
-          chmod 600 "$TMP_RCLONE_CONF"
-          # Trap cleanup on ALL failure paths after mktemp+chmod: the
-          # decoded secret must never linger on the runner when this step
-          # fails. Disarmed on success (the publish step owns the file and
-          # traps its removal on every exit).
-          trap 'rm -f "$TMP_RCLONE_CONF"' EXIT
-          if ! printf '%s' "$RCLONE_CONFIG_B64_SECRET" | base64 --decode > "$TMP_RCLONE_CONF" 2>/dev/null; then
+          # Disposable temp DIRECTORY, not a single file: rclone refreshes
+          # the working config (OAuth token refresh) by writing a sibling
+          # temp file and atomically renaming it over the config, so the
+          # config must live in a directory that is mounted WRITABLE into
+          # the probe containers.
+          TMP_RCLONE_DIR="$(mktemp -d)"
+          RCLONE_CONF="$TMP_RCLONE_DIR/rclone.conf"
+          # Trap cleanup on ALL failure paths after mktemp -d: the decoded
+          # secret must never linger on the runner when this step fails.
+          # Disarmed on success (the publish step owns the directory and
+          # traps its recursive removal on every exit).
+          trap 'rm -rf "$TMP_RCLONE_DIR"' EXIT
+          if ! printf '%s' "$RCLONE_CONFIG_B64_SECRET" | base64 --decode > "$RCLONE_CONF" 2>/dev/null; then
             echo "ERROR: RCLONE_CONFIG_B64 is not valid base64"
             exit 1
           fi
-          if [ ! -s "$TMP_RCLONE_CONF" ]; then
+          if [ ! -s "$RCLONE_CONF" ]; then
             echo "ERROR: RCLONE_CONFIG_B64 decoded to an empty config"
             exit 1
           fi
+          chmod 600 "$RCLONE_CONF"
 
           # FOUR independent field checks (not OR). Parse each field
           # separately. We never print the config output. Uses the pinned
           # image with a direct `rclone` invocation (image entrypoint).
+          # The temp directory is mounted WRITABLE (explicit :rw) so rclone
+          # can atomically refresh the working config in place if needed.
           validate_crypt_remote() {
             REMOTE_NAME="$1"
             if ! docker run --rm \
-                -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+                -v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw" \
                 "$RCLONE_PINNED_IMAGE" \
-                --config /tmp/rclone.conf config show "${REMOTE_NAME}:" \
+                --config /tmp/rclone-conf/rclone.conf config show "${REMOTE_NAME}:" \
                 >/dev/null 2>&1; then
               echo "ERROR: rclone remote '${REMOTE_NAME}' not found in RCLONE_CONFIG_B64"
               exit 1
             fi
             REMOTE_SHOW="$(docker run --rm \
-              -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+              -v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw" \
               "$RCLONE_PINNED_IMAGE" \
-              --config /tmp/rclone.conf config show "${REMOTE_NAME}:" 2>/dev/null || true)"
+              --config /tmp/rclone-conf/rclone.conf config show "${REMOTE_NAME}:" 2>/dev/null || true)"
             # 1. type must be exactly crypt.
             REMOTE_TYPE="$(printf '%s\n' "$REMOTE_SHOW" | sed -n 's/^type[[:space:]]*=[[:space:]]*//p' | tr -d '[:space:]')"
             if [ "$REMOTE_TYPE" != "crypt" ]; then
@@ -755,10 +769,17 @@ jobs:
             validate_crypt_remote "$MNEMOSYNE_REMOTE_NAME"
           fi
 
-          echo "RCLONE_TEMP_CONF=$TMP_RCLONE_CONF" >> "$GITHUB_ENV"
-          # Success: the publish step (the next step) owns the temp file and
-          # removes it on every exit; disarm the failure trap so the file
-          # survives this step's shell exit.
+          # Record the pre-probe checksum of the working config so the
+          # publish step can detect an rclone-side refresh (e.g. OAuth
+          # token refresh during the readiness probes) and publish the
+          # UPDATED config into the shared volume.
+          RCLONE_CONFIG_SHA256="$(sha256sum "$RCLONE_CONF" | awk '{print $1}')"
+
+          echo "RCLONE_TEMP_DIR=$TMP_RCLONE_DIR" >> "$GITHUB_ENV"
+          echo "RCLONE_CONFIG_SHA256=$RCLONE_CONFIG_SHA256" >> "$GITHUB_ENV"
+          # Success: the publish step (the next step) owns the temp
+          # directory and removes it on every exit; disarm the failure trap
+          # so the directory survives this step's shell exit.
           trap - EXIT
 
       - name: Vault-recovery remote readiness gate (real upload probe)
@@ -772,21 +793,28 @@ jobs:
         # lane is retired). The probe object lives under the remote base
         # path, NOT inside the committed namespace, so it can never be
         # mistaken for a generation by listing/retention/recovery. The
-        # decoded temp config is read-only here; the step traps its removal
-        # on EVERY exit (a readiness failure must never leave the decoded
-        # secret on the runner) and disarms the trap on success, when the
-        # publish step (next) takes over as the final cleanup owner.
+        # disposable temp DIRECTORY is mounted WRITABLE into the probe
+        # containers so rclone can refresh the working config (OAuth token
+        # refresh: sibling temp file + atomic rename) during the real
+        # probes; the UPDATED config is then detected and published by the
+        # publish step. The step traps recursive removal of the temp
+        # directory on EVERY exit (a readiness failure must never leave the
+        # decoded secret on the runner) and disarms the trap on success,
+        # when the publish step (next) takes over as the final cleanup
+        # owner.
         run: |
           set -euo pipefail
-          TMP_RCLONE_CONF="${RCLONE_TEMP_CONF:-}"
+          TMP_RCLONE_DIR="${RCLONE_TEMP_DIR:-}"
+          RCLONE_CONF="$TMP_RCLONE_DIR/rclone.conf"
           # Cleanup ownership (council fix): this step itself can FAIL (an
           # unreachable remote aborts the deploy here), and the decode step
-          # already disarmed its failure trap on success. Trap removal of
-          # the decoded secret on EVERY exit of this step so a readiness
-          # failure can never leave it on the runner; disarmed only on
-          # success so the publish step (the final owner) can still use it.
-          trap 'rm -f "$TMP_RCLONE_CONF"' EXIT
-          if [ -z "$TMP_RCLONE_CONF" ] || [ ! -s "$TMP_RCLONE_CONF" ]; then
+          # already disarmed its failure trap on success. Trap RECURSIVE
+          # removal of the decoded-secret temp DIRECTORY on EVERY exit of
+          # this step so a readiness failure can never leave it on the
+          # runner; disarmed only on success so the publish step (the final
+          # owner) can still use it.
+          trap 'rm -rf "$TMP_RCLONE_DIR"' EXIT
+          if [ -z "$TMP_RCLONE_DIR" ] || [ ! -s "$RCLONE_CONF" ]; then
             echo "ERROR: rclone temp config missing or empty at readiness-gate time"
             exit 1
           fi
@@ -797,73 +825,163 @@ jobs:
           PROBE_CONTENT="vault-recovery deploy probe $(date -u +%FT%TZ)"
 
           # 1. REAL WRITE through the crypt boundary: a syntactically valid
-          #    but unreachable remote fails here, BEFORE any teardown.
+          #    but unreachable remote fails here, BEFORE any teardown. The
+          #    temp directory is mounted WRITABLE so rclone can refresh the
+          #    working config (OAuth token refresh) in place.
           if ! printf '%s' "$PROBE_CONTENT" | docker run --rm -i \
-              -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+              -v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw" \
               "$RCLONE_PINNED_IMAGE" \
-              --config /tmp/rclone.conf rcat "$REMOTE_BASE/$PROBE" >/dev/null 2>&1; then
+              --config /tmp/rclone-conf/rclone.conf rcat "$REMOTE_BASE/$PROBE" >/dev/null 2>&1; then
             echo "ERROR: vault-recovery remote '$REMOTE_BASE' is UNREACHABLE (write probe failed). The encrypted lane cannot accept an initial generation. Deployment ABORTED BEFORE ANY TEARDOWN — the existing deployment and any legacy lane state are retained untouched."
             exit 1
           fi
           # 2. REAL READ-BACK through the crypt boundary (the generation
           #    verification round trip must work against the real remote).
           PROBE_BACK="$(docker run --rm \
-              -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+              -v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw" \
               "$RCLONE_PINNED_IMAGE" \
-              --config /tmp/rclone.conf cat "$REMOTE_BASE/$PROBE" 2>/dev/null || true)"
+              --config /tmp/rclone-conf/rclone.conf cat "$REMOTE_BASE/$PROBE" 2>/dev/null || true)"
           if [ "$PROBE_BACK" != "$PROBE_CONTENT" ]; then
             echo "ERROR: vault-recovery remote '$REMOTE_BASE' failed the read-back probe (crypt round trip broken). Deployment ABORTED BEFORE ANY TEARDOWN — the existing deployment and any legacy lane state are retained untouched."
             docker run --rm \
-              -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+              -v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw" \
               "$RCLONE_PINNED_IMAGE" \
-              --config /tmp/rclone.conf deletefile "$REMOTE_BASE/$PROBE" >/dev/null 2>&1 || true
+              --config /tmp/rclone-conf/rclone.conf deletefile "$REMOTE_BASE/$PROBE" >/dev/null 2>&1 || true
             exit 1
           fi
           # 3. Cleanup the probe object (best effort; a leftover probe is
           #    harmless: it is not a generation and is never listed).
           docker run --rm \
-            -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+            -v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw" \
             "$RCLONE_PINNED_IMAGE" \
-            --config /tmp/rclone.conf deletefile "$REMOTE_BASE/$PROBE" >/dev/null 2>&1 || \
+            --config /tmp/rclone-conf/rclone.conf deletefile "$REMOTE_BASE/$PROBE" >/dev/null 2>&1 || \
             echo "WARNING: could not remove the deploy probe object $REMOTE_BASE/$PROBE; remove it manually (it is not a generation)"
+          # If rclone refreshed the working config during the probes (OAuth
+          # token refresh), the updated file now lives in the disposable
+          # temp directory; the publish step detects it via the pre-probe
+          # checksum and publishes the UPDATED config atomically.
           echo "vault-recovery remote readiness gate PASSED: real write + read-back round trip confirmed on '$REMOTE_BASE'"
-          # Success: the publish step (the next step) owns the temp file and
-          # removes it on every exit; disarm the failure trap so the file
-          # survives this step's shell exit.
+          # Success: the publish step (the next step) owns the temp
+          # directory and removes it on every exit; disarm the failure trap
+          # so the directory survives this step's shell exit.
           trap - EXIT
 
       - name: Publish rclone config into shared volume
         # Publish the already-decoded/validated rclone config into the shared
-        # obsidian-rclone-config volume atomically. The temp file was created
-        # and validated in the "Decode and validate rclone config" step and
-        # probed by the readiness gate. This step is the OWNER of the temp
-        # file: it traps removal on EVERY exit (success AND failure), so the
-        # decoded secret never lingers on the runner. Runs immediately after
-        # the readiness gate so no intermediate step can fail with the temp
-        # file still on disk.
+        # obsidian-rclone-config volume atomically. The working config lives
+        # in the disposable temp DIRECTORY created in the "Decode and
+        # validate rclone config" step and was probed by the readiness gate
+        # with that directory mounted WRITABLE. If rclone refreshed the
+        # working config during the probes (OAuth token refresh writes a
+        # sibling temp file and atomically renames it over the config — only
+        # possible with a writable directory mount), the UPDATED file is
+        # detected via the pre-probe checksum and published, so the runtime
+        # services consume the refreshed tokens.
+        # The physical seed volume is resolved from Compose's rendered
+        # config metadata (top-level `name`, honoring COMPOSE_PROJECT_NAME /
+        # `-p`) plus the `com.docker.compose.volume=obsidian-rclone-config`
+        # label — never guessed from `basename "$PWD"`. Outcome handling
+        # (analogous to the legacy migration): 0 labeled matches creates the
+        # volume WITH the compose labels (or reuses a pre-labeling volume of
+        # the same compose-convention name); a Docker list/inspect
+        # operational failure or >1 matches FAILS the deploy (never guess).
+        # This step is the OWNER of the temp directory: it traps RECURSIVE
+        # removal on EVERY exit (success AND failure), so the decoded secret
+        # never lingers on the runner. Runs immediately after the readiness
+        # gate so no intermediate step can fail with the temp directory
+        # still on disk.
         run: |
           set -euo pipefail
-          TMP_RCLONE_CONF="${RCLONE_TEMP_CONF:-}"
-          if [ -z "$TMP_RCLONE_CONF" ]; then
+          TMP_RCLONE_DIR="${RCLONE_TEMP_DIR:-}"
+          if [ -z "$TMP_RCLONE_DIR" ]; then
             # No rclone config to publish (secret was unset — already failed
             # in the decode step for the default lane).
             exit 0
           fi
           # Cleanup on EVERY exit path of this step (success or failure).
-          trap 'rm -f "$TMP_RCLONE_CONF"' EXIT
-          if [ ! -s "$TMP_RCLONE_CONF" ]; then
+          trap 'rm -rf "$TMP_RCLONE_DIR"' EXIT
+          RCLONE_CONF="$TMP_RCLONE_DIR/rclone.conf"
+          if [ ! -s "$RCLONE_CONF" ]; then
             echo "ERROR: rclone temp config missing or empty at publish time"
             exit 1
           fi
-          COMPOSE_PROJECT="$(basename "$PWD")"
-          RCLONE_VOLUME="${COMPOSE_PROJECT}_obsidian-rclone-config"
-          docker volume create "$RCLONE_VOLUME" >/dev/null
-          # Atomic publish into the shared obsidian-rclone-config volume.
+          # Detect an rclone-side refresh of the working config (OAuth
+          # token refresh during the readiness probes): rclone replaced the
+          # config inside the writable temp directory via sibling temp file
+          # + atomic rename. When that happened, publish the UPDATED file
+          # so the runtime services use the refreshed tokens.
+          if [ -n "${RCLONE_CONFIG_SHA256:-}" ]; then
+            CURRENT_SHA="$(sha256sum "$RCLONE_CONF" | awk '{print $1}')"
+            if [ "$CURRENT_SHA" != "$RCLONE_CONFIG_SHA256" ]; then
+              echo "rclone changed the working config during validation/probing (OAuth refresh); publishing the UPDATED config"
+            fi
+          fi
+          # Resolve the ACTUAL physical volume for obsidian-rclone-config
+          # from Compose's rendered config metadata (top-level `name`,
+          # honoring COMPOSE_PROJECT_NAME / `-p`) plus the compose volume
+          # label. Never guessed from `basename "$PWD"`.
+          if ! PROJECT_NAME="$(docker compose config --format json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["name"])')"; then
+            echo "ERROR: cannot resolve the Compose project name (docker compose config failed); aborting the seed publish instead of guessing"
+            exit 1
+          fi
+          if [ -z "$PROJECT_NAME" ]; then
+            echo "ERROR: Compose project name resolved to empty; aborting the seed publish instead of guessing"
+            exit 1
+          fi
+          resolve_seed_volume() {
+            if ! MATCHES="$(docker volume ls \
+                --filter "label=com.docker.compose.project=$PROJECT_NAME" \
+                --filter label=com.docker.compose.volume=obsidian-rclone-config \
+                --format '{{.Name}}' 2>/dev/null)"; then
+              echo "ERROR: cannot list Docker volumes for project '$PROJECT_NAME' (docker volume ls failed); aborting the seed publish instead of guessing"
+              exit 1
+            fi
+            MATCH_COUNT="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
+          }
+          # Outcome distinction (fail closed except the creation path):
+          #   0 matches  -> no labeled volume yet: create it WITH the
+          #                 compose labels so compose reuses it and future
+          #                 resolution finds it (or reuse a pre-labeling
+          #                 volume of the same compose-convention name);
+          #   >1 matches -> FAIL the deploy (ambiguous; never guess).
+          resolve_seed_volume
+          if [ "$MATCH_COUNT" -eq 0 ]; then
+            RCLONE_VOLUME="${PROJECT_NAME}_obsidian-rclone-config"
+            if docker volume create \
+                --label "com.docker.compose.project=$PROJECT_NAME" \
+                --label "com.docker.compose.volume=obsidian-rclone-config" \
+                "$RCLONE_VOLUME" >/dev/null 2>&1; then
+              echo "Created obsidian-rclone-config volume '$RCLONE_VOLUME' (labeled for compose project '$PROJECT_NAME')"
+            elif docker volume inspect "$RCLONE_VOLUME" >/dev/null 2>&1; then
+              # Pre-existing volume without compose labels (pre-labeling
+              # era): reuse it as-is — the name follows compose's
+              # convention for the resolved project.
+              echo "Reusing existing obsidian-rclone-config volume '$RCLONE_VOLUME' (created before compose labeling)"
+            else
+              echo "ERROR: cannot create or inspect the obsidian-rclone-config volume '$RCLONE_VOLUME' for project '$PROJECT_NAME'; aborting instead of guessing"
+              exit 1
+            fi
+          elif [ "$MATCH_COUNT" -eq 1 ]; then
+            RCLONE_VOLUME="$MATCHES"
+          else
+            echo "ERROR: expected exactly 1 obsidian-rclone-config volume for project '$PROJECT_NAME', found $MATCH_COUNT; aborting instead of guessing"
+            exit 1
+          fi
+          # Named-volume-only guard: the resolved name must be an existing
+          # Docker NAMED volume before anything is mounted or seeded.
+          if ! docker volume inspect "$RCLONE_VOLUME" >/dev/null 2>&1; then
+            echo "ERROR: resolved volume '$RCLONE_VOLUME' is not an inspectable Docker named volume; aborting instead of guessing"
+            exit 1
+          fi
+          # Atomic publish into the shared obsidian-rclone-config volume:
+          # copy the (possibly refreshed) working config to a temp file in
+          # the volume, chmod 600, then mv into place so a reader never
+          # sees a partial or world-readable config.
           docker run --rm \
-            -v "$TMP_RCLONE_CONF:/tmp/rclone.conf:ro" \
+            -v "$TMP_RCLONE_DIR:/config/source:ro" \
             -v "$RCLONE_VOLUME:/config/rclone" \
             alpine:3.20 \
-            sh -c 'cp /tmp/rclone.conf /config/rclone/rclone.conf.new && chmod 600 /config/rclone/rclone.conf.new && mv /config/rclone/rclone.conf.new /config/rclone/rclone.conf'
+            sh -c 'cp /config/source/rclone.conf /config/rclone/rclone.conf.new && chmod 600 /config/rclone/rclone.conf.new && mv /config/rclone/rclone.conf.new /config/rclone/rclone.conf'
           echo "rclone config loaded into Docker volume"
 
       - name: Populate browser-control persistent volumes
@@ -978,6 +1096,118 @@ jobs:
             ARGS+=("-f" "$f")
           done
           docker compose "${ARGS[@]}" down --remove-orphans
+
+      - name: Migrate legacy rclone active config out of Mnemosyne backup state volume
+        # Oracle upgrade-migration blocker. Legacy deployments (pre
+        # OAuth-refresh fix) kept the private ACTIVE rclone config
+        # (rclone.active.conf + its seed fingerprint sidecar) inside the
+        # persistent mnemosyne-backup-state volume at /state. Hermes mounts
+        # that volume READ-ONLY, so the legacy layout exposed the secret
+        # config to Hermes and blocked the upgrade to the dedicated
+        # uploader-only secret volume (mnemosyne-backup-rclone-config).
+        # This migration runs AFTER the old services are stopped and BEFORE
+        # Hermes/new services start: it deletes ONLY those two exact legacy
+        # files at the volume root — never the ledger/slot acknowledgement
+        # state — so the state volume again holds only non-secret state.
+        # Fail-closed and safe:
+        #   - the Compose project name is resolved from Compose's rendered
+        #     config metadata (`docker compose config --format json`),
+        #     honoring COMPOSE_PROJECT_NAME / `-p` — never guessed from
+        #     `basename "$PWD"`;
+        #   - the volume is located by the Compose project AND the
+        #     `com.docker.compose.volume=mnemosyne-backup-state` label;
+        #     0 matches is the ONLY safe skip; a Docker list/inspect
+        #     operational failure or >1 matches FAILS the deploy (never
+        #     guess);
+        #   - the deletion runs INSIDE a disposable container mounting the
+        #     NAMED volume, so an accidental host-path deletion is
+        #     impossible;
+        #   - exactly two basenames are removed at the volume root; the
+        #     ledger/slot state is never touched (no recursive delete);
+        #   - the files are only removed, never read or printed;
+        #   - if a legacy file is still present after removal, the step
+        #     FAILS the deploy (no partial upgrade).
+        # The volume can exist from a prior deploy even when the current
+        # MNEMOSYNE_DEPLOY_MODE is off, so this step runs unconditionally
+        # and skips cleanly when no labeled volume matches (nothing to
+        # migrate).
+        run: |
+          set -euo pipefail
+          # Resolve the ACTUAL Compose project name from Compose's own
+          # rendered config metadata (top-level `name` field), which honors
+          # COMPOSE_PROJECT_NAME, `-p`, and the directory default. The
+          # physical volume name is a Compose concern — never guessed from
+          # `basename "$PWD"`.
+          if ! PROJECT_NAME="$(docker compose config --format json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["name"])')"; then
+            echo "ERROR: cannot resolve the Compose project name (docker compose config failed); aborting the legacy migration instead of guessing"
+            exit 1
+          fi
+          if [ -z "$PROJECT_NAME" ]; then
+            echo "ERROR: Compose project name resolved to empty; aborting the legacy migration instead of guessing"
+            exit 1
+          fi
+          # Locate the state volume by the Compose project AND the
+          # com.docker.compose.volume label (compose v2 labels every named
+          # volume it creates). Outcome distinction:
+          #   0 matches  -> safe skip (no legacy volume to migrate);
+          #   docker volume ls operational failure -> FAIL the deploy;
+          #   >1 matches -> FAIL the deploy (ambiguous; never guess).
+          if ! MATCHES="$(docker volume ls \
+              --filter "label=com.docker.compose.project=$PROJECT_NAME" \
+              --filter label=com.docker.compose.volume=mnemosyne-backup-state \
+              --format '{{.Name}}' 2>/dev/null)"; then
+            echo "ERROR: cannot list Docker volumes for project '$PROJECT_NAME' (docker volume ls failed); aborting the legacy migration instead of guessing"
+            exit 1
+          fi
+          MATCH_COUNT="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
+          if [ "$MATCH_COUNT" -eq 0 ]; then
+            echo "No Mnemosyne backup state volume found for project '$PROJECT_NAME' (com.docker.compose.volume=mnemosyne-backup-state); legacy rclone active config migration skipped"
+            exit 0
+          fi
+          if [ "$MATCH_COUNT" -ne 1 ]; then
+            echo "ERROR: expected exactly 1 Mnemosyne backup state volume for project '$PROJECT_NAME', found $MATCH_COUNT; aborting the legacy migration instead of guessing"
+            exit 1
+          fi
+          STATE_VOLUME="$MATCHES"
+          # Named-volume-only guard: the resolved name must be an existing
+          # Docker NAMED volume before anything is mounted or deleted.
+          if ! docker volume inspect "$STATE_VOLUME" >/dev/null 2>&1; then
+            echo "ERROR: resolved volume '$STATE_VOLUME' is not an inspectable Docker named volume; aborting instead of guessing"
+            exit 1
+          fi
+          # Delete ONLY the two exact legacy secret files at the volume
+          # root. The deletion runs inside a disposable alpine container
+          # mounting the named volume at /state — a host path can never be
+          # touched. The ledger/slot acknowledgement state is never
+          # modified, and the legacy files are never read or printed (only
+          # their basenames are reported). `set -euo pipefail` plus the
+          # still-present re-check fail the deploy if the removal did not
+          # happen.
+          docker run --rm \
+            -v "$STATE_VOLUME:/state" \
+            alpine:3.20 \
+            sh -c '
+              found=0
+              for f in /state/rclone.active.conf /state/rclone.active.conf.seed-fp; do
+                if [ -e "$f" ] || [ -L "$f" ]; then
+                  echo "removing legacy file: $(basename "$f")"
+                  found=1
+                fi
+              done
+              rm -f /state/rclone.active.conf /state/rclone.active.conf.seed-fp
+              for f in /state/rclone.active.conf /state/rclone.active.conf.seed-fp; do
+                if [ -e "$f" ] || [ -L "$f" ]; then
+                  echo "ERROR: legacy file still present after removal: $(basename "$f")" >&2
+                  exit 1
+                fi
+              done
+              if [ "$found" -eq 0 ]; then
+                echo "no legacy rclone active config files present in the state volume"
+              else
+                echo "legacy rclone active config files removed from the state volume"
+              fi
+            '
+          echo "Legacy rclone active config migration complete (volume '$STATE_VOLUME' holds only non-secret acknowledgement state)"
 
       - name: Clean up old Docker images
         run: |
@@ -1534,15 +1764,15 @@ jobs:
       - name: Cleanup sensitive files
         if: always()
         # Final sweep on EVERY exit path, including a cancelled run: the
-        # decoded rclone temp config must never linger on the runner even
+        # decoded rclone temp DIRECTORY must never linger on the runner even
         # when the run is cancelled BETWEEN the rclone steps (a step-local
         # trap only fires inside its own shell; the decode/readiness/publish
         # traps cover in-step failures, this always() step covers the
-        # between-step cancellation window). RCLONE_TEMP_CONF is exported to
+        # between-step cancellation window). RCLONE_TEMP_DIR is exported to
         # GITHUB_ENV by the decode step, so it is visible here whenever it
         # was created; the guard also covers the case where decode never ran.
         run: |
           rm -f .env
-          if [ -n "${RCLONE_TEMP_CONF:-}" ]; then
-            rm -f "$RCLONE_TEMP_CONF"
+          if [ -n "${RCLONE_TEMP_DIR:-}" ]; then
+            rm -rf "$RCLONE_TEMP_DIR"
           fi

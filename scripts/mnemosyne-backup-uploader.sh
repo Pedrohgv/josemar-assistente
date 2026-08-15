@@ -2,9 +2,18 @@
 # mnemosyne-backup-uploader.sh - Separate rclone uploader service.
 #
 # This service NEVER mounts hermes-data or /opt/data. Its staging mount is
-# READ-ONLY. Its rclone config is READ-ONLY. Only its state volume is
-# writable. It reuses the existing secret-managed obsidian-rclone-config
-# volume because that volume can hold a separate mnemosyne-crypt remote.
+# READ-ONLY. Its published rclone config (the secret-managed
+# obsidian-rclone-config volume) is READ-ONLY: rclone runs against a private
+# writable ACTIVE copy seeded into a DEDICATED uploader-only secret volume
+# (OAuth-refresh fix, rclone-active-config.sh) — preserved while the seed is
+# unchanged (a refreshed OAuth token survives restarts), atomically reseeded
+# only when the seed changes; the seed itself is never modified. The
+# uploader STATE volume holds ONLY non-secret acknowledgement state (ledger,
+# slot pointer) and is mounted READ-ONLY into Hermes for exporter pruning —
+# the secret active config NEVER lives there and is NEVER exposed to Hermes
+# or the recover step. It reuses the existing secret-managed
+# obsidian-rclone-config volume because that volume can hold a separate
+# mnemosyne-crypt remote.
 #
 # Contract (see docs/mnemosyne-operations.md):
 #   - Require/configure MNEMOSYNE_BACKUP_RCLONE_REMOTE (must be rclone type
@@ -29,12 +38,25 @@
 #
 # Env:
 #   MNEMOSYNE_BACKUP_STAGING_DIR  - read-only staging mount (default /staging)
-#   MNEMOSYNE_BACKUP_STATE_DIR    - writable state volume (default /state)
+#   MNEMOSYNE_BACKUP_STATE_DIR    - writable state volume (default /state);
+#                                   NON-SECRET acknowledgement state only
+#                                   (ledger, slot pointer) — the exporter
+#                                   observes it read-only from Hermes.
+#   MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR - dedicated uploader-only writable
+#                                   volume for the private ACTIVE rclone
+#                                   config (default /rclone-active). NEVER
+#                                   mounted into Hermes or the recover step.
 #   MNEMOSYNE_BACKUP_RCLONE_REMOTE - REQUIRED crypt remote name (e.g. mnemosyne-crypt)
 #   MNEMOSYNE_BACKUP_RCLONE_PATH  - remote base path (default Josemar/mnemosyne-backups)
 #   MNEMOSYNE_BACKUP_SLOTS        - rotating full-snapshot slots (default 5)
 #   MNEMOSYNE_BACKUP_POLL_INTERVAL - poll interval in SECONDS (default 300)
-#   RCLONE_CONFIG                - rclone config path (default /config/rclone/rclone.conf)
+#   RCLONE_CONFIG                - rclone config SEED path (default
+#                                  /config/rclone/rclone.conf; the published
+#                                  read-only config). The uploader seeds a
+#                                  private writable active copy at
+#                                  $MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR/
+#                                  rclone.active.conf and runs rclone
+#                                  against it (OAuth-refresh fix).
 #   MNEMOSYNE_BACKUP_RUN_ON_START - run once on start (default true)
 #   MNEMOSYNE_BACKUP_ONCE        - one-shot mode (default false): perform ALL
 #                                  startup validation, take the same upload
@@ -54,6 +76,12 @@ set -eu
 
 STAGING_DIR="${MNEMOSYNE_BACKUP_STAGING_DIR:-/staging}"
 STATE_DIR="${MNEMOSYNE_BACKUP_STATE_DIR:-/state}"
+# Dedicated uploader-only volume for the private ACTIVE rclone config
+# (OAuth-refresh fix). NEVER the state volume: the state volume is mounted
+# READ-ONLY into Hermes (exporter ledger observation) and must hold NO
+# secrets; the active config stays in a secret volume only the uploader
+# mounts.
+RCLONE_ACTIVE_DIR="${MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR:-/rclone-active}"
 REMOTE_NAME="${MNEMOSYNE_BACKUP_RCLONE_REMOTE:-}"
 REMOTE_PATH="${MNEMOSYNE_BACKUP_RCLONE_PATH:-Josemar/mnemosyne-backups}"
 SLOTS="${MNEMOSYNE_BACKUP_SLOTS:-5}"
@@ -72,6 +100,11 @@ _SLOT_META=""
 
 log_info() { echo "[mnemosyne-backup-uploader] $1"; }
 log_error() { echo "[mnemosyne-backup-uploader] ERROR: $1" >&2; }
+
+# Shared rclone OAuth-refresh runtime helper: rclone runs against a private
+# writable ACTIVE copy of the config (see rclone-active-config.sh); the
+# published seed stays read-only.
+. "$(dirname "$0")/rclone-active-config.sh"
 
 cleanup() {
     # Clean temp slot metadata on exit/failure.
@@ -424,6 +457,13 @@ acquire_upload_lock() {
 startup_checks() {
     validate_slots
     validate_poll_interval
+    # OAuth-refresh fix: the published seed stays read-only; rclone runs
+    # against a private writable active copy in the DEDICATED uploader-only
+    # secret volume (preserved across restarts while the seed is unchanged,
+    # atomically reseeded when the seed changes). NEVER the state volume,
+    # which is exposed READ-ONLY to Hermes. MUST run before require_remote
+    # so the remote validation reads the ACTIVE config.
+    rclone_active_config_ensure "$RCLONE_CONFIG_FILE" "$RCLONE_ACTIVE_DIR/rclone.active.conf"
     require_remote
     mkdir -p "$STATE_DIR"
 
@@ -441,7 +481,7 @@ main() {
         # upload lock, run ONE upload attempt, then exit with a meaningful
         # status instead of polling. This is NOT scheduled-service behavior;
         # the default daemon path below is unchanged.
-        log_info "Uploader one-shot mode (staging=$STAGING_DIR state=$STATE_DIR remote=$REMOTE_NAME slots=$SLOTS)"
+        log_info "Uploader one-shot mode (staging=$STAGING_DIR state=$STATE_DIR active-config=$RCLONE_ACTIVE_DIR remote=$REMOTE_NAME slots=$SLOTS)"
         if ! acquire_upload_lock; then
             # Lock held by a concurrent daemon/manual invocation. Fail closed
             # (one-shot callers must observe the lock was not taken). The trap
@@ -455,7 +495,7 @@ main() {
         exit $rc
     fi
 
-    log_info "Uploader started (staging=$STAGING_DIR state=$STATE_DIR remote=$REMOTE_NAME slots=$SLOTS poll=${POLL_INTERVAL}s)"
+    log_info "Uploader started (staging=$STAGING_DIR state=$STATE_DIR active-config=$RCLONE_ACTIVE_DIR remote=$REMOTE_NAME slots=$SLOTS poll=${POLL_INTERVAL}s)"
 
     if [ "$RUN_ON_START" = "true" ]; then
         if acquire_upload_lock; then

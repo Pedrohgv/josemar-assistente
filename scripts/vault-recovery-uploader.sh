@@ -4,8 +4,13 @@
 #
 # A SEPARATE pinned rclone service. It NEVER mounts hermes-data or /opt/data:
 #   - the staging mount is READ-ONLY (Phase-1 immutable generations),
-#   - the rclone crypt config is READ-ONLY (reuses the secret-managed
-#     obsidian-rclone-config volume),
+#   - the published rclone crypt config (the secret-managed
+#     obsidian-rclone-config volume) is READ-ONLY: rclone runs against a
+#     private writable ACTIVE copy seeded into the state volume
+#     (OAuth-refresh fix, rclone-active-config.sh). The active copy is
+#     preserved while the seed is unchanged (a refreshed OAuth token
+#     survives restarts) and atomically reseeded only when the seed
+#     changes; the seed itself is never modified.
 #   - ONLY its own state volume is writable.
 #
 # Contract (see docs/vault-recovery-operations.md -> Phase 2):
@@ -132,7 +137,14 @@
 #                                         first), then EXIT with a meaningful
 #                                         status (for tests and manual
 #                                         cron-style invocations).
-#   RCLONE_CONFIG                       - rclone config path (default /config/rclone/rclone.conf)
+#   RCLONE_CONFIG                       - rclone config SEED path (default
+#                                         /config/rclone/rclone.conf; the
+#                                         published read-only config). The
+#                                         uploader seeds a private writable
+#                                         active copy at
+#                                         $STATE_DIR/rclone.active.conf and
+#                                         runs rclone against it
+#                                         (OAuth-refresh fix).
 #
 # Exit codes: 0 success/continue, 1 upload attempt failed (one-shot mode),
 # 2 config/validation error, 3 unexpected error.
@@ -176,6 +188,11 @@ LAST_UPLOADED_FILE="$STATE_DIR/last-uploaded-generation"
 
 log_info() { echo "[vault-recovery-uploader] $1"; }
 log_error() { echo "[vault-recovery-uploader] ERROR: $1" >&2; }
+
+# Shared rclone OAuth-refresh runtime helper: rclone runs against a private
+# writable ACTIVE copy of the config (see rclone-active-config.sh); the
+# published seed stays read-only.
+. "$(dirname "$0")/rclone-active-config.sh"
 
 _cleanup() {
     if [ -n "${_LOCK_HELD:-}" ] && [ "$_LOCK_HELD" = "1" ]; then
@@ -744,8 +761,10 @@ remote_payload_digests() {
     # after `if ! cmd; then` is the NEGATED status (always 0), which would
     # turn every rclone failure into an "indeterminate" read. The `||`
     # branch preserves the REAL exit code (3/4 = confirmed absent, anything
-    # else = failed read).
-    rclone cat "$gen_remote/READY" > "$ready_file" 2>&1 && rc=0 || rc=$?
+    # else = failed read). The explicit `--config` pins the ACTIVE config
+    # (OAuth-refresh fix) exactly like every other rclone call in this
+    # script.
+    rclone cat "$gen_remote/READY" --config "$RCLONE_CONFIG_FILE" > "$ready_file" 2>&1 && rc=0 || rc=$?
     if [ "$rc" -ne 0 ]; then
         case "$rc" in
             3|4) rm -rf "$pd_tmp"; return 1 ;;
@@ -763,7 +782,7 @@ remote_payload_digests() {
         rm -rf "$pd_tmp"
         return 1
     fi
-    rclone cat "$gen_remote/manifest.json" > "$manifest_file" 2>&1 && mrc=0 || mrc=$?
+    rclone cat "$gen_remote/manifest.json" --config "$RCLONE_CONFIG_FILE" > "$manifest_file" 2>&1 && mrc=0 || mrc=$?
     if [ "$mrc" -ne 0 ]; then
         case "$mrc" in
             3|4) rm -rf "$pd_tmp"; return 1 ;;
@@ -1361,6 +1380,12 @@ startup_checks() {
     validate_retention
     validate_local_retention
     validate_poll_interval
+    # OAuth-refresh fix: the published seed stays read-only; rclone runs
+    # against a private writable active copy in the state volume (preserved
+    # across restarts while the seed is unchanged, atomically reseeded when
+    # the seed changes). MUST run before require_remote so the remote
+    # validation reads the ACTIVE config.
+    rclone_active_config_ensure "$RCLONE_CONFIG_FILE" "$STATE_DIR/rclone.active.conf"
     require_remote
     mkdir -p "$STATE_DIR"
     if [ ! -d "$STAGING_DIR" ]; then

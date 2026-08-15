@@ -13,6 +13,7 @@ COMPOSE = REPO_ROOT / "docker-compose.yml"
 OVERLAY = REPO_ROOT / "docker-compose.browser-control.yml"
 EMBED_OVERLAY = REPO_ROOT / "docker-compose.embeddings.yml"
 MNEMOSYNE_OVERLAY = REPO_ROOT / "docker-compose.mnemosyne.yml"
+MNEMOSYNE_BACKUP_OVERLAY = REPO_ROOT / "docker-compose.mnemosyne-backup.yml"
 VAULT_RECOVERY_OVERLAY = REPO_ROOT / "docker-compose.vault-recovery.yml"
 
 
@@ -134,6 +135,52 @@ class ComposeContractTests(unittest.TestCase):
         self.assertNotIn("- /opt/data", block)
         self.assertIn("- obsidian-rclone-config:/config/rclone:ro", block)
         self.assertIn("- vault-recovery-recovery:/recovery", block)
+
+    def test_rclone_active_config_helper_mounted_read_only_in_backup_lanes(self) -> None:
+        # OAuth-refresh fix: every rclone service of both backup lanes mounts
+        # the shared runtime helper read-only, and the published
+        # obsidian-rclone-config SEED stays READ-ONLY everywhere (rclone runs
+        # against a private writable ACTIVE copy instead).
+        self.mn_backup_overlay = MNEMOSYNE_BACKUP_OVERLAY.read_text(encoding="utf-8")
+        cases = [
+            (self.vr_overlay, "vault-recovery-uploader"),
+            (self.vr_overlay, "vault-recovery-recover"),
+            (self.mn_backup_overlay, "mnemosyne-backup-uploader"),
+            (self.mn_backup_overlay, "mnemosyne-backup-recover"),
+        ]
+        for overlay, service in cases:
+            with self.subTest(service=service):
+                block = service_block(overlay, service)
+                self.assertIn("- obsidian-rclone-config:/config/rclone:ro", block)
+                self.assertIn(
+                    "- ./scripts/rclone-active-config.sh:"
+                    "/scripts/rclone-active-config.sh:ro",
+                    block,
+                )
+
+    def test_mnemosyne_active_rclone_config_is_uploader_only_secret_volume(self) -> None:
+        # Oracle blocker regression: the Mnemosyne uploader's ACTIVE rclone
+        # config (OAuth/crypt credentials) must live in a DEDICATED
+        # uploader-only secret volume, NEVER in the uploader state volume
+        # that Hermes mounts READ-ONLY for exporter ledger observation, and
+        # NEVER mounted into Hermes or the recover step.
+        overlay = MNEMOSYNE_BACKUP_OVERLAY.read_text(encoding="utf-8")
+        uploader = service_block(overlay, "mnemosyne-backup-uploader")
+        hermes_block = service_block(overlay, "hermes")
+        recover = service_block(overlay, "mnemosyne-backup-recover")
+        # Uploader: dedicated writable secret volume + env wiring.
+        self.assertIn("- mnemosyne-backup-rclone-config:/rclone-active", uploader)
+        self.assertNotIn("- mnemosyne-backup-rclone-config:/rclone-active:ro", uploader)
+        self.assertIn("- MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR=/rclone-active", uploader)
+        # The secret volume is NEVER mounted into hermes or the recover step
+        # (mount lines start with "- <volume>:"; comments may mention the
+        # volume name to explain the boundary, so match the mount form).
+        self.assertNotIn("- mnemosyne-backup-rclone-config:", hermes_block)
+        self.assertNotIn("- mnemosyne-backup-rclone-config:", recover)
+        self.assertNotIn("MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR", hermes_block)
+        # The volume is declared at the overlay level.
+        volumes_block = top_level_block(overlay, "volumes")
+        self.assertIn("mnemosyne-backup-rclone-config:", volumes_block)
 
     def test_vault_recovery_overlay_volumes_declared(self) -> None:
         volumes_block = top_level_block(self.vr_overlay, "volumes")

@@ -22,7 +22,7 @@
 # Boundaries (mirror the Mnemosyne encrypted lane; see
 # docs/vault-recovery-operations.md):
 #   - The uploader NEVER mounts hermes-data or /opt/data. Its staging mount
-#     (vault-recovery-staging) is READ-ONLY, its rclone config
+#     (vault-recovery-staging) is READ-ONLY, its rclone config SEED
 #     (obsidian-rclone-config) is READ-ONLY, and ONLY its own state volume
 #     is writable — with ONE strictly-bounded exception: the SAME staging
 #     volume is additionally mounted read-WRITE at /staging-prune
@@ -30,9 +30,15 @@
 #     staged generations beyond the newest VAULT_RECOVERY_LOCAL_RETENTION
 #     that the remote acknowledged; it never touches READY/latest/artifacts
 #     of retained generations, and any invalid state skips the whole prune).
+#     The OAuth-refresh fix: rclone runs against a private writable ACTIVE
+#     copy of the config seeded into the uploader state volume
+#     (rclone-active-config.sh) — preserved while the seed is unchanged,
+#     atomically reseeded when it changes; the seed itself is never written.
 #   - The recover step is profile-gated (`--profile recovery`), runs in the
-#     rclone image with a READ-ONLY rclone config and ONLY the disposable
-#     recovery volume writable; it never mounts hermes-data or /opt/data.
+#     rclone image with a READ-ONLY rclone config SEED and ONLY the
+#     disposable recovery volume writable; rclone runs against an EPHEMERAL
+#     private writable copy of the config in a fresh temp dir (never the
+#     recovery handoff volume). It never mounts hermes-data or /opt/data.
 #   - The LONG-RUNNING hermes service NEVER mounts the recovery volume; only
 #     short-lived `docker compose run` invocations mount it transiently for
 #     the verify/install steps.
@@ -106,7 +112,13 @@ services:
     volumes:
       # Reuse the existing secret-managed obsidian-rclone-config volume
       # (read-only). It can hold a dedicated vault-recovery crypt remote.
+      # This is the SEED only: the uploader runs rclone against a private
+      # writable active copy in its state volume (OAuth-refresh fix, see
+      # rclone-active-config.sh), so a refreshed OAuth token can persist
+      # across restarts.
       - obsidian-rclone-config:/config/rclone:ro
+      # Shared rclone OAuth-refresh runtime helper (read-only).
+      - ./scripts/rclone-active-config.sh:/scripts/rclone-active-config.sh:ro
       # Phase-1 staging mount, READ-ONLY. The uploader never writes here and
       # never deletes READY/latest/artifacts.
       - vault-recovery-staging:/staging:ro
@@ -163,7 +175,13 @@ services:
     volumes:
       # Reuse the existing secret-managed obsidian-rclone-config volume
       # (read-only). It can hold a dedicated vault-recovery crypt remote.
+      # This is the SEED only: the recover step runs rclone against an
+      # EPHEMERAL private writable copy in a fresh temp dir (OAuth-refresh
+      # fix, see rclone-active-config.sh) — never inside the recovery
+      # handoff volume.
       - obsidian-rclone-config:/config/rclone:ro
+      # Shared rclone OAuth-refresh runtime helper (read-only).
+      - ./scripts/rclone-active-config.sh:/scripts/rclone-active-config.sh:ro
       # Disposable recovery handoff volume. This is NEVER mounted into the
       # long-running hermes service; only short-lived `docker compose run`
       # invocations mount it (transiently).
