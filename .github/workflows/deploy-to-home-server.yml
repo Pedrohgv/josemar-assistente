@@ -712,9 +712,16 @@ jobs:
           # image with a direct `rclone` invocation (image entrypoint).
           # The temp directory is mounted WRITABLE (explicit :rw) so rclone
           # can atomically refresh the working config in place if needed.
+          # Every rclone container runs as the HOST RUNNER UID:GID (the
+          # --user flag built from the runner's id -u and id -g): a config
+          # rewritten by rclone (sibling temp file + atomic rename) must
+          # stay runner-owned so the host runner can still sha256 it in
+          # the publish step (live ownership regression: a root-owned 0600
+          # config was unreadable).
           validate_crypt_remote() {
             REMOTE_NAME="$1"
             if ! docker run --rm \
+                --user "$(id -u):$(id -g)" \
                 -v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw" \
                 "$RCLONE_PINNED_IMAGE" \
                 --config /tmp/rclone-conf/rclone.conf config show "${REMOTE_NAME}:" \
@@ -723,6 +730,7 @@ jobs:
               exit 1
             fi
             REMOTE_SHOW="$(docker run --rm \
+              --user "$(id -u):$(id -g)" \
               -v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw" \
               "$RCLONE_PINNED_IMAGE" \
               --config /tmp/rclone-conf/rclone.conf config show "${REMOTE_NAME}:" 2>/dev/null || true)"
@@ -797,11 +805,14 @@ jobs:
         # containers so rclone can refresh the working config (OAuth token
         # refresh: sibling temp file + atomic rename) during the real
         # probes; the UPDATED config is then detected and published by the
-        # publish step. The step traps recursive removal of the temp
-        # directory on EVERY exit (a readiness failure must never leave the
-        # decoded secret on the runner) and disarms the trap on success,
-        # when the publish step (next) takes over as the final cleanup
-        # owner.
+        # publish step. Every probe container runs as the HOST RUNNER
+        # UID:GID (--user "$(id -u):$(id -g)") so a config rewritten by
+        # rclone stays runner-owned and host-readable for the publish
+        # step's checksum (live ownership regression). The step
+        # traps recursive removal of the temp directory on EVERY exit (a
+        # readiness failure must never leave the decoded secret on the
+        # runner) and disarms the trap on success, when the publish step
+        # (next) takes over as the final cleanup owner.
         run: |
           set -euo pipefail
           TMP_RCLONE_DIR="${RCLONE_TEMP_DIR:-}"
@@ -827,8 +838,11 @@ jobs:
           # 1. REAL WRITE through the crypt boundary: a syntactically valid
           #    but unreachable remote fails here, BEFORE any teardown. The
           #    temp directory is mounted WRITABLE so rclone can refresh the
-          #    working config (OAuth token refresh) in place.
+          #    working config (OAuth token refresh) in place; the container
+          #    runs as the host runner UID:GID so any rewrite stays
+          #    host-readable.
           if ! printf '%s' "$PROBE_CONTENT" | docker run --rm -i \
+              --user "$(id -u):$(id -g)" \
               -v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw" \
               "$RCLONE_PINNED_IMAGE" \
               --config /tmp/rclone-conf/rclone.conf rcat "$REMOTE_BASE/$PROBE" >/dev/null 2>&1; then
@@ -838,12 +852,14 @@ jobs:
           # 2. REAL READ-BACK through the crypt boundary (the generation
           #    verification round trip must work against the real remote).
           PROBE_BACK="$(docker run --rm \
+              --user "$(id -u):$(id -g)" \
               -v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw" \
               "$RCLONE_PINNED_IMAGE" \
               --config /tmp/rclone-conf/rclone.conf cat "$REMOTE_BASE/$PROBE" 2>/dev/null || true)"
           if [ "$PROBE_BACK" != "$PROBE_CONTENT" ]; then
             echo "ERROR: vault-recovery remote '$REMOTE_BASE' failed the read-back probe (crypt round trip broken). Deployment ABORTED BEFORE ANY TEARDOWN — the existing deployment and any legacy lane state are retained untouched."
             docker run --rm \
+              --user "$(id -u):$(id -g)" \
               -v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw" \
               "$RCLONE_PINNED_IMAGE" \
               --config /tmp/rclone-conf/rclone.conf deletefile "$REMOTE_BASE/$PROBE" >/dev/null 2>&1 || true
@@ -852,6 +868,7 @@ jobs:
           # 3. Cleanup the probe object (best effort; a leftover probe is
           #    harmless: it is not a generation and is never listed).
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
             -v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw" \
             "$RCLONE_PINNED_IMAGE" \
             --config /tmp/rclone-conf/rclone.conf deletefile "$REMOTE_BASE/$PROBE" >/dev/null 2>&1 || \
@@ -876,7 +893,13 @@ jobs:
         # sibling temp file and atomically renames it over the config — only
         # possible with a writable directory mount), the UPDATED file is
         # detected via the pre-probe checksum and published, so the runtime
-        # services consume the refreshed tokens.
+        # services consume the refreshed tokens. The checksum comparison
+        # runs ON THE HOST as the runner user: every writable temp-dir
+        # rclone container runs as the host runner UID:GID, so an
+        # rclone-rewritten config stays runner-owned and host-readable
+        # (live ownership regression); the alpine publish container
+        # mounts the temp dir READ-ONLY and stays root (it writes the
+        # named volume atomically) and can never re-own the config.
         # The physical seed volume is resolved from Compose's rendered
         # config metadata (top-level `name`, honoring COMPOSE_PROJECT_NAME /
         # `-p`) plus the `com.docker.compose.volume=obsidian-rclone-config`

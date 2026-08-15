@@ -32,10 +32,14 @@ They cover the remediated behaviors from the architecture review:
     temp DIRECTORY (mode-0600 file) mounted WRITABLE into the probe
     containers, because rclone refreshes the working config via sibling
     temp file + atomic rename (impossible with a read-only single-file
-    mount); every cleanup owner recursively removes the temp directory on
-    every exit/cancellation, and when rclone changes the working config
-    during the probes the publish step detects it via the pre-probe
-    checksum and publishes the UPDATED file atomically,
+    mount); every writable temp-dir rclone container runs as the host
+    runner UID:GID (`--user "$(id -u):$(id -g)"`) so a rewritten config
+    stays runner-owned and host-readable for the publish step's checksum
+    (live ownership regression); every cleanup owner recursively
+    removes the temp directory on every exit/cancellation, and when
+    rclone changes the working config during the probes the publish step
+    detects it via the pre-probe checksum and publishes the UPDATED file
+    atomically,
   - Oracle upgrade-migration blocker: after old services are stopped and
     before Hermes/new services start, a fail-closed step migrates legacy
     deployments that retain `/state/rclone.active.conf` and
@@ -639,6 +643,62 @@ class DeployWorkflowContractTests(unittest.TestCase):
         # The old read-only single-file mount is gone everywhere.
         self.assertNotIn(":/tmp/rclone.conf:ro", decode + gate)
         self.assertNotIn('TMP_RCLONE_CONF="$(mktemp)"', decode)
+
+    def test_rclone_writable_probe_containers_run_as_runner_user(self) -> None:
+        """Regression: every rclone container that
+        mounts the disposable config directory WRITABLE must execute with
+        the host runner's UID:GID (`--user "$(id -u):$(id -g)"`). rclone
+        rewrites the working config via sibling temp file + atomic rename,
+        and as container root the renamed file becomes root-owned 0600 —
+        unreadable by the host runner, which broke the publish step's
+        checksum. The writable-dir OAuth refresh behavior is preserved
+        (the mounts stay :rw)."""
+        decode = _step_text(self.workflow, "Decode and validate rclone config")
+        gate = _step_text(self.workflow, "Vault-recovery remote readiness gate (real upload probe)")
+        for step_text in (decode, gate):
+            rw_mounts = step_text.count('-v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw"')
+            user_flags = step_text.count('--user "$(id -u):$(id -g)"')
+            self.assertGreater(rw_mounts, 0, "writable temp-dir rclone mounts must exist")
+            self.assertEqual(
+                user_flags,
+                rw_mounts,
+                "every writable temp-dir rclone invocation must run as the host runner UID:GID",
+            )
+        # The identity derives from the HOST runner (never guessed), and
+        # the writable mounts themselves are preserved.
+        self.assertIn('--user "$(id -u):$(id -g)"', decode)
+        self.assertIn('--user "$(id -u):$(id -g)"', gate)
+        self.assertIn('-v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw"', decode)
+        self.assertIn('-v "$TMP_RCLONE_DIR:/tmp/rclone-conf:rw"', gate)
+        # The config modes are never weakened (still 0600, no chown).
+        self.assertIn('chmod 600 "$RCLONE_CONF"', decode)
+        self.assertNotIn("chown", decode)
+        self.assertNotIn("chown", gate)
+
+    def test_publish_remains_host_readable(self) -> None:
+        """Regression: the publish step compares the
+        working config checksum ON THE HOST as the runner user, so the
+        config must stay runner-owned. The alpine publish container mounts
+        the temp dir READ-ONLY (it can never rewrite or re-own the config)
+        and stays root (it must write the named volume atomically); it is
+        NOT a writable temp-dir rclone invocation and gets no runner-user
+        flag."""
+        publish = _step_text(self.workflow, "Publish rclone config into shared volume")
+        # Host-side checksum of the working config (no docker wrapper),
+        # executed before any container runs.
+        self.assertIn('CURRENT_SHA="$(sha256sum "$RCLONE_CONF"', publish)
+        self.assertLess(
+            publish.index('CURRENT_SHA="$(sha256sum "$RCLONE_CONF"'),
+            publish.index("docker run"),
+        )
+        # The publish container mounts the temp dir READ-ONLY: it can never
+        # mutate or re-own the working config.
+        self.assertIn('-v "$TMP_RCLONE_DIR:/config/source:ro"', publish)
+        self.assertNotIn('-v "$TMP_RCLONE_DIR:/config/source:rw"', publish)
+        # It is not a writable temp-dir rclone invocation (no runner-user
+        # flag, no rw rclone temp-dir mount).
+        self.assertNotIn('--user "$(id -u):$(id -g)"', publish)
+        self.assertNotIn(':/tmp/rclone-conf:rw', publish)
 
     def test_temp_dir_cleanup_is_recursive_on_every_owner(self) -> None:
         """Every cleanup owner recursively removes the temp DIRECTORY
