@@ -28,6 +28,13 @@
 # manifest's shallow nesting. Duplicate keys are rejected (the exporter
 # never emits them; a document with duplicate keys is suspect even though
 # Python dict semantics would silently keep the last value).
+#
+# NO ERE interval expressions ({n} / {n,m}): mawk 1.3.3 (and old busybox
+# awk) do not support them and treat the braces as LITERAL characters, so
+# every match fails and every valid manifest is rejected. Exact-width
+# constraints are expressed with explicit length checks and fixed substr
+# slices instead, preserving byte-for-byte parity with the Python
+# validator's interval-based regexes.
 
 function die(msg) {
     print "vault-recovery-manifest-schema: invalid manifest: " msg > "/dev/stderr"
@@ -215,9 +222,28 @@ function need_int_pos(key) {
 
 function need_hex64(key) {
     need_string(key)
-    if (length(last_str) != 64 || match(last_str, "^[0-9a-f]{64}$") == 0) {
+    # Python _HEX64_RE is ^[0-9a-f]{64}$; the {64} interval becomes the
+    # explicit length check plus a single-repeatable class — exactly the
+    # same accepted set (64 chars, all [0-9a-f]).
+    if (length(last_str) != 64 || match(last_str, "^[0-9a-f]+$") == 0) {
         die("'" key "' is not a 64-hex sha256")
     }
+}
+
+function is_generation_id(s) {
+    # Python GENERATION_ID_RE is ^\d{8}T\d{6}\d{6}Z-[0-9a-f]{8}$ with
+    # GENERATION_ID_LEN 31. The {8}/{12} intervals become fixed substr
+    # slices + single-repeatable classes — exact parity, the token field
+    # widths are NOT weakened (a 31-char id with shifted digit widths is
+    # still rejected).
+    if (length(s) != 31) return 0
+    if (match(substr(s, 1, 8), "^[0-9]+$") == 0) return 0
+    if (substr(s, 9, 1) != "T") return 0
+    if (match(substr(s, 10, 12), "^[0-9]+$") == 0) return 0
+    if (substr(s, 22, 1) != "Z") return 0
+    if (substr(s, 23, 1) != "-") return 0
+    if (match(substr(s, 24, 8), "^[0-9a-f]+$") == 0) return 0
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -239,7 +265,7 @@ function validate_value(ctx, key) {
         }
         if (key == "generation_id") {
             need_string(key)
-            if (length(last_str) != 31 || match(last_str, "^[0-9]{8}T[0-9]{12}Z-[0-9a-f]{8}$") == 0) {
+            if (!is_generation_id(last_str)) {
                 die("generation_id is not a valid generation id")
             }
             print "generation_id\t" last_str
@@ -274,7 +300,12 @@ function validate_value(ctx, key) {
         }
         if (key == "root_mode") {
             need_string(key)
-            if (match(last_str, "^0o[0-7]{3,4}$") == 0) die("root_mode is not an octal mode string")
+            # Python _OCTAL_MODE_RE is ^0o[0-7]{3,4}$: "0o" plus exactly 3 or
+            # 4 octal digits. The {3,4} interval becomes the explicit length
+            # check (5 or 6 chars) plus a single-repeatable class.
+            if (match(last_str, "^0o[0-7]+$") == 0 || (length(last_str) != 5 && length(last_str) != 6)) {
+                die("root_mode is not an octal mode string")
+            }
             return
         }
         if (key == "scan_digest" || key == "staged_digest" || key == "entries_digest") {
