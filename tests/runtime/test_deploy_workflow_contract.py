@@ -676,6 +676,48 @@ class DeployWorkflowContractTests(unittest.TestCase):
             _step_index(self.workflow, "Verify vault-recovery deployment (uploader + export cron + plaintext absence)"),
         )
 
+    def test_vault_recovery_export_cron_wait_is_bounded_with_clear_timeout(self) -> None:
+        """Regression (false-negative deploy race): the verify step read
+        jobs.json at 15:55:18-19 with 0 jobs while the Hermes init only
+        created the vault-recovery-export cron job at 15:55:24 (health
+        verified at 15:55:14). The step must poll for the named job with a
+        BOUNDED budget instead of a single read, and a job still missing
+        after the budget must fail the deploy with a clear diagnostic
+        (Hermes init logs cron creation failures nonfatally)."""
+        step = _step_text(self.workflow, "Verify vault-recovery deployment (uploader + export cron + plaintext absence)")
+        # Bounded polling loop for the named job (60s budget, 5s interval).
+        self.assertIn('job_name = "vault-recovery-export"', step)
+        self.assertIn("deadline = time.monotonic() + 60", step)
+        self.assertIn("while time.monotonic() < deadline:", step)
+        self.assertIn("time.sleep(5)", step)
+        # Timeout path: clear diagnostic + non-zero exit (missing job fails).
+        self.assertIn("timed out after 60s waiting for the {job_name!r} cron job", step)
+        self.assertIn("docker compose logs hermes", step)
+        timeout_part = step.split("timed out after 60s waiting for the {job_name!r} cron job")[1]
+        self.assertIn("sys.exit(1)", timeout_part)
+
+    def test_vault_recovery_export_cron_strict_validation_runs_after_wait(self) -> None:
+        """The bounded wait only establishes PRESENCE; the strict schema
+        validation (schedule expr 0 4 * * *, script, no_agent, workdir) must
+        still run after the wait and must reject an invalid, duplicated or
+        missing job."""
+        step = _step_text(self.workflow, "Verify vault-recovery deployment (uploader + export cron + plaintext absence)")
+        # The wait loop precedes the strict assertions.
+        self.assertLess(
+            step.index("while time.monotonic() < deadline:"),
+            step.index('expected_expr = "0 4 * * *"'),
+        )
+        # Strict validation preserved: schedule, script, no_agent, workdir.
+        self.assertIn('expected_expr = "0 4 * * *"', step)
+        self.assertIn('schedule.get("kind") != "cron"', step)
+        self.assertIn("expr != expected_expr", step)
+        self.assertIn("hermes-vault-recovery-export-cron.sh", step)
+        self.assertIn('job.get("no_agent") is not True:', step)
+        self.assertIn('if workdir != "/opt/data":', step)
+        # Invalid/missing/duplicated job after the wait still fails.
+        self.assertIn("expected exactly 1 vault-recovery-export cron job, got", step)
+        self.assertIn("schedule.expr {expr!r} does not match VAULT_RECOVERY_EXPORT_SCHEDULE", step)
+
     def test_maximal_compose_set_includes_vault_recovery_overlay(self) -> None:
         verify = _step_text(self.workflow, "Verify embeddings overlay selection")
         self.assertIn("docker-compose.vault-recovery.yml", verify)

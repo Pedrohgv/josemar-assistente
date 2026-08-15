@@ -1445,7 +1445,42 @@ jobs:
           # workdir=/opt/data. The expr must match the base compose default
           # VAULT_RECOVERY_EXPORT_SCHEDULE.
           docker compose exec -T hermes /opt/hermes/.venv/bin/python3 - <<'PY'
-          import json, sys
+          import json, sys, time
+          # The Hermes cont-init (docker-hermes-init.sh) creates the
+          # vault-recovery-export cron job shortly AFTER the container passes
+          # the cheap healthcheck, so this verify step can race the init and
+          # read an empty/absent job set (observed live: health verified at
+          # 15:55:14, jobs.json read at 15:55:18-19 with 0 jobs, job created
+          # at 15:55:24 — a ~10s window that produced a false-negative deploy
+          # failure). Poll for the named job with a bounded 60s budget before
+          # the strict schema assertion below; a job still missing after the
+          # budget is a REAL failure (Hermes init logs cron creation failures
+          # nonfatally, so container health alone is not enough).
+          job_name = "vault-recovery-export"
+          deadline = time.monotonic() + 60
+          last_error = "job never appeared"
+          while time.monotonic() < deadline:
+              try:
+                  with open("/opt/data/cron/jobs.json", encoding="utf-8") as fh:
+                      data = json.load(fh)
+                  jobs = data.get("jobs")
+                  if not isinstance(jobs, list):
+                      last_error = "jobs.json 'jobs' is not a list"
+                  elif any(isinstance(j, dict) and j.get("name") == job_name for j in jobs):
+                      break
+                  else:
+                      last_error = f"jobs.json present but has no {job_name!r} job"
+              except Exception as exc:
+                  last_error = f"could not read /opt/data/cron/jobs.json: {exc}"
+              time.sleep(5)
+          else:
+              print(
+                  f"ERROR: timed out after 60s waiting for the {job_name!r} cron job to appear "
+                  f"in /opt/data/cron/jobs.json (last state: {last_error}); Hermes init logs "
+                  f"cron creation failures nonfatally - check 'docker compose logs hermes'",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
           expected_expr = "0 4 * * *"
           try:
               with open("/opt/data/cron/jobs.json", encoding="utf-8") as fh:
