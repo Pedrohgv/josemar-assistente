@@ -82,6 +82,12 @@ FROM ${HERMES_BASE_IMAGE}
 USER root
 
 # Install Josemar skill/runtime dependencies not guaranteed by the base Hermes image.
+# openssh-server is installed for the optional josemar-mcp overlay (issue #101):
+# when the overlay is enabled, a hardened sshd runs inside this container
+# alongside the Hermes gateway, sharing the same PID namespace, gbrain state,
+# and locks. The sshd starts as root (via a cont-init script) and drops to the
+# hermes user for forced commands. The gateway continues to run as the
+# non-root hermes user via s6-setuidgid.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     gh \
@@ -89,7 +95,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     ca-certificates \
     unzip \
-    && rm -rf /var/lib/apt/lists/*
+    openssh-server \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd /var/lib/josemar-mcp \
+    && chmod 0755 /run/sshd
 
 # Install Josemar skill dependencies into both the Hermes venv (used by
 # `docker compose exec` and Hermes-spawned subprocesses) and system Python
@@ -158,6 +167,10 @@ COPY skills-factory/tasknotes /opt/josemar/skills/tasknotes
 # is instruction-only (SKILL.md + SETUP.md, no executable); the overlay still
 # gates the tunnel sidecar and network, not the skill registration.
 COPY skills-factory/browser-control /opt/josemar/skills/browser-control
+# josemar-mcp skill (issue #101): remote MCP client setup and runtime guidance.
+# Baked into the Hermes image so Josemar can guide first-time setup and
+# self-diagnose when the overlay is disabled, consistent with browser-control.
+COPY skills-factory/josemar-mcp /opt/josemar/skills/josemar-mcp
 RUN chmod +x /opt/josemar/skills/aux-ml/aux-ml
 
 # Canonical workspace-sync implementation (standard-library Python).
@@ -182,6 +195,11 @@ COPY scripts/hermes-gbrain-refresh-cron.sh /opt/josemar/scripts/hermes-gbrain-re
 COPY scripts/hermes-gbrain-embedding-refresh-cron.sh /opt/josemar/scripts/hermes-gbrain-embedding-refresh-cron.sh
 COPY scripts/hermes-gbrain-embedding-refresh.py /opt/josemar/scripts/hermes-gbrain-embedding-refresh.py
 COPY scripts/tasknotes_mcp_core.py scripts/tasknotes_mcp.py scripts/tasknotes_lock_run.py /opt/josemar/scripts/
+# Josemar knowledge MCP server (issue #101): curated read-only gbrain tools
+# plus a user-approved josemar_chat tool. Launched as a forced SSH command by
+# the supervised in-container sshd (see docker-compose.josemar-mcp.yml). The
+# wrapper recovers only API_SERVER_KEY from s6's container environment and execs the stdio server.
+COPY scripts/josemar_knowledge_mcp.py /opt/josemar/scripts/josemar_knowledge_mcp.py
 # Mnemosyne encrypted-backup core (Phase 2): Hermes-side exporter + restore
 # helper. The separate rclone uploader service runs in its own container
 # (docker-compose.mnemosyne-backup.yml) and mounts these scripts read-only.
@@ -200,7 +218,44 @@ RUN chmod +x /opt/josemar/scripts/hermes-workspace-sync-cron.sh \
         /opt/josemar/scripts/tasknotes_mcp_core.py \
         /opt/josemar/scripts/tasknotes_mcp.py \
         /opt/josemar/scripts/tasknotes_lock_run.py \
-        /opt/josemar/scripts/mnemosyne_backup_core.py
+        /opt/josemar/scripts/mnemosyne_backup_core.py \
+        /opt/josemar/scripts/josemar_knowledge_mcp.py
+# Forced-command wrapper for the josemar-mcp SSH daemon (issue #101). When
+# the josemar-mcp overlay is enabled, a hardened sshd runs inside this
+# container. The wrapper sets the deployment env and execs the stdio MCP
+# server with the Hermes venv python as the hermes user (sshd drops
+# privileges via its own mechanism). The wrapper is the authorized_keys
+# forced command; the remote client cannot override it.
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    'ENV_DIR="/var/run/s6/container_environment"' \
+    'if [ ! -r "${ENV_DIR}/API_SERVER_KEY" ]; then echo "API_SERVER_KEY is not available" >&2; exit 1; fi' \
+    'API_SERVER_KEY="$(cat "${ENV_DIR}/API_SERVER_KEY")"' \
+    'export API_SERVER_KEY' \
+    'unset SSH_ORIGINAL_COMMAND LANG LANGUAGE LC_ALL LC_CTYPE LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME' \
+    'export GBRAIN_HOME="${GBRAIN_HOME:-/opt/data}"' \
+    'export GBRAIN_BRAIN_REPO="${GBRAIN_BRAIN_REPO:-/opt/data/obsidian}"' \
+    'export GBRAIN_SCHEMA_PACK="${GBRAIN_SCHEMA_PACK:-josemar}"' \
+    'export GBRAIN_SKIP_STARTUP_HOOKS=1' \
+    'export HOME="${HOME:-/opt/data}"' \
+    'exec /opt/hermes/.venv/bin/python3 /opt/josemar/scripts/josemar_knowledge_mcp.py' \
+    > /usr/local/bin/josemar-knowledge-mcp-forced \
+    && chmod 0755 /usr/local/bin/josemar-knowledge-mcp-forced
+
+# Josemar MCP sshd config template and init script (issue #101). The sshd
+# runs inside this container when JOSEMAR_MCP_ENABLED=true, sharing the
+# same PID namespace, gbrain state, and locks as the Hermes gateway. The
+# cont-init script provisions the config; the s6 longrun runs sshd foregrounded
+# as root and restarts it on exit. sshd drops to hermes for forced commands.
+# The gateway continues as non-root hermes via s6-setuidgid.
+COPY josemar-mcp/sshd_config.template /etc/josemar-mcp/sshd_config.template
+COPY josemar-mcp/init-sshd.sh /etc/cont-init.d/02-josemar-mcp-sshd
+COPY josemar-mcp/sshd-run /etc/services.d/josemar-mcp-sshd/run
+COPY josemar-mcp/down /etc/services.d/josemar-mcp-sshd/down
+RUN chmod 0644 /etc/josemar-mcp/sshd_config.template \
+    && chmod 0755 /etc/cont-init.d/02-josemar-mcp-sshd /etc/services.d/josemar-mcp-sshd/run \
+    && chmod 0644 /etc/services.d/josemar-mcp-sshd/down
 
 COPY config/hermes-config.yaml /opt/josemar/hermes/config.yaml
 COPY docker-hermes-init.sh /etc/cont-init.d/00-josemar-setup

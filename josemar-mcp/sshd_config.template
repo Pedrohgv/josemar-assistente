@@ -1,0 +1,88 @@
+# Josemar MCP sshd configuration template.
+#
+# Hardened, forced-command-only MCP endpoint running inside the Hermes
+# container. The init script (02-josemar-mcp-sshd) renders this template
+# with the runtime bind IP and authorized_keys options. The s6 longrun starts
+# sshd in the foreground and restarts it on exit.
+#
+# Constants: SSH user `hermes`, SSH port 2223, forced command
+# /usr/local/bin/josemar-knowledge-mcp-forced.
+#
+# Security posture:
+#   - Public-key only (AuthenticationMethods publickey); passwords,
+#     keyboard-interactive, root login, X11, agent forwarding,
+#     local/dynamic/stream forwarding all disabled.
+#   - MaxSessions 1 allows exactly one session channel (the forced command);
+#     no shell, no subsystem, no additional sessions.
+#   - AllowTcpForwarding no blocks ALL forwarding (local and remote). The
+#     forced command is the only thing the client can do.
+#   - PermitTTY no prevents interactive shells even though the `hermes` user
+#     has a valid login shell. The forced command in authorized_keys
+#     overrides any client-requested command, so the shell is only ever
+#     used to exec the forced wrapper.
+#   - sshd binds only to the josemar-mcp interface IP, not josemar-network
+#     or the tailnet.
+#   - The forced command runs as the `hermes` user (the same user that runs
+#     the gateway), sharing the same PID namespace, gbrain state, and locks.
+
+Port 2223
+ListenAddress __JOSEMAR_MCP_HERMES_IP__
+
+AddressFamily inet
+
+# Host keys: persisted in the dedicated root-owned named volume mounted at
+# /var/lib/josemar-mcp-hostkeys so the client known_hosts stays stable across
+# redeploys. Generated on first start by the init script.
+HostKey /var/lib/josemar-mcp-hostkeys/ssh_host_ed25519_key
+
+# Authorized keys populated by the deploy workflow into a named volume and
+# mounted read-only at /josemar-mcp-authorized-keys. The init script copies
+# them into a runtime dir with restrictive options prefixed so a supplied
+# plain public key cannot gain a shell and can only run the forced MCP
+# command.
+AuthorizedKeysFile /etc/josemar-mcp/runtime/authorized_keys
+
+# Authentication: public-key only.
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+AuthenticationMethods publickey
+
+# Forced-command user: hermes (the same non-root user that runs the gateway).
+# This ensures the forced MCP command shares the same PID namespace, gbrain
+# state, locks, and UID as the Hermes gateway.
+AllowUsers hermes
+# No TCP forwarding of any kind. The forced command is the only path.
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+GatewayPorts no
+PermitTunnel no
+X11Forwarding no
+
+# MaxSessions 1 allows exactly one session channel for the forced command.
+MaxSessions 1
+
+# No TTY, no interactive sessions.
+PermitTTY no
+PrintMotd no
+AcceptEnv none
+PermitUserEnvironment no
+
+# No SFTP/subsystems. The default sftp subsystem is not declared, so it is
+# unavailable. MaxSessions 1 + the forced command make subsystems unusable
+# regardless.
+
+# Logging.
+SyslogFacility AUTH
+LogLevel VERBOSE
+
+# Misc hardening.
+LoginGraceTime 20
+MaxAuthTries 3
+ClientAliveInterval 30
+ClientAliveCountMax 3
+StrictModes yes
+PidFile /run/josemar-mcp-sshd.pid

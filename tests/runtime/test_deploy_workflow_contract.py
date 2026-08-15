@@ -177,7 +177,7 @@ class DeployWorkflowContractTests(unittest.TestCase):
     def test_compose_config_validation_precedes_volume_population(self) -> None:
         names = _step_names(self.workflow)
         derive_idx = names.index("Derive compose file and validate config")
-        populate_idx = names.index("Populate browser-control persistent volumes")
+        populate_idx = names.index("Populate browser-control and josemar-mcp persistent volumes")
         self.assertLess(derive_idx, populate_idx)
 
     def test_compose_config_validation_precedes_rclone_volume_publish(self) -> None:
@@ -189,14 +189,14 @@ class DeployWorkflowContractTests(unittest.TestCase):
     def test_rclone_decode_validation_precedes_volume_population(self) -> None:
         names = _step_names(self.workflow)
         decode_idx = names.index("Decode and validate rclone config")
-        populate_idx = names.index("Populate browser-control persistent volumes")
+        populate_idx = names.index("Populate browser-control and josemar-mcp persistent volumes")
         self.assertLess(decode_idx, populate_idx)
 
     def test_all_preflight_precedes_teardown(self) -> None:
         names = _step_names(self.workflow)
         derive_idx = names.index("Derive compose file and validate config")
         decode_idx = names.index("Decode and validate rclone config")
-        populate_idx = names.index("Populate browser-control persistent volumes")
+        populate_idx = names.index("Populate browser-control and josemar-mcp persistent volumes")
         publish_idx = names.index("Publish rclone config into shared volume")
         stop_idx = names.index("Stop existing services")
         # All preflight steps precede teardown.

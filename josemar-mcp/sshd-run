@@ -1,0 +1,6 @@
+#!/command/with-contenv sh
+set -eu
+if [ "${JOSEMAR_MCP_ENABLED:-false}" != "true" ]; then
+    exit 0
+fi
+exec /usr/sbin/sshd -D -e -f /etc/josemar-mcp/runtime/sshd_config

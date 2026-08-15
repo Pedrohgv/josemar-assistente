@@ -1,0 +1,92 @@
+# Optional josemar-mcp overlay.
+#
+# Apply together with docker-compose.yml ONLY when josemar-mcp is enabled:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.josemar-mcp.yml
+#   (no Compose profile is required; this overlay modifies existing services)
+#
+# This overlay adds:
+#   - the internal `josemar-mcp` Docker network (shared by hermes and
+#     tailscale) with configurable static IPs,
+#   - josemar-mcp-specific network attachments for hermes (static IP) and
+#     tailscale (static IP),
+#   - the `josemar-mcp-authorized-keys` volume populated by the deploy
+#     workflow with the operator's SSH public key, mounted read-only into
+#     the hermes container.
+#
+# When enabled, a hardened sshd runs INSIDE the existing Hermes container
+# (started by the cont-init script /etc/cont-init.d/02-josemar-mcp-sshd,
+# installed by Dockerfile.hermes). The sshd shares Hermes's PID namespace,
+# gbrain state, and locks. It starts as root (cont-init runs as root) and
+# drops to the hermes user for forced commands. The Hermes gateway continues
+# as non-root hermes via s6-setuidgid. No separate sidecar container is
+# used.
+#
+# The forced command invokes /usr/local/bin/josemar-knowledge-mcp-forced,
+# which execs the repo-owned scripts/josemar_knowledge_mcp.py stdio FastMCP
+# server. The server offers curated read-only gbrain tools plus a
+# josemar_chat tool that calls the local bearer-authenticated Hermes API on
+# the internal Docker network. No shell, arbitrary command, port
+# forwarding, or direct API exposure is available to the remote client.
+#
+# When josemar-mcp is disabled, this overlay is NOT applied; the base
+# docker-compose.yml alone is used. The cont-init script checks
+# JOSEMAR_MCP_ENABLED and skips sshd startup when it is not "true".
+#
+# Tailscale Serve is tailnet-only (TCP). No Funnel is ever used. When both
+# browser-control and josemar-mcp are enabled, the deploy workflow writes a
+# Serve config that maps both tcp:2222 and tcp:2223.
+#
+# See docs/josemar-mcp.md for the full threat model and client setup.
+
+services:
+  hermes:
+    networks:
+      josemar-network: null
+      josemar-mcp:
+        # Tailscale Serve forwards tcp:2223 to the SSH daemon, which binds
+        # to JOSEMAR_MCP_HERMES_IP:2223 on this network. The sshd runs
+        # inside the hermes container, sharing its PID namespace and
+        # gbrain state.
+        ipv4_address: ${JOSEMAR_MCP_HERMES_IP:-172.31.251.2}
+    volumes:
+      # Authorized keys populated by the deploy workflow into a named volume.
+      # The cont-init script reads /josemar-mcp-authorized-keys/authorized_keys.
+      - josemar-mcp-authorized-keys:/josemar-mcp-authorized-keys:ro
+      - josemar-mcp-hostkeys:/var/lib/josemar-mcp-hostkeys
+    environment:
+      - JOSEMAR_MCP_ENABLED=true
+      - JOSEMAR_MCP_HERMES_IP=${JOSEMAR_MCP_HERMES_IP:-172.31.251.2}
+
+  tailscale:
+    networks:
+      josemar-network: null
+      josemar-mcp:
+        ipv4_address: ${JOSEMAR_MCP_TAILSCALE_IP:-172.31.251.3}
+
+networks:
+  # Internal-only network shared by hermes and tailscale when josemar-mcp is
+  # enabled. `internal: true` blocks external egress; inter-container traffic
+  # (Tailscale -> JOSEMAR_MCP_HERMES_IP:2223) still works. No port is
+  # published to the host. Uses a distinct subnet (172.31.251.0/29) from
+  # browser-control (172.31.250.0/29) so both overlays can be enabled
+  # simultaneously.
+  josemar-mcp:
+    driver: bridge
+    internal: true
+    ipam:
+      driver: default
+      config:
+        - subnet: ${JOSEMAR_MCP_SUBNET:-172.31.251.0/29}
+          gateway: ${JOSEMAR_MCP_GATEWAY:-172.31.251.1}
+    attachable: false
+
+volumes:
+  # Authorized keys populated by the deploy workflow from the
+  # JOSEMAR_MCP_AUTHORIZED_KEY secret. Mounted read-only into the hermes
+  # container at /josemar-mcp-authorized-keys.
+  josemar-mcp-authorized-keys:
+    driver: local
+  # Dedicated root-owned volume; docker-hermes-init intentionally never chowns
+  # this mount. The sshd init script reapplies root ownership and modes.
+  josemar-mcp-hostkeys:
+    driver: local
