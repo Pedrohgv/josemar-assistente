@@ -30,10 +30,16 @@ staged generations are still pending.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
 import shutil
+import signal
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1598,6 +1604,241 @@ class UploaderBehaviorTests(unittest.TestCase):
         proc = self._run_impl({"VAULT_RECOVERY_LOCAL_RETENTION": "abc"})
         self.assertEqual(proc.returncode, 2, proc.stderr)
         self.assertIn("Invalid VAULT_RECOVERY_LOCAL_RETENTION", proc.stderr)
+
+
+class UploadLockLifecycleTests(unittest.TestCase):
+    """The upload lock is a KERNEL-RELEASED exclusive flock(1) on a regular
+    file — NOT a mkdir lease. The live failure this guards: a persistent
+    `/state/.upload.lock` mkdir lease survives a Docker SIGKILL during a
+    deploy and blocks every future uploader start. With flock the kernel
+    drops the lock automatically when the owning process dies (even
+    SIGKILL), living contention is still rejected, and the lock file is
+    never deleted on startup (deleting it while another process holds it
+    would break mutual exclusion)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="vr-upload-lock-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.gen_id, self.staging = make_generation(self.tmp)
+        self.state = self.tmp / "state"
+        # The uploader creates the state dir itself (mkdir -p); pre-create it
+        # so host-side lock probes (which run before any uploader start in
+        # the SIGKILL test) have a place to open the lock file.
+        self.state.mkdir()
+        self.fixture = FakeRcloneFixture(self.tmp)
+
+    def _run(self, over=None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["/bin/sh", str(UPLOADER_SCRIPT)],
+            env=uploader_env_for(self.fixture, self.staging, self.state, **(over or {})),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    def _lock_file(self) -> Path:
+        # The kernel lock lives on `.upload.flock` (a regular file), NOT the
+        # legacy mkdir lease `.upload.lock` directory.
+        return self.state / ".upload.flock"
+
+    def _lock_free(self) -> bool:
+        """True when no live process holds the upload lock (non-blocking
+        exclusive flock from this test process)."""
+        fd = os.open(self._lock_file(), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+            return True
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+
+    def test_one_shot_releases_kernel_lock_after_exit(self) -> None:
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0,
+                         f"one-shot failed:\n{proc.stdout}\n{proc.stderr}")
+        # The lock FILE persists by design (never deleted) but is a regular
+        # file, and the KERNEL lock is free after the process exited: a
+        # fresh exclusive flock succeeds.
+        self.assertTrue(self._lock_file().exists(), "lock file not created")
+        self.assertTrue(self._lock_file().is_file(),
+                        "lock must be a regular flock file, not a mkdir lease")
+        self.assertTrue(self._lock_free(), "kernel lock must be free after exit")
+
+    def test_lock_file_never_deleted_across_runs(self) -> None:
+        first = self._run()
+        self.assertEqual(first.returncode, 0,
+                         f"first run failed:\n{first.stdout}\n{first.stderr}")
+        self.assertTrue(self._lock_file().exists())
+        # A second invocation (restart over the same state) must neither be
+        # blocked by nor delete the lock file.
+        second = self._run()
+        self.assertEqual(second.returncode, 0,
+                         f"second run failed:\n{second.stdout}\n{second.stderr}")
+        self.assertTrue(self._lock_file().exists(),
+                        "lock file must never be deleted on startup")
+
+    def test_living_contention_rejected_without_state_advance(self) -> None:
+        # A LIVE holder (this process) must reject the uploader immediately
+        # (non-blocking), with no state advance, and release must unblock it.
+        fd = os.open(self._lock_file(), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            proc = self._run()
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        self.assertEqual(proc.returncode, 1,
+                         f"contended one-shot must fail:\n{proc.stdout}\n{proc.stderr}")
+        self.assertIn("Upload already in progress", proc.stderr)
+        self.assertFalse((self.state / "uploaded-generations.jsonl").exists(),
+                         "no ledger may be written under contention")
+        self.assertFalse((self.state / "last-uploaded-generation").exists(),
+                         "no last-uploaded may be written under contention")
+        # After the holder releases, the next run succeeds (the lock file
+        # itself was never touched by the rejected run).
+        again = self._run()
+        self.assertEqual(again.returncode, 0,
+                         f"post-release run failed:\n{again.stdout}\n{again.stderr}")
+
+    def test_sigkilled_holder_releases_lock(self) -> None:
+        # THE live failure: a holder killed with SIGKILL (no cleanup, no
+        # traps can run) must not leave a stale lease. The kernel releases
+        # the flock, and the very next uploader start succeeds.
+        holder = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "import fcntl, os, sys, time\n"
+                "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                "time.sleep(300)\n",
+                str(self._lock_file()),
+            ],
+        )
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if holder.poll() is not None:
+                    self.fail("lock holder exited early")
+                if not self._lock_free():
+                    break
+                time.sleep(0.05)
+            self.assertFalse(self._lock_free(), "holder never acquired the lock")
+            # A live holder rejects the uploader (real contention).
+            proc = self._run()
+            self.assertEqual(proc.returncode, 1,
+                             f"contended one-shot must fail:\n{proc.stdout}\n{proc.stderr}")
+            self.assertIn("Upload already in progress", proc.stderr)
+            # SIGKILL: no trap, no cleanup, nothing but the kernel can
+            # release the lock.
+            os.kill(holder.pid, signal.SIGKILL)
+            holder.wait(timeout=15)
+            # The kernel released the lock: the uploader runs again.
+            again = self._run()
+            self.assertEqual(again.returncode, 0,
+                             f"post-SIGKILL run failed:\n{again.stdout}\n{again.stderr}")
+        finally:
+            if holder.poll() is None:
+                holder.kill()
+                holder.wait(timeout=10)
+
+    def test_stderr_remains_visible_after_completed_poll_and_later_contention(self) -> None:
+        # Oracle blocker regression: `_cleanup` must close the lock fd
+        # WITHOUT `2>/dev/null` on the `exec` special builtin — that
+        # redirection PERSISTS after the command, permanently redirecting
+        # the whole daemon shell's stderr to /dev/null and silently
+        # swallowing every later log_error. The daemon completes a full
+        # poll (run_once + _cleanup with the lock held), then a LIVE holder
+        # contends the NEXT poll: the rejection error must still be visible
+        # on stderr.
+        err_path = self.tmp / "daemon.stderr"
+        env = uploader_env_for(
+            self.fixture, self.staging, self.state,
+            VAULT_RECOVERY_ONCE="false",
+            VAULT_RECOVERY_POLL_INTERVAL="1",
+            VAULT_RECOVERY_RUN_ON_START="true",
+        )
+        with err_path.open("w", encoding="utf-8") as err_fh:
+            daemon = subprocess.Popen(
+                ["/bin/sh", str(UPLOADER_SCRIPT)],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=err_fh,
+                text=True,
+            )
+        try:
+            # First poll completed: the staged generation was uploaded and
+            # acknowledged (ledger written), which means _cleanup ran with
+            # the lock held — the exact spot the buggy redirection would
+            # have persisted.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if (self.state / "uploaded-generations.jsonl").exists():
+                    break
+                if daemon.poll() is not None:
+                    self.fail(f"daemon exited before completing a poll:\n{err_path.read_text()}")
+                time.sleep(0.1)
+            else:
+                self.fail(f"daemon never completed a poll:\n{err_path.read_text()}")
+            # LIVE contention: the next poll must be rejected — and the
+            # rejection MUST be visible on stderr.
+            fd = os.open(self._lock_file(), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    if "Upload already in progress" in err_path.read_text():
+                        break
+                    if daemon.poll() is not None:
+                        self.fail(f"daemon exited during contention:\n{err_path.read_text()}")
+                    time.sleep(0.1)
+                else:
+                    self.fail(
+                        "contention error never reached stderr after a completed poll — "
+                        "the _cleanup `exec` must not carry a persistent stderr "
+                        f"redirection (stderr so far:\n{err_path.read_text()})"
+                    )
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+        finally:
+            daemon.terminate()
+            try:
+                daemon.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+                daemon.wait(timeout=10)
+
+    def test_flock_unavailable_fails_closed(self) -> None:
+        # A runtime without flock(1) must fail closed (exit 2) instead of
+        # falling back to a lease that could survive process death. Build a
+        # PATH containing every tool the uploader needs EXCEPT flock.
+        farm = self.tmp / "no-flock-bin"
+        farm.mkdir()
+        for tool in (
+            "awk", "basename", "cat", "chmod", "cmp", "cp", "cut", "date",
+            "dirname", "env", "find", "grep", "head", "mkdir", "mktemp",
+            "mv", "python3", "realpath", "rm", "sed", "sha256sum", "sort",
+            "stat", "tr", "wc", "xargs",
+        ):
+            resolved = shutil.which(tool)
+            if resolved:
+                os.symlink(resolved, farm / tool)
+        # The fake rclone (python3 via `env` from the farm) and NO flock.
+        os.symlink(self.fixture.bin / "rclone", farm / "rclone")
+        self.assertIsNone(shutil.which("flock", path=str(farm)),
+                          "test setup: flock must be absent from the farm PATH")
+        proc = self._run({"PATH": str(farm)})
+        self.assertEqual(proc.returncode, 2,
+                         f"must fail closed without flock:\n{proc.stdout}\n{proc.stderr}")
+        self.assertIn("flock(1) is not available", proc.stderr)
+        self.assertFalse((self.state / "uploaded-generations.jsonl").exists(),
+                         "no upload may happen without the kernel lock")
 
 
 if __name__ == "__main__":

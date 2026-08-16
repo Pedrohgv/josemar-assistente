@@ -1232,6 +1232,124 @@ jobs:
             '
           echo "Legacy rclone active config migration complete (volume '$STATE_VOLUME' holds only non-secret acknowledgement state)"
 
+      - name: Migrate stale vault-recovery uploader lock
+        # Audited stale-lock migration. The vault-recovery uploader uses a
+        # mkdir-based lock DIRECTORY at /state/.upload.lock inside the
+        # persistent vault-recovery-uploader-state volume and FAILS CLOSED
+        # at startup when the lock exists ("Upload already in progress"). A
+        # stale empty lock dir (crashed/killed run, pre-fix uploader)
+        # blocks the new uploader until removed. This step runs AFTER all
+        # prior services are stopped and BEFORE new services start, and
+        # removes ONLY an EMPTY legacy /state/.upload.lock via `rmdir`
+        # inside a disposable named-volume container.
+        # Fail-closed and safe (same rigor as the other migrations):
+        #   - the Compose project name comes from Compose's rendered
+        #     config metadata (honoring COMPOSE_PROJECT_NAME / `-p`),
+        #     never guessed from `basename "$PWD"`;
+        #   - the volume is located by the Compose project AND the
+        #     `com.docker.compose.volume=vault-recovery-uploader-state`
+        #     label; 0 matches is the ONLY safe skip; a Docker
+        #     list/inspect operational failure or >1 matches FAILS the
+        #     deploy (never guess);
+        #   - ANY container (running or stopped) still mounting the
+        #     volume FAILS the deploy — the migration must not race a
+        #     live user;
+        #   - the lock removal runs INSIDE a disposable container
+        #     mounting the NAMED volume at /state; a host path can never
+        #     be touched;
+        #   - ONLY the empty lock DIRECTORY is removed, via `rmdir` (it
+        #     cannot remove non-empty directories): a nonempty lock, a
+        #     non-directory at the lock path, or a lock still present
+        #     after removal FAILS the deploy;
+        #   - no broad rm/rm -rf, no ledger/slot/secret/state deletion;
+        #     the lock is never read or printed;
+        #   - clean skip ONLY when the volume or the lock is absent.
+        run: |
+          set -euo pipefail
+          # Resolve the ACTUAL Compose project name from Compose's own
+          # rendered config metadata (top-level `name` field), which honors
+          # COMPOSE_PROJECT_NAME, `-p`, and the directory default. Never
+          # guessed from `basename "$PWD"`.
+          if ! PROJECT_NAME="$(docker compose config --format json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["name"])')"; then
+            echo "ERROR: cannot resolve the Compose project name (docker compose config failed); aborting the stale-lock migration instead of guessing"
+            exit 1
+          fi
+          if [ -z "$PROJECT_NAME" ]; then
+            echo "ERROR: Compose project name resolved to empty; aborting the stale-lock migration instead of guessing"
+            exit 1
+          fi
+          # Locate the uploader state volume by the Compose project AND the
+          # com.docker.compose.volume label. Outcome distinction:
+          #   0 matches  -> safe skip (no volume to migrate);
+          #   docker volume ls operational failure -> FAIL the deploy;
+          #   >1 matches -> FAIL the deploy (ambiguous; never guess).
+          if ! MATCHES="$(docker volume ls \
+              --filter "label=com.docker.compose.project=$PROJECT_NAME" \
+              --filter label=com.docker.compose.volume=vault-recovery-uploader-state \
+              --format '{{.Name}}' 2>/dev/null)"; then
+            echo "ERROR: cannot list Docker volumes for project '$PROJECT_NAME' (docker volume ls failed); aborting the stale-lock migration instead of guessing"
+            exit 1
+          fi
+          MATCH_COUNT="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
+          if [ "$MATCH_COUNT" -eq 0 ]; then
+            echo "No vault-recovery-uploader-state volume found for project '$PROJECT_NAME' (com.docker.compose.volume=vault-recovery-uploader-state); stale-lock migration skipped"
+            exit 0
+          fi
+          if [ "$MATCH_COUNT" -ne 1 ]; then
+            echo "ERROR: expected exactly 1 vault-recovery-uploader-state volume for project '$PROJECT_NAME', found $MATCH_COUNT; aborting the stale-lock migration instead of guessing"
+            exit 1
+          fi
+          STATE_VOLUME="$MATCHES"
+          # Named-volume-only guard: the resolved name must be an existing
+          # Docker NAMED volume before anything is mounted or removed.
+          if ! docker volume inspect "$STATE_VOLUME" >/dev/null 2>&1; then
+            echo "ERROR: resolved volume '$STATE_VOLUME' is not an inspectable Docker named volume; aborting instead of guessing"
+            exit 1
+          fi
+          # Verify NO container (running or stopped) still mounts the
+          # volume: the migration must never race a live user.
+          if ! MOUNTED_CONTAINERS="$(docker ps -aq --filter "volume=$STATE_VOLUME" 2>/dev/null)"; then
+            echo "ERROR: cannot list containers mounting '$STATE_VOLUME' (docker ps failed); aborting the stale-lock migration instead of guessing"
+            exit 1
+          fi
+          if [ -n "$(printf '%s' "$MOUNTED_CONTAINERS" | tr -d '[:space:]')" ]; then
+            echo "ERROR: container(s) still mount volume '$STATE_VOLUME' ($(printf '%s' "$MOUNTED_CONTAINERS" | tr '\n' ' ')); aborting the stale-lock migration instead of racing a live user"
+            exit 1
+          fi
+          # Remove ONLY an EMPTY legacy lock directory via `rmdir` inside a
+          # disposable alpine container mounting the NAMED volume at /state
+          # — a host path can never be touched, and rmdir cannot remove
+          # non-empty directories, so no state can ever be deleted. The
+          # lock is never read or printed. Clean skip when the lock is
+          # absent; every other outcome fails the deploy.
+          docker run --rm \
+            -v "$STATE_VOLUME:/state" \
+            alpine:3.20 \
+            sh -c '
+              if [ ! -e /state/.upload.lock ]; then
+                echo "no legacy .upload.lock present in the uploader state volume; stale-lock migration skipped"
+                exit 0
+              fi
+              if [ ! -d /state/.upload.lock ]; then
+                echo "ERROR: /state/.upload.lock exists but is not a directory; refusing to remove it" >&2
+                exit 1
+              fi
+              if [ -n "$(ls -A /state/.upload.lock 2>/dev/null)" ]; then
+                echo "ERROR: /state/.upload.lock is not empty; refusing to remove it (it may hold state)" >&2
+                exit 1
+              fi
+              rmdir /state/.upload.lock || {
+                echo "ERROR: rmdir failed on /state/.upload.lock" >&2
+                exit 1
+              }
+              if [ -e /state/.upload.lock ]; then
+                echo "ERROR: /state/.upload.lock still present after rmdir" >&2
+                exit 1
+              fi
+              echo "removed empty legacy lock directory /state/.upload.lock"
+            '
+          echo "Stale vault-recovery uploader lock migration complete (volume '$STATE_VOLUME')"
+
       - name: Clean up old Docker images
         run: |
           docker image prune -a -f

@@ -60,6 +60,16 @@ They cover the remediated behaviors from the architecture review:
     compose labels (or reuses a pre-labeling volume of the same
     compose-convention name), while a Docker list/inspect failure or >1
     matches fails the deploy,
+  - stale vault-recovery uploader lock migration: after all prior services
+    stop and before new services start, a fail-closed step resolves
+    vault-recovery-uploader-state by Compose metadata + labels (same
+    rigor as the other migrations), verifies NO container (running or
+    stopped) still mounts it, and removes ONLY an EMPTY legacy
+    `/state/.upload.lock` via `rmdir` inside a disposable named-volume
+    container — a nonempty lock, a non-directory at the lock path, any
+    mounting container, an ambiguous/failed resolve/list/inspect all fail
+    the deploy; clean skip only when the volume or lock is absent; no
+    broad rm/rm -rf and no secret/state deletion,
   - mode-specific verification commands (off/pilot/backup post-start checks;
     Hermes init nonfatal activation failure handled; hermes_cli.config
     load_config() against /opt/data/config.yaml; TEI 600s wait budget with
@@ -99,6 +109,8 @@ RCLONE_DIGEST = "rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4
 LEGACY_MIGRATION_STEP_NAME = (
     "Migrate legacy rclone active config out of Mnemosyne backup state volume"
 )
+
+STALE_LOCK_MIGRATION_STEP_NAME = "Migrate stale vault-recovery uploader lock"
 
 
 def _step_text(workflow: dict, name: str) -> str:
@@ -1016,6 +1028,120 @@ class DeployWorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("MNEMOSYNE_DEPLOY_MODE", step.get("if", ""))
         self.assertNotIn("vars.", step.get("if", ""))
+
+    # --- stale vault-recovery uploader lock migration (audited issue) ---
+
+    def test_stale_lock_migration_runs_after_stop_before_start(self) -> None:
+        """The stale-lock migration must run AFTER all prior services are
+        stopped (no live uploader can hold or recreate the lock) and
+        BEFORE new services start (the new uploader must never fail closed
+        on the stale lock)."""
+        names = _step_names(self.workflow)
+        self.assertIn(STALE_LOCK_MIGRATION_STEP_NAME, names)
+        self.assertLess(
+            names.index("Stop existing services"),
+            names.index(STALE_LOCK_MIGRATION_STEP_NAME),
+        )
+        self.assertLess(
+            names.index(STALE_LOCK_MIGRATION_STEP_NAME),
+            names.index("Start services"),
+        )
+        self.assertLess(
+            names.index(STALE_LOCK_MIGRATION_STEP_NAME),
+            names.index("Build Docker image"),
+        )
+
+    def test_stale_lock_migration_resolves_volume_via_compose_metadata(self) -> None:
+        """The vault-recovery-uploader-state volume is resolved from
+        Compose's rendered config metadata (top-level `name`, honoring
+        COMPOSE_PROJECT_NAME / -p) plus the compose volume label — never
+        guessed from `basename "$PWD"`."""
+        step = _step_text(self.workflow, STALE_LOCK_MIGRATION_STEP_NAME)
+        self.assertIn(
+            'PROJECT_NAME="$(docker compose config --format json',
+            step,
+        )
+        self.assertIn('json.load(sys.stdin)["name"]', step)
+        self.assertIn(
+            '--filter "label=com.docker.compose.project=$PROJECT_NAME"',
+            step,
+        )
+        self.assertIn(
+            "--filter label=com.docker.compose.volume=vault-recovery-uploader-state",
+            step,
+        )
+        self.assertIn("--format '{{.Name}}'", step)
+        self.assertNotIn('COMPOSE_PROJECT="$(basename "$PWD")"', step)
+        self.assertNotIn('"${COMPOSE_PROJECT}_', step)
+
+    def test_stale_lock_migration_outcome_distinction(self) -> None:
+        """0 matching volumes is the ONLY safe skip (after a SUCCESSFUL
+        listing); project-resolution failure, empty name, a Docker
+        volume ls operational failure, >1 matches, and an uninspectable
+        resolved volume all FAIL the deploy (never guess)."""
+        step = _step_text(self.workflow, STALE_LOCK_MIGRATION_STEP_NAME)
+        self.assertIn("set -euo pipefail", step)
+        self.assertIn("cannot resolve the Compose project name", step)
+        self.assertIn("resolved to empty", step)
+        self.assertIn("cannot list Docker volumes", step)
+        self.assertIn("expected exactly 1 vault-recovery-uploader-state volume", step)
+        self.assertIn("not an inspectable Docker named volume", step)
+        # Clean skip only for 0 matches, before any removal.
+        self.assertIn("stale-lock migration skipped", step)
+        self.assertIn("exit 0", step)
+        self.assertLess(
+            step.index("exit 0"),
+            step.index("docker ps -aq"),
+        )
+
+    def test_stale_lock_migration_mount_check_fails_closed(self) -> None:
+        """ANY container (running or stopped) still mounting the volume
+        FAILS the deploy: the mount check runs before the lock removal and
+        a docker ps operational failure is never treated as "no users"."""
+        step = _step_text(self.workflow, STALE_LOCK_MIGRATION_STEP_NAME)
+        self.assertIn(
+            'MOUNTED_CONTAINERS="$(docker ps -aq --filter "volume=$STATE_VOLUME"',
+            step,
+        )
+        self.assertIn("cannot list containers mounting", step)
+        self.assertIn("still mount volume", step)
+        self.assertIn("racing a live user", step)
+        # The mount check precedes the lock-removal container.
+        self.assertLess(
+            step.index("docker ps -aq"),
+            step.index("rmdir /state/.upload.lock"),
+        )
+
+    def test_stale_lock_migration_removes_only_empty_lock_via_rmdir(self) -> None:
+        """The migration removes ONLY an EMPTY legacy lock directory, via
+        `rmdir` inside a disposable named-volume container: no broad
+        rm/rm -rf, no secret/state deletion, clean skip when the lock is
+        absent, and every abnormal lock state fails the deploy."""
+        step = _step_text(self.workflow, STALE_LOCK_MIGRATION_STEP_NAME)
+        # Removal happens inside a container mounting the NAMED volume.
+        self.assertIn('-v "$STATE_VOLUME:/state"', step)
+        self.assertIn("alpine:3.20", step)
+        self.assertLess(
+            step.index('-v "$STATE_VOLUME:/state"'),
+            step.index("rmdir /state/.upload.lock"),
+        )
+        # rmdir is the ONLY removal primitive; no broad rm anywhere.
+        self.assertIn("rmdir /state/.upload.lock", step)
+        self.assertNotIn("rm -f", step)
+        self.assertNotIn("rm -rf", step)
+        # Abnormal lock states fail closed.
+        self.assertIn("is not a directory; refusing to remove it", step)
+        self.assertIn("is not empty; refusing to remove it", step)
+        self.assertIn("still present after rmdir", step)
+        # Clean skip when the lock is absent.
+        self.assertIn("no legacy .upload.lock present", step)
+        # No secret/state files are ever referenced for deletion.
+        self.assertNotIn("rclone.active.conf", step)
+        self.assertNotIn("uploaded-generations.jsonl", step)
+        self.assertNotIn("ledger", step)
+        self.assertNotIn("next-slot", step)
+        # The lock is never read or printed (only its state is described).
+        self.assertNotIn("cat /state/.upload.lock", step)
 
     def test_vault_recovery_overlay_hardcodes_remote_identity(self) -> None:
         """Runtime remote immutability (council fix): the overlay wires the

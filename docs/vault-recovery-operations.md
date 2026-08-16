@@ -148,6 +148,18 @@ generations.
   per-generation retry-after-READY protocol is unchanged: a backlog
   generation that is already READY-visible in the committed namespace is
   re-validated and acknowledged — never mutated, never re-uploaded.
+- **Upload mutual exclusion (kernel-managed lock, audited change).** A
+  single uploader-scoped lock around `run_once`/upload prevents manual AND
+  daemon invocations from uploading/pruning concurrently. The lock is
+  **released by the kernel when the holding process dies**: a `docker kill`
+  (SIGKILL), crash, container restart, or redeploy can never leave a stale
+  lock behind, and a REAL concurrent uploader (e.g. a manual one-shot
+  racing the daemon poll) is genuinely rejected — visible error, non-zero
+  exit in one-shot mode — never queued, never racing. The one-time safe
+  deployment migration of a legacy empty `.upload.lock` and the
+  no-blind-deletion rule are documented in the "Uploader lock:
+  kernel-managed release and legacy `.upload.lock` migration" subsection
+  below.
 - **Recover** (`vault-recovery-recover`, `--profile recovery`, short-lived
   `docker compose run` only; runs rclone against an EPHEMERAL writable copy
   of the config seed — a token refresh during a long download must be able
@@ -370,6 +382,58 @@ share one rclone configuration volume, `obsidian-rclone-config`. It is a
 - **Install:** same invocation with `install-recovery /recovery --live-vault /opt/data/obsidian --live-gbrain /opt/data/.gbrain [--generation "$GENERATION_ID"] --i-confirm-this-overwrites-production`. Stop Hermes, server Syncthing and all gbrain jobs first. When `--generation` is given, the requested id is bound in the core under the lock: a handoff carrying a different generation refuses the install (a concurrent recover download of another gen can never be installed).
 - **Rollback:** `rollback <gen-id>` (reverse the journaled transaction).
 
+### Uploader lock: kernel-managed release and legacy `.upload.lock` migration
+
+Every upload/prune pass (daemon poll, `RUN_ON_START`, and one-shot
+manual/cron invocations) is serialized by a single uploader-scoped lock in
+the uploader's own state volume (`vault-recovery-uploader-state`). Audited
+change: the lock is kernel-managed and self-releasing, replacing the legacy
+mkdir-based lock whose stale `.upload.lock` directory survived crashes and
+kills.
+
+- **Kernel-managed release across `docker kill`/redeploy.** The lock is
+  released automatically by the kernel when the holding process exits, no
+  matter how it dies — `docker kill` (SIGKILL), a crash, a container
+  restart, or a redeploy. There is no stale lock to remove and no lock
+  surgery after a kill/redeploy: the next start simply acquires the lock and
+  proceeds.
+- **Real concurrent uploader rejection.** While one invocation holds the
+  lock, ANY other invocation — a manual one-shot racing the daemon poll, or
+  two manual one-shots — is genuinely rejected: the lock is never silently
+  ignored and never shared. The rejected invocation logs a visible error;
+  in one-shot mode it exits non-zero (the caller observes the lock was not
+  taken), in daemon mode it logs and retries at the next poll interval.
+- **One-time safe deployment migration of a legacy empty `.upload.lock`.**
+  Deployments that ran the previous mkdir-based lock may carry a legacy
+  `.upload.lock` DIRECTORY inside the uploader state volume (a residue of a
+  container killed while holding the old lock). The deploy workflow
+  performs the migration EXACTLY ONCE, in the safe window AFTER all prior
+  services are stopped and BEFORE the new services start (no live uploader
+  can hold or recreate the lock): it resolves
+  `vault-recovery-uploader-state` from the Compose project metadata and
+  volume labels (never guessed), verifies NO container — running or
+  stopped — still mounts the volume, and removes ONLY an EMPTY legacy
+  `.upload.lock` DIRECTORY via `rmdir` inside a disposable container
+  mounting the named volume (no broad `rm`/`rm -rf`, never the ledger, the
+  active config, or any other state). The migration **fails closed** on
+  every abnormal outcome — a lock that is NON-EMPTY, a lock that is not a
+  directory, a lock still present after `rmdir`, a volume that is
+  ambiguous or unresolvable, or ANY container still mounting the volume
+  (IN USE) — and the deploy aborts with a visible error instead of
+  deleting anything: any doubt -> no deletion. A non-empty legacy lock
+  means something was left inside it and must be inspected by the
+  operator, never deleted blind. Clean skip only when the volume or the
+  lock is absent.
+- **Never delete the lock blindly.** There is no legitimate operator
+  procedure that removes the lock by hand. The lock is kernel-managed and
+  self-releasing — `docker kill`/redeploy release it on their own, and the
+  migration handles the only legacy artifact (an empty, unused
+  `.upload.lock`). Blind deletion (`rmdir`/`rm -rf` of `.upload.lock`) can
+  race a REAL concurrent uploader that legitimately holds the lock and is
+  never a fix. If the uploader reports the lock as in use, wait for the
+  holder to finish (or inspect the running uploader containers) — do not
+  delete the lock.
+
 ## Phase-3 deployment integration (default lane)
 
 - **Composition.** The deploy workflow ALWAYS derives
@@ -400,7 +464,10 @@ share one rclone configuration volume, `obsidian-rclone-config`. It is a
      generation by listing/retention/recovery.
 - **Teardown/start.** The teardown superset includes the vault-recovery
   overlay (and the `recovery` profile) so stale uploader/recover containers
-  are removed; `docker compose up -d` starts the uploader.
+  are removed; between the stop and the start, the deploy runs the one-time
+  stale-lock migration (legacy empty `.upload.lock` removal — see the
+  "Uploader lock: kernel-managed release and legacy `.upload.lock`
+  migration" subsection above); `docker compose up -d` starts the uploader.
 - **Temp config cleanup.** The decoded `RCLONE_CONFIG_B64` temp file is
   trapped end to end: the decode step removes it on every failure (and
   disarms the trap on success), the readiness gate — the only step between

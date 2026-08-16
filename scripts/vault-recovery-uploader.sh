@@ -112,9 +112,19 @@
 #     pointer (its generation neither staged nor acked) fails closed.
 #   - Polls the staging mount for new generations (idempotent; does not
 #     depend on deleting sentinels).
-#   - A mkdir lock around run_once/upload prevents manual + daemon
-#     invocations from uploading/pruning concurrently. Stale locks are NOT
-#     auto-deleted; operator recovery is documented.
+#   - A KERNEL-RELEASED exclusive advisory lock (flock(1), non-blocking)
+#     around run_once/upload prevents manual + daemon invocations from
+#     uploading/pruning concurrently. The kernel releases the lock
+#     automatically when the owning process dies — even on SIGKILL (e.g.
+#     `docker kill` during a deploy) — so a dead container can NEVER leave
+#     a stale lease behind that blocks future starts. The lock FILE
+#     (`.upload.flock` in the state volume) is never deleted: deleting a
+#     lock file while another process holds it would break mutual
+#     exclusion; the kernel lock is what matters, not the file's presence.
+#     The runtime MUST provide flock(1); the uploader fails closed (exit 2)
+#     when it is unavailable. The legacy mkdir lease (`.upload.lock`
+#     directory) is gone; the deploy's stale-lock migration step removes
+#     only that old empty directory, never the flock file.
 #
 # Env:
 #   VAULT_RECOVERY_UPLOADER_STAGING_DIR - read-only staging mount (default /staging)
@@ -181,7 +191,19 @@ MANIFEST_SCHEMA_AWK="$(dirname "$0")/vault-recovery-manifest-schema.awk"
 # Strict rclone `lsjson` machine-inventory parser (never human lsd columns).
 LSJSON_PARSER="$(dirname "$0")/vault-recovery-lsjson.awk"
 
-UPLOAD_LOCK_DIR="$STATE_DIR/.upload.lock"
+# The upload lock: a KERNEL-RELEASED exclusive advisory flock(1) on a
+# regular file in the state volume. The file itself persists across runs
+# (never deleted — deleting a lock file while another process holds it
+# would break mutual exclusion), but the KERNEL releases the exclusive lock
+# automatically when the owning process dies, even on SIGKILL: a container
+# killed mid-upload (e.g. `docker kill` during a deploy) can never leave a
+# stale lease behind. Named `.upload.flock` (NOT the legacy mkdir
+# `.upload.lock` DIRECTORY) so it never collides with the deploy's
+# legacy-lock migration step, which removes only the old empty directory.
+UPLOAD_LOCK_FILE="$STATE_DIR/.upload.flock"
+# Dedicated file descriptor carrying the kernel lock for the process
+# lifetime (closed on release/exit; the kernel then drops the lock).
+UPLOAD_LOCK_FD=9
 VERIFY_TMP="$STATE_DIR/.verify-tmp"
 LEDGER_FILE="$STATE_DIR/uploaded-generations.jsonl"
 LAST_UPLOADED_FILE="$STATE_DIR/last-uploaded-generation"
@@ -195,8 +217,22 @@ log_error() { echo "[vault-recovery-uploader] ERROR: $1" >&2; }
 . "$(dirname "$0")/rclone-active-config.sh"
 
 _cleanup() {
+    # Release the upload lock (close the lock fd 9, see UPLOAD_LOCK_FD) if
+    # we hold it. The kernel would release it on process exit anyway;
+    # closing here lets the daemon drop the lock between poll iterations
+    # exactly like the old mkdir lease. The lock FILE is never removed.
+    #
+    # NEVER attach `2>/dev/null` (or any stderr redirection) to this `exec`:
+    # redirections on special builtins PERSIST after the command (same rule
+    # as acquire_upload_lock), so it would permanently redirect the whole
+    # daemon shell's stderr to /dev/null and silently swallow every later
+    # log_error — e.g. the contention rejection of the next poll — hiding
+    # daemon errors from the operator. A redirection failure on the `exec`
+    # special builtin is FATAL in POSIX sh (dash exits 2 with its own
+    # visible message), and closing the held fd cannot fail, so no
+    # redirection is needed here.
     if [ -n "${_LOCK_HELD:-}" ] && [ "$_LOCK_HELD" = "1" ]; then
-        rmdir "$UPLOAD_LOCK_DIR" 2>/dev/null || true
+        exec 9>&-
         _LOCK_HELD="0"
     fi
     rm -rf "$VERIFY_TMP" 2>/dev/null || true
@@ -1364,16 +1400,44 @@ run_once() {
 }
 
 acquire_upload_lock() {
-    if [ -d "$UPLOAD_LOCK_DIR" ]; then
-        log_error "Upload already in progress (lock: $UPLOAD_LOCK_DIR). If no upload is running, remove the lock dir manually."
+    # KERNEL-RELEASED lock: a non-blocking exclusive flock(1) on a regular
+    # file in the state volume. The kernel drops the lock automatically when
+    # the owning process dies — even SIGKILL — so a container killed
+    # mid-upload can never leave a stale lease that blocks future starts.
+    # The lock file is NEVER deleted (deleting it while another process
+    # holds the lock would break mutual exclusion). The runtime must provide
+    # flock(1); without it the uploader fails closed instead of falling back
+    # to a lease that could survive process death.
+    #
+    # NOTE: plain if/then/else only — NO `if ! cmd` here. Under dash's
+    # `set -e`, a function called from an inverted condition (`if ! func`)
+    # does not get errexit suppression, and a nested `if ! failing-cmd`
+    # then kills the whole shell silently instead of running the branch.
+    if command -v flock >/dev/null 2>&1; then
+        :
+    else
+        log_error "flock(1) is not available in this runtime; refusing to run without a kernel-released upload lock (fail closed)"
+        exit 2
+    fi
+    # Open (create if needed) the lock file on the dedicated lock fd (9 —
+    # see UPLOAD_LOCK_FD; a redirection fd must be literal in POSIX sh);
+    # the open file description carries the kernel lock for the process
+    # lifetime. A crash releases the lock with the fd.
+    #
+    # NEVER attach `2>/dev/null` (or any stderr redirection) to this `exec`:
+    # redirections on special builtins PERSIST after the command, so it
+    # would permanently redirect the whole shell's stderr to /dev/null and
+    # silently swallow every later log_error. A redirection failure on the
+    # `exec` special builtin is FATAL in POSIX sh: dash exits 2 with its own
+    # visible message — fail closed, which is the intent.
+    exec 9>"$UPLOAD_LOCK_FILE"
+    if flock -n "$UPLOAD_LOCK_FD" 2>/dev/null; then
+        _LOCK_HELD="1"
+        return 0
+    else
+        log_error "Upload already in progress (lock: $UPLOAD_LOCK_FILE is held by a live process). The kernel releases the lock automatically when the holder dies; no manual lock removal is ever needed."
         return 1
     fi
-    if ! mkdir "$UPLOAD_LOCK_DIR" 2>/dev/null; then
-        log_error "Could not acquire upload lock: $UPLOAD_LOCK_DIR"
-        return 1
-    fi
-    _LOCK_HELD="1"
-    return 0
 }
 
 startup_checks() {
@@ -1409,7 +1473,12 @@ main() {
             fi
         fi
         startup_checks
-        if ! acquire_upload_lock; then
+        # NOTE: no `if ! acquire_upload_lock` here — under dash `set -e` a
+        # function called from an inverted condition loses errexit
+        # suppression inside its body (see acquire_upload_lock).
+        if acquire_upload_lock; then
+            :
+        else
             exit 1
         fi
         run_once
