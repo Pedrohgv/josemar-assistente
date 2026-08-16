@@ -1458,13 +1458,16 @@ class MnemosyneBackupExportCronTests(unittest.TestCase):
     # --- Writable-volume allowlist ---
 
     def test_base_writable_volumes_unchanged(self) -> None:
-        # Base-only startup must remain exactly HERMES_HOME + /shared.
-        # The default HERMES_WRITABLE_VOLUMES line must not include mnemosyne-backup.
+        # Base-only startup must remain exactly HERMES_HOME + /shared plus the
+        # vault-recovery staging volume (a BASE feature: the daily export cron
+        # is default-enabled, so its path is unconditionally allowlisted).
+        # The default HERMES_WRITABLE_VOLUMES line must not include
+        # mnemosyne-backup (that stays opt-in).
         pos = self.src.find("HERMES_WRITABLE_VOLUMES=")
         self.assertGreater(pos, 0)
         # Find the assignment line (may be multi-line with conditional append).
-        # The base default must be HERMES_HOME + /shared.
-        self.assertIn('"${HERMES_HOME} /shared"', self.src)
+        # The base default must be HERMES_HOME + /shared + vault-recovery staging.
+        self.assertIn('"${HERMES_HOME} /shared /opt/data/vault-recovery/staging"', self.src)
 
     def test_optin_staging_appended_to_writable_volumes(self) -> None:
         # When MNEMOSYNE_BACKUP_STAGING_DIR equals the exact expected path,

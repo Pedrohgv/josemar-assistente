@@ -11,7 +11,12 @@
 #     download step, `recovery` profile only; never part of `docker compose up`),
 #   - the `mnemosyne-backup-staging` named volume (read-only in uploader,
 #     read-write in hermes),
-#   - the `mnemosyne-backup-state` named volume (writable in uploader only),
+#   - the `mnemosyne-backup-state` named volume (writable in uploader only;
+#     NON-SECRET acknowledgement state, mounted read-only into hermes for
+#     exporter pruning),
+#   - the `mnemosyne-backup-rclone-config` named volume (UPLOADER-ONLY secret
+#     volume holding the private ACTIVE rclone config; NEVER mounted into
+#     hermes or the recover step),
 #   - the `mnemosyne-backup-recovery` disposable handoff volume (written by the
 #     short-lived recover step, mounted transiently into hermes runs),
 #   - hermes overlay: staging RW mount + uploader-state RO mount + backup env.
@@ -45,9 +50,22 @@
 # SECURITY:
 #   - The uploader and recover steps NEVER mount hermes-data or /opt/data.
 #   - The staging mount is READ-ONLY in the uploader.
-#   - The rclone config is READ-ONLY in the uploader and recover services.
-#   - Only the uploader state volume (uploader) and the disposable recovery
-#     volume (recover) are writable; they are distinct.
+#   - The published rclone config SEED is READ-ONLY in the uploader and
+#     recover services. The OAuth-refresh fix: rclone runs against a private
+#     writable ACTIVE copy of the config — the uploader seeds it into a
+#     DEDICATED UPLOADER-ONLY SECRET volume (`mnemosyne-backup-rclone-config`,
+#     never mounted into hermes or the recover step; preserved while the
+#     seed is unchanged so refreshed OAuth tokens survive restarts,
+#     atomically reseeded when the seed changes); the recover step uses an
+#     ephemeral private copy in a fresh temp dir (never the recovery handoff
+#     volume). The seed is never written (rclone-active-config.sh).
+#   - The uploader STATE volume holds ONLY non-secret acknowledgement state
+#     (ledger, slot pointer) and is the ONLY mount Hermes sees from the
+#     uploader (read-only, for exporter pruning): the secret active rclone
+#     config NEVER lives in the state volume.
+#   - Only the uploader state volume, the uploader-only rclone-config secret
+#     volume (uploader) and the disposable recovery volume (recover) are
+#     writable; they are distinct.
 #   - The remote MUST be rclone type `crypt` (validated before any transfer).
 #   - Hermes NEVER gets the rclone config; the recovery lane hands off an
 #     already-decrypted, SHA-verified artifact through the recovery volume.
@@ -63,7 +81,10 @@ services:
       # staging path is in HERMES_WRITABLE_VOLUMES (activation/init).
       - mnemosyne-backup-staging:/opt/data/mnemosyne-backup/staging
       # Uploader state mounted READ-ONLY so the exporter can observe what has
-      # been uploaded. The uploader owns writes.
+      # been uploaded. The uploader owns writes. This mount exposes ONLY
+      # non-secret acknowledgement state: the secret ACTIVE rclone config
+      # lives in the uploader-only mnemosyne-backup-rclone-config volume,
+      # which Hermes NEVER mounts.
       - mnemosyne-backup-state:/opt/data/mnemosyne-backup/uploader-state:ro
     environment:
       # ---- Backup exporter env (Hermes-side) ----
@@ -96,8 +117,13 @@ services:
       - RCLONE_CONFIG=/config/rclone/rclone.conf
       # Staging mount is READ-ONLY (see volumes below).
       - MNEMOSYNE_BACKUP_STAGING_DIR=/staging
-      # State volume is the ONLY writable mount in this service.
+      # State volume: NON-SECRET acknowledgement state only (ledger, slot
+      # pointer). It is mounted READ-ONLY into Hermes for exporter pruning,
+      # so it must NEVER hold the secret active rclone config.
       - MNEMOSYNE_BACKUP_STATE_DIR=/state
+      # Dedicated uploader-only SECRET volume for the private ACTIVE rclone
+      # config (OAuth-refresh fix). NEVER mounted into hermes or recover.
+      - MNEMOSYNE_BACKUP_RCLONE_ACTIVE_DIR=/rclone-active
       # REQUIRED crypt remote name. Must be rclone type 'crypt' (validated
       # before upload). Configure a separate mnemosyne-crypt remote in the
       # obsidian-rclone-config volume.
@@ -109,13 +135,24 @@ services:
     volumes:
       # Reuse the existing secret-managed obsidian-rclone-config volume
       # (read-only). It can hold a separate mnemosyne-crypt remote.
+      # This is the SEED only: the uploader runs rclone against a private
+      # writable active copy in its own uploader-only secret volume
+      # (OAuth-refresh fix, see rclone-active-config.sh), so a refreshed
+      # OAuth token can persist across restarts.
       - obsidian-rclone-config:/config/rclone:ro
+      # Shared rclone OAuth-refresh runtime helper (read-only).
+      - ./scripts/rclone-active-config.sh:/scripts/rclone-active-config.sh:ro
       # Staging mount is READ-ONLY. The uploader never writes here and never
       # deletes READY/latest/artifacts.
       - mnemosyne-backup-staging:/staging:ro
-      # State volume is the ONLY writable mount. Slot rotation and
-      # last-uploaded-generation live here.
+      # State volume: NON-SECRET acknowledgement state (ledger, slot pointer,
+      # last-uploaded). This volume is ALSO mounted READ-ONLY into Hermes for
+      # exporter pruning, so it must never hold the secret active config.
       - mnemosyne-backup-state:/state
+      # UPLOADER-ONLY secret volume: the private ACTIVE rclone config
+      # (rclone.active.conf + seed fingerprint sidecar). NEVER mounted into
+      # hermes or the recover step.
+      - mnemosyne-backup-rclone-config:/rclone-active
       # Mount the uploader script read-only.
       - ./scripts/mnemosyne-backup-uploader.sh:/scripts/mnemosyne-backup-uploader.sh:ro
     entrypoint: ["/bin/sh", "/scripts/mnemosyne-backup-uploader.sh"]
@@ -149,7 +186,13 @@ services:
     volumes:
       # Reuse the existing secret-managed obsidian-rclone-config volume
       # (read-only). It can hold a separate mnemosyne-crypt remote.
+      # This is the SEED only: the recover step runs rclone against an
+      # EPHEMERAL private writable copy in a fresh temp dir (OAuth-refresh
+      # fix, see rclone-active-config.sh) — never inside the recovery
+      # handoff volume.
       - obsidian-rclone-config:/config/rclone:ro
+      # Shared rclone OAuth-refresh runtime helper (read-only).
+      - ./scripts/rclone-active-config.sh:/scripts/rclone-active-config.sh:ro
       # Disposable recovery handoff volume. This is NEVER mounted into the
       # long-running hermes service; only short-lived `docker compose run`
       # invocations mount it (transiently).
@@ -168,6 +211,10 @@ volumes:
   mnemosyne-backup-staging:
     driver: local
   mnemosyne-backup-state:
+    driver: local
+  # Uploader-only SECRET volume: private ACTIVE rclone config (OAuth-refresh
+  # fix). NEVER mounted into hermes or the recover step.
+  mnemosyne-backup-rclone-config:
     driver: local
   mnemosyne-backup-recovery:
     driver: local

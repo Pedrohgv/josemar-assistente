@@ -3,7 +3,7 @@
 This runbook documents the full setup and operations flow for the Obsidian vault stack:
 
 - Syncthing device sync between server and laptop
-- Daily rotating backups to Google Drive (rclone)
+- Encrypted disaster-recovery backups (vault-recovery lane)
 - Restore and troubleshooting procedures
 
 Use this file as the source of truth for future operators.
@@ -13,21 +13,32 @@ Use this file as the source of truth for future operators.
 - `obsidian-vault` Docker volume stores notes and attachments (not git-versioned).
 - `tailscale` sidecar provides private network connectivity for sync.
 - `syncthing` container syncs the vault to client devices through the sidecar namespace.
-- `obsidian-backup` container uploads one rotating snapshot per day to Google Drive.
 - `hermes` mounts the same vault volume at `/opt/data/obsidian`.
+- The **vault-recovery lane** (default deployment composition) exports the
+  vault **plus** the complete `/opt/data/.gbrain` state into immutable
+  encrypted remote generations every day and retains the newest 14. It is the
+  replacement for the retired plaintext `obsidian-backup` service. See
+  `docs/vault-recovery-operations.md` for the full runbook (export, upload,
+  recovery, install, rollback, drills).
 
 Key volumes:
 
 - `josemar-assistente_obsidian-vault`
 - `josemar-assistente_syncthing-config`
 - `josemar-assistente_tailscale-state`
-- `josemar-assistente_obsidian-backup-state`
+- `josemar-assistente_vault-recovery-staging`
+- `josemar-assistente_vault-recovery-uploader-state`
+- `josemar-assistente_vault-recovery-recovery`
 
 ## Required GitHub Configuration
 
 ### Secrets
 
-- `RCLONE_CONFIG_B64`: base64-encoded `rclone.conf` containing remote `gdrive`
+- `RCLONE_CONFIG_B64`: base64-encoded `rclone.conf` containing the
+  `vault-recovery-crypt` remote (type `crypt`, non-empty underlying remote and
+  password). **Required for every deployment**: the deploy workflow fails when
+  it is missing or invalid — the encrypted backup lane must never silently
+  disappear.
 - `TS_AUTHKEY` (optional, recommended): Tailscale auth key for unattended server bootstrap/login during deploy
 
 ### Variables
@@ -55,13 +66,52 @@ docker run --rm \
 
 Fresh deployments do not need this migration.
 
-Backup behavior defaults are defined in `docker-compose.yml`:
+## Retired plaintext lane (Phase 3)
 
-- `OBSIDIAN_BACKUP_TIME=03:15`
-- `OBSIDIAN_BACKUP_RUN_ON_START=false`
-- `OBSIDIAN_BACKUP_SLOTS=5`
-- `OBSIDIAN_GDRIVE_REMOTE=gdrive`
-- `OBSIDIAN_GDRIVE_PATH=Josemar/obsidian-backups`
+The plaintext `obsidian-backup` service (rclone rotating snapshots to Google
+Drive, `OBSIDIAN_BACKUP_*` / `OBSIDIAN_GDRIVE_*` variables,
+`scripts/obsidian-backup.sh` / `scripts/obsidian-backup-daemon.sh`, the
+`obsidian-backup-state` volume) is **retired** and removed from the default
+deployment. It had no crypt boundary and no manifest. The encrypted
+vault-recovery lane is the default backup composition; the deploy workflow
+fails when the crypt remote is not configured, so backups are never silently
+lost.
+
+**Existing remote plaintext slots are NOT deleted automatically.** The slots
+under `Josemar/obsidian-backups` (`slot-1/` … `slot-5/` plus the slot pointer
+files) remain on Google Drive as historical material. Deleting them is an
+**explicit operator decision** after the migration is proven (see
+`docs/vault-recovery-operations.md` → "Migration sequence"), and must be done
+manually — no deployment automation ever deletes them.
+
+### Manual historical recovery from plaintext slots (operator-only)
+
+This reads an old plaintext slot into a scratch dir; it never re-creates the
+plaintext lane:
+
+```bash
+# 1. Stop vault writers.
+dc stop hermes syncthing
+
+# 2. List the historical slots.
+dc exec -T tailscale sh -c 'ls' >/dev/null 2>&1 || true
+docker run --rm \
+  -v josemar-assistente_obsidian-rclone-config:/config/rclone:ro \
+  -e RCLONE_CONFIG=/config/rclone/rclone.conf \
+  rclone/rclone:latest lsf gdrive:Josemar/obsidian-backups
+
+# 3. Download the chosen slot into a scratch dir and inspect it.
+mkdir -p /tmp/obsidian-historical-slot-3
+docker run --rm \
+  -v josemar-assistente_obsidian-rclone-config:/config/rclone:ro \
+  -v /tmp/obsidian-historical-slot-3:/restore \
+  -e RCLONE_CONFIG=/config/rclone/rclone.conf \
+  rclone/rclone:latest sync gdrive:Josemar/obsidian-backups/slot-3 /restore
+```
+
+`dc exec` against the retired container is no longer possible — the service
+does not exist in the deployment. The `rclone/rclone` image is pulled on
+demand for these operator commands.
 
 ## Local/Manual rclone Config Loading
 
@@ -131,13 +181,25 @@ Run on server:
 dc ps
 dc logs --tail=80 tailscale
 dc logs --tail=80 syncthing
-dc logs --tail=80 obsidian-backup
 ```
 
 Expected:
 
-- `hermes`, `tailscale`, `syncthing`, `obsidian-backup` are `Up`
+- `hermes`, `tailscale`, `syncthing`, `vault-recovery-uploader` are `Up`
 - Tailscale reports a `100.x.y.z` address
+
+Check the vault-recovery lane explicitly (the deploy workflow runs these as
+post-start checks; they are repeated here for manual validation):
+
+```bash
+# Uploader running + exactly one export cron.
+dc ps vault-recovery-uploader
+dc exec -T hermes /opt/hermes/.venv/bin/python3 -c \
+  'import json; data=json.load(open("/opt/data/cron/jobs.json")); print([j for j in data["jobs"] if j.get("name")=="vault-recovery-export"])'
+
+# Plaintext lane absence: the retired service must not exist.
+docker ps -a --format '{{.Names}}' | grep -F obsidian-backup || echo "obsidian-backup absent (retired)"
+```
 
 Check runtime state explicitly:
 
@@ -277,72 +339,39 @@ For each device, set explicit peer address to the other Tailscale endpoint:
 
 ## Backup Operations
 
-### Manual backup test
+The backup lane is **vault-recovery** (encrypted, default-on): a daily export
+cron (04:00 local) stages the full vault + `.gbrain` state on the
+`vault-recovery-staging` volume; the `vault-recovery-uploader` service
+uploads each generation through the `vault-recovery-crypt` rclone remote and
+retains the newest 14 committed remote generations. Full operations,
+verification commands, recovery, install and rollback are in
+`docs/vault-recovery-operations.md`.
+
+Quick health checks:
 
 ```bash
-dc exec -T obsidian-backup sh /scripts/obsidian-backup.sh
-dc logs --tail=100 obsidian-backup
+# Latest staged generation and uploader ack.
+dc exec -T hermes su -s /bin/sh hermes -c \
+  '/opt/hermes/.venv/bin/python3 -I /opt/josemar/scripts/vault_recovery_core.py latest'
+dc exec -T vault-recovery-uploader cat /state/last-uploaded-generation 2>/dev/null || true
+# Remote committed generations.
+dc exec -T vault-recovery-uploader rclone --config /config/rclone/rclone.conf lsf \
+  vault-recovery-crypt:Josemar/vault-recovery/committed
 ```
 
-Verify runtime config path:
+## Restore Procedure
 
-```bash
-dc exec -T obsidian-backup ls -l /config/rclone/rclone.conf
-```
+Full restore of the vault **and** the `.gbrain` state from an encrypted
+generation is documented in `docs/vault-recovery-operations.md` →
+"Phase-2 operations" (recover download → disposable-doctor verify → journaled
+install → rollback). Restore is an operator-only sequence: stop Hermes, server
+Syncthing and all gbrain jobs, pause paired-device writers, and follow the
+procedure — it is never automated.
 
-### Verify slots in Google Drive
-
-```bash
-dc exec -T obsidian-backup rclone lsf gdrive:Josemar/obsidian-backups
-```
-
-Expected files/directories:
-
-- `slot-1/` ... `slot-5/`
-- `slot-1.json` ... `slot-5.json`
-
-### Rotation behavior
-
-- Daily run writes to one slot.
-- After slot 5, it wraps to slot 1.
-- The newest snapshot replaces the oldest slot in the cycle.
-
-## Restore Procedure (Safe)
-
-1. Stop writers:
-
-```bash
-dc stop hermes syncthing
-```
-
-2. Get vault volume mountpoint:
-
-```bash
-VAULT_PATH=$(docker volume inspect josemar-assistente_obsidian-vault --format '{{ .Mountpoint }}')
-echo "$VAULT_PATH"
-```
-
-3. Restore selected slot (example `slot-3`) into vault:
-
-```bash
-docker run --rm \
-  -v "$VAULT_PATH:/restore" \
-  -v "josemar-assistente_obsidian-rclone-config:/config/rclone:ro" \
-  -e RCLONE_CONFIG=/config/rclone/rclone.conf \
-  rclone/rclone:latest sync gdrive:Josemar/obsidian-backups/slot-3 /restore
-```
-
-4. Start services:
-
-```bash
-dc up -d syncthing hermes
-```
-
-5. Confirm sync health:
-
-```bash
-dc logs --tail=80 syncthing
-```
+> Historical plaintext slots (retired lane) are restored manually with the
+> operator-only procedure under "Retired plaintext lane" above; those slots
+> contain ONLY vault files, never `.gbrain` state, and have no manifest or
+> checksums.
 
 ## What Persists Across Redeploy
 
@@ -351,7 +380,15 @@ Normal redeploy preserves:
 - Syncthing identity, pairing, folder settings (`syncthing-config`)
 - Tailscale node state (`tailscale-state`)
 - Vault files (`obsidian-vault`)
-- Backup ring pointer (`obsidian-backup-state`)
+- Vault-recovery staged generations, uploader ledger and retention state
+  (`vault-recovery-staging`, `vault-recovery-uploader-state`,
+  `vault-recovery-recovery`)
+
+The retired plaintext lane's `obsidian-backup-state` volume (ring pointer)
+may still exist on the host; it is no longer mounted or used. It can be
+removed manually after the migration is proven (see
+`docs/vault-recovery-operations.md` → "Migration sequence") — deployment
+automation never deletes it.
 
 Workflow `fresh_start=true` is disabled after moving private state into `/opt/data`.
 Use a manual, reviewed cleanup instead so runtime state and credentials are not removed accidentally. Obsidian volumes should not be removed during agent-state cleanup.
@@ -408,8 +445,14 @@ Run on server:
 ```bash
 dc ps
 dc exec -T syncthing syncthing cli --gui-address=127.0.0.1:8384 --gui-apikey=<SERVER_API_KEY> show connections
-dc exec -T obsidian-backup sh /scripts/obsidian-backup.sh
-dc logs --tail=80 obsidian-backup
+# Vault-recovery lane: uploader up, latest staged generation, remote list.
+dc ps vault-recovery-uploader
+dc exec -T hermes su -s /bin/sh hermes -c \
+  '/opt/hermes/.venv/bin/python3 -I /opt/josemar/scripts/vault_recovery_core.py latest'
+dc exec -T vault-recovery-uploader rclone --config /config/rclone/rclone.conf lsf \
+  vault-recovery-crypt:Josemar/vault-recovery/committed
+# A monthly encrypted drill is recommended; see docs/vault-recovery-operations.md
+# → "Disaster-recovery drill" (automated: make test-vault-recovery-dr-drill).
 ```
 
 If all commands succeed and connection is `connected: true`, setup is healthy.

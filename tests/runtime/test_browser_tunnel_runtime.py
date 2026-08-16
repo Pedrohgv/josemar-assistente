@@ -5,6 +5,9 @@ Skipped by default. Enable with:
   RUN_DOCKER_TESTS=1 RUN_BROWSER_TUNNEL_RUNTIME_TESTS=1 \
   python3 -m unittest tests.runtime.test_browser_tunnel_runtime -v
 
+The pure subnet-allocation unit tests at the bottom of this file run
+unconditionally (they need no Docker).
+
 What it proves (all inside Docker, no production stack/Tailscale/laptop):
   1. The production browser-tunnel image builds and starts sshd under the
      production hardening constraints (read-only root, tmpfs, no-new-privileges,
@@ -27,6 +30,14 @@ Determinism notes:
     access and build failures surface with captured stderr.
   - All Docker resources use collision-resistant names (UUID suffix) so
     concurrent or previous runs cannot interfere.
+  - The test network subnet is collision-aware (select_test_subnet): the IPAM
+    subnets of every existing Docker network are enumerated, the historical
+    172.29-31 /29 candidates are preferred when they are free, and otherwise
+    the less-contested 10.200.0.0/16 space is scanned in ascending /29 order
+    for the first block that overlaps nothing. Create-time retries
+    re-enumerate on every attempt so a concurrent run that wins a race
+    becomes visible and is skipped; docker stderr from every failed attempt
+    is included in the final allocation error.
   - On any readiness/traversal/assertion failure, container state and logs are
     captured before cleanup. Cleanup runs even when setup fails and removes
     containers, networks, volumes, images, and generated dump_folder artifacts.
@@ -36,12 +47,15 @@ Does not start Hermes or Tailscale.
 
 from __future__ import annotations
 
+import ipaddress
+import json
 import os
 import shutil
 import subprocess
 import time
 import unittest
 import uuid
+from collections.abc import Sequence
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -59,6 +73,134 @@ def docker_available() -> bool:
 
 def run(cmd: list[str], check: bool = True, timeout: int = 120) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True, check=check, timeout=timeout)
+
+
+# --- Collision-aware test-network subnet allocation --------------------------
+#
+# Hosts commonly run foreign Docker networks in 172.17-31.0.0/16 (compose
+# stacks, CI runners, this repo's own test stacks), so a hard-coded test
+# subnet in that space reliably collides. Strategy: enumerate the IPAM
+# subnets of every existing Docker network, keep the historical 172.29-31
+# candidates when they are free, otherwise deterministically scan the
+# less-contested 10.200.0.0/16 space in ascending /29 order for the first
+# block that overlaps nothing. Create-time retries (with a fresh enumeration
+# each attempt) handle races against concurrent runs.
+
+ALLOCATION_ATTEMPTS = 5
+PREFERRED_TEST_SUBNETS = [
+    "172.31.252.0/29",
+    "172.31.253.0/29",
+    "172.31.254.0/29",
+    "172.30.252.0/29",
+    "172.29.252.0/29",
+]
+TEST_SCAN_SPACE = "10.200.0.0/16"
+TEST_SUBNET_PREFIX = 29
+
+
+class SubnetAllocationError(Exception):
+    """Raised when no non-overlapping test subnet can be selected."""
+
+
+def _parse_ipam_subnets(inspect_json: str) -> list[ipaddress.IPv4Network]:
+    """Parse ``docker network inspect`` JSON into the IPv4 IPAM subnets.
+
+    IPv6 subnets and malformed/absent entries are skipped so one odd network
+    can never break allocation. Accepts both the array and single-object
+    forms docker emits.
+    """
+    try:
+        networks = json.loads(inspect_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid `docker network inspect` JSON: {exc}") from exc
+    if isinstance(networks, dict):
+        networks = [networks]
+    subnets: list[ipaddress.IPv4Network] = []
+    for network in networks:
+        for config in (network.get("IPAM") or {}).get("Config") or []:
+            subnet_text = config.get("Subnet")
+            if not subnet_text:
+                continue
+            try:
+                subnet = ipaddress.ip_network(subnet_text, strict=False)
+            except ValueError:
+                continue
+            if subnet.version == 4:
+                subnets.append(subnet)
+    return subnets
+
+
+def _enumerate_existing_subnets() -> list[ipaddress.IPv4Network]:
+    """IPAM IPv4 subnets of every existing Docker network (for overlap checks).
+
+    Fails loudly with docker stderr only when the daemon cannot be enumerated
+    at all; a network that cannot be inspected individually is skipped (the
+    create-time retries still race against it).
+    """
+    listed = run(["docker", "network", "ls", "-q"], check=False)
+    if listed.returncode != 0:
+        raise AssertionError(f"docker network ls failed:\n{listed.stderr}")
+    network_ids = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+    if not network_ids:
+        return []
+    inspected = run(["docker", "network", "inspect", *network_ids], check=False)
+    if inspected.returncode == 0:
+        return _parse_ipam_subnets(inspected.stdout)
+    # Batch inspect can fail when one network is uninspectable (e.g. swarm);
+    # fall back to per-network inspection and keep whatever parses.
+    subnets: list[ipaddress.IPv4Network] = []
+    failures = 0
+    one = inspected
+    for network_id in network_ids:
+        one = run(["docker", "network", "inspect", network_id], check=False)
+        if one.returncode == 0:
+            subnets.extend(_parse_ipam_subnets(one.stdout))
+        else:
+            failures += 1
+    if not subnets and failures == len(network_ids):
+        raise AssertionError(
+            "docker network inspect failed for every network "
+            f"(batch stderr:\n{inspected.stderr}\n"
+            f"last per-network stderr:\n{one.stderr})"
+        )
+    return subnets
+
+
+def select_test_subnet(
+    existing_subnets: Sequence[ipaddress.IPv4Network],
+    *,
+    preferred: Sequence[str] = PREFERRED_TEST_SUBNETS,
+    scan_space: str = TEST_SCAN_SPACE,
+) -> str:
+    """Deterministically pick a /29 test subnet overlapping no existing one.
+
+    The historical 172.29-31 candidates are checked first so hosts where
+    those ranges are free keep the old behavior; otherwise ``scan_space`` is
+    scanned in ascending /29 order and the first free block is returned.
+    Deterministic for a given set of existing subnets.
+    """
+    existing = list(existing_subnets)
+
+    def overlaps(candidate: ipaddress.IPv4Network) -> bool:
+        return any(candidate.overlaps(other) for other in existing)
+
+    for candidate in preferred:
+        subnet = ipaddress.ip_network(candidate)
+        if not isinstance(subnet, ipaddress.IPv4Network):
+            raise SubnetAllocationError(f"preferred subnet {candidate!r} is not IPv4")
+        if not overlaps(subnet):
+            return candidate
+    scan = ipaddress.ip_network(scan_space)
+    if not isinstance(scan, ipaddress.IPv4Network):
+        raise SubnetAllocationError(f"scan space {scan_space!r} is not IPv4")
+    for subnet in scan.subnets(new_prefix=TEST_SUBNET_PREFIX):
+        if not overlaps(subnet):
+            return str(subnet)
+    raise SubnetAllocationError(
+        "no non-overlapping /29 test subnet: every block in "
+        f"{list(preferred)} and {scan_space} overlaps one of "
+        f"{len(existing)} existing Docker network subnet(s)"
+    )
 
 
 class BrowserTunnelRuntimeTests(unittest.TestCase):
@@ -86,16 +228,9 @@ class BrowserTunnelRuntimeTests(unittest.TestCase):
         self.vol_auth_keys = f"bt-authkeys-{suffix}"
         self.tunnel_image = f"josemar-browser-tunnel:runtime-test-{suffix}"
         self.laptop_image = f"josemar-bt-laptop-fixture:runtime-test-{suffix}"
-        # Try a small set of test-only /29 subnets in private space that are
-        # unlikely to collide with the host's existing Docker networks. If one
-        # overlaps, try the next. The IPs are derived from the chosen subnet.
-        self._subnet_candidates = [
-            "172.31.252.0/29",
-            "172.31.253.0/29",
-            "172.31.254.0/29",
-            "172.30.252.0/29",
-            "172.29.252.0/29",
-        ]
+        # The test subnet is chosen at network-create time by
+        # select_test_subnet() (collision-aware against every existing Docker
+        # network's IPAM subnets; see PREFERRED_TEST_SUBNETS / TEST_SCAN_SPACE).
         self.subnet: str | None = None
         self.ns_owner_ip: str | None = None
         self.laptop_ip: str | None = None
@@ -168,10 +303,21 @@ class BrowserTunnelRuntimeTests(unittest.TestCase):
         self._artifacts.extend([self.key, self.pub])
 
         # --- 4. Create the test network and authorized-keys/host-keys volumes. ---
-        # Try candidate subnets until one does not overlap an existing network.
+        # Collision-aware allocation: enumerate the IPAM subnets of every
+        # existing Docker network, prefer the historical 172.29-31 candidates
+        # when free, then deterministically scan the less-contested
+        # 10.200.0.0/16 space for a /29 block overlapping nothing. Each retry
+        # re-enumerates so a concurrent run that won the previous race is
+        # visible and skipped; docker stderr from every attempt is kept for
+        # the final error.
+        create_errors: list[str] = []
         net_created = False
-        for candidate in self._subnet_candidates:
-            result = run(["docker", "network", "create", "--subnet", candidate, self.net], check=False)
+        for attempt in range(1, ALLOCATION_ATTEMPTS + 1):
+            candidate = select_test_subnet(_enumerate_existing_subnets())
+            result = run(
+                ["docker", "network", "create", "--subnet", candidate, self.net],
+                check=False,
+            )
             if result.returncode == 0:
                 self.subnet = candidate
                 # Derive IPs: .2 = namespace-owner, .3 = laptop.
@@ -180,9 +326,13 @@ class BrowserTunnelRuntimeTests(unittest.TestCase):
                 self.laptop_ip = f"{base}.3"
                 net_created = True
                 break
+            create_errors.append(
+                f"attempt {attempt} (subnet {candidate}): {result.stderr.strip()}"
+            )
         if not net_created:
             raise AssertionError(
-                f"could not create a non-overlapping test network; tried {self._subnet_candidates}"
+                "could not create a non-overlapping test network after "
+                f"{ALLOCATION_ATTEMPTS} attempts:\n" + "\n".join(create_errors)
             )
         self._networks.append(self.net)
         # Type narrowing: these are set when net_created is True.
@@ -365,6 +515,101 @@ class BrowserTunnelRuntimeTests(unittest.TestCase):
                     os.remove(p)
                 except OSError:
                     pass
+
+
+class SubnetAllocationUnitTests(unittest.TestCase):
+    """Pure unit coverage for the collision-aware subnet helpers.
+
+    No Docker required; these run even when the runtime tests are skipped.
+    """
+
+    def test_parse_ipam_subnets_extracts_ipv4_and_skips_noise(self) -> None:
+        payload = json.dumps([
+            {
+                "Name": "bridge",
+                "IPAM": {
+                    "Driver": "default",
+                    "Config": [
+                        {"Subnet": "172.17.0.0/16", "Gateway": "172.17.0.1"},
+                        {"Subnet": "fd00::/64", "Gateway": "fd00::1"},
+                    ],
+                },
+            },
+            {"Name": "host", "IPAM": {"Driver": "default", "Config": []}},
+            {
+                "Name": "custom",
+                "IPAM": {
+                    "Driver": "default",
+                    "Config": [
+                        {"Subnet": "10.200.0.0/29"},
+                        {"Subnet": "not-a-subnet"},
+                        {"Subnet": ""},
+                        {},
+                    ],
+                },
+            },
+            {"Name": "no-ipam"},
+        ])
+        self.assertEqual(
+            _parse_ipam_subnets(payload),
+            [
+                ipaddress.IPv4Network("172.17.0.0/16"),
+                ipaddress.IPv4Network("10.200.0.0/29"),
+            ],
+        )
+
+    def test_parse_ipam_subnets_single_object_and_bad_json(self) -> None:
+        self.assertEqual(
+            _parse_ipam_subnets(json.dumps({
+                "Name": "only",
+                "IPAM": {"Config": [{"Subnet": "10.200.0.8/29"}]},
+            })),
+            [ipaddress.IPv4Network("10.200.0.8/29")],
+        )
+        with self.assertRaises(ValueError):
+            _parse_ipam_subnets("not json")
+
+    def test_preferred_candidates_used_when_free(self) -> None:
+        self.assertEqual(select_test_subnet([]), "172.31.252.0/29")
+        self.assertEqual(
+            select_test_subnet([ipaddress.IPv4Network("172.31.252.0/29")]),
+            "172.31.253.0/29",
+        )
+        # Unrelated networks never block the preferred candidates.
+        self.assertEqual(
+            select_test_subnet([
+                ipaddress.IPv4Network("172.17.0.0/16"),
+                ipaddress.IPv4Network("192.168.16.0/20"),
+            ]),
+            "172.31.252.0/29",
+        )
+
+    def test_scan_space_used_when_all_preferred_overlap(self) -> None:
+        foreign = [
+            ipaddress.IPv4Network("172.29.0.0/16"),
+            ipaddress.IPv4Network("172.30.0.0/16"),
+            ipaddress.IPv4Network("172.31.0.0/16"),
+        ]
+        self.assertEqual(select_test_subnet(foreign), "10.200.0.0/29")
+
+    def test_scan_skips_occupied_blocks_deterministically(self) -> None:
+        foreign = [
+            ipaddress.IPv4Network("172.29.0.0/16"),
+            ipaddress.IPv4Network("172.30.0.0/16"),
+            ipaddress.IPv4Network("172.31.0.0/16"),
+            ipaddress.IPv4Network("10.200.0.0/29"),
+        ]
+        self.assertEqual(select_test_subnet(foreign), "10.200.0.8/29")
+
+    def test_scan_exhaustion_raises(self) -> None:
+        foreign = [
+            ipaddress.IPv4Network("172.29.0.0/16"),
+            ipaddress.IPv4Network("172.30.0.0/16"),
+            ipaddress.IPv4Network("172.31.0.0/16"),
+            ipaddress.IPv4Network("10.200.0.0/16"),
+        ]
+        with self.assertRaises(SubnetAllocationError):
+            select_test_subnet(foreign)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,6 @@
 .PHONY: test test-runtime test-aux-runtime verify \
+	test-vault-recovery test-vault-recovery-portability test-vault-recovery-round-trip \
+	test-vault-recovery-dr-drill \
 	test-mnemosyne-retrieval test-mnemosyne-retrieval-smoke test-mnemosyne-retrieval-tei-smoke \
 	test-mnemosyne-retrieval-synthetic-regression test-mnemosyne-retrieval-activation test-mnemosyne-retrieval-activation-evidence \
 	test-mnemosyne-retrieval-activation-reviewed
@@ -17,6 +19,30 @@ test-runtime:
 
 test-aux-runtime:
 	RUN_DOCKER_TESTS=1 RUN_AUX_ML_RUNTIME_TESTS=1 python3 -m unittest tests.runtime.test_aux_ml_runtime_contract -v
+
+# Vault-recovery Phase 1: fast unit/contract suite (no Docker).
+test-vault-recovery:
+	python3 -m unittest discover -s tests/vault_recovery -v
+
+# Vault-recovery Phase 1 portability proof (Docker-gated; the release/deploy
+# workflow runs the same test with VAULT_RECOVERY_PORTABILITY_REQUIRED=1,
+# which makes a missing docker CLI a FAILURE instead of a skip).
+test-vault-recovery-portability:
+	RUN_DOCKER_TESTS=1 python3 -m unittest tests.runtime.test_vault_recovery_portability -v
+
+# Vault-recovery Phase 2 encrypted round trip (Docker-gated): real rclone
+# crypt over a local underlying dir, upload -> ciphertext proof -> recover ->
+# disposable doctor verify -> journaled install into the real mount layout.
+test-vault-recovery-round-trip:
+	RUN_DOCKER_TESTS=1 python3 -m unittest tests.runtime.test_vault_recovery_round_trip -v
+
+# Vault-recovery Phase 3 full disaster-recovery drill (Docker-gated): real
+# vector-bearing state + DB-only link -> export -> encrypted upload ->
+# DESTROY both live trees -> recover/verify/install -> doctor/link/vectors/
+# config/schema/markers/vault survive -> rollback. The migration-sequence
+# proof for declaring the plaintext lane retired.
+test-vault-recovery-dr-drill:
+	RUN_DOCKER_TESTS=1 python3 -m unittest tests.runtime.test_vault_recovery_dr_drill -v
 
 # Phase 2: Mnemosyne Portuguese vector retrieval quality gate.
 # Fast unit/schema/boundary tests (no Docker, no model download). These run

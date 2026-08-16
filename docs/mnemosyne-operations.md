@@ -136,8 +136,18 @@ no automatic pruning.
 
 - **Never** mounts `hermes-data` or `/opt/data`.
 - Staging mount is **read-only**.
-- rclone config is **read-only**.
-- Only the `mnemosyne-backup-state` volume is writable.
+- The shared rclone config seed (`obsidian-rclone-config`) is **read-only**;
+  the uploader runs rclone against a **private active copy** in a DEDICATED
+  uploader-only secret volume (`mnemosyne-backup-rclone-config`), because
+  Google OAuth access-token refresh must be able to write the config (see
+  `docs/vault-recovery-operations.md` →
+  "rclone OAuth-refresh configuration design").
+- The `mnemosyne-backup-state` volume holds **only non-secret
+  acknowledgement state** (ledger, slot pointer, `last-uploaded-generation`)
+  and is the ONLY uploader state exposed to Hermes (mounted **read-only**
+  for exporter pruning). The secret active rclone config NEVER lives there:
+  it stays in the uploader-only `mnemosyne-backup-rclone-config` volume,
+  which Hermes and the recover step NEVER mount.
 - Reuses the existing secret-managed `obsidian-rclone-config` volume because
   it can hold a separate `mnemosyne-crypt` remote.
 
@@ -177,6 +187,88 @@ plus a `slot-N.json` manifest.
 - Does not depend on deleting sentinels; uses the `latest` pointer and
   `last-uploaded-generation` state file.
 
+### rclone OAuth-refresh configuration
+
+The `obsidian-rclone-config` volume is a **read-only deploy-published seed**,
+never writable by any consumer. Google OAuth access tokens refresh
+continuously and rclone must rewrite the config to persist them, so no
+consumer runs rclone directly against the seed: the long-running uploader
+uses a **private persistent active copy** in the DEDICATED uploader-only
+secret volume `mnemosyne-backup-rclone-config` (mounted only into the
+uploader; the uploader state volume that Hermes observes read-only holds
+only the non-secret acknowledgement ledger and NEVER contains the active
+config), and the short-lived recover step uses an **ephemeral writable
+copy** that dies with the container. The deploy re-publishes (reseeds) the
+seed on every deployment, including `RCLONE_CONFIG_B64` rotations —
+consumers pick it up on their next start. (The deploy's validation probes
+run rclone against a disposable WRITABLE working directory; if a probe
+triggers an OAuth refresh there, the publish step atomically promotes that
+updated working config into the persistent seed volume — the seed is only
+ever written by the deploy's publish step, never by a runtime consumer.
+See `docs/vault-recovery-operations.md` → "rclone OAuth-refresh
+configuration design".) Active config copies are
+**secret-bearing**: never inspect, log, or archive the
+`mnemosyne-backup-rclone-config` volume. If rclone reports a read-only
+config / token-refresh failure, the consumer is running against the seed
+instead of a writable copy; never "fix" it by making the seed writable.
+Full design and troubleshooting: `docs/vault-recovery-operations.md`
+→ "rclone OAuth-refresh configuration design".
+
+### Upgrade migration: pre-fix active-config cleanup (Oracle fix)
+
+Deployments that ran the FIRST iteration of the OAuth-refresh runtime fix
+(before the uploader's ACTIVE rclone config was moved out of the state
+volume) may carry exactly **two legacy secret-bearing artifacts** inside
+`mnemosyne-backup-state` — the volume Hermes mounts READ-ONLY at
+`/opt/data/mnemosyne-backup/uploader-state`:
+
+1. `rclone.active.conf` — the private ACTIVE rclone config (OAuth/crypt
+   credentials, possibly holding a live refreshed token);
+2. `rclone.active.conf.seed-fp` — its seed-fingerprint sidecar (the sha256
+   of the seed the active copy was seeded from).
+
+The upgrade deployment removes **exactly these two artifacts** from the
+pre-fix Mnemosyne state volume **before Hermes starts**, and this is
+mandatory:
+
+- Hermes mounts that volume read-only for the exporter's ledger
+  observation; a lingering active config would sit inside the Hermes
+  filesystem for the entire runtime — the exact credential exposure the
+  fix closes.
+- The removal happens before Hermes starts so there is **no exposure
+  window**: no Hermes-side process ever observes the legacy secret.
+
+Everything else in the state volume is **non-secret acknowledgement state**
+and is **preserved untouched**:
+
+- `uploaded-generations.jsonl` — the ack ledger the exporter reads for
+  conservative pruning;
+- `next-slot` — the slot-rotation pointer;
+- `last-uploaded-generation` — the idempotency pointer.
+
+No other uploader state existed in that volume; the transient `.upload.lock`
+is unaffected, and stale-lock recovery remains operator-handled as
+documented. The ack ledger and slot pointer are exactly what keep the
+upgrade lossless: acknowledged generations are not re-uploaded and slot
+rotation continues where it left off.
+
+After the cleanup, the uploader seeds a fresh active config in the
+dedicated uploader-only secret volume `mnemosyne-backup-rclone-config` on
+its next start (see "rclone OAuth-refresh configuration" above); the state
+volume stays non-secret from then on. The cleanup is a **one-time
+migration**: the fixed uploader never writes the active config into the
+state volume again, so the two legacy artifacts cannot reappear there.
+
+**Never bypass the cleanup.** Skipping it leaves OAuth/crypt credentials
+exposed through the Hermes-visible read-only mount and violates the
+non-secret state-volume contract the exporter trusts; the deployment treats
+the removal as mandatory (fail closed), not as an optimization.
+
+The vault-recovery lane needs **no** such migration: its active config
+always lived in its own uploader-only state volume
+(`vault-recovery-uploader-state`, never mounted into Hermes), so no legacy
+artifacts exist there.
+
 ## Recovery Lane
 
 Restore is split into two short-lived, least-privilege steps plus an explicit
@@ -189,7 +281,7 @@ Python/Mnemosyne/live DB — so recovery is a two-container handoff:
    rclone image (short-lived)            hermes image (short-lived)
    mnemosyne-backup-recover.sh           mnemosyne-backup-restore.sh
   +----------------------------+        +-----------------------------+
-  | read-only crypt config     |        | NO rclone / NO crypt config |
+  | seed -> ephemeral copy      |        | NO rclone / NO crypt config |
   | disposable recovery volume | =====> | disposable recovery volume  |
   | download slot-N + verify   | handoff| verify-restore to NEW path  |
   | SHA/manifest, write READY  |        | install-restore (explicit)  |
@@ -200,12 +292,16 @@ Python/Mnemosyne/live DB — so recovery is a two-container handoff:
 
 Downloads one immutable slot through crypt into a disposable recovery handoff
 volume and verifies its manifest generation_id and artifact SHA-256 **before**
-writing the `RECOVERY_READY` sentinel. It never mounts `hermes-data`/`/opt/data`
+writing the `RECOVERY_READY` sentinel. It runs rclone against an **ephemeral
+writable copy** of the config seed (a token refresh during a long download
+must be able to persist; the copy is discarded when the container exits). It
+never mounts `hermes-data`/`/opt/data`
 and never touches a live DB.
 
 ```sh
 # From the repo root (or on the operator host with the compose files):
-docker compose -f docker-compose.yml -f docker-compose.embeddings.yml \
+docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml \
+  -f docker-compose.embeddings.yml \
   -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml \
   --profile recovery run --rm mnemosyne-backup-recover <slot>
 ```
@@ -221,7 +317,8 @@ Consumes the handoff, re-verifies SHA/manifest, and restores to a **NEW
 disposable path**. Requires NO rclone and NO rclone config:
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.embeddings.yml \
+docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml \
+  -f docker-compose.embeddings.yml \
   -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml \
   run --rm --no-deps \
   -v mnemosyne-backup-recovery:/recovery \
@@ -248,7 +345,8 @@ retained. The same recovery volume is mounted into this separate short-lived
 Hermes container.
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.embeddings.yml \
+docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml \
+  -f docker-compose.embeddings.yml \
   -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml \
   run --rm --no-deps \
   -v mnemosyne-backup-recovery:/recovery \
@@ -274,17 +372,24 @@ short-lived container invocations. Install requires matching `RECOVERY_READY`,
 `manifest.json`, `VERIFIED_READY`, and verified DB SHA for the explicitly
 selected generation. The long-running Hermes service never mounts recovery.
 
+**Agent-facing guidance:** chat-facing backup status/recovery guidance for
+the backup lanes lives in `skills-factory/backup-operations/SKILL.md`. The
+only chat-visible status action is `josemar-backup-status` — a read-only
+LOCAL STAGING OBSERVATION; remote status and every recovery step are
+operator-only.
+
 ### Drill (exact steps)
 
-1. **Stop writers** (stop the hermes container or pause the agent).
+1. **Stop writers** (stop the hermes container or pause the agent; pause the
+   gbrain/embedding-refresh and export cron jobs for the maintenance window).
 2. Download + verify the handoff:
-   `docker compose -f docker-compose.yml -f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml --profile recovery run --rm mnemosyne-backup-recover <slot>`.
+   `docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml -f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml --profile recovery run --rm mnemosyne-backup-recover <slot>`.
 3. In a new short-lived Hermes container, verify restore to the durable handoff
    (`verify-restore /recovery /recovery/verified.db`) and confirm integrity and
    marker recall.
 4. Set `GENERATION_ID` to the first line of `RECOVERY_READY`, then install in
    a fresh container with explicit confirmation:
-   `docker compose -f docker-compose.yml -f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml run --rm --no-deps -v mnemosyne-backup-recovery:/recovery hermes /opt/josemar/scripts/mnemosyne-backup-restore.sh install-restore /recovery /opt/data/mnemosyne/data/mnemosyne.db --generation "$GENERATION_ID" --i-confirm-this-overwrites-production`.
+   `docker compose -f docker-compose.yml -f docker-compose.vault-recovery.yml -f docker-compose.embeddings.yml -f docker-compose.mnemosyne.yml -f docker-compose.mnemosyne-backup.yml run --rm --no-deps -v mnemosyne-backup-recovery:/recovery hermes /opt/josemar/scripts/mnemosyne-backup-restore.sh install-restore /recovery /opt/data/mnemosyne/data/mnemosyne.db --generation "$GENERATION_ID" --i-confirm-this-overwrites-production`.
 5. Restart writers.
 6. If anything is wrong, **rollback**: copy the `.rollback` file back over
    the live DB (and restore its `-wal`/`-shm` if present), then restart
@@ -292,10 +397,11 @@ selected generation. The long-running Hermes service never mounts recovery.
 
 ## Compose Overlay
 
-`docker-compose.mnemosyne-backup.yml` is opt-in and layered last:
+`docker-compose.mnemosyne-backup.yml` is opt-in and layered last, AFTER the
+always-applied vault-recovery overlay (the default deployment lane, Phase 3):
 
 ```sh
-COMPOSE_FILE=docker-compose.yml:docker-compose.embeddings.yml:docker-compose.mnemosyne.yml:docker-compose.mnemosyne-backup.yml
+COMPOSE_FILE=docker-compose.yml:docker-compose.vault-recovery.yml:docker-compose.embeddings.yml:docker-compose.mnemosyne.yml:docker-compose.mnemosyne-backup.yml
 ```
 
 It adds only:
@@ -319,9 +425,9 @@ unchanged until the operator explicitly opts in.
 
 | Value | Overlays applied (in fixed order) | Prerequisites |
 | --- | --- | --- |
-| `off` (default / unset) | base only | none |
-| `pilot` | base + embeddings + mnemosyne | none beyond the base deploy secrets |
-| `backup` | base + embeddings + mnemosyne + mnemosyne-backup | `MNEMOSYNE_BACKUP_EXPORT_INTERVAL` (positive integer, no leading zeros, <= 10080 minutes) and `RCLONE_CONFIG_B64` (base64 rclone config with a `crypt` remote named `mnemosyne-crypt` and the baseline `gdrive` remote) |
+| `off` (default / unset) | base + vault-recovery (the default encrypted backup lane is ALWAYS applied, Phase 3) | `RCLONE_CONFIG_B64` (required for EVERY deployment: the `vault-recovery-crypt` remote) |
+| `pilot` | base + vault-recovery + embeddings + mnemosyne | `RCLONE_CONFIG_B64` (vault-recovery lane) |
+| `backup` | base + vault-recovery + embeddings + mnemosyne + mnemosyne-backup | `MNEMOSYNE_BACKUP_EXPORT_INTERVAL` (positive integer, no leading zeros, <= 10080 minutes) and `RCLONE_CONFIG_B64` (base64 rclone config with a `crypt` remote named `mnemosyne-crypt` in addition to the always-required `vault-recovery-crypt`) |
 
 There is **no embeddings-only mode**: `pilot` is the smallest Mnemosyne-enabled
 mode and always includes the embeddings overlay (the mnemosyne overlay requires
@@ -346,7 +452,8 @@ down prior services.
 ### Compose-file ordering
 
 The deploy workflow builds `COMPOSE_FILE` with strict ordering:
-`base; optional browser-control; embeddings; mnemosyne; backup last`.
+`base; vault-recovery (ALWAYS, the default encrypted backup lane); optional
+browser-control; embeddings; mnemosyne; backup last`.
 `browser-control` is the only overlay whose presence depends on a separate
 repo variable (`BROWSER_CONTROL_ENABLED`); the Mnemosyne overlays are appended
 in fixed order based on `MNEMOSYNE_DEPLOY_MODE`.
@@ -354,10 +461,11 @@ in fixed order based on `MNEMOSYNE_DEPLOY_MODE`.
 ### Maximal fail-closed teardown
 
 Before rebuild/start, the deploy workflow tears down with the **superset** of
-overlays (base + browser-control + embeddings + mnemosyne + backup, plus the
-`aux-ml`, `browser-control`, and `recovery` profiles — recovery only to remove
-a stale recovery service) so any prior overlay service is removed even when
-switching to `off` or dropping an overlay. The teardown is **fail-closed**
+overlays (base + vault-recovery + browser-control + embeddings + mnemosyne +
+backup, plus the `aux-ml`, `browser-control`, and `recovery` profiles —
+recovery only to remove a stale recovery service) so any prior overlay
+service is removed even when switching to `off` or dropping an overlay. The
+teardown is **fail-closed**
 (`set -euo pipefail`, no `|| true`): a teardown failure stops the deploy rather
 than proceeding against unknown state. **No `-v`**: named volumes are always
 preserved. The selected config is rendered with `docker compose config --quiet`
@@ -377,16 +485,17 @@ or teardown. It requires THREE independent field checks:
 - `remote` is present and nonempty (the underlying storage remote),
 - `password` is present and nonempty (the crypt remote password).
 
-It also requires the baseline `gdrive` remote so replacing the shared
-`obsidian-rclone-config` volume does not break `obsidian-backup`. The crypt
-remote name `mnemosyne-crypt` is hardcoded in the workflow validation and
-written explicitly to `.env` as `MNEMOSYNE_BACKUP_RCLONE_REMOTE=mnemosyne-crypt`
-so validation and runtime cannot diverge. No config or secrets are printed.
-The config is published atomically into the shared volume (temp file + cp +
-chmod + mv) only after all validation passes. The existing non-backup behavior
-for the shared rclone config (publishing for the obsidian-backup container
-without crypt validation) remains supported when `MNEMOSYNE_DEPLOY_MODE` is not
-`backup`.
+The crypt remote name `mnemosyne-crypt` is hardcoded in the workflow
+validation and written explicitly to `.env` as
+`MNEMOSYNE_BACKUP_RCLONE_REMOTE=mnemosyne-crypt` so validation and runtime
+cannot diverge. No config or secrets are printed. The config is published
+atomically into the shared volume (temp file + cp + chmod + mv) only after
+all validation passes. Since Phase 3 (vault-recovery as the default backup
+lane), the `vault-recovery-crypt` remote is validated on EVERY deployment
+independently of this mode, and the retired plaintext `obsidian-backup`
+service no longer requires a baseline `gdrive` remote; the shared
+`obsidian-rclone-config` volume serves the vault-recovery lane by default and
+the Mnemosyne lane in `backup` mode.
 
 ### Mode-specific post-start verification
 
@@ -395,9 +504,11 @@ container health alone is not enough. The deploy workflow adds mode-specific
 checks after start, using `hermes_cli.config.load_config()` to load
 `/opt/data/config.yaml` and assert the exact `memory` subtree (not grep):
 
-- **off**: confirms the `embeddings`, `mnemosyne-backup-uploader`, and
+- **off**: confirms the `mnemosyne-backup-uploader` and
   `mnemosyne-backup-recover` services are absent (queried with the MAXIMAL
-  compose file set so orphan containers from a failed teardown are detected),
+  compose file set so orphan containers from a failed teardown are detected;
+  the standalone `embeddings` service is verified separately by its own
+  post-start step and deliberately not part of this stale-services loop),
   `memory.provider` is blank/empty, static memory flags restored
   (`memory_enabled=true`, `user_profile_enabled=true`), nested `memory.mnemosyne`
   config absent, and no `mnemosyne-backup-export` cron job installed.
@@ -412,7 +523,7 @@ checks after start, using `hermes_cli.config.load_config()` to load
   `jobs.json` schema: `{"jobs": [...]}` with
   `schedule.kind == "interval"`, integer `schedule.minutes` matching
   `MNEMOSYNE_BACKUP_EXPORT_INTERVAL`, `script == "mnemosyne-backup-export.sh"`,
-  `no_agent == true`, and a nonempty `workdir`.
+  `no_agent == true`, and `workdir == "/opt/data"` exactly.
 
 The `recovery` profile is never enabled for a normal deploy; it is only
 passed to the teardown superset to remove a stale recovery service, and to

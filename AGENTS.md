@@ -46,7 +46,7 @@ josemar-assistente/
 - `hermes-data`: Hermes runtime state plus private state git worktree (`/opt/data`). Includes gbrain state at `/opt/data/.gbrain` (PGLite database, config, cache).
 - `aux-ml-shared`: explicit file handoff area for aux-ml (`/shared` in both Hermes and aux-ml)
 - `obsidian-vault`: notes/attachments plus local-only Git history already required by native gbrain sync; there is no remote consumer, `.git/` is excluded from Syncthing, and the history is unrelated to agent-state sync
-- `syncthing-config`, `tailscale-state`, `obsidian-rclone-config`, `obsidian-backup-state`
+- `syncthing-config`, `tailscale-state`, `obsidian-rclone-config`, `vault-recovery-staging`, `vault-recovery-uploader-state`, `vault-recovery-recovery`
 
 Docker named volumes default to `root:root 0755`, but the Hermes gateway runs as `HERMES_UID` (default 10000). `docker-hermes-init.sh` chowns an explicit allowlist of Hermes-writable volumes (`HERMES_HOME` and `/shared`) at startup and verifies write access. When adding a new Hermes-writable volume, add its mount path to `HERMES_WRITABLE_VOLUMES` in `docker-hermes-init.sh`. Do not chown bind mounts, read-only mounts, or cross-service volumes (e.g. `obsidian-vault`).
 
@@ -123,10 +123,14 @@ Adapter"; TaskNotes specifics are in `docs/tasknotes-mcp.md`.
 4. **Cooperative flock.** The global lock at `/opt/data/.locks/tasknotes.lock`
    serializes cooperative access today: TaskNotes transactions, both refresh
    crons, backfills, and every other gbrain-touching path cooperate on it.
-5. **Pause both crons for maintenance windows.** For recovery, reindex/rebuild,
-   migrations, vault swaps, and unadapted/third-party diagnostics, the
-   operator pauses BOTH `gbrain-refresh` and `gbrain-embedding-refresh`.
-   Routine adapted access does NOT require pausing the crons.
+ 5. **Pause all owned jobs for maintenance windows.** For recovery, reindex/rebuild,
+    migrations, vault swaps, and unadapted/third-party diagnostics, the
+    operator pauses ALL THREE owned jobs: `gbrain-refresh`,
+    `gbrain-embedding-refresh`, AND the `vault-recovery-export` cron (a
+    lock-held export would repopulate state inside the window), plus stops
+    Hermes and server Syncthing before any destructive restore/install (the
+    full disaster-recovery drill asserts this exact ordering).
+    Routine adapted access does NOT require pausing the jobs.
 6. **No nested wrapper usage in TaskNotes.** TaskNotes remains a bounded MCP
    adapter on short-lived native gbrain commands and is the sole task-file
    writer. It retains its transaction-level global lock and internal native
@@ -160,10 +164,12 @@ When adding or editing a skill, if a section exceeds ~30 lines of detail, consid
 ## Testing
 
 - New and changed behavior must include new or updated tests, and relevant tests should pass during development cycles before work is considered complete. If a change is not practically testable, surface that limitation to the user before proceeding.
+- Do not invoke bare system `python3` for test runs. Use the repo's supported test entrypoint (`make test` / `make verify`) or the repo virtualenv interpreter (`venv/bin/python3`, the interpreter the Makefile's `PYTHON` prefers when present), which includes the `requirements-test.txt` dependencies (e.g. httpx). Bare system `python3` may lack those dependencies.
 
 ```bash
-python3 -m unittest discover -s tests -v
-python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
+make test
+venv/bin/python3 -m unittest discover -s tests -v
+venv/bin/python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
 ```
 
 ## Key References
@@ -174,4 +180,5 @@ python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
 - `docs/aux-ml.md` - aux-ml operations
 - `docs/gbrain-operations.md` - gbrain activation, reindex, vault swap, and schema workflow
 - `docs/tasknotes-mcp.md` - TaskNotes MCP prerequisites, profile gate, locking, and recovery
+- `docs/vault-recovery-operations.md` - vault-recovery export (default-on): daily local staged generations, doctor preflight, convergence semantics, portability proof; encrypted upload/recovery/install lane (DEFAULT deployment composition, 14 committed remote generations, fail-closed deploy when the crypt remote is missing); Phase-3 migration sequence and the full Docker-gated disaster-recovery drill
 - `docs/obsidian-operations.md` - Obsidian sync/backup runbook

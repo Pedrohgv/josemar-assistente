@@ -5,7 +5,11 @@
 # This is the short-lived, least-privilege DOWNLOAD step of the recovery
 # lane. It runs in an rclone image (rclone + crypt config), NEVER in Hermes:
 #   - NEVER mounts hermes-data or /opt/data.
-#   - The rclone crypt config is READ-ONLY.
+#   - The published rclone crypt config (obsidian-rclone-config volume) is
+#     READ-ONLY: rclone runs against an EPHEMERAL PRIVATE writable copy of
+#     the config in a fresh temp dir (OAuth-refresh fix,
+#     rclone-active-config.sh) — never inside the recovery handoff volume,
+#     removed on exit; the seed itself is never modified.
 #   - Only the disposable recovery handoff volume is writable.
 #   - It downloads the selected immutable slot, verifies the manifest
 #     generation_id and the artifact SHA-256 BEFORE writing the RECOVERY_READY
@@ -22,7 +26,12 @@
 #   MNEMOSYNE_BACKUP_RCLONE_PATH   - remote base path (default Josemar/mnemosyne-backups)
 #   MNEMOSYNE_BACKUP_SLOTS         - rotating slots (default 5)
 #   MNEMOSYNE_BACKUP_RECOVERY_DIR  - recovery handoff dir (default /recovery)
-#   RCLONE_CONFIG                  - rclone config path (default /config/rclone/rclone.conf)
+#   RCLONE_CONFIG                  - rclone config SEED path (default
+#                                    /config/rclone/rclone.conf; the
+#                                    published read-only config). The
+#                                    recover step runs rclone against an
+#                                    ephemeral private writable copy
+#                                    (OAuth-refresh fix).
 #
 # Exit codes: 0 success, 2 validation/known error, 3 unexpected error.
 
@@ -36,6 +45,25 @@ RCLONE_CONFIG_FILE="${RCLONE_CONFIG:-/config/rclone/rclone.conf}"
 
 log_info() { echo "[mnemosyne-backup-recover] $1"; }
 log_error() { echo "[mnemosyne-backup-recover] ERROR: $1" >&2; }
+
+# Shared rclone OAuth-refresh runtime helper (see rclone-active-config.sh):
+# rclone runs against a private writable ACTIVE copy of the config, never
+# the read-only seed.
+. "$(dirname "$0")/rclone-active-config.sh"
+
+# OAuth-refresh fix (recover lane): the active copy lives in an EPHEMERAL
+# PRIVATE temp dir created on first use and removed on exit — never inside
+# the recovery handoff volume (which is handed off to Hermes-side
+# verify/install steps without any rclone credentials).
+_ACTIVE_CONFIG_DIR=""
+prepare_active_config() {
+    if [ -z "$_ACTIVE_CONFIG_DIR" ]; then
+        _ACTIVE_CONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mnemosyne-backup-rclone.XXXXXX")"
+        trap 'rm -rf "$_ACTIVE_CONFIG_DIR"' EXIT
+        trap 'rm -rf "$_ACTIVE_CONFIG_DIR"; exit 143' INT TERM
+    fi
+    rclone_active_config_ensure "$RCLONE_CONFIG_FILE" "$_ACTIVE_CONFIG_DIR/rclone.conf"
+}
 
 validate_slots() {
     case "$SLOTS" in
@@ -65,6 +93,9 @@ validate_slot() {
 }
 
 require_remote() {
+    # Prepare the ephemeral private writable config BEFORE validating the
+    # remote, so the validation reads the ACTIVE config.
+    prepare_active_config
     if [ -z "$REMOTE_NAME" ]; then
         log_error "MNEMOSYNE_BACKUP_RCLONE_REMOTE is required (must be rclone type 'crypt')"
         exit 2
