@@ -761,6 +761,11 @@ drift by full expected state (schedule, script name, `no_agent`, workdir).
 - **Observe cron runs:** `docker compose logs hermes | grep vault-recovery`.
   Exit 75 (lock busy) is logged as a skip; convergence/preflight failures
   exit 2 with no generation published.
+- **Agent-facing guidance:** chat-facing backup status/recovery guidance
+  lives in `skills-factory/backup-operations/SKILL.md`. The only
+  chat-visible status action is `josemar-backup-status` — a read-only LOCAL
+  STAGING OBSERVATION; remote status and every recovery step are
+  operator-only.
 
 ## Phase limitations
 

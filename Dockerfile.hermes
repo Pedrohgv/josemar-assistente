@@ -158,6 +158,9 @@ COPY skills-factory/tasknotes /opt/josemar/skills/tasknotes
 # is instruction-only (SKILL.md + SETUP.md, no executable); the overlay still
 # gates the tunnel sidecar and network, not the skill registration.
 COPY skills-factory/browser-control /opt/josemar/skills/browser-control
+# backup-operations is baked in like the other repo-owned skills: instruction-
+# only agent-facing guidance (SKILL.md + references/, no executable).
+COPY skills-factory/backup-operations /opt/josemar/skills/backup-operations
 RUN chmod +x /opt/josemar/skills/aux-ml/aux-ml
 
 # Canonical workspace-sync implementation (standard-library Python).
@@ -200,6 +203,12 @@ COPY scripts/vault-recovery-restore.sh /opt/josemar/scripts/vault-recovery-resto
 COPY scripts/mnemosyne_backup_core.py /opt/josemar/scripts/mnemosyne_backup_core.py
 COPY scripts/mnemosyne-backup-export.sh /opt/josemar/scripts/mnemosyne-backup-export.sh
 COPY scripts/mnemosyne-backup-restore.sh /opt/josemar/scripts/mnemosyne-backup-restore.sh
+# Backup-status: bounded direct local reader for the vault-recovery and
+# mnemosyne staging lanes (operator/agent-facing; read-only, never touches
+# remote state or writes anything). The bare PATH name is provided as a
+# symlink (repo convention for agent-facing commands, like gbrain and
+# workspace-sync); the canonical copy stays under /opt/josemar/scripts.
+COPY scripts/josemar-backup-status.py /opt/josemar/scripts/josemar-backup-status.py
 RUN chmod +x /opt/josemar/scripts/hermes-workspace-sync-cron.sh \
     /opt/josemar/scripts/hermes-gbrain-refresh-cron.sh \
     /opt/josemar/scripts/hermes-gbrain-embedding-refresh-cron.sh \
@@ -211,13 +220,16 @@ RUN chmod +x /opt/josemar/scripts/hermes-workspace-sync-cron.sh \
     /opt/josemar/scripts/vault-recovery-export.sh \
     /opt/josemar/scripts/hermes-vault-recovery-export-cron.sh \
     /opt/josemar/scripts/vault-recovery-restore.sh \
+    /opt/josemar/scripts/josemar-backup-status.py \
+    && ln -s /opt/josemar/scripts/josemar-backup-status.py /usr/local/bin/josemar-backup-status \
     && /opt/hermes/.venv/bin/python3 -m compileall -q \
         /opt/josemar/scripts/tasknotes_mcp_core.py \
         /opt/josemar/scripts/tasknotes_mcp.py \
         /opt/josemar/scripts/tasknotes_lock_run.py \
         /opt/josemar/scripts/mnemosyne_backup_core.py \
         /opt/josemar/scripts/vault_recovery_core.py \
-        /opt/josemar/scripts/vault_recovery_restore_core.py
+        /opt/josemar/scripts/vault_recovery_restore_core.py \
+        /opt/josemar/scripts/josemar-backup-status.py
 
 COPY config/hermes-config.yaml /opt/josemar/hermes/config.yaml
 COPY docker-hermes-init.sh /etc/cont-init.d/00-josemar-setup

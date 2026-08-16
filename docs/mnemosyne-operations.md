@@ -372,6 +372,12 @@ short-lived container invocations. Install requires matching `RECOVERY_READY`,
 `manifest.json`, `VERIFIED_READY`, and verified DB SHA for the explicitly
 selected generation. The long-running Hermes service never mounts recovery.
 
+**Agent-facing guidance:** chat-facing backup status/recovery guidance for
+the backup lanes lives in `skills-factory/backup-operations/SKILL.md`. The
+only chat-visible status action is `josemar-backup-status` — a read-only
+LOCAL STAGING OBSERVATION; remote status and every recovery step are
+operator-only.
+
 ### Drill (exact steps)
 
 1. **Stop writers** (stop the hermes container or pause the agent; pause the
