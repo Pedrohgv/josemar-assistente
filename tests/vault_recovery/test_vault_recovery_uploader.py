@@ -711,6 +711,135 @@ class UploaderBehaviorTests(unittest.TestCase):
         self.assertFalse((self.state / "last-uploaded-generation").exists())
 
     # ------------------------------------------------------------------
+    # RCLONE_STATS stderr separation: machine-parsed rclone calls (READY/
+    # manifest cat, lsjson) consume STDOUT ONLY. Manual status settings
+    # (RCLONE_STATS=30s, RCLONE_STATS_ONE_LINE=true,
+    # RCLONE_STATS_LOG_LEVEL=NOTICE) make real rclone write human-oriented
+    # status text on stderr; it must never invalidate a valid remote
+    # readiness/ACK check, while real error text stays meaningful.
+    # ------------------------------------------------------------------
+
+    def test_retry_after_ready_ignores_benign_rclone_stderr_status(self) -> None:
+        """Status text on stderr (READY/manifest cat reads) must not
+        invalidate the remote readiness check: a committed generation with
+        a valid READY marker is still re-validated and acknowledged —
+        never re-uploaded over the published payload."""
+        seed_remote_committed(self.fixture, self.gen_id, self.staging)
+        committed = self.fixture.remote_dir(
+            "Josemar", "vault-recovery", "committed", self.gen_id
+        )
+        before = (committed / "vault" / "notes" / "hello.md").read_bytes()
+        status = (
+            "Transferred:           1 / 1 B, 100%, 0 B/s, ETA -\n"
+            "Checks:                 1 / 1, 100%"
+        )
+        proc = self._run_impl({
+            "FAKE_RCLONE_STDERR_STATUS": status,
+            "FAKE_RCLONE_STDERR_STATUS_CMDS": "cat",
+        })
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("valid READY marker", proc.stdout)
+        self.assertIn("no overwrite", proc.stdout)
+        self.assertEqual(
+            self._remote_targeting_entries(), [],
+            "a READY-visible retry must not upload, move, or purge anything",
+        )
+        self.assertEqual(
+            (committed / "vault" / "notes" / "hello.md").read_bytes(), before,
+            "the published payload must be byte-identical after the retry",
+        )
+        self.assertIn(
+            _acked(self.gen_id, self.staging),
+            (self.state / "uploaded-generations.jsonl").read_text("utf-8").splitlines(),
+        )
+        self.assertNotIn("Transferred:", proc.stdout,
+                         "rclone status text must never reach the parsed output")
+
+    def test_noop_ack_confirmation_ignores_benign_rclone_stderr_status(self) -> None:
+        """The ack-confirmation digest reads (remote_payload_digests) parse
+        stdout ONLY: benign status text on stderr must not invalidate a
+        valid digest-bound ACK — the acknowledged generation stays a no-op
+        instead of being re-uploaded."""
+        first = self._run_impl({})
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.fixture.log.unlink(missing_ok=True)
+        status = (
+            "Transferred:           1 / 1 B, 100%, 0 B/s, ETA -\n"
+            "Checks:                 1 / 1, 100%"
+        )
+        second = self._run_impl({
+            "FAKE_RCLONE_STDERR_STATUS": status,
+            "FAKE_RCLONE_STDERR_STATUS_CMDS": "cat",
+        })
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("already uploaded; no-op", second.stdout)
+        self.assertEqual(
+            _no_transfer_cmds(self.fixture.log_entries()), [],
+            "a confirmed ack must stay a no-op under stderr status text",
+        )
+
+    def test_retention_prune_ignores_benign_rclone_stderr_status(self) -> None:
+        """Status text on stderr during the lsjson inventory read must not
+        contaminate the strict inventory parser: retention still counts and
+        prunes exactly the acknowledged generations beyond the window."""
+        committed = self.fixture.remote_dir("Josemar", "vault-recovery", "committed")
+        gen_dir = self.staging / self.gen_id
+        for gen_id in SEED_IDS:
+            _seed_committed_generation(gen_dir, gen_id, committed / gen_id)
+        self.state.mkdir(parents=True, exist_ok=True)
+        lines = []
+        for gen_id in SEED_IDS:
+            target = committed / gen_id
+            manifest_sha = hashlib.sha256((target / "manifest.json").read_bytes()).hexdigest()
+            ready_sha = hashlib.sha256((target / "READY").read_bytes()).hexdigest()
+            lines.append(
+                f"{gen_id}\tvault-crypt\tJosemar/vault-recovery\t{manifest_sha}\t{ready_sha}"
+            )
+        (self.state / "uploaded-generations.jsonl").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+        proc = self._run_impl({
+            "FAKE_RCLONE_STDERR_STATUS": "Transferred:   1 / 1 B, 100%, 0 B/s, ETA -",
+            "FAKE_RCLONE_STDERR_STATUS_CMDS": "lsjson",
+        })
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("not strict rclone lsjson output", proc.stderr,
+                         "status text must never contaminate the inventory parser")
+        purged = [
+            e["args"][1].rsplit("/", 1)[-1]
+            for e in self.fixture.log_entries()
+            if e["cmd"] == "purge" and "/committed/" in e["args"][1]
+        ]
+        self.assertEqual(sorted(purged), SEED_IDS[:7], purged)
+
+    def test_ready_cat_failure_stderr_surfaced_not_status_line(self) -> None:
+        """On a FAILED remote READY read the surfaced diagnostic must be the
+        real rclone error (the LAST stderr line), even when benign status
+        text preceded it — never the status line, never silence."""
+        seed_remote_committed(self.fixture, self.gen_id, self.staging)
+        committed = self.fixture.remote_dir(
+            "Josemar", "vault-recovery", "committed", self.gen_id
+        )
+        before = (committed / "vault" / "notes" / "hello.md").read_bytes()
+        status = (
+            "Transferred:           1 / 1 B, 100%, 0 B/s, ETA -\n"
+            "Checks:                 1 / 1, 100%"
+        )
+        proc = self._run_impl({
+            "FAKE_RCLONE_FAIL_CAT_SUBSTR": "READY",
+            "FAKE_RCLONE_STDERR_STATUS": status,
+        })
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("marker state UNKNOWN", proc.stderr)
+        self.assertIn("simulated cat failure", proc.stderr,
+                      "the real rclone error text must be surfaced, not the status line")
+        self.assertEqual(
+            (committed / "vault" / "notes" / "hello.md").read_bytes(), before,
+            "the possibly-published payload must stay byte-identical",
+        )
+        self.assertFalse((self.state / "uploaded-generations.jsonl").exists())
+
+    # ------------------------------------------------------------------
     # Staged backlog reconciliation (foreground): every staged generation
     # NOT acknowledged in the local ledger is uploaded and acknowledged,
     # oldest first — not just the `latest` pointer. Fail closed on any

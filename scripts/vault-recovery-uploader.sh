@@ -438,18 +438,50 @@ manifest_schema_validate() {
 #
 # Real rclone exits 3 (directory not found) / 4 (file not found) when the
 # object is confirmed absent; every other non-zero exit code means the
-# read itself failed. The rclone stderr is captured so the failure reason
-# is visible in the logs instead of being silenced.
+# read itself failed. The rclone stderr is captured SEPARATELY from the
+# parsed stdout (see rclone_machine below) so the failure reason is
+# visible in the logs instead of being silenced — without contaminating
+# the sentinel/manifest bytes the strict validation consumes.
+
+# ---------------------------------------------------------------------------
+# Machine-readable rclone calls: parser input is STDOUT ONLY
+# ---------------------------------------------------------------------------
+#
+# The READY/manifest `cat` and `lsjson` inventory calls feed strict machine
+# parsers. rclone writes human-oriented status text to STDERR (e.g.
+# periodic transfer stats when the operator sets RCLONE_STATS=30s /
+# RCLONE_STATS_ONE_LINE=true / RCLONE_STATS_LOG_LEVEL=NOTICE, plus
+# backend/transport diagnostics). Merging stderr into stdout with `2>&1`
+# contaminates the parsed payload (sentinel line, manifest JSON, lsjson
+# array) and causes fail-closed FALSE rejects: a valid remote ACK or
+# readiness check would be invalidated BEFORE any transfer. rclone_machine
+# therefore keeps the streams apart: stdout is captured by the caller via
+# command substitution (parser input), stderr goes to a private scratch
+# file in the state volume (the uploader's own writable volume; files are
+# overwritten per call, never parsed). The caller surfaces that stderr in
+# the logs ONLY when the command FAILS (non-zero) — the LAST line, which
+# is the final ERROR line even when periodic status text preceded it — so
+# benign status text never pollutes parsing while real failure reasons
+# stay visible. (Transfer calls — copy/move/purge — are NOT machine-parsed
+# and are intentionally left untouched.)
+rclone_machine() {
+    _rm_err="$1"
+    shift
+    "$@" 2>"$_rm_err"
+}
 
 remote_ready_valid() {
     gen_id="$1"
     gen_remote="$2"
-    ready="$(rclone cat "$gen_remote/READY" --config "$RCLONE_CONFIG_FILE" 2>&1)" && rc=0 || rc=$?
+    ready="$(rclone_machine "$STATE_DIR/.ready.stderr" \
+        rclone cat "$gen_remote/READY" --config "$RCLONE_CONFIG_FILE")" && rc=0 || rc=$?
     if [ "$rc" -ne 0 ]; then
         case "$rc" in
             3|4) return 1 ;;
             *)
-                log_error "remote READY read FAILED for $gen_remote (rclone exit $rc): $(printf '%s' "$ready" | head -n1)"
+                _diag="$(cat "$STATE_DIR/.ready.stderr" 2>/dev/null | tail -n1)"
+                [ -n "$_diag" ] || _diag="$(printf '%s' "$ready" | head -n1)"
+                log_error "remote READY read FAILED for $gen_remote (rclone exit $rc): $_diag"
                 log_error "marker state INDETERMINATE, NOT markerless; refusing to proceed"
                 return 2
                 ;;
@@ -460,12 +492,15 @@ remote_ready_valid() {
     if [ "$ready_line" != "$gen_id" ]; then
         return 1
     fi
-    manifest="$(rclone cat "$gen_remote/manifest.json" --config "$RCLONE_CONFIG_FILE" 2>&1)" && mrc=0 || mrc=$?
+    manifest="$(rclone_machine "$STATE_DIR/.manifest.stderr" \
+        rclone cat "$gen_remote/manifest.json" --config "$RCLONE_CONFIG_FILE")" && mrc=0 || mrc=$?
     if [ "$mrc" -ne 0 ]; then
         case "$mrc" in
             3|4) return 1 ;;
             *)
-                log_error "remote manifest read FAILED for $gen_remote (rclone exit $mrc): $(printf '%s' "$manifest" | head -n1)"
+                _diag="$(cat "$STATE_DIR/.manifest.stderr" 2>/dev/null | tail -n1)"
+                [ -n "$_diag" ] || _diag="$(printf '%s' "$manifest" | head -n1)"
+                log_error "remote manifest read FAILED for $gen_remote (rclone exit $mrc): $_diag"
                 log_error "marker state INDETERMINATE, NOT markerless; refusing to proceed"
                 return 2
                 ;;
@@ -799,13 +834,19 @@ remote_payload_digests() {
     # branch preserves the REAL exit code (3/4 = confirmed absent, anything
     # else = failed read). The explicit `--config` pins the ACTIVE config
     # (OAuth-refresh fix) exactly like every other rclone call in this
-    # script.
-    rclone cat "$gen_remote/READY" --config "$RCLONE_CONFIG_FILE" > "$ready_file" 2>&1 && rc=0 || rc=$?
+    # script. stdout is redirected to the parse files (the digest bytes);
+    # rclone's stderr goes to a scratch file inside pd_tmp (removed with
+    # it) — same RCLONE_STATS separation as remote_ready_valid, so status
+    # text never contaminates the digest computation.
+    err_file="$pd_tmp/rclone.stderr"
+    rclone cat "$gen_remote/READY" --config "$RCLONE_CONFIG_FILE" > "$ready_file" 2>"$err_file" && rc=0 || rc=$?
     if [ "$rc" -ne 0 ]; then
         case "$rc" in
             3|4) rm -rf "$pd_tmp"; return 1 ;;
             *)
-                log_error "remote READY read FAILED for $gen_remote (rclone exit $rc): $(head -n1 "$ready_file")"
+                _diag="$(cat "$err_file" 2>/dev/null | tail -n1)"
+                [ -n "$_diag" ] || _diag="$(head -n1 "$ready_file")"
+                log_error "remote READY read FAILED for $gen_remote (rclone exit $rc): $_diag"
                 log_error "marker state INDETERMINATE, NOT markerless; refusing to proceed"
                 rm -rf "$pd_tmp"
                 return 2
@@ -818,12 +859,14 @@ remote_payload_digests() {
         rm -rf "$pd_tmp"
         return 1
     fi
-    rclone cat "$gen_remote/manifest.json" --config "$RCLONE_CONFIG_FILE" > "$manifest_file" 2>&1 && mrc=0 || mrc=$?
+    rclone cat "$gen_remote/manifest.json" --config "$RCLONE_CONFIG_FILE" > "$manifest_file" 2>"$err_file" && mrc=0 || mrc=$?
     if [ "$mrc" -ne 0 ]; then
         case "$mrc" in
             3|4) rm -rf "$pd_tmp"; return 1 ;;
             *)
-                log_error "remote manifest read FAILED for $gen_remote (rclone exit $mrc): $(head -n1 "$manifest_file")"
+                _diag="$(cat "$err_file" 2>/dev/null | tail -n1)"
+                [ -n "$_diag" ] || _diag="$(head -n1 "$manifest_file")"
+                log_error "remote manifest read FAILED for $gen_remote (rclone exit $mrc): $_diag"
                 log_error "marker state INDETERMINATE, NOT markerless; refusing to proceed"
                 rm -rf "$pd_tmp"
                 return 2
@@ -1084,15 +1127,20 @@ prune_old_generations() {
     # retention failures from the operator. A CONFIRMED absent committed
     # namespace (rclone exit 3, "directory not found") is a clean empty
     # inventory: nothing to prune. (The explicit rc capture is required:
-    # `$?` after a negated `if !` condition is the NEGATED status.)
-    listing="$(rclone lsjson "${base}/${COMMITTED_NS}" --dirs-only \
-        --config "$RCLONE_CONFIG_FILE" 2>&1)" && list_rc=0 || list_rc=$?
+    # `$?` after a negated `if !` condition is the NEGATED status.) The
+    # lsjson payload is parsed from stdout ONLY — rclone status text on
+    # stderr (rclone_machine) must never reach the strict inventory parser.
+    listing="$(rclone_machine "$STATE_DIR/.lsjson.stderr" \
+        rclone lsjson "${base}/${COMMITTED_NS}" --dirs-only \
+        --config "$RCLONE_CONFIG_FILE")" && list_rc=0 || list_rc=$?
     if [ "$list_rc" -ne 0 ]; then
         if [ "$list_rc" -eq 3 ]; then
             log_info "Committed namespace confirmed absent on the remote; nothing to prune"
             return 0
         fi
-        log_error "remote committed inventory listing FAILED; pruning skipped: $(printf '%s\n' "$listing" | head -n1)"
+        _diag="$(cat "$STATE_DIR/.lsjson.stderr" 2>/dev/null | tail -n1)"
+        [ -n "$_diag" ] || _diag="$(printf '%s\n' "$listing" | head -n1)"
+        log_error "remote committed inventory listing FAILED; pruning skipped: $_diag"
         return 0
     fi
     # A zero-byte response is a PROTOCOL failure, never an empty

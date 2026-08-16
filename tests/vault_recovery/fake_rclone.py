@@ -62,6 +62,20 @@ Failure injection (deterministic, no sleeps):
                                must never be mistaken for an empty
                                inventory; a real empty namespace emits the
                                valid JSON array `[]`).
+  $FAKE_RCLONE_STDERR_STATUS   - when set, this text is printed to STDERR
+                               before every invocation (or only the
+                               comma-separated commands named in
+                               $FAKE_RCLONE_STDERR_STATUS_CMDS),
+                               simulating the human-oriented status text
+                               real rclone writes to stderr (periodic
+                               transfer stats under RCLONE_STATS=30s /
+                               RCLONE_STATS_ONE_LINE=true /
+                               RCLONE_STATS_LOG_LEVEL=NOTICE). The machine
+                               parsers (README/manifest cat, lsjson) must
+                               ignore it: parser input is stdout ONLY.
+  $FAKE_RCLONE_STDERR_STATUS_CMDS - comma-separated command names that
+                               receive the FAKE_RCLONE_STDERR_STATUS text
+                               (default: every command).
 
 Cat semantics: a missing file exits 4 ("file not found") exactly like the
 real rclone, so the scripts can distinguish a CONFIRMED absent marker from
@@ -436,6 +450,20 @@ def main(argv: list[str]) -> int:
     cmd = args[0]
     rest = args[1:]
     _log([cmd, *rest], config=config_path)
+    # Benign stderr status text (simulated RCLONE_STATS output): printed to
+    # stderr BEFORE any failure injection, like real rclone emitting
+    # periodic status while a transfer/read is in progress. The recovery
+    # script must parse stdout only, so this text must never contaminate
+    # the READY/manifest/lsjson payloads.
+    status_text = os.environ.get("FAKE_RCLONE_STDERR_STATUS", "")
+    if status_text:
+        status_cmds = {
+            c.strip()
+            for c in os.environ.get("FAKE_RCLONE_STDERR_STATUS_CMDS", "").split(",")
+            if c.strip()
+        }
+        if not status_cmds or cmd in status_cmds:
+            print(status_text, file=sys.stderr)
     if cmd in _fail_cmds():
         print(f"error: simulated failure for command {cmd}", file=sys.stderr)
         return 1

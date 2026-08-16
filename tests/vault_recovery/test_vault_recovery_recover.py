@@ -197,6 +197,51 @@ class RecoverDownloadTests(unittest.TestCase):
             ["copy"],
         )
 
+    def test_download_prechecks_ignore_benign_rclone_stderr_status(self) -> None:
+        """Manual RCLONE_STATS (RCLONE_STATS=30s, RCLONE_STATS_ONE_LINE,
+        RCLONE_STATS_LOG_LEVEL=NOTICE) makes real rclone emit human-oriented
+        status text on STDERR. The machine-readable READY/manifest `cat`
+        prechecks and the payload `copy` must parse stdout ONLY: benign
+        stderr status must never contaminate the sentinel/manifest bytes
+        and fail closed BEFORE any transfer."""
+        self._seed_committed()
+        status = (
+            "Transferred:           1 / 1 B, 100%, 0 B/s, ETA -\n"
+            "Checks:                 1 / 1, 100%\n"
+            "Elapsed time:         0.0s"
+        )
+        proc = self._run("download", self.gen_id, **{
+            "FAKE_RCLONE_STDERR_STATUS": status,
+        })
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue((self.recovery / "RECOVERY_READY").exists(),
+                        "status text on stderr must not fail the prechecks")
+        self.assertNotIn("Transferred:", proc.stdout,
+                         "rclone status text must never reach the parsed output")
+
+    def test_download_failure_stderr_surfaced_not_status_line(self) -> None:
+        """On a FAILED remote read the surfaced diagnostic must be the real
+        rclone error (the LAST stderr line), even when benign status text
+        preceded it — never the status line, never silence."""
+        self._seed_committed()
+        status = (
+            "Transferred:           1 / 1 B, 100%, 0 B/s, ETA -\n"
+            "Checks:                 1 / 1, 100%"
+        )
+        proc = self._run("download", self.gen_id, **{
+            "FAKE_RCLONE_FAIL_CAT_SUBSTR": "READY",
+            "FAKE_RCLONE_STDERR_STATUS": status,
+        })
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("marker state UNKNOWN", proc.stderr)
+        self.assertIn("simulated cat failure", proc.stderr,
+                      "the real rclone error text must be surfaced, not the status line")
+        self.assertFalse((self.recovery / "RECOVERY_READY").exists())
+        self.assertNotIn(
+            "copy", [e["cmd"] for e in self.fixture.log_entries()],
+            "no payload transfer may start when the marker state is UNKNOWN",
+        )
+
     def test_stale_handoff_cleared_before_new_download(self) -> None:
         # A previous partial download + stale sentinel must be wiped.
         stale = self.recovery / "20260101T000000000000Z-deadbeef"
@@ -469,7 +514,27 @@ class RecoverListRemoteTests(unittest.TestCase):
         proc = self._run("list-remote", **{"FAKE_RCLONE_FAIL_CMDS": "lsjson"})
         self.assertEqual(proc.returncode, 2, proc.stderr)
         self.assertIn("inventory listing FAILED", proc.stderr)
+        self.assertIn("simulated failure for command lsjson", proc.stderr,
+                      "the real rclone error text must be surfaced")
         self.assertNotIn("No committed remote generations", proc.stdout)
+
+    def test_list_remote_ignores_benign_rclone_stderr_status(self) -> None:
+        """RCLONE_STATS status text on stderr during the lsjson inventory
+        read must not contaminate the strict lsjson parser: the listing
+        still succeeds and prints the valid generation."""
+        seed_remote_committed(self.fixture, self.gen_id, self.staging)
+        proc = self._run("list-remote", **{
+            "FAKE_RCLONE_STDERR_STATUS": "Transferred:   1 / 1 B, 100%, 0 B/s, ETA -",
+            "FAKE_RCLONE_STDERR_STATUS_CMDS": "lsjson",
+        })
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        lines = [
+            line for line in proc.stdout.splitlines()
+            if not line.startswith("[vault-recovery-recover]")
+        ]
+        self.assertEqual(lines, [self.gen_id], lines)
+        self.assertNotIn("Transferred:", proc.stdout,
+                         "rclone status text must never reach the parsed output")
 
     def test_list_remote_zero_byte_inventory_fails_closed(self) -> None:
         """A ZERO-BYTE successful lsjson response is a PROTOCOL failure,
