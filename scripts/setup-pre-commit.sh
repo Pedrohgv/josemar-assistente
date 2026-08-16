@@ -34,6 +34,6 @@ pre-commit install
 
 echo ""
 echo "=== Setup Complete ==="
-echo "  Pre-commit hooks installed. Gitleaks, PII guard, and fast tests will run on every commit."
-echo "  To skip (emergency only): SKIP=gitleaks,pii-guard,josemar-fast-tests git commit -m 'message'"
+echo "  Pre-commit hooks installed. Gitleaks, test-env-drift, PII guard, and fast tests will run on every commit."
+echo "  To skip (emergency only): SKIP=gitleaks,test-env-drift,pii-guard,josemar-fast-tests git commit -m 'message'"
 echo "  To update hooks: source $VENV_DIR/bin/activate && pre-commit run --all-files"
