@@ -7,6 +7,17 @@ repos:
   - repo: local
     hooks:
       # When adding/removing hook IDs, update scripts/setup-pre-commit.sh skip guidance.
+      - id: test-env-drift
+        name: test-env-drift
+        # Fail fast (before the full fast-test suite) if the test venv drifts
+        # from requirements-test.txt, with actionable setup guidance (issue #91).
+        # Use the repository venv interpreter explicitly so hook execution does
+        # not depend on commit-time PATH. Setup: scripts/setup-pre-commit.sh
+        entry: >-
+          sh -c 'test -x venv/bin/python3 || { echo "ERROR: venv/bin/python3 not found. Run scripts/setup-pre-commit.sh to create the venv and install requirements-test.txt." >&2; exit 1; }; exec venv/bin/python3 scripts/check-test-env.py'
+        language: system
+        pass_filenames: false
+
       - id: pii-guard
         name: pii-guard
         # Use the repository venv interpreter explicitly so hook execution does

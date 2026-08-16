@@ -435,19 +435,27 @@ Important state-sync variables:
 
 ## Development
 
-Run unit tests:
+The local test environment is reproducible from tracked metadata. The
+authoritative manifest is `requirements-test.txt`; `scripts/setup-pre-commit.sh`
+creates the `venv/` and installs the pinned dependencies plus the pre-commit
+hooks. The `mcp` pin mirrors the Hermes runtime version (issue #91).
+
+Run the full unit suite (prefers `venv/` when present):
 
 ```bash
-python3 -m unittest discover -s tests -v
+make test
+# or, explicitly against the venv:
+venv/bin/python3 -m unittest discover -s tests -v
 ```
 
 Run scoped contract tests:
 
 ```bash
-python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
+venv/bin/python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
 ```
 
-Set up optional pre-commit hooks:
+Set up optional pre-commit hooks (creates `venv/`, installs
+`requirements-test.txt`, and registers the hooks):
 
 ```bash
 ./scripts/setup-pre-commit.sh
