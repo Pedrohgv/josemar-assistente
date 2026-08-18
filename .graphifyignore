@@ -1,0 +1,36 @@
+# Graphify scan exclusions (issue #116)
+# Base: mirrors .gitignore, plus additions. Graphify walks the filesystem (not
+# git), so local-only/private files must be excluded explicitly here even when
+# they are already gitignored.
+
+# Credentials / secrets
+credentials/
+.env
+.env.*
+
+# Personal/private data — never scanned
+workspace/
+josemar-vault/
+obsidian_vault/
+.slim/
+
+# Tooling / generated / caches
+.tmp/
+dump_folder/
+graphify-out/            # self-exclusion: never scan our own output
+.opencode/node_modules/
+__pycache__/
+.git/
+
+# Test suite — excluded from the codebase-navigation graph: tests dominate
+# the node count (70% of nodes) and drown out the production-code signal.
+# The graph maps the actual code for onboarding/navigation, not the test suite.
+tests/
+
+# Python envs
+venv/
+.venv/
+dev-tools-venv/
+
+# Aux services
+aux-ml/models/

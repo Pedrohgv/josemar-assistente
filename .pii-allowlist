@@ -25,3 +25,9 @@ tests/runtime/test_mnemosyne_(?:backup|pilot)\.py:\d+:email:git@github\.com:.*gi
 
 # Deterministic gbrain upstream E5 patch fixture, not a personal phone number.
 patches/gbrain-inline-worker-gateway\.patch:\d+:phone:[0]123456789:.*[0]123456789
+
+# Graphify GRAPH_REPORT.md (issue #116): community "Cohesion score" floats
+# (e.g. a 0.0xxx...xxx value) can pass the Luhn credit-card check. These are
+# generated graph metrics, not card numbers. Path-scoped to the report file.
+# Note: CARD_RE captures a trailing space in the value, hence the ` ?`.
+graphify-out/GRAPH_REPORT\.md:\d+:credit_card:\d+ ?:.*Cohesion score 0\.\d+
