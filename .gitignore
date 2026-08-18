@@ -9,6 +9,7 @@
 venv/
 env/
 ENV/
+dev-tools-venv/
 
 # Workspace (persistent data)
 workspace/
@@ -89,3 +90,15 @@ aux-ml/models/*.bin
 aux-ml/models/*.safetensors
 !aux-ml/models/.gitkeep
 !aux-ml/models/README.md
+
+# Graphify dev-tool artifacts (issue #116)
+# graph.json + GRAPH_REPORT.md are committed as the onboarding map.
+# The rest are regenerable caches/local state and are NOT committed.
+graphify-out/manifest.json
+graphify-out/cache/
+graphify-out/cost.json
+graphify-out/.graphify_labels.json
+graphify-out/.graphify_labels.json.sig
+graphify-out/.graphify_root
+graphify-out/.pending_changes
+graphify-out/2026-*/     # graphify auto-backup of the previous graph on prune

@@ -182,3 +182,23 @@ venv/bin/python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
 - `docs/tasknotes-mcp.md` - TaskNotes MCP prerequisites, profile gate, locking, and recovery
 - `docs/vault-recovery-operations.md` - vault-recovery export (default-on): daily local staged generations, doctor preflight, convergence semantics, portability proof; encrypted upload/recovery/install lane (DEFAULT deployment composition, 14 committed remote generations, fail-closed deploy when the crypt remote is missing); Phase-3 migration sequence and the full Docker-gated disaster-recovery drill
 - `docs/obsidian-operations.md` - Obsidian sync/backup runbook
+
+## Graphify (codebase navigation, issue #116)
+
+This repo has a knowledge graph at `graphify-out/` (committed `graph.json` +
+`GRAPH_REPORT.md`) with god nodes, community structure, and cross-file
+relationships. Full operations guidance: `docs/graphify.md`.
+
+- For codebase questions, first run `graphify query "<question>"` when
+  `graphify-out/graph.json` exists. Use `graphify path "<A>" "<B>"` for
+  relationships and `graphify explain "<concept>"` for focused concepts.
+  These return a scoped subgraph, usually much smaller than raw grep output.
+- Run the CLI via `dev-tools-venv/bin/graphify ...` (or `make graphify` to
+  regenerate). The venv is gitignored; the tool is dev-time only.
+- Read `graphify-out/GRAPH_REPORT.md` for broad architecture review; prefer
+  `query`/`path`/`explain` for focused questions.
+- **Never** run graphify on `/opt/data`, the vault, `workspace/`, or any
+  private state; never run it as root or inside the Hermes container. It maps
+  this repo's code only and is not a gbrain/mnemosyne replacement.
+- Regeneration is operator-initiated and deliberate; do **not** auto-regenerate
+  or commit graph changes in routine work.

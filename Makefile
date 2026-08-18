@@ -93,3 +93,14 @@ verify: test
 	HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=test \
 	HERMES_DASHBOARD_BASIC_AUTH_SECRET=test \
 	docker compose config --quiet
+
+# Graphify dev-tool (issue #116): regenerate the codebase knowledge graph.
+# Dev-time only — never runs inside the Hermes service. Uses the dedicated
+# dev-tools-venv (NOT the pinned test venv). Local AST + markdown structure,
+# zero LLM, nothing leaves the machine. See docs/graphify.md.
+# Committed artifacts: graphify-out/graph.json + GRAPH_REPORT.md.
+# Regenerate deliberately (snapshot), not on every commit.
+.PHONY: graphify
+graphify:
+	@test -x dev-tools-venv/bin/graphify || { echo "ERROR: dev-tools-venv/bin/graphify not found. Run: python3 -m venv dev-tools-venv && dev-tools-venv/bin/pip install graphifyy==0.9.45" >&2; exit 1; }
+	dev-tools-venv/bin/graphify update .
