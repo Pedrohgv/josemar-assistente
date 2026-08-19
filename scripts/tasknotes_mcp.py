@@ -10,8 +10,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from tasknotes_mcp_core import (
     LIST_MAX_RESULTS,
@@ -37,7 +37,7 @@ TASKNOTES_VAULT = "/opt/data/obsidian"
 TASKNOTES_GBRAIN_HOME = "/opt/data"
 TASKNOTES_LOCK_DIR = "/opt/data/.locks"
 
-mcp = FastMCP(
+mcp = MCPServer(
     "tasknotes",
     instructions=(
         "Manage TaskNotes tasks through the bounded gbrain-backed lifecycle API. "

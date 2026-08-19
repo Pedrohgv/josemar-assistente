@@ -1,4 +1,4 @@
-"""Contract tests for the bounded FastMCP TaskNotes surface."""
+"""Contract tests for the bounded MCPServer TaskNotes surface."""
 
 from __future__ import annotations
 
@@ -41,15 +41,15 @@ class FakeFastMCP:
 def _load_server():
     mcp_module = types.ModuleType("mcp")
     server_module = types.ModuleType("mcp.server")
-    fastmcp_module = types.ModuleType("mcp.server.fastmcp")
-    exceptions_module = types.ModuleType("mcp.server.fastmcp.exceptions")
-    setattr(fastmcp_module, "FastMCP", FakeFastMCP)
+    mcpserver_module = types.ModuleType("mcp.server.mcpserver")
+    exceptions_module = types.ModuleType("mcp.server.mcpserver.exceptions")
+    setattr(mcpserver_module, "MCPServer", FakeFastMCP)
     setattr(exceptions_module, "ToolError", FakeToolError)
     modules = {
         "mcp": mcp_module,
         "mcp.server": server_module,
-        "mcp.server.fastmcp": fastmcp_module,
-        "mcp.server.fastmcp.exceptions": exceptions_module,
+        "mcp.server.mcpserver": mcpserver_module,
+        "mcp.server.mcpserver.exceptions": exceptions_module,
     }
     spec = importlib.util.spec_from_file_location("tasknotes_mcp", SERVER_PATH)
     assert spec is not None and spec.loader is not None

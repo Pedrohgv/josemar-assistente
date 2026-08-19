@@ -116,7 +116,7 @@ Run any `gh` CLI command: `workspace-sync gh <args...>`. Args reach the binary l
 
 ## Troubleshooting
 
-- With the pinned Hermes v2026.8.3 gateway terminal, invoke the bare PATH command (`workspace-sync status`); the absolute form `/usr/local/bin/workspace-sync status` is falsely rejected by the referenced-script guard.
+- With the pinned Hermes v2026.8.18 gateway terminal, invoke the bare PATH command (`workspace-sync status`); the absolute form `/usr/local/bin/workspace-sync status` is falsely rejected by the referenced-script guard.
 - The gateway's referenced-script guard may also flag `gh` command bodies containing lifecycle-shaped words (e.g. "startup"/"periodic"); such bodies are not guaranteed to evade the scanner — prefer plain non-lifecycle phrasing.
 
 ## Environment Variables

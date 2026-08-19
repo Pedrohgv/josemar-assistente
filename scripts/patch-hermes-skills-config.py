@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Patch Hermes ``skills_config.save_disabled_skills`` for Josemar deployments.
 
-Hermes v2026.8.3 persists skill toggles directly to ``config.yaml`` via
+Hermes v2026.8.18 persists skill toggles directly to ``config.yaml`` via
 ``save_config``. Josemar tracks only canonical JSON sidecars under
 ``/opt/data/hermes/skill-toggles/`` (the full ``config.yaml`` is sensitive
 and deliberately untracked), so the dashboard ``PUT /api/skills/toggle``
