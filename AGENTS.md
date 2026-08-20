@@ -19,8 +19,11 @@ Josemar Assistente is a self-hosted AI assistant built on Hermes, running in Doc
 Core architecture:
 - Hermes gateway runtime (dashboard/API/Telegram/cron/skills)
 - Two-scope skills (repo-owned `skills-factory/` + user-owned `agent-state/skills/`)
-- Git-backed state sync (`scripts/workspace-sync.sh`)
-- Obsidian vault operations (native gbrain + bounded TaskNotes MCP + Syncthing + backup)
+- Git-backed state sync (`scripts/workspace_sync.py`)
+- Obsidian vault operations (native gbrain + bounded TaskNotes MCP + Syncthing)
+- Default encrypted vault-recovery lane for the vault plus complete gbrain state
+- Optional Mnemosyne semantic conversation memory backed by an internal TEI embeddings service
+- Optional browser-control reverse-tunnel overlay for on-demand laptop browser access
 - Optional `aux-ml` queue service for long OCR jobs
 
 ## Directory Structure
@@ -29,14 +32,15 @@ Core architecture:
 josemar-assistente/
 ├── agent-state/            # Nested private repo: user state (memory/persona/skills)
 ├── credentials/            # Service credentials (not versioned)
-├── docs/                   # Operations runbooks (gbrain, obsidian, aux-ml)
-├── scripts/                # Workspace sync, backup, privacy tooling, gbrain wrapper
+├── docs/                   # Operations runbooks
+├── scripts/                # Workspace sync, backup, privacy tooling, runtime helpers
 ├── aux-ml/                 # Auxiliary ML service
+├── browser-tunnel/         # Optional browser-control tunnel sidecar
 ├── skills-factory/         # Repo-owned core skills
 ├── templates/              # Bootstrap template for private state repo
-├── tests/                  # Python unit and contract tests
+├── tests/                  # Python unit, contract, and gated runtime tests
 ├── .github/workflows/      # CI/CD automation
-├── docker-compose.yml      # Runtime stack
+├── docker-compose.yml      # Base runtime stack
 ├── Dockerfile.hermes       # Hermes runtime image
 └── .env.example            # Environment template
 ```
@@ -75,6 +79,23 @@ COMPOSE_PROFILES=aux-ml docker compose up -d
 - Create feature branches for non-trivial work.
 - Do not commit directly to `main` unless explicitly requested.
 - Keep commits focused and scoped.
+
+## Guidance Consistency
+
+Safety and operational invariants are intentionally repeated in a few places so
+agents encounter them at the point of use. When changing an invariant that is
+duplicated across `AGENTS.md`, skills, runbooks, workflows, or contract tests,
+inspect and update every applicable copy in the same change. Do not leave a
+narrower instruction that can bypass the root safety rule.
+
+## Pinned Dependency Upgrades
+
+Hermes, gbrain, Mnemosyne, Bun, container images, and selected helper tools are
+pinned, and Josemar carries local compatibility patches around some upstream
+components. Treat upgrades as compatibility changes, not isolated version
+bumps: verify the upstream release/ref, re-check local patches and runtime/config
+contracts, inspect affected runbooks/tests, and run the relevant focused and
+Docker/Compose validation before considering the upgrade complete.
 
 ## Agent State Repo Rules
 
@@ -123,14 +144,14 @@ Adapter"; TaskNotes specifics are in `docs/tasknotes-mcp.md`.
 4. **Cooperative flock.** The global lock at `/opt/data/.locks/tasknotes.lock`
    serializes cooperative access today: TaskNotes transactions, both refresh
    crons, backfills, and every other gbrain-touching path cooperate on it.
- 5. **Pause all owned jobs for maintenance windows.** For recovery, reindex/rebuild,
-    migrations, vault swaps, and unadapted/third-party diagnostics, the
-    operator pauses ALL THREE owned jobs: `gbrain-refresh`,
-    `gbrain-embedding-refresh`, AND the `vault-recovery-export` cron (a
-    lock-held export would repopulate state inside the window), plus stops
-    Hermes and server Syncthing before any destructive restore/install (the
-    full disaster-recovery drill asserts this exact ordering).
-    Routine adapted access does NOT require pausing the jobs.
+5. **Pause all owned jobs for maintenance windows.** For recovery, reindex/rebuild,
+   migrations, vault swaps, and unadapted/third-party diagnostics, the
+   operator pauses ALL THREE owned jobs: `gbrain-refresh`,
+   `gbrain-embedding-refresh`, AND the `vault-recovery-export` cron (a
+   lock-held export would repopulate state inside the window), plus stops
+   Hermes and server Syncthing before any destructive restore/install (the
+   full disaster-recovery drill asserts this exact ordering).
+   Routine adapted access does NOT require pausing the jobs.
 6. **No nested wrapper usage in TaskNotes.** TaskNotes remains a bounded MCP
    adapter on short-lived native gbrain commands and is the sole task-file
    writer. It retains its transaction-level global lock and internal native
@@ -148,8 +169,8 @@ Adapter"; TaskNotes specifics are in `docs/tasknotes-mcp.md`.
 This pattern keeps the always-loaded skill context small while making all information reachable when needed. The umbrella skill should state "for X details, load the reference" so the agent knows what's available.
 
 Examples in this repo:
-- `skills-factory/gbrain/SKILL.md` (compact) + `references/chronicle.md` (full event schema, kind taxonomy, ontology model)
-- `agent-state/skills/client-workflows/SKILL.md` (umbrella router) + `references/client-transcription.md` (detailed workflow)
+- `skills-factory/backup-operations/SKILL.md` + `references/status-observation.md` / `references/recovery-checklist.md`
+- `skills-factory/tasknotes/SKILL.md` + `references/custom-fields.md`
 
 When adding or editing a skill, if a section exceeds ~30 lines of detail, consider moving it to `references/<topic>.md` and replacing it in the main skill with a brief summary + `skill_view` pointer.
 
@@ -164,24 +185,31 @@ When adding or editing a skill, if a section exceeds ~30 lines of detail, consid
 ## Testing
 
 - New and changed behavior must include new or updated tests, and relevant tests should pass during development cycles before work is considered complete. If a change is not practically testable, surface that limitation to the user before proceeding.
-- Do not invoke bare system `python3` for test runs. Use the repo's supported test entrypoint (`make test` / `make verify`) or the repo virtualenv interpreter (`venv/bin/python3`, the interpreter the Makefile's `PYTHON` prefers when present), which includes the `requirements-test.txt` dependencies (e.g. httpx). Bare system `python3` may lack those dependencies.
+- Prefer the repo's named Make targets (`make test`, `make verify`, and subsystem-specific targets in the Makefile) because they encode the supported environment and gates.
+- For direct local Python test invocation, prefer `venv/bin/python3` when the repo virtualenv exists. Venv-less environments such as CI may use system `python3` when dependencies are supplied as documented in `tests/README.md`; do not assume an arbitrary bare system Python has the test dependencies installed.
+- Docker/runtime suites are deliberately gated. Consult `tests/README.md` and run the focused gate appropriate to the change rather than enabling expensive runtime tests indiscriminately.
 
 ```bash
 make test
-venv/bin/python3 -m unittest discover -s tests -v
+make verify
 venv/bin/python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
 ```
 
 ## Key References
 
 - `README.md` - top-level runtime and operations guide
-- `.github/workflows/AGENTS.md` - deploy/stop/privacy workflow documentation
+- `tests/README.md` - supported fast, focused, and Docker-gated validation commands
+- `.github/workflows/AGENTS.md` - deploy/stop/privacy/test workflow documentation
 - `credentials/README.md` - credential setup
 - `docs/aux-ml.md` - aux-ml operations
-- `docs/gbrain-operations.md` - gbrain activation, reindex, vault swap, and schema workflow
+- `docs/browser-control.md` - optional remote browser-control architecture and operations
+- `docs/gbrain-operations.md` - gbrain activation, reindex, vault swap, embeddings, and schema workflow
+- `docs/memory-embeddings-evaluation.md` - embedding evaluation and activation context
+- `docs/mnemosyne-operations.md` - optional Mnemosyne deployment, backup, rollback, and recovery
 - `docs/tasknotes-mcp.md` - TaskNotes MCP prerequisites, profile gate, locking, and recovery
 - `docs/vault-recovery-operations.md` - vault-recovery export (default-on): daily local staged generations, doctor preflight, convergence semantics, portability proof; encrypted upload/recovery/install lane (DEFAULT deployment composition, 14 committed remote generations, fail-closed deploy when the crypt remote is missing); Phase-3 migration sequence and the full Docker-gated disaster-recovery drill
 - `docs/obsidian-operations.md` - Obsidian sync/backup runbook
+- `docs/graphify.md` - Graphify navigation, freshness, governance, and regeneration guidance
 
 ## Graphify (codebase navigation, issue #116)
 
@@ -189,6 +217,10 @@ This repo has a knowledge graph at `graphify-out/` (committed `graph.json` +
 `GRAPH_REPORT.md`) with god nodes, community structure, and cross-file
 relationships. Full operations guidance: `docs/graphify.md`.
 
+- Before relying on Graphify, compare the built-from commit recorded in
+  `graphify-out/GRAPH_REPORT.md` with current `HEAD`. A stale graph may still
+  be used as a navigation hint, but every conclusion must be verified against
+  current source; do not treat graph output as authoritative.
 - For codebase questions, first run `graphify query "<question>"` when
   `graphify-out/graph.json` exists. Use `graphify path "<A>" "<B>"` for
   relationships and `graphify explain "<concept>"` for focused concepts.
