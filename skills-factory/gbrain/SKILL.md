@@ -41,10 +41,12 @@ Safe gbrain Adapter".
 - **Cooperative flock.** `/opt/data/.locks/tasknotes.lock` is the global
   serialization point today: TaskNotes transactions, both refresh crons,
   backfills, and every adapted path cooperate on it.
-- **Pause both crons for maintenance.** For recovery, reindex/rebuild,
+- **Pause all owned jobs for maintenance.** For recovery, reindex/rebuild,
   migrations, vault swaps, and unadapted/third-party diagnostics, the operator
-  pauses BOTH `gbrain-refresh` and `gbrain-embedding-refresh`. Routine adapted
-  access does not require pausing.
+  pauses all three owned jobs: `gbrain-refresh`, `gbrain-embedding-refresh`,
+  and `vault-recovery-export`. A lock-held recovery export can repopulate state
+  inside the maintenance window. Routine adapted access does not require
+  pausing the jobs.
 - **Threat model.** The safe wrapper prevents accidental, prompt-driven, and
   cooperative-concurrency PGLite access — NOT a security boundary against a
   compromised same-UID container/shell. The private native path is defense in
@@ -215,7 +217,8 @@ Safe gbrain Adapter".
   `gbrain chronicle-backfill` (enqueues extraction jobs) or, on PGLite,
   `gbrain jobs submit chronicle_extract
   --params '{"slug":"<meeting-slug>","sourceId":"default"}' --follow`
-  (inline processing) inside a maintenance window with both refresh crons
+  (inline processing) inside a maintenance window with all three owned jobs
+  (`gbrain-refresh`, `gbrain-embedding-refresh`, and `vault-recovery-export`)
   paused. Normal agents must NOT invoke these commands. See
   `docs/gbrain-operations.md` for setup details.
 
