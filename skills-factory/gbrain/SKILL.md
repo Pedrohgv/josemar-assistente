@@ -1,6 +1,6 @@
 ---
 name: gbrain
-description: Native gbrain vault interface. Direct authoring, retrieval, and linking via the public `gbrain` command, which transparently provides the issue #110 safe-adapter behavior. Keyword-only search by default (text keyword-only, image/cross-modal rejected, put/capture do not embed); opt-in TEI E5 semantic/hybrid retrieval (issue #65) makes search and query hybrid/semantic. No auto indexing.
+description: Native gbrain vault interface. Direct authoring, retrieval, and linking via the public `gbrain` command, which transparently provides the issue #110 safe-adapter behavior. Semantic/hybrid retrieval is enabled; use concept-based `gbrain search` and `gbrain query --no-expand`. No auto indexing.
 categories:
   - retrieval
   - search
@@ -74,25 +74,12 @@ Safe gbrain Adapter".
   `enable-embeddings`, `disable-embeddings`, and `embed-backfill` — is
   operator-only and remains forbidden from chat even when the user asks for it
   directly.
-- **Keyword-only search by default; opt-in semantic/hybrid retrieval (issue #65).**
-  The base deploy configures `search.mcp_keyword_only=true` and the
-  `embedding_disabled` sentinel, so `gbrain search` uses
-  `engine.searchKeyword`
-  and never the vector/hybrid provider path; text queries are keyword-only,
-  image/cross-modal queries are rejected, and `gbrain put`/`capture`
-  do not embed. Semantic/hybrid retrieval is opt-in via issue #65: the operator deploys
-  the `docker-compose.embeddings.yml` TEI overlay, runs
-  `josemar-gbrain enable-embeddings` (native in-place migration; forces
-  keyword-only first, runs `migrate embeddings --no-embed`, then only on
-  success sets `search.mcp_keyword_only=false` and clears the
-  `embedding_disabled` sentinel) and `josemar-gbrain embed-backfill` (one-time
-  vectorization that finalizes the native migration state), after which both
-  `gbrain search` and `gbrain query --no-expand` use the
-  hybrid/semantic provider path (not exact keyword). `gbrain doctor`
-  will warn that embeddings
-  are not configured in the base deploy; this is expected. See
-  `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI E5 Semantic/Hybrid
-  Retrieval".
+- **Semantic/hybrid retrieval is enabled.** Use concept-based queries with
+  `gbrain search` and `gbrain query --no-expand`; exact keyword matching is not
+  required. `gbrain status` is available as a diagnostic if search capability
+  is uncertain after deployment or recovery. Embedding activation, backfill,
+  disable, and rollback are operator concerns; see `docs/gbrain-operations.md`
+  → "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval".
 - **Periodic refresh, no chat reindex.** Chat does not run activation/reindex.
   Operators run `josemar-gbrain reindex` manually for activation, schema
   changes, or vault swaps. A Hermes cron runs `josemar-gbrain refresh` every 5
@@ -240,7 +227,8 @@ below are the ones Josemar uses routinely from chat.
 
 ### `gbrain status`
 
-Report native gbrain runtime/config status. Safe to call at any time.
+Report native gbrain runtime/config status. Safe to call at any time. Use it
+as a diagnostic if search capability is uncertain after deployment or recovery.
 
 ```bash
 gbrain status
@@ -248,13 +236,9 @@ gbrain status
 
 ### `gbrain search`
 
-Native search. In the base deploy `search.mcp_keyword_only=true` and the
-`embedding_disabled` sentinel are in effect, so search uses
-`engine.searchKeyword` (keyword-only; image/cross-modal queries are rejected).
-After issue #65 opt-in semantic/hybrid retrieval is enabled
-(`josemar-gbrain enable-embeddings` + `josemar-gbrain embed-backfill`),
-`search.mcp_keyword_only=false` and the sentinel is cleared, so `gbrain
-search` uses the hybrid/semantic provider path (not exact keyword).
+Native semantic/hybrid search in Josemar's current deployment. Exact keyword
+matching is not required; formulate concept-based queries when that better
+matches what you are trying to retrieve.
 
 ```bash
 gbrain search "notes on obsidian sync" --limit 10
@@ -264,18 +248,11 @@ Common flags:
 - `--limit` (integer, optional, result cap)
 - `--offset` (integer, optional, pagination)
 
-### `gbrain query --no-expand` (opt-in semantic/hybrid retrieval, issue #65)
+### `gbrain query --no-expand`
 
-When issue #65 opt-in TEI E5 semantic/hybrid retrieval is enabled by the
-operator (`josemar-gbrain enable-embeddings` + `josemar-gbrain embed-backfill`),
-`search.mcp_keyword_only=false` and the `embedding_disabled` sentinel is
-cleared, so `gbrain query --no-expand` uses the hybrid/semantic
-provider path.
-In the base (keyword-only) deploy this command is not available (text queries
-are keyword-only, image/cross-modal queries are rejected). See
-`docs/gbrain-operations.md` → "Issue #65: Opt-in TEI E5 Semantic/Hybrid
-Retrieval" for activation, backfill, rollback, and the model-tuple immutability
-rules.
+Semantic/hybrid retrieval without query expansion. This is available in the
+current Josemar deployment and is appropriate for concept-based vault
+exploration.
 
 ```bash
 gbrain query --no-expand "notes on obsidian sync"
@@ -391,18 +368,14 @@ skills document Pedro's specific setup.
 | `repo-architecture` | `skills/repo-architecture/SKILL.md` | Where new brain files go, directory conventions |
 | `reports` | `skills/reports/SKILL.md` | Save/load timestamped reports |
 
-### Requires opt-in features (embeddings / dream cycle / LLM synthesis)
+### Requires runtime features (embeddings / dream cycle / LLM synthesis)
 
-These document features that do NOT work in the base keyword-only/no-embedding
-deploy. Some become available when issue #65 opt-in TEI E5 semantic/hybrid
-retrieval is enabled (`gbrain query --no-expand`); others require
-features
-Josemar does not enable. Read for awareness and check the issue #65 docs
-before invoking:
+Embedding-backed `query` is enabled in the current Josemar deployment. Other
+entries below depend on runtime features Josemar does not enable.
 
 | Skill | Requires |
 |---|---|
-| `query` | Semantic search (embeddings) — opt-in via issue #65; use `gbrain query --no-expand` after `enable-embeddings` + `embed-backfill` |
+| `query` | Semantic search (embeddings) — enabled; use `gbrain query --no-expand` |
 | `briefing` | `gbrain recall --since-last-run` (embeddings) |
 | `concept-synthesis` | Dream cycle + LLM synthesis |
 | `enrich`, `article-enrichment`, `book-mirror`, `strategic-reading` | LLM synthesis calls |
@@ -448,26 +421,6 @@ cron for recurring manual-file reconciliation. It syncs vault files, extracts
 stale content, and refreshes links without init/schema work. It uses
 `gbrain sync --no-embed` even after issue #65 activation.
 
-### Opt-in semantic/hybrid retrieval (issue #65)
-
-`josemar-gbrain enable-embeddings` and `josemar-gbrain embed-backfill` are
-operator-only and never called by chat/cron/startup. They are the activation
-path for opt-in TEI E5 semantic/hybrid retrieval:
-
-- `enable-embeddings`: native in-place embedding migration; forces
-  keyword-only first, runs `migrate embeddings --no-embed` (no vectors
-  produced), then only on success sets `search.mcp_keyword_only=false` and
-  clears the `embedding_disabled` sentinel; preserves DB-only records.
-- `embed-backfill`: one-time existing-vault vectorization that finalizes the
-  native migration state; acquires the shared TaskNotes lock, runs at
-  concurrency 1, verifies zero stale embeddings, and is retryable.
-
-After both succeed, `gbrain search` and
-`gbrain query --no-expand` both use
-the hybrid/semantic provider path (not exact keyword). Before enable or after
-`disable-embeddings`, text queries are keyword-only, image/cross-modal queries
-are rejected, and `put`/`capture` do not embed. See
+Embedding activation, backfill, disable, and rollback are operator-only. See
 `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI E5 Semantic/Hybrid
-Retrieval" for the full flow, TEI health/config/preflight, model-tuple
-immutability, and safe rollback (`disable-embeddings` sets keyword-only first
-and writes the sentinel; vectors/TEI preserved; do not remove TEI first).
+Retrieval" for the full lifecycle and recovery procedure.
