@@ -17,6 +17,7 @@ All workflows run on a self-hosted runner.
 ## Workflows
 
 - `deploy-to-home-server.yml`: build and deploy Hermes stack.
+- `fast-tests.yml`: run `make verify` on pull requests, pushes to `main`, and manual dispatch with pinned test dependencies installed into an isolated runner temp directory.
 - `gbrain-embedding-backfill.yml`: manual, destructive gbrain embedding activation and retry-safe backfill; it never deploys or rebuilds.
 - `stop-service.yml`: stop all project services safely.
 - `privacy-scan.yml`: secret and PII scanning on changes.
