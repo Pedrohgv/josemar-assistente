@@ -1,6 +1,6 @@
 ---
 name: gbrain
-description: Native gbrain vault interface. Direct authoring, retrieval, and linking via the public `gbrain` command, which transparently provides the issue #110 safe-adapter behavior. Search mode follows the live runtime; check `gbrain status`, use semantic/hybrid retrieval when embeddings are active, and fall back to keyword search when they are not. No auto indexing.
+description: Native gbrain vault interface. Direct authoring, retrieval, and linking via the public `gbrain` command, which transparently provides the issue #110 safe-adapter behavior. Semantic/hybrid retrieval is enabled; use concept-based `gbrain search` and `gbrain query --no-expand`. No auto indexing.
 categories:
   - retrieval
   - search
@@ -74,20 +74,12 @@ Safe gbrain Adapter".
   `enable-embeddings`, `disable-embeddings`, and `embed-backfill` — is
   operator-only and remains forbidden from chat even when the user asks for it
   directly.
-- **Search mode follows the live runtime; base activation starts keyword-only
-  (issue #65).** Do not infer the current search capability from the base
-  activation defaults. Use `gbrain status` when search mode matters. If the
-  runtime has embeddings configured and backfilled, `gbrain search` and
-  `gbrain query --no-expand` use the hybrid/semantic provider path, so
-  concept-based queries are appropriate. If embeddings are disabled or not
-  configured, `gbrain search` is keyword-only and `gbrain query --no-expand`
-  is unavailable. The operator lifecycle intentionally starts from
-  `search.mcp_keyword_only=true` plus the `embedding_disabled` sentinel, then
-  `josemar-gbrain enable-embeddings` and `josemar-gbrain embed-backfill`
-  activate semantic/hybrid retrieval. Those base activation defaults describe
-  initialization and rollback, not necessarily the current deployed state.
-  See `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI E5 Semantic/Hybrid
-  Retrieval".
+- **Semantic/hybrid retrieval is enabled.** Use concept-based queries with
+  `gbrain search` and `gbrain query --no-expand`; exact keyword matching is not
+  required. `gbrain status` is available as a diagnostic if search capability
+  is uncertain after deployment or recovery. Embedding activation, backfill,
+  disable, and rollback are operator concerns; see `docs/gbrain-operations.md`
+  → "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval".
 - **Periodic refresh, no chat reindex.** Chat does not run activation/reindex.
   Operators run `josemar-gbrain reindex` manually for activation, schema
   changes, or vault swaps. A Hermes cron runs `josemar-gbrain refresh` every 5
@@ -235,9 +227,8 @@ below are the ones Josemar uses routinely from chat.
 
 ### `gbrain status`
 
-Report native gbrain runtime/config status. Safe to call at any time. Use this
-before assuming whether search is keyword-only or semantic/hybrid; live runtime
-status is authoritative over the base activation defaults.
+Report native gbrain runtime/config status. Safe to call at any time. Use it
+as a diagnostic if search capability is uncertain after deployment or recovery.
 
 ```bash
 gbrain status
@@ -245,13 +236,9 @@ gbrain status
 
 ### `gbrain search`
 
-Native search. Search behavior follows the live runtime. Check `gbrain status`
-when capability matters. With embeddings configured and backfilled, `gbrain
-search` uses the hybrid/semantic provider path (not exact keyword), so use
-concept-based queries when useful. With embeddings disabled or not configured,
-search uses the keyword-only path and image/cross-modal queries are rejected.
-Base activation starts in that keyword-only state until the operator completes
-the issue #65 embeddings lifecycle.
+Native semantic/hybrid search in Josemar's current deployment. Exact keyword
+matching is not required; formulate concept-based queries when that better
+matches what you are trying to retrieve.
 
 ```bash
 gbrain search "notes on obsidian sync" --limit 10
@@ -261,16 +248,11 @@ Common flags:
 - `--limit` (integer, optional, result cap)
 - `--offset` (integer, optional, pagination)
 
-### `gbrain query --no-expand` (when semantic/hybrid retrieval is active, issue #65)
+### `gbrain query --no-expand`
 
-Availability follows the live runtime, not a permanent base-deploy assumption.
-Check `gbrain status` first when uncertain. When embeddings are configured and
-backfilled, `gbrain query --no-expand` uses the hybrid/semantic provider path
-and is appropriate for concept-based vault exploration. When embeddings are
-disabled or not configured, this command is unavailable; use `gbrain search`
-with keyword queries instead. The operator activation/backfill and rollback
-lifecycle is documented in `docs/gbrain-operations.md` → "Issue #65: Opt-in
-TEI E5 Semantic/Hybrid Retrieval".
+Semantic/hybrid retrieval without query expansion. This is available in the
+current Josemar deployment and is appropriate for concept-based vault
+exploration.
 
 ```bash
 gbrain query --no-expand "notes on obsidian sync"
@@ -388,15 +370,12 @@ skills document Pedro's specific setup.
 
 ### Requires runtime features (embeddings / dream cycle / LLM synthesis)
 
-These features depend on the live runtime rather than a permanent
-keyword-only assumption. Embedding-backed features such as `query` are
-available when embeddings are configured and backfilled; a deployment may
-already be in that state. Check `gbrain status` before deciding they are
-unavailable. Other entries below require features Josemar does not enable.
+Embedding-backed `query` is enabled in the current Josemar deployment. Other
+entries below depend on runtime features Josemar does not enable.
 
 | Skill | Requires |
 |---|---|
-| `query` | Semantic search (embeddings) — use `gbrain query --no-expand` whenever runtime status shows embeddings active; operator lifecycle is issue #65 |
+| `query` | Semantic search (embeddings) — enabled; use `gbrain query --no-expand` |
 | `briefing` | `gbrain recall --since-last-run` (embeddings) |
 | `concept-synthesis` | Dream cycle + LLM synthesis |
 | `enrich`, `article-enrichment`, `book-mirror`, `strategic-reading` | LLM synthesis calls |
@@ -442,26 +421,6 @@ cron for recurring manual-file reconciliation. It syncs vault files, extracts
 stale content, and refreshes links without init/schema work. It uses
 `gbrain sync --no-embed` even after issue #65 activation.
 
-### Opt-in semantic/hybrid retrieval (issue #65)
-
-`josemar-gbrain enable-embeddings` and `josemar-gbrain embed-backfill` are
-operator-only and never called by chat/cron/startup. They are the activation
-path for opt-in TEI E5 semantic/hybrid retrieval:
-
-- `enable-embeddings`: native in-place embedding migration; forces
-  keyword-only first, runs `migrate embeddings --no-embed` (no vectors
-  produced), then only on success sets `search.mcp_keyword_only=false` and
-  clears the `embedding_disabled` sentinel; preserves DB-only records.
-- `embed-backfill`: one-time existing-vault vectorization that finalizes the
-  native migration state; acquires the shared TaskNotes lock, runs at
-  concurrency 1, verifies zero stale embeddings, and is retryable.
-
-After both succeed, `gbrain search` and
-`gbrain query --no-expand` both use
-the hybrid/semantic provider path (not exact keyword). Before enable or after
-`disable-embeddings`, text queries are keyword-only, image/cross-modal queries
-are rejected, and `put`/`capture` do not embed. See
+Embedding activation, backfill, disable, and rollback are operator-only. See
 `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI E5 Semantic/Hybrid
-Retrieval" for the full flow, TEI health/config/preflight, model-tuple
-immutability, and safe rollback (`disable-embeddings` sets keyword-only first
-and writes the sentinel; vectors/TEI preserved; do not remove TEI first).
+Retrieval" for the full lifecycle and recovery procedure.
