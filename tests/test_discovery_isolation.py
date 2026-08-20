@@ -141,10 +141,10 @@ class DiscoveryHttpxIsolationTests(unittest.TestCase):
         sys.modules.pop("mcp", None)
         import httpx  # noqa: E402
         import httpx_sse  # noqa: E402
-        from mcp.server.fastmcp import FastMCP  # noqa: E402
+        from mcp.server.mcpserver import MCPServer  # noqa: E402
         self.assertTrue(hasattr(httpx, "TransportError"))
         self.assertTrue(hasattr(httpx_sse, "EventSource"))
-        self.assertTrue(callable(FastMCP))
+        self.assertTrue(callable(MCPServer))
 
     def test_each_aux_module_leaves_app_llama_router_using_real_httpx(self) -> None:
         # After importing each aux test module, a subsequent fresh import of

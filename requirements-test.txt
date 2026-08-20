@@ -12,16 +12,16 @@
 # Pins are the versions validated for the fast-test suite (issue #91).
 #
 # mcp is pinned to mirror the Hermes runtime exactly. The runtime base image
-# (Dockerfile.hermes: HERMES_BASE_IMAGE=nousresearch/hermes-agent:v2026.8.3)
-# ships mcp==1.28.1 (verified: docker run --rm nousresearch/hermes-agent:v2026.8.3
-# /opt/hermes/.venv/bin/python3 -c "import importlib.metadata as m; print(m.version('mcp'))").
-# Stay on the 1.x line — mcp 2.x is a breaking rewrite and Hermes pins 1.x.
+# (Dockerfile.hermes: HERMES_BASE_IMAGE=nousresearch/hermes-agent:v2026.8.18)
+# ships mcp==2.0.0 (verified: docker run --rm nousresearch/hermes-agent:v2026.8.18
+# /opt/hermes/.venv/bin/python3 -c "import importlib.metadata as m; print(m.version('mcp'))"),
+# so the local pin mirrors the runtime exactly.
 # Re-verify this pin whenever HERMES_BASE_IMAGE is bumped.
 #
 # Known limitation: mcp's own transitive dependencies are unpinned here, so
 # reproducibility is top-level only (full lockfile reproducibility is out of
 # scope for issue #91).
-mcp==1.28.1
+mcp==2.0.0
 httpx==0.28.1
 httpx-sse==0.4.3
 pydantic==2.13.4
