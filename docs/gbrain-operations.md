@@ -426,8 +426,9 @@ defaults. Operators must not assume unvalidated model selection.
 ### Routing and config
 
 - Triage route: `models.dream.triage`; synthesis route:
-  `models.dream.synthesize`. Each falls back to normal model resolution when
-  unset; they are independent — do not assume one implies the other.
+  `models.dream.synthesize`. Each resolves in order: CLI flag → route key →
+  deprecated key → `models.default` → key-aware tier default → caller
+  fallback; they are independent — do not assume one implies the other.
 - Do not select a production #67 model: #67 is not validated for this
   deployment, and the #126 Dream gate covers only the Anthropic-compatible
   route.
@@ -446,13 +447,17 @@ produced under a different route/model.
 
 ### Bounded defaults
 
-- `max_turns`: 16.
-- Daily `max_submissions`: 0 (disabled).
-- Triage: `max_chars` 24000, `max_tokens` 2048, `max_ms` 300000 (0 =
-  unlimited), `concurrency` 4 (valid range 1–16).
-- `max_chunks`: 24.
-- Subagent timeout: 30 min; wait timeout: 35 min.
-- Optional inline concurrency 1 (PGLite serial) for synthesis child work.
+- `dream.synthesize.max_turns`: 16.
+- `dream.synthesize.max_submissions_per_source_per_day`: 0 (disabled).
+- `dream.triage.max_chars`: 24000.
+- `dream.triage.max_tokens`: 2048.
+- `dream.triage.max_ms`: 300000 (0 = unlimited).
+- `dream.triage.concurrency`: 4 (valid range 1–16).
+- `dream.synthesize.max_chunks_per_transcript`: 24.
+- `dream.synthesize.subagent_timeout_ms`: 30 min.
+- `dream.synthesize.subagent_wait_timeout_ms`: 35 min.
+- `dream.synthesize.inline_concurrency`: optional 1 (PGLite serial) for
+  synthesis child work.
 
 This contract does not claim automatic #4361 recovery; rollback remains
 covered by the fail-safe policy in the migration section above.
