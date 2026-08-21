@@ -142,6 +142,89 @@ def _chat_subcommand_allowed(gbrain_args: list[str]) -> bool:
     return True
 
 
+# gbrain-specific explicit classification of the documented Josemar public /
+# operator command surface (skills-factory/gbrain/SKILL.md + its references/,
+# plus the operator runbook). This is the single machine-readable source of
+# truth for the issue #127 conformance matrix: every documented operation is
+# classified here, and the policy tests assert the classification against the
+# actual allowlist so a newly allowlisted command cannot drift without a
+# coverage entry.
+#
+# Categories:
+#   core               - provider-free public commands (deep/smoke coverage)
+#   chronicle_read     - Chronicle zero-LLM read smoke (no LLM required)
+#   embeddings_gated   - requires the TEI embeddings feature (separate gate)
+#   operator_only      - operator/cron maintenance, never agent-facing
+#   forbidden          - rejected/unsafe even under an allowlisted parent
+#   probe_unavailable  - known discrepancy; classified probe/unavailable
+#
+# Scope boundary: this classifies the NATIVE gbrain command surface the
+# adapter allowlists/rejects. The `josemar-gbrain` wrapper subcommands
+# (reindex/refresh/refresh-embeddings/enable-embeddings/disable-embeddings/
+# embed-backfill) are a separate operator surface handled by
+# scripts/josemar-gbrain; `reindex`/`refresh` appear here only because the
+# adapter inventory has always listed them as operator-only.
+GBRAIN_OPERATION_CLASSIFICATION = {
+    # --- core public surface ---
+    "status": "core",
+    "search": "core",
+    "get": "core",
+    "capture": "core",
+    "put": "core",
+    "link": "core",
+    "backlinks": "core",
+    "graph": "core",
+    "tags": "core",
+    "history": "core",
+    "delete": "core",
+    "revert": "core",
+    "restore": "core",
+    "doctor": "core",
+    "sources": "core",  # read-only `sources list` only
+    # --- Chronicle zero-LLM read smoke ---
+    "day": "chronicle_read",
+    "since": "chronicle_read",
+    "last-seen": "chronicle_read",
+    "on-this-day": "chronicle_read",
+    "orient": "chronicle_read",
+    "timeline": "chronicle_read",
+    "ontology": "chronicle_read",
+    # --- embeddings/provider-gated ---
+    "query": "embeddings_gated",
+    # --- operator-only (never agent-facing) ---
+    "init": "operator_only",
+    "config": "operator_only",
+    "sync": "operator_only",
+    "extract": "operator_only",
+    "embed": "operator_only",
+    "migrate": "operator_only",
+    "schema": "operator_only",
+    "reindex": "operator_only",
+    "refresh": "operator_only",
+    "import": "operator_only",
+    "export": "operator_only",
+    "jobs": "operator_only",
+    "chronicle-backfill": "operator_only",
+    # --- forbidden/rejected ---
+    "put --stdin": "forbidden",
+    # --- known discrepancy: probe/unavailable ---
+    # `schema-status` is the agent-facing spelling (the underscore
+    # `schema_status` is not a command). It is allowlisted as a read-only
+    # diagnostic but carries a known discrepancy, so the conformance matrix
+    # treats it as a probe, not a hard assertion.
+    "schema-status": "probe_unavailable",
+}
+
+
+def _classification_category(category: str) -> frozenset[str]:
+    """Names classified under ``category`` in GBRAIN_OPERATION_CLASSIFICATION."""
+    return frozenset(
+        name
+        for name, cat in GBRAIN_OPERATION_CLASSIFICATION.items()
+        if cat == category
+    )
+
+
 # Mechanical command inventory for policy tests: the docs-policy suite
 # asserts the documented user-facing surface against this single export
 # instead of maintaining a fragile duplicate list.
@@ -149,13 +232,8 @@ CHAT_COMMAND_INVENTORY = {
     "subcommands": sorted(CHAT_SUBCOMMANDS),
     "subsubcommands": {name: sorted(subs) for name, subs in CHAT_SUBSUBCOMMANDS.items()},
     "rejected_arguments": {name: list(forms) for name, forms in CHAT_REJECTED_ARGUMENTS.items()},
-    "operator_only": sorted(
-        {
-            "init", "config", "sync", "extract", "embed", "migrate", "schema",
-            "reindex", "refresh", "import", "export", "jobs",
-            "chronicle-backfill",
-        }
-    ),
+    "operator_only": sorted(_classification_category("operator_only")),
+    "classification": dict(sorted(GBRAIN_OPERATION_CLASSIFICATION.items())),
 }
 
 

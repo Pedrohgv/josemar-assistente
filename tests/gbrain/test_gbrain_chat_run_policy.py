@@ -360,5 +360,131 @@ class GbrainTransparentWrapperPolicyTest(unittest.TestCase):
         self.assertIn("--stdin", inventory["rejected_arguments"]["put"])
 
 
+class GbrainOperationClassificationTests(unittest.TestCase):
+    """The gbrain operation classification (issue #127 W2a) is the single
+    machine-readable record of the documented Josemar public/operator surface.
+
+    These guards prevent a classified supported command from drifting from the
+    actual allowlist/policy and ensure every documented operation is accounted
+    for without brittle arbitrary Markdown prose parsing: the classification
+    manifest in scripts/gbrain_chat_run.py IS the explicit documented record,
+    and the adapter's allowlist/rejection sets are asserted against it."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+
+        repo_root = Path(__file__).resolve().parents[2]
+        adapter = repo_root / "scripts" / "gbrain_chat_run.py"
+        spec = importlib.util.spec_from_file_location("gbrain_chat_run_cls", adapter)
+        assert spec is not None and spec.loader is not None
+        cls.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.mod)
+        cls.classification = cls.mod.GBRAIN_OPERATION_CLASSIFICATION
+        cls.subcommands = set(cls.mod.CHAT_SUBCOMMANDS)
+        cls.rejected = cls.mod.CHAT_REJECTED_ARGUMENTS
+
+    @classmethod
+    def _category(cls, category):
+        return frozenset(
+            name
+            for name, cat in cls.classification.items()
+            if cat == category
+        )
+
+    def test_classification_categories_are_exactly_the_defined_set(self):
+        allowed = {
+            "core",
+            "chronicle_read",
+            "embeddings_gated",
+            "operator_only",
+            "forbidden",
+            "probe_unavailable",
+        }
+        self.assertTrue(set(self.classification.values()) <= allowed)
+
+    def test_supported_commands_are_allowlisted(self):
+        """Every command classified as core/chronicle_read/embeddings_gated
+        must be on the actual agent-facing allowlist (no drift where docs say
+        supported but the adapter rejects)."""
+        supported = (
+            self._category("core")
+            | self._category("chronicle_read")
+            | self._category("embeddings_gated")
+        )
+        for cmd in sorted(supported):
+            self.assertIn(cmd, self.subcommands, cmd)
+
+    def test_probe_commands_are_allowlisted(self):
+        """probe_unavailable commands are still public (allowlisted) but carry
+        a known discrepancy, so they are probes, not hard assertions."""
+        for cmd in sorted(self._category("probe_unavailable")):
+            self.assertIn(cmd, self.subcommands, cmd)
+
+    def test_operator_only_commands_not_allowlisted(self):
+        for cmd in sorted(self._category("operator_only")):
+            self.assertNotIn(cmd, self.subcommands, cmd)
+
+    def test_forbidden_forms_match_rejected_arguments(self):
+        """Every forbidden classification must be an actual rejected argument
+        form in the adapter policy."""
+        for form in sorted(self._category("forbidden")):
+            parent, _, flag = form.partition(" ")
+            self.assertIn(parent, self.rejected, form)
+            self.assertIn(flag, self.rejected[parent], form)
+
+    def test_every_allowlisted_command_is_classified(self):
+        """A newly allowlisted command must have a classification/coverage
+        entry (the issue #127 guard against unclassified supported ops)."""
+        missing = sorted(self.subcommands - set(self.classification))
+        self.assertEqual([], missing, "allowlisted commands without a classification entry")
+
+    def test_classification_covers_full_documented_surface(self):
+        """Every classified command is either allowlisted, operator-only, or
+        forbidden — no classified command may sit in a limbo state."""
+        known = (
+            set(self.subcommands)
+            | self._category("operator_only")
+            | self._category("forbidden")
+        )
+        self.assertEqual(set(self.classification), known)
+
+    def test_schema_status_classified_probe_unavailable(self):
+        self.assertEqual(self.classification["schema-status"], "probe_unavailable")
+        self.assertIn("schema-status", self.subcommands)
+
+    def test_put_stdin_forbidden_and_rejected(self):
+        self.assertEqual(self.classification["put --stdin"], "forbidden")
+        self.assertIn("--stdin", self.rejected["put"])
+
+    def test_query_classified_embeddings_gated(self):
+        self.assertEqual(self.classification["query"], "embeddings_gated")
+
+    def test_chronicle_read_commands_classified(self):
+        for cmd in (
+            "day",
+            "since",
+            "last-seen",
+            "on-this-day",
+            "orient",
+            "timeline",
+            "ontology",
+        ):
+            self.assertEqual(self.classification[cmd], "chronicle_read", cmd)
+
+    def test_inventory_exports_classification(self):
+        """CHAT_COMMAND_INVENTORY carries the classification and derives
+        operator_only from it (single source of truth)."""
+        inventory = self.mod.CHAT_COMMAND_INVENTORY
+        self.assertEqual(
+            inventory["classification"],
+            dict(sorted(self.classification.items())),
+        )
+        self.assertEqual(
+            set(inventory["operator_only"]),
+            self._category("operator_only"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

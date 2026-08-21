@@ -3,7 +3,9 @@
 	test-vault-recovery-dr-drill \
 	test-mnemosyne-retrieval test-mnemosyne-retrieval-smoke test-mnemosyne-retrieval-tei-smoke \
 	test-mnemosyne-retrieval-synthetic-regression test-mnemosyne-retrieval-activation test-mnemosyne-retrieval-activation-evidence \
-	test-mnemosyne-retrieval-activation-reviewed
+	test-mnemosyne-retrieval-activation-reviewed \
+	test-gbrain-conformance test-gbrain-conformance-embeddings test-gbrain-conformance-chronicle \
+	test-gbrain-upgrade-conformance test-gbrain-upgrade-conformance-embeddings
 
 # Python interpreter used by the default test target.
 # Prefer the local virtualenv when present; otherwise fall back to `python3`
@@ -86,6 +88,53 @@ test-mnemosyne-retrieval-activation-evidence: test-mnemosyne-retrieval-activatio
 # Backward-compatible alias for the standard activation command.
 test-mnemosyne-retrieval-activation-reviewed:
 	$(MAKE) test-mnemosyne-retrieval-activation
+
+# gbrain conformance (issue #127): opt-in Docker runtime suites against the
+# real pinned gbrain integration. None of these run on ordinary `make test`,
+# `make test-runtime`, or `make verify`: each module is gated on
+# RUN_DOCKER_TESTS=1 AND its own RUN_GBRAIN_* gate, so generic discovery
+# never invokes them. Reports land under the gitignored
+# dump_folder/gbrain-conformance/ (command/result metadata only, no env
+# dumps). See tests/README.md -> "gbrain Conformance" and
+# docs/gbrain-operations.md -> "gbrain Upgrade Checklist".
+test-gbrain-conformance:
+	RUN_DOCKER_TESTS=1 RUN_GBRAIN_CONFORMANCE=1 \
+	python3 -m unittest tests.runtime.test_gbrain_conformance -v
+
+# Real TEI/E5 embeddings gate: adds the docker-compose.embeddings.yml overlay
+# and validates the real embedding lifecycle. A cold model download is
+# acceptable because this gate is explicit and infrequent.
+test-gbrain-conformance-embeddings:
+	RUN_DOCKER_TESTS=1 RUN_GBRAIN_EMBEDDING_CONFORMANCE=1 \
+	python3 -m unittest tests.runtime.test_gbrain_conformance_embeddings -v
+
+# Provider-gated Chronicle conformance: runs the REAL chronicle_extract
+# lifecycle against a credential-free loopback LiteLLM mock started INSIDE the
+# container (no external network, no provider credentials). The core suite's
+# zero-event Chronicle smoke stays provider-free; this gate proves the
+# provider-gated event behavior (extract -> timeline projection -> semantic
+# reads) on deterministic synthetic state.
+test-gbrain-conformance-chronicle:
+	RUN_DOCKER_TESTS=1 RUN_GBRAIN_CHRONICLE_CONFORMANCE=1 \
+	python3 -m unittest tests.runtime.test_gbrain_conformance_chronicle -v
+
+# Candidate upgrade conformance: builds an exact candidate gbrain commit SHA
+# (GBRAIN_CONFORMANCE_CANDIDATE_REF) against the same disposable volumes and
+# proves logical state survives the old-pin -> candidate transition. The
+# empty-ref guard runs BEFORE Python so a missing candidate fails fast; the
+# exact 40-hex validation happens in the conformance support layer.
+test-gbrain-upgrade-conformance:
+	@test -n "$(GBRAIN_CONFORMANCE_CANDIDATE_REF)" || { echo "ERROR: GBRAIN_CONFORMANCE_CANDIDATE_REF is required (exact 40-hex gbrain commit SHA)" >&2; exit 2; }
+	RUN_DOCKER_TESTS=1 RUN_GBRAIN_UPGRADE_CONFORMANCE=1 \
+	GBRAIN_CONFORMANCE_CANDIDATE_REF="$(GBRAIN_CONFORMANCE_CANDIDATE_REF)" \
+	python3 -m unittest tests.runtime.test_gbrain_upgrade_conformance -v
+
+# Candidate upgrade conformance with the real TEI/E5 embeddings gate.
+test-gbrain-upgrade-conformance-embeddings:
+	@test -n "$(GBRAIN_CONFORMANCE_CANDIDATE_REF)" || { echo "ERROR: GBRAIN_CONFORMANCE_CANDIDATE_REF is required (exact 40-hex gbrain commit SHA)" >&2; exit 2; }
+	RUN_DOCKER_TESTS=1 RUN_GBRAIN_EMBEDDING_CONFORMANCE=1 RUN_GBRAIN_UPGRADE_CONFORMANCE=1 \
+	GBRAIN_CONFORMANCE_CANDIDATE_REF="$(GBRAIN_CONFORMANCE_CANDIDATE_REF)" \
+	python3 -m unittest tests.runtime.test_gbrain_upgrade_conformance_embeddings -v
 
 verify: test
 	HERMES_DASHBOARD_SESSION_TOKEN=test \

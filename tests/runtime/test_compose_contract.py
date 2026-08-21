@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
-from .helpers import ComposeRuntime
+from .helpers import ComposeRuntime, TEST_ISOLATION_OVERLAY
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1081,6 +1083,148 @@ class MnemosyneRenderedComposeTests(unittest.TestCase):
         # No new volume.
         self.assertNotIn("mnemosyne-data", data["volumes"])
         self.assertNotIn("mnemosyne-state", data["volumes"])
+
+
+class ComposeRuntimeOverlayContractTests(unittest.TestCase):
+    """Backward-compatible ComposeRuntime explicit-overlay support (issue #127
+    W1a): fixed ordering base -> validated explicit overlays -> test-isolation
+    overlay LAST, explicit build args as separate argv tokens, no-build
+    start/recreate, and stop that preserves volumes."""
+
+    @staticmethod
+    def _write_overlay(tmp: str, name: str) -> Path:
+        path = Path(tmp) / name
+        path.write_text("services: {}\n", encoding="utf-8")
+        return path
+
+    def test_default_command_is_byte_for_byte_unchanged(self) -> None:
+        """With no explicit overlays the command must be byte-for-byte
+        identical to the pre-overlay behavior: base compose file, then the
+        test-isolation overlay LAST, no extras."""
+        runtime = ComposeRuntime()
+        command = runtime.compose_command()
+        self.assertEqual(
+            command,
+            [
+                "docker",
+                "compose",
+                "--env-file",
+                command[3],
+                "-f",
+                "docker-compose.yml",
+                "-f",
+                str(TEST_ISOLATION_OVERLAY),
+                "-p",
+                runtime.project,
+            ],
+        )
+        # The isolation overlay must be the final -f entry.
+        self.assertEqual(command[-4], "-f")
+        self.assertEqual(command[-3], str(TEST_ISOLATION_OVERLAY))
+
+    def test_explicit_overlays_ordered_before_isolation_overlay(self) -> None:
+        """Explicit overlays render in caller order between the base compose
+        file and the final test-isolation overlay."""
+        with tempfile.TemporaryDirectory(prefix="overlay-order-") as tmp:
+            first = self._write_overlay(tmp, "first.yml")
+            second = self._write_overlay(tmp, "second.yml")
+            runtime = ComposeRuntime(overlays=[first, second])
+            command = runtime.compose_command()
+            self.assertEqual(command[4:6], ["-f", "docker-compose.yml"])
+            self.assertEqual(command[6:8], ["-f", str(first.resolve())])
+            self.assertEqual(command[8:10], ["-f", str(second.resolve())])
+            self.assertEqual(command[10:12], ["-f", str(TEST_ISOLATION_OVERLAY)])
+            self.assertEqual(command[-2:], ["-p", runtime.project])
+
+    def test_overlays_accept_tuple_of_paths(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="overlay-tuple-") as tmp:
+            overlay = self._write_overlay(tmp, "tuple.yml")
+            runtime = ComposeRuntime(overlays=(overlay,))
+            command = runtime.compose_command()
+            self.assertIn(str(overlay.resolve()), command)
+
+    def test_relative_str_overlay_resolved_against_repo_root(self) -> None:
+        """A relative path (as a str) must be resolved against REPO_ROOT —
+        where compose actually runs — not the caller's process CWD."""
+        relative = "tests/runtime/docker-compose.test-tailscale-isolation.yml"
+        runtime = ComposeRuntime(overlays=[relative])
+        command = runtime.compose_command()
+        self.assertIn(str((REPO_ROOT / relative).resolve()), command)
+
+    def test_missing_overlay_raises(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            ComposeRuntime(overlays=[REPO_ROOT / "does-not-exist-overlay.yml"])
+
+    def test_symlink_overlay_raises(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="overlay-symlink-") as tmp:
+            real = self._write_overlay(tmp, "real.yml")
+            link = Path(tmp) / "link.yml"
+            link.symlink_to(real)
+            with self.assertRaises(ValueError):
+                ComposeRuntime(overlays=[link])
+
+    def test_directory_overlay_raises(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="overlay-dir-") as tmp:
+            with self.assertRaises(ValueError):
+                ComposeRuntime(overlays=[Path(tmp)])
+
+    def test_up_keeps_automatic_build(self) -> None:
+        runtime = ComposeRuntime()
+        with mock.patch.object(runtime, "run") as run:
+            runtime.up("hermes")
+        args = list(run.call_args.args)
+        self.assertEqual(args, ["up", "-d", "--build", "hermes"])
+
+    def test_build_passes_build_args_as_separate_argv_tokens(self) -> None:
+        """Build args must be separate argv tokens (--build-arg KEY=VALUE),
+        never a shell string, so values cannot be re-parsed by a shell."""
+        runtime = ComposeRuntime()
+        ref = "a" * 40
+        with mock.patch.object(runtime, "run") as run:
+            runtime.build("hermes", build_args={"GBRAIN_REF": ref})
+        args = list(run.call_args.args)
+        self.assertEqual(
+            args,
+            ["build", "--build-arg", f"GBRAIN_REF={ref}", "hermes"],
+        )
+        # No shell involved: every token is a distinct argv element.
+        self.assertNotIn("sh", args)
+        self.assertNotIn("-c", args)
+
+    def test_build_without_build_args(self) -> None:
+        runtime = ComposeRuntime()
+        with mock.patch.object(runtime, "run") as run:
+            runtime.build("hermes")
+        self.assertEqual(list(run.call_args.args), ["build", "hermes"])
+
+    def test_start_uses_no_build(self) -> None:
+        runtime = ComposeRuntime()
+        with mock.patch.object(runtime, "run") as run:
+            runtime.start("hermes")
+        args = list(run.call_args.args)
+        self.assertEqual(args, ["up", "-d", "--no-build", "hermes"])
+        self.assertNotIn("--build", args)
+
+    def test_recreate_uses_no_build_and_no_volume_deletion(self) -> None:
+        runtime = ComposeRuntime()
+        with mock.patch.object(runtime, "run") as run:
+            runtime.recreate("hermes")
+        args = list(run.call_args.args)
+        self.assertEqual(
+            args,
+            ["up", "-d", "--force-recreate", "--no-build", "hermes"],
+        )
+        # Recreate must never delete volumes (-v is reserved for down()).
+        self.assertNotIn("-v", args)
+
+    def test_stop_preserves_volumes(self) -> None:
+        runtime = ComposeRuntime()
+        with mock.patch.object(runtime, "run") as run:
+            runtime.stop("hermes")
+        args = list(run.call_args.args)
+        self.assertEqual(args, ["stop", "hermes"])
+        # Stop must never delete volumes (-v is reserved for down()).
+        self.assertNotIn("-v", args)
 
 
 if __name__ == "__main__":

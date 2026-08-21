@@ -215,6 +215,55 @@ operator MUST verify the following after rebuild and before deploying:
    See "Safe Initial Production Activation" below for the activation
    procedure.
 
+9. **gbrain conformance — mechanical gates (issue #127).** Before changing the
+   pin, run the opt-in conformance suites against the CURRENT committed pin to
+   establish a baseline, then against the exact candidate SHA. The five targets
+   are documented in `tests/README.md` → "gbrain Conformance":
+   - `make test-gbrain-conformance` — core provider-free suite. **Required for
+     every upgrade.**
+   - `make test-gbrain-conformance-embeddings` — real TEI/E5 gate. **Required
+     when semantic mode is part of the deployed state/upgrade surface.**
+   - `make test-gbrain-conformance-chronicle` — provider-gated Chronicle
+     lifecycle against a credential-free loopback LiteLLM mock (no external
+     network/provider): real `chronicle_extract`, timeline projection, and
+     semantic reads on deterministic synthetic state. **Required when
+     timeline/Chronicle behavior is part of the deployed state/upgrade
+     surface.**
+   - `make test-gbrain-upgrade-conformance GBRAIN_CONFORMANCE_CANDIDATE_REF=<40-hex-sha>`
+     — candidate upgrade against the same disposable volumes. **Required.**
+   - `make test-gbrain-upgrade-conformance-embeddings GBRAIN_CONFORMANCE_CANDIDATE_REF=<40-hex-sha>`
+     — candidate upgrade with the real TEI gate. **Required when semantic mode
+     is deployed.**
+   The candidate SHA must be an exact 40-hex Git commit SHA; the Make targets
+   reject an empty ref before Python and the conformance support layer
+   validates the exact form. A candidate build failure because a local patch no
+   longer applies is an upgrade incompatibility to record, not a harness
+   failure.
+
+10. **Existing TaskNotes real-gbrain E2E.** Run the existing real-gbrain
+    TaskNotes lifecycle against the final rebuilt image using its documented
+    command (`tests/README.md` → "TaskNotes real-gbrain lifecycle").
+
+11. **Fast suites.** Run `make test` and `make verify` (fast unit/contract plus
+    compose validation) before and after the change. The conformance targets
+    are never invoked by them (they are gated on their own `RUN_GBRAIN_*`
+    vars).
+
+12. **Probe reporting.** Review the JSON reports under
+    `dump_folder/gbrain-conformance/` for the #124/#125 probe classifications
+    (`fixed` / `present` / `changed_failure_mode` / `inconclusive`) and
+    summarize them in the dependency-upgrade PR/issue.
+
+13. **Then change the pin.** Only after the required core (and embedding, when
+    deployed, and Chronicle, when timeline/Chronicle behavior matters) candidate
+    suites are green, update `GBRAIN_REF` in
+    `Dockerfile.hermes` and the pinned values in this section and
+    `skills-factory/gbrain/SKILL.md` if it references the version.
+
+14. **Complement, not replace.** The conformance gates complement — they do not
+    replace — the recovery/deploy validation (vault-recovery DR drill, deploy
+    workflow) and the operator runbook checks above.
+
 ## Environment Defaults
 
 | Variable | Default | Notes |
