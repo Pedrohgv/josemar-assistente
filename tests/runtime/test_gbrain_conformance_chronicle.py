@@ -26,11 +26,13 @@ deterministic JSON event reply. Scope:
     chars) created through the public ``put`` write path
   - the real ``chronicle_extract`` job submitted through the real inline
     job path (``jobs submit chronicle_extract --follow``, native under the
-    lock): the judge calls the mock and at least one deterministic event is
-    written (event page + timeline projection)
+    lock): the judge calls the mock and both deterministic events are
+    written (event page + timeline projection each)
   - semantic read behavior on a deterministic date/entity: ``timeline``,
-    ``day``, ``day --week``, ``since``, ``last-seen``, ``on-this-day``
-    (empty: no synthetic prior-year events), ``orient``
+    ``day``, ``day --week``, ``since``, ``since --kind`` (matching and
+    non-matching kinds), ``last-seen``, ``on-this-day`` /
+    ``on-this-day --date`` (positive: the prior-year same-month/day event),
+    ``orient`` and bounded ``orient --days ... --entities ...``
   - lock/non-root/no-direct-PGLite-write constraints: every native
     invocation runs as hermes under the shared lock; all writes go through
     gbrain commands; the mock only writes its own request log
@@ -81,10 +83,17 @@ CHRONICLE_MOCK_MODEL = "conformance-mock"
 CHRONICLE_MOCK_BASE_URL = "http://127.0.0.1:" + str(CHRONICLE_MOCK_PORT) + "/v1"
 
 # Deterministic synthetic entity + event facts (the synthetic vault's person
-# page and a fixed one-clause summary the mock judge returns).
+# page and fixed one-clause summaries the mock judge returns). The mock
+# returns TWO events: the current event (dated ``date``) plus a prior-year
+# same-month/day event (leap-date safe), so the positive on-this-day and the
+# bounded since-kind/orient semantics have deterministic data to assert.
 CHRONICLE_ENTITY = "people/alice"
 CHRONICLE_EVENT_WHAT = "Conformance meeting decision: adopt the synthetic plan"
 CHRONICLE_EVENT_KIND = "decision"
+CHRONICLE_PRIOR_EVENT_WHAT = (
+    "Prior-year conformance milestone: synthetic plan anniversary"
+)
+CHRONICLE_PRIOR_EVENT_KIND = "milestone"
 
 # The synthetic qualifying meeting page body (>= 80 chars for chronicle
 # eligibility). The frontmatter date is interpolated at runtime.
@@ -97,11 +106,24 @@ CHRONICLE_MEETING_BODY = (
 )
 
 
+def _prior_year_date(date: str) -> str:
+    """Same month/day one year earlier, clamped to the prior year's last valid
+    day of that month (leap-date safe: Feb 29 -> Feb 28 in a non-leap prior
+    year)."""
+    d = datetime.fromisoformat(date)
+    year = d.year - 1
+    if d.month == 2 and d.day == 29:
+        return f"{year:04d}-02-28"
+    return f"{year:04d}-{d.month:02d}-{d.day:02d}"
+
+
 def _mock_events_for(date: str) -> list[dict]:
     """The deterministic synthetic event set the mock judge returns for the
-    given date. Mirrors the pinned CLI's ``ChronicleEventProposal`` shape
-    (when/who/what/where/kind) so the host-side safety test can validate it
-    against the same PARSE BARRIER rules without Docker."""
+    given date: the current event (dated ``date``) plus a prior-year
+    same-month/day event (leap-date safe). Mirrors the pinned CLI's
+    ``ChronicleEventProposal`` shape (when/who/what/where/kind) so the
+    host-side safety test can validate it against the same PARSE BARRIER
+    rules without Docker."""
     return [
         {
             "when": date,
@@ -109,7 +131,14 @@ def _mock_events_for(date: str) -> list[dict]:
             "what": CHRONICLE_EVENT_WHAT,
             "where": None,
             "kind": CHRONICLE_EVENT_KIND,
-        }
+        },
+        {
+            "when": _prior_year_date(date),
+            "who": [CHRONICLE_ENTITY],
+            "what": CHRONICLE_PRIOR_EVENT_WHAT,
+            "where": None,
+            "kind": CHRONICLE_PRIOR_EVENT_KIND,
+        },
     ]
 
 
@@ -197,9 +226,13 @@ CHRONICLE_CONFORMANCE_MATRIX = {
     "day": "chronicle_read",
     "day_week": "chronicle_read",
     "since": "chronicle_read",
+    "since_kind_match": "chronicle_read",
+    "since_kind_nonmatch": "chronicle_read",
     "last_seen": "chronicle_read",
     "on_this_day": "chronicle_read",
+    "on_this_day_date": "chronicle_read",
     "orient": "chronicle_read",
+    "orient_bounded": "chronicle_read",
 }
 
 
@@ -522,8 +555,9 @@ class GbrainChronicleConformanceRuntimeTests(GbrainChronicleConformanceTestCase)
     def _scenario_chronicle_extract(self) -> None:
         """Submit the real ``chronicle_extract`` job through the real inline
         job path (``jobs submit chronicle_extract --follow``, native under
-        the lock): the judge calls the in-container mock and at least one
-        deterministic event is written."""
+        the lock): the judge calls the in-container mock and BOTH
+        deterministic events (current + prior-year same-month/day) are
+        written."""
         self._matrix["chronicle_extract"] = "fail"
         params = json.dumps({"slug": self._meeting_slug})
         ev = self._run_native_under_lock(
@@ -534,15 +568,19 @@ class GbrainChronicleConformanceRuntimeTests(GbrainChronicleConformanceTestCase)
         self.assertEqual(ev.returncode, 0, ev.stderr)
         self._evidence.append(ev)
         self.assertIn('"status":"extracted"', ev.stdout)
-        self.assertIn('"events_written":1', ev.stdout)
+        self.assertIn('"events_written":2', ev.stdout)
         self._matrix["chronicle_extract"] = "pass"
 
     def _scenario_semantic_reads(self) -> None:
         """Semantic read behavior on the deterministic date/entity: the
-        projected event is visible through timeline/day/day --week/since/
-        last-seen/orient, while on-this-day stays empty (no synthetic
-        prior-year events)."""
+        projected current event is visible through timeline/day/day --week/
+        since/last-seen/orient, ``since --kind`` filters by matching and
+        non-matching kinds, ``on-this-day`` / ``on-this-day --date`` return
+        the prior-year same-month/day event (positive), and bounded
+        ``orient --days ... --entities ...`` includes the current event while
+        excluding the prior-year one."""
         date = self._event_date
+        prior_date = _prior_year_date(date)
         meeting_slug = self._meeting_slug
 
         # timeline: the meeting page's own timeline shows the projected event.
@@ -554,7 +592,8 @@ class GbrainChronicleConformanceRuntimeTests(GbrainChronicleConformanceTestCase)
         self._evidence.append(ev)
         self._matrix["timeline"] = "pass"
 
-        # day / day --week / since: the event row is returned.
+        # day / day --week / since: the current event row is returned (the
+        # prior-year event is outside every date window here).
         for key, command in (
             ("day", ("gbrain", "day", date)),
             ("day_week", ("gbrain", "day", date, "--week")),
@@ -575,7 +614,34 @@ class GbrainChronicleConformanceRuntimeTests(GbrainChronicleConformanceTestCase)
             )
             self._matrix[key] = "pass"
 
-        # last-seen: the synthetic entity was seen at the event.
+        # since --kind: a matching kind returns the current event; a
+        # non-matching kind returns an empty array.
+        self._matrix["since_kind_match"] = "fail"
+        ev = self.runtime.run_as_hermes(
+            "gbrain", "since", date, "--kind", CHRONICLE_EVENT_KIND
+        )
+        self.assertEqual(ev.returncode, 0, ev.stderr)
+        self._evidence.append(ev)
+        rows = json.loads(ev.stdout)
+        self.assertTrue(rows, "since --kind decision must return the current event")
+        row = rows[0]
+        self.assertEqual(row.get("summary"), CHRONICLE_EVENT_WHAT)
+        self.assertEqual(row.get("kind"), CHRONICLE_EVENT_KIND)
+        self._matrix["since_kind_match"] = "pass"
+
+        self._matrix["since_kind_nonmatch"] = "fail"
+        ev = self.runtime.run_as_hermes(
+            "gbrain", "since", date, "--kind", "travel"
+        )
+        self.assertEqual(ev.returncode, 0, ev.stderr)
+        self._evidence.append(ev)
+        self.assertEqual(
+            json.loads(ev.stdout), [],
+            "since --kind travel must be empty (no matching kind)",
+        )
+        self._matrix["since_kind_nonmatch"] = "pass"
+
+        # last-seen: the synthetic entity was seen at the current event.
         self._matrix["last_seen"] = "fail"
         ev = self.runtime.run_as_hermes("gbrain", "last-seen", CHRONICLE_ENTITY)
         self.assertEqual(ev.returncode, 0, ev.stderr)
@@ -588,15 +654,26 @@ class GbrainChronicleConformanceRuntimeTests(GbrainChronicleConformanceTestCase)
         )
         self._matrix["last_seen"] = "pass"
 
-        # on-this-day: prior years only — no synthetic prior-year events.
-        self._matrix["on_this_day"] = "fail"
-        ev = self.runtime.run_as_hermes("gbrain", "on-this-day")
-        self.assertEqual(ev.returncode, 0, ev.stderr)
-        self._evidence.append(ev)
-        self.assertEqual(json.loads(ev.stdout), [])
-        self._matrix["on_this_day"] = "pass"
+        # on-this-day: prior years only — the prior-year same-month/day event
+        # is returned (positive), through both the default anchor and the
+        # explicit --date anchor.
+        for key, command in (
+            ("on_this_day", ("gbrain", "on-this-day")),
+            ("on_this_day_date", ("gbrain", "on-this-day", "--date", date)),
+        ):
+            self._matrix[key] = "fail"
+            ev = self.runtime.run_as_hermes(*command)
+            self.assertEqual(ev.returncode, 0, ev.stderr)
+            self._evidence.append(ev)
+            rows = json.loads(ev.stdout)
+            self.assertTrue(rows, f"{command} must return the prior-year event")
+            row = rows[0]
+            self.assertEqual(row.get("summary"), CHRONICLE_PRIOR_EVENT_WHAT)
+            self.assertEqual(row.get("date"), prior_date)
+            self.assertEqual(row.get("kind"), CHRONICLE_PRIOR_EVENT_KIND)
+            self._matrix[key] = "pass"
 
-        # orient: the recent timeline includes the event.
+        # orient: the recent timeline includes the current event.
         self._matrix["orient"] = "fail"
         ev = self.runtime.run_as_hermes("gbrain", "orient")
         self.assertEqual(ev.returncode, 0, ev.stderr)
@@ -609,6 +686,27 @@ class GbrainChronicleConformanceRuntimeTests(GbrainChronicleConformanceTestCase)
             f"unexpected recent event_slug: {recent[0].get('event_slug')!r}",
         )
         self._matrix["orient"] = "pass"
+
+        # orient bounded: --days 1 --entities people/alice includes the
+        # current event but excludes the prior-year event (outside the 1-day
+        # lookback), and the ontology resolution is bounded to the named
+        # entity.
+        self._matrix["orient_bounded"] = "fail"
+        ev = self.runtime.run_as_hermes(
+            "gbrain", "orient", "--days", "1", "--entities", CHRONICLE_ENTITY
+        )
+        self.assertEqual(ev.returncode, 0, ev.stderr)
+        self._evidence.append(ev)
+        orient = json.loads(ev.stdout)
+        recent = orient.get("recent_timeline", [])
+        self.assertTrue(recent, "orient --days 1 must include the current event")
+        summaries = [r.get("summary") for r in recent]
+        self.assertIn(CHRONICLE_EVENT_WHAT, summaries)
+        self.assertNotIn(CHRONICLE_PRIOR_EVENT_WHAT, summaries)
+        ontologies = orient.get("ontologies", {})
+        self.assertIsInstance(ontologies, dict)
+        self.assertLessEqual(set(ontologies), {CHRONICLE_ENTITY})
+        self._matrix["orient_bounded"] = "pass"
 
     def _scenario_mock_evidence(self) -> None:
         """The judge must have actually called the in-container mock (real
@@ -697,23 +795,45 @@ class GbrainChronicleConformanceGateStructureTests(unittest.TestCase):
     # --- mock response safety --------------------------------------------
 
     def test_mock_response_is_deterministic_valid_proposal(self) -> None:
-        """The deterministic mock reply must be a valid ChronicleEventProposal
+        """Each deterministic mock reply must be a valid ChronicleEventProposal
         under the pinned CLI's PARSE BARRIER rules (parseable when, non-empty
         what, who array of strings, kind string)."""
         events = _mock_events_for("2026-08-21")
-        self.assertEqual(len(events), 1)
-        proposal = events[0]
-        self.assertIsInstance(proposal.get("when"), str)
-        self.assertRegex(proposal["when"], r"^\d{4}-\d{2}-\d{2}$")
-        datetime.fromisoformat(proposal["when"])  # must not raise
-        self.assertIsInstance(proposal.get("what"), str)
-        self.assertTrue(proposal["what"].strip())
-        self.assertIsInstance(proposal.get("who"), list)
-        self.assertTrue(all(isinstance(w, str) for w in proposal["who"]))
-        self.assertIsInstance(proposal.get("kind"), str)
-        self.assertIn(proposal.get("where"), (None, ""))
+        self.assertEqual(len(events), 2)
+        for proposal in events:
+            self.assertIsInstance(proposal.get("when"), str)
+            self.assertRegex(proposal["when"], r"^\d{4}-\d{2}-\d{2}$")
+            datetime.fromisoformat(proposal["when"])  # must not raise
+            self.assertIsInstance(proposal.get("what"), str)
+            self.assertTrue(proposal["what"].strip())
+            self.assertIsInstance(proposal.get("who"), list)
+            self.assertTrue(all(isinstance(w, str) for w in proposal["who"]))
+            self.assertIsInstance(proposal.get("kind"), str)
+            self.assertIn(proposal.get("where"), (None, ""))
         # The event set is deterministic: same date -> same payload.
         self.assertEqual(_mock_events_for("2026-08-21"), events)
+
+    def test_mock_returns_current_and_prior_year_events(self) -> None:
+        """The deterministic mock reply carries BOTH the current event and a
+        prior-year same-month/day event (leap-date safe), so on-this-day and
+        the bounded since-kind/orient semantics have positive data to assert."""
+        events = _mock_events_for("2026-08-21")
+        self.assertEqual(len(events), 2)
+        by_date = {e["when"]: e for e in events}
+        self.assertEqual(sorted(by_date), ["2025-08-21", "2026-08-21"])
+        self.assertEqual(by_date["2026-08-21"]["kind"], CHRONICLE_EVENT_KIND)
+        self.assertEqual(by_date["2026-08-21"]["what"], CHRONICLE_EVENT_WHAT)
+        self.assertEqual(by_date["2025-08-21"]["kind"], CHRONICLE_PRIOR_EVENT_KIND)
+        self.assertEqual(by_date["2025-08-21"]["what"], CHRONICLE_PRIOR_EVENT_WHAT)
+
+    def test_prior_year_date_is_leap_date_safe(self) -> None:
+        """The prior-year date keeps the same month/day and clamps Feb 29 to
+        Feb 28 in a non-leap prior year."""
+        self.assertEqual(_prior_year_date("2026-08-21"), "2025-08-21")
+        self.assertEqual(_prior_year_date("2024-02-29"), "2023-02-28")
+        self.assertEqual(_prior_year_date("2024-02-28"), "2023-02-28")
+        self.assertEqual(_prior_year_date("2023-02-28"), "2022-02-28")
+        self.assertEqual(_prior_year_date("2024-03-01"), "2023-03-01")
 
     def test_mock_binds_loopback_only_and_is_credential_free(self) -> None:
         """The mock must bind 127.0.0.1 only and carry no credential material
@@ -773,12 +893,13 @@ class GbrainChronicleConformanceGateStructureTests(unittest.TestCase):
 
     def test_chronicle_extract_uses_real_inline_job_path(self) -> None:
         """The extraction must go through the real inline job path
-        (``jobs submit chronicle_extract --follow``), never a shortcut."""
+        (``jobs submit chronicle_extract --follow``), never a shortcut, and
+        must write BOTH deterministic events (current + prior-year)."""
         runtime_class = self._runtime_class_text()
         self.assertIn('"jobs", "submit", "chronicle_extract"', runtime_class)
         self.assertIn("--follow", runtime_class)
         self.assertIn('"status":"extracted"', runtime_class)
-        self.assertIn('"events_written":1', runtime_class)
+        self.assertIn('"events_written":2', runtime_class)
 
     def test_operator_invocations_run_as_hermes_never_root(self) -> None:
         """Every in-container invocation must run as the hermes runtime user
@@ -799,19 +920,55 @@ class GbrainChronicleConformanceGateStructureTests(unittest.TestCase):
 
     def test_semantic_reads_covered(self) -> None:
         """The runtime must exercise every semantic read on the deterministic
-        date/entity."""
+        date/entity, including the positive prior-year and bounded variants."""
         runtime_class = self._runtime_class_text()
         for cmd in ("timeline", "day", "since", "last-seen", "on-this-day", "orient"):
             self.assertIn(f'"gbrain", "{cmd}"', runtime_class)
         self.assertIn("--week", runtime_class)
+        self.assertIn("--date", runtime_class)
+        self.assertIn("--kind", runtime_class)
+        self.assertIn("--days", runtime_class)
+        self.assertIn("--entities", runtime_class)
         self.assertIn("CHRONICLE_ENTITY", runtime_class)
         self.assertIn("CHRONICLE_EVENT_WHAT", runtime_class)
+        self.assertIn("CHRONICLE_PRIOR_EVENT_WHAT", runtime_class)
+        self.assertIn("CHRONICLE_PRIOR_EVENT_KIND", runtime_class)
+        self.assertIn("_prior_year_date", runtime_class)
 
-    def test_on_this_day_asserts_no_synthetic_prior_year_events(self) -> None:
-        """on-this-day must assert an EMPTY result: the deterministic event
-        is dated today, so no synthetic prior-year events may appear."""
+    def test_on_this_day_asserts_prior_year_event(self) -> None:
+        """on-this-day must assert a POSITIVE result: the deterministic
+        prior-year same-month/day event is returned through both the default
+        anchor and the explicit --date anchor."""
         runtime_class = self._runtime_class_text()
-        self.assertIn("json.loads(ev.stdout), []", runtime_class)
+        self.assertIn("on-this-day", runtime_class)
+        self.assertIn("--date", runtime_class)
+        self.assertIn("CHRONICLE_PRIOR_EVENT_WHAT", runtime_class)
+        self.assertIn("CHRONICLE_PRIOR_EVENT_KIND", runtime_class)
+        self.assertIn("_prior_year_date", runtime_class)
+        # The prior-year event must be asserted as present (positive), never
+        # as an empty on-this-day result.
+        self.assertIn("must return the prior-year event", runtime_class)
+
+    def test_since_kind_asserts_matching_and_nonmatching(self) -> None:
+        """since --kind must assert BOTH a matching kind (returns the current
+        event) and a non-matching kind (returns an empty array)."""
+        runtime_class = self._runtime_class_text()
+        self.assertIn("--kind", runtime_class)
+        self.assertIn("CHRONICLE_EVENT_KIND", runtime_class)
+        self.assertIn("since --kind decision must return the current event", runtime_class)
+        self.assertIn("since --kind travel must be empty", runtime_class)
+
+    def test_orient_bounded_asserts_days_and_entities(self) -> None:
+        """orient must assert the bounded --days/--entities semantics: the
+        current event is inside the 1-day lookback, the prior-year event is
+        outside it, and the ontology resolution is bounded to the named
+        entity."""
+        runtime_class = self._runtime_class_text()
+        self.assertIn("--days", runtime_class)
+        self.assertIn("--entities", runtime_class)
+        self.assertIn("CHRONICLE_PRIOR_EVENT_WHAT", runtime_class)
+        self.assertIn("assertNotIn(CHRONICLE_PRIOR_EVENT_WHAT, summaries)", runtime_class)
+        self.assertIn("assertLessEqual(set(ontologies), {CHRONICLE_ENTITY})", runtime_class)
 
     def test_meeting_page_is_qualifying(self) -> None:
         """The synthetic meeting body must satisfy the pinned CLI's chronicle
@@ -859,9 +1016,13 @@ class GbrainChronicleConformanceGateStructureTests(unittest.TestCase):
                 "day",
                 "day_week",
                 "since",
+                "since_kind_match",
+                "since_kind_nonmatch",
                 "last_seen",
                 "on_this_day",
+                "on_this_day_date",
                 "orient",
+                "orient_bounded",
             },
         )
 

@@ -294,13 +294,50 @@ def prepare() -> tuple[Path, dict[str, str]]:
     return vault, env
 
 
+def _result_is_error(result: Any) -> bool:
+    """Narrow MCP SDK compatibility accessor for the error flag.
+
+    The pinned runtime SDK (mcp==2.0.0, mirroring the Hermes base image)
+    names the field ``is_error``; older SDK generations used ``isError``.
+    The installed (current) field wins when present; the legacy field is
+    honored as a fallback so the harness survives a base-image pin bump in
+    either direction. This only reads the result envelope — task semantics
+    are untouched.
+    """
+    if hasattr(result, "is_error"):
+        return bool(result.is_error)
+    if hasattr(result, "isError"):
+        return bool(result.isError)
+    raise AttributeError(
+        f"CallToolResult exposes neither is_error nor isError "
+        f"(got {type(result).__name__})"
+    )
+
+
+def _result_structured_content(result: Any) -> dict | None:
+    """Narrow MCP SDK compatibility accessor for the structured content.
+
+    Mirrors ``_result_is_error``: mcp==2.0.0 names the field
+    ``structured_content``; older SDK generations used ``structuredContent``.
+    """
+    if hasattr(result, "structured_content"):
+        return result.structured_content
+    if hasattr(result, "structuredContent"):
+        return result.structuredContent
+    raise AttributeError(
+        f"CallToolResult exposes neither structured_content nor "
+        f"structuredContent (got {type(result).__name__})"
+    )
+
+
 async def call(session: Any, name: str, arguments: dict) -> dict:
     result = await session.call_tool(name, arguments)
-    if result.isError:
+    if _result_is_error(result):
         rendered = " ".join(getattr(item, "text", repr(item)) for item in result.content)
         raise AssertionError(f"{name} returned MCP error: {rendered}")
-    assert result.structuredContent is not None, name
-    return result.structuredContent
+    structured = _result_structured_content(result)
+    assert structured is not None, name
+    return structured
 
 
 async def lifecycle(vault: Path, env: dict[str, str]) -> None:

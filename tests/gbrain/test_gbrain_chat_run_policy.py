@@ -485,6 +485,104 @@ class GbrainOperationClassificationTests(unittest.TestCase):
             self._category("operator_only"),
         )
 
+    def test_every_supported_operation_has_coverage(self):
+        """Every classified SUPPORTED operation (core / chronicle_read /
+        embeddings_gated / probe_unavailable) must have a coverage entry
+        mapping it to a real scenario symbol and a known gate env. A newly
+        classified/documented supported operation with no mechanical runtime
+        coverage fails here (PR #129 MAJOR finding: the exhaustive-coverage
+        guard must prove runtime coverage, not just classification)."""
+        supported = (
+            self._category("core")
+            | self._category("chronicle_read")
+            | self._category("embeddings_gated")
+            | self._category("probe_unavailable")
+        )
+        missing = sorted(supported - set(self.mod.GBRAIN_OPERATION_COVERAGE))
+        self.assertEqual(
+            [],
+            missing,
+            "supported operations without a runtime coverage entry",
+        )
+
+    def test_coverage_only_for_supported_surfaces(self):
+        """operator_only / forbidden surfaces must NOT have coverage entries:
+        they are rejected by the adapter, never exercised as supported
+        operations."""
+        unsupported = self._category("operator_only") | self._category("forbidden")
+        extra = sorted(set(self.mod.GBRAIN_OPERATION_COVERAGE) & unsupported)
+        self.assertEqual(
+            [],
+            extra,
+            "unsupported (operator_only/forbidden) operations must not have "
+            "coverage entries",
+        )
+
+    def test_coverage_gates_are_known(self):
+        """Every coverage entry's gate must be a known conformance gate env
+        (the opt-in Docker runtime gates defined in the Makefile)."""
+        for op, (scenario, gate) in self.mod.GBRAIN_OPERATION_COVERAGE.items():
+            self.assertIn(
+                gate,
+                self.mod.KNOWN_CONFORMANCE_GATES,
+                f"{op} ({scenario}): unknown gate {gate!r}",
+            )
+
+    def test_coverage_scenario_symbols_exist_in_owning_modules(self):
+        """Every coverage entry's scenario symbol must exist (as a real
+        method definition) in the runtime test module(s) owned by its gate.
+        This is the mechanical proof that a classified supported surface has
+        actual runtime coverage, not just a classification entry."""
+        for op, (scenario, gate) in self.mod.GBRAIN_OPERATION_COVERAGE.items():
+            modules = _GATE_COVERAGE_MODULES.get(gate)
+            self.assertIsNotNone(
+                modules,
+                f"{op}: no coverage modules registered for gate {gate!r}",
+            )
+            assert modules is not None
+            texts = [
+                (REPO_ROOT / rel).read_text(encoding="utf-8") for rel in modules
+            ]
+            self.assertTrue(
+                any(f"def {scenario}" in text for text in texts),
+                f"{op}: scenario {scenario!r} not defined in {modules}",
+            )
+
+    def test_inventory_exports_coverage(self):
+        """CHAT_COMMAND_INVENTORY exports the coverage manifest and the known
+        gate envs (single machine-readable source of truth)."""
+        inventory = self.mod.CHAT_COMMAND_INVENTORY
+        self.assertEqual(
+            inventory["coverage"],
+            dict(sorted(self.mod.GBRAIN_OPERATION_COVERAGE.items())),
+        )
+        self.assertEqual(
+            set(inventory["known_gates"]),
+            set(self.mod.KNOWN_CONFORMANCE_GATES),
+        )
+
+
+# Runtime test modules that own the coverage scenarios, keyed by the gate env
+# a coverage entry can reference. The core gate's scenarios live in the
+# reusable CoreScenarioMixin (tests/runtime/gbrain_conformance_scenarios.py)
+# plus the core runtime test module; the other gates own their scenarios
+# directly in their test modules.
+_GATE_COVERAGE_MODULES = {
+    "RUN_GBRAIN_CONFORMANCE": (
+        "tests/runtime/gbrain_conformance_scenarios.py",
+        "tests/runtime/test_gbrain_conformance.py",
+    ),
+    "RUN_GBRAIN_CHRONICLE_CONFORMANCE": (
+        "tests/runtime/test_gbrain_conformance_chronicle.py",
+    ),
+    "RUN_GBRAIN_EMBEDDING_CONFORMANCE": (
+        "tests/runtime/test_gbrain_conformance_embeddings.py",
+    ),
+    "RUN_GBRAIN_UPGRADE_CONFORMANCE": (
+        "tests/runtime/test_gbrain_upgrade_conformance.py",
+    ),
+}
+
 
 if __name__ == "__main__":
     unittest.main()

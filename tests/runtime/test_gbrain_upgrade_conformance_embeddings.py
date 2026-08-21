@@ -14,7 +14,15 @@ test-isolation overlay preserved):
   - candidate source-ref proof (``/opt/gbrain/.git/HEAD`` equals the exact
     candidate ref), candidate gbrain version, and candidate reindex with the
     issue #124 classification (fixed/present/changed_failure_mode/
-    inconclusive, REPORT-ONLY)
+    inconclusive, REPORT-ONLY). The probe reproduces the regression exactly
+    (review finding MAJOR #124): the baseline semantic mode is established
+    (enable + backfill + semantic proof), the supported search-mode
+    indicators are snapshotted, the candidate ``josemar-gbrain reindex``
+    runs, the indicators are snapshotted again, and the classification is
+    derived SOLELY from the pre/post transition. The documented workaround
+    (``enable-embeddings``) is applied only AFTER the classification is
+    recorded, so it can never mask the regression before semantic retrieval
+    is checked.
   - WITHOUT a destructive full backfill: prove the pre-upgrade semantic
     corpus is usable on the candidate (vectors survive the migration), or
     fail with the precise ``vector_migration_required`` signal
@@ -38,6 +46,7 @@ matrix — command/result metadata only, never environment dumps.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -69,6 +78,18 @@ EMBEDDING_MODEL_REVISION = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
 # test-isolation overlay is always appended last by ComposeRuntime.
 EMBEDDINGS_OVERLAY = REPO_ROOT / "docker-compose.embeddings.yml"
 
+# The native gbrain binary (non-PATH: the PUBLIC ``gbrain`` is the issue #110
+# adapter, which rejects operator-only ``config`` with exit 2). The canonical
+# env mirrors the wrapper's ``export_gbrain_env`` and the DR drill's
+# ``GBRAIN_ENV`` — the established supported surface for reading
+# ``search.mcp_keyword_only`` in this repo's Docker-gated tests.
+NATIVE_GBRAIN_BIN = "/opt/josemar/libexec/gbrain-native"
+GBRAIN_SNAPSHOT_ENV = (
+    "GBRAIN_HOME=/opt/data GBRAIN_BRAIN_REPO=/opt/data/obsidian "
+    "GBRAIN_SCHEMA_PACK=josemar GBRAIN_SKIP_STARTUP_HOOKS=1 "
+    "HOME=/opt/data XDG_CONFIG_HOME=/opt/data/.config"
+)
+
 # Issue #124 reindex classification values. REPORT-ONLY: the runtime
 # scenarios record one of these in the report metadata and never assert on
 # it (the classification is an operator signal, not a conformance gate).
@@ -78,6 +99,81 @@ REINDEX_CLASSIFICATION_VALUES = (
     "changed_failure_mode",
     "inconclusive",
 )
+
+
+@dataclass(frozen=True)
+class SearchModeSnapshot:
+    """Supported search/embedding-mode indicators for the issue #124 oracle.
+
+    - ``keyword_only``: ``search.mcp_keyword_only`` read via the native
+      binary with the canonical env (the same surface the wrapper's
+      ``refresh-embeddings`` gate reads); ``True`` when it prints exactly
+      ``true``, ``False`` when it prints exactly ``false``, ``None`` when the
+      surface cannot be read.
+    - ``embedding_disabled``: the file-plane sentinel in
+      ``/opt/data/.gbrain/config.json`` (the same sentinel the wrapper reads);
+      ``True``/``False`` when the config is a readable object with a boolean
+      (or absent) sentinel, ``None`` when the config cannot be read or the
+      sentinel is not boolean.
+    """
+
+    keyword_only: bool | None
+    embedding_disabled: bool | None
+
+    def is_semantic(self) -> bool:
+        """Semantic mode active: keyword-only off and no disabled sentinel."""
+        return self.keyword_only is False and self.embedding_disabled is not True
+
+    def is_keyword_only(self) -> bool:
+        """Keyword-only mode active (the observable #124 reset)."""
+        return self.keyword_only is True
+
+    def to_dict(self) -> dict[str, bool | None]:
+        return {
+            "search_mcp_keyword_only": self.keyword_only,
+            "embedding_disabled": self.embedding_disabled,
+        }
+
+
+def classify_reindex_transition(
+    pre: SearchModeSnapshot | None,
+    post: SearchModeSnapshot | None,
+    *,
+    probe_rc: int,
+) -> str:
+    """Issue #124 reindex classification, derived SOLELY from the pre/post
+    transition of the supported search-mode indicators (review finding MAJOR
+    #124). The recorded regression is: semantic mode is working -> reindex ->
+    reindex silently resets ``search.mcp_keyword_only`` / embedding mode to
+    keyword-only.
+
+    Oracle (mirrors the #127 classification framework):
+      - ``inconclusive``: the probe precondition could not be established —
+        the pre snapshot is unreadable or semantic mode is not active before
+        the probe reindex.
+      - ``changed_failure_mode``: the probe reindex itself fails, the post
+        snapshot is unreadable, or the post state is neither clean semantic
+        nor clean keyword-only (behavior differs materially from the recorded
+        #124 failure).
+      - ``present``: the post state is keyword-only — exactly the recorded
+        #124 failure (reindex reset the mode).
+      - ``fixed``: the post state is still semantic — the mode survived the
+        reindex.
+
+    The workaround (``enable-embeddings``) is applied by the caller only
+    AFTER this classification is recorded and never participates in it.
+    """
+    if pre is None or not pre.is_semantic():
+        return "inconclusive"
+    if probe_rc != 0:
+        return "changed_failure_mode"
+    if post is None:
+        return "changed_failure_mode"
+    if post.is_keyword_only():
+        return "present"
+    if post.is_semantic():
+        return "fixed"
+    return "changed_failure_mode"
 
 # Deterministic post-upgrade stale vault edit (as hermes, committed to the
 # vault git repo): appends a new unique token so the page chunk becomes
@@ -108,6 +204,7 @@ UPGRADE_EMBEDDING_MATRIX = {
     "candidate_recreate": "core",
     "candidate_source_ref": "core",
     "candidate_reindex": "operator_only",
+    "issue124_workaround": "operator_only",
     "candidate_semantic_corpus": "embeddings_gated",
     "post_upgrade_stale_edit": "embeddings_gated",
 }
@@ -180,6 +277,8 @@ class GbrainUpgradeEmbeddingConformanceTestCase(unittest.TestCase):
         self._baseline_version: str | None = None
         self._candidate_version: str | None = None
         self._reindex_classification: str = "inconclusive"
+        self._reindex_pre_snapshot: dict | None = None
+        self._reindex_post_snapshot: dict | None = None
         self._blockers: list[str] = []
         self._report_path: Path | None = None
 
@@ -251,6 +350,45 @@ class GbrainUpgradeEmbeddingConformanceTestCase(unittest.TestCase):
         self.assertEqual(len(sources), 1)
         return float(sources[0].get("embedding_coverage_pct", -1))
 
+    def _snapshot_search_mode(self) -> SearchModeSnapshot | None:
+        """Snapshot the supported search-mode indicators for the issue #124
+        oracle: ``search.mcp_keyword_only`` via the native binary with the
+        canonical env (the same surface the wrapper's ``refresh-embeddings``
+        gate reads; the public ``gbrain`` adapter rejects operator-only
+        ``config``) plus the ``embedding_disabled`` file-plane sentinel.
+        Returns ``None`` when either surface cannot be read (the caller
+        records ``inconclusive``)."""
+        keyword_only: bool | None = None
+        ev = self.runtime.run_as_hermes(
+            "sh", "-lc",
+            f"{GBRAIN_SNAPSHOT_ENV} {NATIVE_GBRAIN_BIN} config get search.mcp_keyword_only",
+            timeout=60,
+        )
+        self._evidence.append(ev)
+        if ev.returncode == 0 and ev.stdout.strip() in ("true", "false"):
+            keyword_only = ev.stdout.strip() == "true"
+        cfg: dict | None = None
+        ev = self.runtime.run_as_hermes("cat", "/opt/data/.gbrain/config.json", timeout=60)
+        self._evidence.append(ev)
+        if ev.returncode == 0:
+            try:
+                parsed = json.loads(ev.stdout)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                cfg = parsed
+        if keyword_only is None or cfg is None:
+            return None
+        sentinel = cfg.get("embedding_disabled")
+        if sentinel is not None and not isinstance(sentinel, bool):
+            # Mirror the wrapper's own validation: a non-boolean sentinel is
+            # corrupt, so the snapshot cannot be established.
+            return None
+        return SearchModeSnapshot(
+            keyword_only=keyword_only,
+            embedding_disabled=sentinel is True,
+        )
+
     # --- report -----------------------------------------------------------
 
     def _write_report(self) -> None:
@@ -266,6 +404,8 @@ class GbrainUpgradeEmbeddingConformanceTestCase(unittest.TestCase):
             "embedding_model": EMBEDDING_MODEL_ID,
             "embedding_revision": EMBEDDING_MODEL_REVISION,
             "reindex_classification": self._reindex_classification,
+            "reindex_pre_snapshot": self._reindex_pre_snapshot,
+            "reindex_post_snapshot": self._reindex_post_snapshot,
             "actions": list(UPGRADE_EMBEDDING_MATRIX),
             "matrix": self._matrix,
         }
@@ -415,44 +555,103 @@ class GbrainUpgradeEmbeddingConformanceRuntimeTests(GbrainUpgradeEmbeddingConfor
         self._matrix["candidate_source_ref"] = "pass"
 
     def _scenario_candidate_reindex(self) -> None:
-        """Candidate reindex/migration returns the success envelope. The
-        issue #124 reindex classification is REPORT-ONLY: derived from the
-        outcome and recorded in the report metadata, never asserted."""
+        """Candidate reindex/migration is the issue #124 probe (review
+        finding MAJOR #124): reproduce the regression exactly.
+
+        Order: the baseline semantic mode must be working BEFORE the probe
+        (the baseline semantic proof already passed; the pre snapshot
+        confirms the mode), then snapshot the supported search-mode
+        indicators, run the candidate ``josemar-gbrain reindex``, snapshot
+        the indicators again, and classify ``fixed``/``present``/
+        ``changed_failure_mode``/``inconclusive`` SOLELY from the pre/post
+        transition. The documented workaround (``enable-embeddings``) is
+        applied only AFTER the classification is recorded, so it can never
+        mask the regression before semantic retrieval is checked.
+
+        REPORT-ONLY: the classification is recorded in the report metadata,
+        never asserted. ``present`` (the recorded #124 failure) does not fail
+        the suite; the workaround restores semantic mode for the remaining
+        vector scenarios."""
+        # 1. Pre-reindex snapshot of the supported search-mode indicators
+        #    (precondition: semantic mode active on the baseline).
+        pre = self._snapshot_search_mode()
+        if pre is None or not pre.is_semantic():
+            self._reindex_classification = classify_reindex_transition(pre, None, probe_rc=0)
+            self.fail(
+                "issue #124 probe precondition not established: semantic mode "
+                f"is not active before the candidate reindex (pre snapshot: {pre})"
+            )
+
+        # 2. The probe reindex (candidate migration/activation).
         self._matrix["candidate_reindex"] = "fail"
         ev = self.runtime.run_as_hermes("josemar-gbrain", "reindex", timeout=300)
         self._evidence.append(ev)
+
+        # 3. Post-reindex snapshot, taken BEFORE any workaround.
+        post = self._snapshot_search_mode()
+
+        # 4. Classification derived SOLELY from the pre/post transition (and
+        #    the probe outcome); the workaround below never participates.
+        self._reindex_classification = classify_reindex_transition(pre, post, probe_rc=ev.returncode)
+        self._reindex_pre_snapshot = pre.to_dict()
+        self._reindex_post_snapshot = post.to_dict() if post is not None else None
+
         if ev.returncode != 0:
-            self._reindex_classification = "present"
-            self.fail(f"candidate reindex failed: {ev.stderr[-800:]}")
+            self.fail(
+                f"candidate reindex probe failed (classification "
+                f"{self._reindex_classification} recorded): {ev.stderr[-800:]}"
+            )
+        if post is None:
+            self.fail(
+                "post-reindex search-mode snapshot unreadable "
+                f"(classification {self._reindex_classification} recorded)"
+            )
+        # Wrapper contract (independent of the #124 classification): the
+        # reindex envelope must keep its shape.
         try:
             envelope = json.loads(ev.stdout)
         except json.JSONDecodeError:
-            self._reindex_classification = "changed_failure_mode"
             self.fail(f"candidate reindex envelope is not JSON: {ev.stdout[:400]}")
         if envelope.get("success") is not True or envelope.get("action") != "reindex":
-            self._reindex_classification = "changed_failure_mode"
             self.fail(f"candidate reindex envelope shape changed: {ev.stdout[:400]}")
         self.assertEqual(envelope.get("schema_pack"), "josemar")
-        self._reindex_classification = "fixed"
+        if self._reindex_classification == "present":
+            # 5. Documented workaround (enable-embeddings), applied ONLY after
+            #    the classification is recorded so it can never mask the
+            #    regression.
+            self._matrix["issue124_workaround"] = "fail"
+            re_enable = self.runtime.run_as_hermes(
+                "josemar-gbrain", "enable-embeddings", timeout=300
+            )
+            self.assertEqual(re_enable.returncode, 0, re_enable.stderr)
+            self._evidence.append(re_enable)
+            envelope = json.loads(re_enable.stdout)
+            self.assertIs(envelope.get("success"), True)
+            self.assertEqual(envelope.get("action"), "enable-embeddings")
+            after = self._snapshot_search_mode()
+            if after is None or not after.is_semantic():
+                self.fail(f"workaround did not restore semantic mode: {after}")
+            self._matrix["issue124_workaround"] = "pass"
+        elif self._reindex_classification == "fixed":
+            # Semantic mode survived the candidate reindex; no workaround
+            # needed.
+            self._matrix["issue124_workaround"] = "not_run"
+        else:
+            self.fail(
+                f"unexpected post-reindex search mode (classification "
+                f"{self._reindex_classification} recorded)"
+            )
         self._matrix["candidate_reindex"] = "pass"
 
     def _scenario_candidate_semantic_corpus(self) -> None:
         """WITHOUT a destructive full backfill, the pre-upgrade semantic
-        corpus must remain usable on the candidate: re-enable embeddings
-        (migration --no-embed only), then prove the preserved vectors serve
-        search and ``query --no-expand``. If the candidate migration
-        invalidated the pre-upgrade vectors, fail with the precise
+        corpus must remain usable on the candidate: the #124 probe already
+        restored semantic mode (workaround) when the candidate reindex reset
+        it, so here we only prove the preserved vectors serve search and
+        ``query --no-expand``. If the candidate migration invalidated the
+        pre-upgrade vectors, fail with the precise
         ``vector_migration_required`` signal."""
         self._matrix["candidate_semantic_corpus"] = "fail"
-        # Re-enable embeddings WITHOUT any backfill: migration --no-embed only.
-        ev = self.runtime.run_as_hermes("josemar-gbrain", "enable-embeddings", timeout=300)
-        self.assertEqual(ev.returncode, 0, ev.stderr)
-        self._evidence.append(ev)
-        envelope = json.loads(ev.stdout)
-        self.assertIs(envelope.get("success"), True)
-        self.assertEqual(envelope.get("action"), "enable-embeddings")
-        cfg = self._read_gbrain_config()
-        self.assertIsNot(cfg.get("embedding_disabled"), True)
         # The pre-upgrade vectors must survive the candidate migration
         # untouched (coverage stays 100% without any backfill).
         coverage = self._embedding_coverage()
@@ -488,10 +687,11 @@ class GbrainUpgradeEmbeddingConformanceRuntimeTests(GbrainUpgradeEmbeddingConfor
         ``refresh-embeddings`` reconciles it and the new token becomes
         searchable with full embedding coverage restored.
 
-        The candidate ``enable-embeddings`` removed the completion marker, so
-        a no-op ``embed-backfill`` (0 stale — the corpus proof passed)
-        restores it for the incremental refresh path. NOT destructive:
-        nothing is re-embedded when coverage is already 100%."""
+        The candidate ``enable-embeddings`` workaround (only when the #124
+        probe classified ``present``) removed the completion marker, so a
+        no-op ``embed-backfill`` (0 stale — the corpus proof passed)
+        restores/refreshes it for the incremental refresh path. NOT
+        destructive: nothing is re-embedded when coverage is already 100%."""
         self._matrix["post_upgrade_stale_edit"] = "fail"
         backfill = self.runtime.run_as_hermes("josemar-gbrain", "embed-backfill", timeout=600)
         self.assertEqual(backfill.returncode, 0, backfill.stderr)
@@ -762,6 +962,8 @@ class GbrainUpgradeEmbeddingConformanceGateStructureTests(unittest.TestCase):
             "embedding_model",
             "embedding_revision",
             "reindex_classification",
+            "reindex_pre_snapshot",
+            "reindex_post_snapshot",
         ):
             self.assertIn(key, text)
         self.assertIn("write_report", text)
@@ -799,9 +1001,123 @@ class GbrainUpgradeEmbeddingConformanceGateStructureTests(unittest.TestCase):
                 "candidate_recreate",
                 "candidate_source_ref",
                 "candidate_reindex",
+                "issue124_workaround",
                 "candidate_semantic_corpus",
                 "post_upgrade_stale_edit",
             },
+        )
+
+    # --- issue #124 probe: ordering and classification (review MAJOR #124) --
+
+    @staticmethod
+    def _scenario_text(start: str, end: str) -> str:
+        """Extract one scenario method's source from the runtime class text."""
+        runtime_class = (
+            GbrainUpgradeEmbeddingConformanceGateStructureTests._runtime_class_text()
+        )
+        body = runtime_class.split(f"def {start}", 1)[1]
+        return body.split(f"def {end}", 1)[0]
+
+    @staticmethod
+    def _snap(*, keyword_only=None, embedding_disabled=None) -> SearchModeSnapshot:
+        return SearchModeSnapshot(
+            keyword_only=keyword_only, embedding_disabled=embedding_disabled
+        )
+
+    def test_probe_snapshot_uses_native_binary_surface(self) -> None:
+        """The indicator snapshot must read ``search.mcp_keyword_only`` via
+        the native binary with the canonical env (the public ``gbrain``
+        adapter rejects operator-only ``config`` with exit 2)."""
+        runtime_class = self._runtime_class_text()
+        snapshot = runtime_class.split("def _snapshot_search_mode", 1)[1]
+        snapshot = snapshot.split("def _write_report", 1)[0]
+        self.assertIn("{NATIVE_GBRAIN_BIN} config get search.mcp_keyword_only", snapshot)
+        self.assertNotIn('"gbrain", "config"', snapshot)
+
+    def test_candidate_reindex_probe_reproduces_regression_in_order(self) -> None:
+        """MAJOR #124: the candidate probe must reproduce the regression in
+        order — pre snapshot, reindex, post snapshot, classification, and
+        only then the workaround (enable-embeddings)."""
+        probe = self._scenario_text(
+            "_scenario_candidate_reindex", "_scenario_candidate_semantic_corpus"
+        )
+        # pre snapshot precedes the probe reindex; post snapshot follows it.
+        first_snap = probe.index("self._snapshot_search_mode()")
+        second_snap = probe.index("self._snapshot_search_mode()", first_snap + 1)
+        self.assertLess(first_snap, probe.index('"josemar-gbrain", "reindex"'))
+        self.assertGreater(second_snap, probe.index('"josemar-gbrain", "reindex"'))
+        # classification is computed before any workaround enable-embeddings.
+        self.assertLess(
+            probe.index("self._reindex_classification = classify_reindex_transition("),
+            probe.index('"josemar-gbrain", "enable-embeddings"'),
+        )
+        # the workaround is gated on the present classification.
+        self.assertIn('if self._reindex_classification == "present"', probe)
+
+    def test_candidate_probe_precedes_corpus_proof_and_workaround_never_masks(self) -> None:
+        """The candidate #124 probe (candidate reindex + classification +
+        workaround) runs after the baseline semantic proof and BEFORE the
+        corpus proof; the corpus proof must never call enable-embeddings (the
+        workaround lives in the probe and never participates in the
+        classification)."""
+        runtime_class = self._runtime_class_text()
+        self.assertLess(
+            runtime_class.index("self._scenario_baseline_semantic_proof()"),
+            runtime_class.index("self._scenario_candidate_reindex()"),
+        )
+        self.assertLess(
+            runtime_class.index("self._scenario_candidate_reindex()"),
+            runtime_class.index("self._scenario_candidate_semantic_corpus()"),
+        )
+        corpus = runtime_class.split("def _scenario_candidate_semantic_corpus", 1)[1]
+        corpus = corpus.split("def _scenario_post_upgrade_stale_edit", 1)[0]
+        self.assertNotIn('"josemar-gbrain", "enable-embeddings"', corpus)
+
+    def test_candidate_reindex_classification_derived_only_from_transition(self) -> None:
+        """The #124 classification is computed ONLY from the pre/post
+        indicator transition via the pure classifier; no literal
+        classification assignments remain."""
+        runtime_class = self._runtime_class_text()
+        self.assertIn("classify_reindex_transition(", runtime_class)
+        for literal in ('"fixed"', '"present"', '"changed_failure_mode"'):
+            self.assertNotIn(f"self._reindex_classification = {literal}", runtime_class)
+
+    def test_classify_reindex_transition_decision_table(self) -> None:
+        """The pure classifier covers every branch of the #124 oracle."""
+        semantic = self._snap(keyword_only=False)
+        keyword_only = self._snap(keyword_only=True)
+        # inconclusive: precondition not established.
+        self.assertEqual(classify_reindex_transition(None, semantic, probe_rc=0), "inconclusive")
+        self.assertEqual(
+            classify_reindex_transition(self._snap(keyword_only=True), semantic, probe_rc=0),
+            "inconclusive",
+        )
+        # changed_failure_mode: probe failure or unreadable post snapshot.
+        self.assertEqual(
+            classify_reindex_transition(semantic, keyword_only, probe_rc=1),
+            "changed_failure_mode",
+        )
+        self.assertEqual(
+            classify_reindex_transition(semantic, None, probe_rc=0), "changed_failure_mode"
+        )
+        # present: the recorded #124 failure (mode reset to keyword-only).
+        self.assertEqual(
+            classify_reindex_transition(semantic, keyword_only, probe_rc=0), "present"
+        )
+        # fixed: semantic mode survived the reindex.
+        self.assertEqual(
+            classify_reindex_transition(semantic, semantic, probe_rc=0), "fixed"
+        )
+        # changed_failure_mode: unexpected post state.
+        self.assertEqual(
+            classify_reindex_transition(semantic, self._snap(keyword_only=None), probe_rc=0),
+            "changed_failure_mode",
+        )
+        self.assertEqual(
+            classify_reindex_transition(
+                semantic, self._snap(keyword_only=False, embedding_disabled=True), probe_rc=0
+            ),
+            "changed_failure_mode",
         )
 
 

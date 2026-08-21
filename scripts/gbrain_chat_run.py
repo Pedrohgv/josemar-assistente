@@ -225,15 +225,85 @@ def _classification_category(category: str) -> frozenset[str]:
     )
 
 
+# Known conformance gate env vars that can own a coverage entry (the opt-in
+# Docker runtime gates defined in the Makefile). A coverage entry's gate must
+# be one of these; the fast policy guard rejects unknown gates so a coverage
+# entry can never silently point at a gate that does not exist.
+KNOWN_CONFORMANCE_GATES = frozenset(
+    {
+        "RUN_GBRAIN_CONFORMANCE",
+        "RUN_GBRAIN_CHRONICLE_CONFORMANCE",
+        "RUN_GBRAIN_EMBEDDING_CONFORMANCE",
+        "RUN_GBRAIN_UPGRADE_CONFORMANCE",
+    }
+)
+
+# Machine-readable runtime coverage manifest (issue #127 W2a exhaustive
+# coverage guard, PR #129 MAJOR finding): every classified SUPPORTED
+# operation/variant maps to the real scenario method that exercises it and
+# the conformance gate env that owns that scenario. This is the single
+# mechanical record that a documented supported surface is actually covered
+# by a runtime scenario — the fast policy guard asserts:
+#
+#   - every supported classification (core / chronicle_read /
+#     embeddings_gated / probe_unavailable) has a coverage entry;
+#   - every coverage entry's scenario symbol exists in the runtime test
+#     module(s) owned by its gate;
+#   - every coverage entry's gate is a known conformance gate env;
+#   - operator_only / forbidden surfaces have NO coverage entry (they are
+#     rejected by the adapter, never exercised as supported operations).
+#
+# Scenario symbols are the real method names in the owning runtime test
+# modules (tests/runtime/gbrain_conformance_scenarios.py for the core gate,
+# tests/runtime/test_gbrain_conformance_chronicle.py for the Chronicle gate,
+# tests/runtime/test_gbrain_conformance_embeddings.py for the embeddings
+# gate). The core scenarios live in the reusable CoreScenarioMixin so the
+# candidate upgrade suite can rerun them against a candidate image.
+GBRAIN_OPERATION_COVERAGE = {
+    # --- core public surface (RUN_GBRAIN_CONFORMANCE) ---
+    "status": ("_scenario_status", "RUN_GBRAIN_CONFORMANCE"),
+    "search": ("_scenario_get_search_tags", "RUN_GBRAIN_CONFORMANCE"),
+    "get": ("_scenario_get_search_tags", "RUN_GBRAIN_CONFORMANCE"),
+    "capture": ("_scenario_public_write_contracts", "RUN_GBRAIN_CONFORMANCE"),
+    "put": ("_scenario_public_write_contracts", "RUN_GBRAIN_CONFORMANCE"),
+    "link": ("_scenario_links_backlinks_graph", "RUN_GBRAIN_CONFORMANCE"),
+    "backlinks": ("_scenario_links_backlinks_graph", "RUN_GBRAIN_CONFORMANCE"),
+    "graph": ("_scenario_links_backlinks_graph", "RUN_GBRAIN_CONFORMANCE"),
+    "tags": ("_scenario_get_search_tags", "RUN_GBRAIN_CONFORMANCE"),
+    "history": ("_scenario_recovery_history_revert", "RUN_GBRAIN_CONFORMANCE"),
+    "delete": ("_scenario_soft_delete_restore", "RUN_GBRAIN_CONFORMANCE"),
+    "revert": ("_scenario_recovery_history_revert", "RUN_GBRAIN_CONFORMANCE"),
+    "restore": ("_scenario_soft_delete_restore", "RUN_GBRAIN_CONFORMANCE"),
+    "doctor": ("_scenario_doctor", "RUN_GBRAIN_CONFORMANCE"),
+    "sources": ("_scenario_sources_list", "RUN_GBRAIN_CONFORMANCE"),
+    # --- Chronicle zero-LLM read smoke (RUN_GBRAIN_CONFORMANCE) ---
+    "day": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    "since": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    "last-seen": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    "on-this-day": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    "orient": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    "timeline": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    "ontology": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    # --- embeddings/provider-gated (RUN_GBRAIN_EMBEDDING_CONFORMANCE) ---
+    "query": ("_scenario_query_no_expand", "RUN_GBRAIN_EMBEDDING_CONFORMANCE"),
+    # --- known discrepancy probe (RUN_GBRAIN_CONFORMANCE) ---
+    "schema-status": ("_scenario_schema_status_probe", "RUN_GBRAIN_CONFORMANCE"),
+}
+
+
 # Mechanical command inventory for policy tests: the docs-policy suite
 # asserts the documented user-facing surface against this single export
-# instead of maintaining a fragile duplicate list.
+# instead of maintaining a fragile duplicate list. It also exports the
+# exhaustive coverage manifest and the known gate envs so the fast guard can
+# prove every classified supported surface maps to a real scenario/gate.
 CHAT_COMMAND_INVENTORY = {
     "subcommands": sorted(CHAT_SUBCOMMANDS),
     "subsubcommands": {name: sorted(subs) for name, subs in CHAT_SUBSUBCOMMANDS.items()},
     "rejected_arguments": {name: list(forms) for name, forms in CHAT_REJECTED_ARGUMENTS.items()},
     "operator_only": sorted(_classification_category("operator_only")),
     "classification": dict(sorted(GBRAIN_OPERATION_CLASSIFICATION.items())),
+    "coverage": dict(sorted(GBRAIN_OPERATION_COVERAGE.items())),
+    "known_gates": sorted(KNOWN_CONFORMANCE_GATES),
 }
 
 
