@@ -360,6 +360,64 @@ operator MUST verify the following after rebuild and before deploying:
     replace — the recovery/deploy validation (vault-recovery DR drill, deploy
     workflow) and the operator runbook checks above.
 
+## v0.42.73.2 → v0.46.25.0 Migration and Rollback (issue #126)
+
+This upgrade is a state-mutating event, not a binary swap: activation applies
+new PGLite database migrations v126–v135 to the state under
+`$GBRAIN_HOME/.gbrain`. Treat it as a migration with the fail-safe policy
+below.
+
+### Migration surface (v126–v135)
+
+- **v126, v127, v130, v132, v133, v134, v135** — additive/index/check changes
+  (new columns, indexes, and check constraints; no row transformation).
+- **v128** — state-transforming: backfills minion timeout values and cancels
+  duplicate autopilot-cycle rows.
+- **v129** — Dream verdict columns: rolling back from a v129-applied schema
+  has semantic divergence (the old binary reads the new verdict columns
+  differently). After upgrade, Dream verdicts may require
+  `gbrain dream retriage --force` to be re-derived under the new schema.
+- **v131** — drops the `uniq_subagent_tools_use_id` constraint. An OLD binary
+  that names that constraint as an ON CONFLICT target against the migrated
+  schema fails with SQLSTATE 42P10. This is the concrete reason binary-only
+  downgrade is NOT safe: reverting image/ref alone leaves the new schema under
+  the old binary.
+
+### Fail-safe policy
+
+1. **Pre-upgrade recovery generation is REQUIRED.** Before changing the
+   image/ref, produce and locally verify a complete vault + gbrain recovery
+   generation through the vault-recovery export lane (see
+   `docs/vault-recovery-operations.md`).
+2. **Maintenance window.** Pause the relevant workers/jobs —
+   `gbrain-refresh`, `gbrain-embedding-refresh`, and `vault-recovery-export`
+   (a lock-held export would repopulate state inside the window) — and stop
+   Hermes and server Syncthing before any destructive step (see "Cron
+   Pause/Resume for Maintenance Windows" and AGENTS.md rule 5).
+3. **Upgrade** the image and run activation (`josemar-gbrain reindex`) so
+   migrations v126–v135 apply, per the checklist above.
+4. **Rollback after migrations is a RESTORE, not a reversion.** Restore the
+   pre-upgrade recovery generation (vault + `.gbrain`) together with the
+   pre-upgrade image/ref. Never downgrade the binary alone against the
+   migrated schema: v131/42P10 breaks old ON CONFLICT writes, and v129 verdict
+   semantics diverge.
+
+### Stable-target assessment
+
+v0.46.25.0 includes the v0.46.2 self-heal (#4164/#4110). The #4332/#4361
+terminal-path wave remains unmerged upstream and is NOT claimed by this
+upgrade.
+
+### Dream conformance evidence
+
+Run `make test-gbrain-dream-recovery` after rebuilding the final image. The
+isolated gate kills a locked `dream --phase synthesize` parent after it creates
+private child work, proves the identical retry is bounded and degraded rather
+than wedged, cancels the stranded child through `gbrain jobs cancel`, then
+proves the identical retry completes. It records the v0.46.25.0 mechanism
+honestly: bounded retry plus supported operator recovery, not a claim of
+automatic self-healing inside the upstream one-hour foreign-queue grace.
+
 ## Environment Defaults
 
 | Variable | Default | Notes |

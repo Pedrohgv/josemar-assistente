@@ -5,6 +5,7 @@
 	test-mnemosyne-retrieval-synthetic-regression test-mnemosyne-retrieval-activation test-mnemosyne-retrieval-activation-evidence \
 	test-mnemosyne-retrieval-activation-reviewed \
 	test-gbrain-conformance test-gbrain-conformance-embeddings test-gbrain-conformance-chronicle \
+	test-gbrain-dream-recovery \
 	test-gbrain-upgrade-conformance test-gbrain-upgrade-conformance-embeddings
 
 # Python interpreter used by the default test target.
@@ -117,6 +118,17 @@ test-gbrain-conformance-embeddings:
 test-gbrain-conformance-chronicle:
 	RUN_DOCKER_TESTS=1 RUN_GBRAIN_CHRONICLE_CONFORMANCE=1 \
 	python3 -m unittest tests.runtime.test_gbrain_conformance_chronicle -v
+
+# Dream interruption/retry conformance (issue #126): provider-gated gate that
+# SIGKILLs `gbrain dream --phase synthesize --json` mid-synthesize against a
+# loopback Anthropic-compatible mock (fake key only), then proves the honest
+# v0.46.25.0 mechanism: stranded private dream-inline-* child -> bounded
+# degraded retry (<60s, no hang) -> operator `jobs cancel` -> clean recovery.
+# No automatic <1h self-heal is claimed (upstream grace is hardcoded to 1h;
+# #4361 unmerged).
+test-gbrain-dream-recovery:
+	RUN_DOCKER_TESTS=1 RUN_GBRAIN_DREAM_RECOVERY=1 \
+	python3 -m unittest tests.runtime.test_gbrain_dream_recovery -v
 
 # Candidate upgrade conformance: builds an exact candidate gbrain commit SHA
 # (GBRAIN_CONFORMANCE_CANDIDATE_REF) against the same disposable volumes and

@@ -191,6 +191,48 @@ RUN_DOCKER_TESTS=1 RUN_GBRAIN_AUTOPILOT_EXPERIMENT=1 \
 
 See issue #67 for the autopilot/dream follow-up discussion.
 
+## gbrain Dream Interruption/Retry Conformance (issue #126)
+
+An opt-in, provider-gated Docker runtime suite that proves the honest
+v0.46.25.0 dream interruption/retry mechanism against a deterministic
+loopback Anthropic-compatible mock (the fixture
+`tests/runtime/fixtures/gbrain_dream_mock.py`, fake key only — no
+production provider credentials, no external network):
+
+1. Runs exactly `gbrain dream --phase synthesize --json` as the native
+   binary under the shared TaskNotes lock, with short bounded timings
+   (subagent timeout 10s, well below the inline drain's 30s claim lock;
+   wait timeout 8s; serial PGLite-safe inline handling) and one seeded
+   qualifying transcript.
+2. The mock returns a high-score triage verdict and a valid one-page
+   synthesis JSON but delays the first synthesis call, so the test
+   SIGKILLs the parent right after the real private `dream-inline-*`
+   child has been claimed, then proves the lock is released/reacquirable
+   and no live process remains.
+3. An identical rerun (after the stranded child's 300s claim lease and
+   the cycle lock's 60s dead-holder takeover grace elapse) terminates
+   inside a strict bounded wall-time (<60s), reports degraded/no
+   completed page tied to the stranded private work (inspected via
+   `gbrain jobs list/get --json`), and never hangs.
+4. The operator cancels the stranded job with `gbrain jobs cancel <id>`
+   (never `jobs retry`, never DB writes); an identical rerun then
+   completes normally with pages written and a terminal completed
+   outcome.
+
+Honest scope: the gate does NOT claim automatic <1h self-heal — the
+upstream foreign-queue liveness grace is hardcoded to 1h and #4361 is
+unmerged upstream. The established mechanism is bounded retry + operator
+cancel.
+
+```bash
+make test-gbrain-dream-recovery
+```
+
+It is skipped by default (gated on `RUN_DOCKER_TESTS=1` AND
+`RUN_GBRAIN_DREAM_RECOVERY=1`) and never runs on ordinary `make test`,
+`make test-runtime`, or `make verify`. Reports land under the gitignored
+`dump_folder/gbrain-conformance/`.
+
 ## gbrain Conformance (issue #127)
 
 An opt-in, pass/fail Docker runtime suite that mechanically validates the real
