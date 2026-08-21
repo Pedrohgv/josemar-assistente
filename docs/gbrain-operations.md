@@ -172,8 +172,8 @@ Immediate non-negotiables:
 ## Pinned Values
 
 - Bun: `1.3.14`
-- gbrain ref: `15b9863d13635d173562a54f55a1d388bfcf546b`
-- gbrain version: `0.42.73.2`
+- gbrain ref: `055ac6c75a116aafdf3d00b47c9db2294612a134`
+- gbrain version: `0.46.25.0`
 - Schema pack: `josemar` (state-owned custom pack extending `gbrain-base-v2`; the active schema marker in this deployment)
 
 ## gbrain Upgrade Checklist
@@ -202,7 +202,7 @@ operator MUST verify the following after rebuild and before deploying:
    chronicle commands (`gbrain day`, `gbrain since`,
    `gbrain last-seen`, `gbrain orient`) still exist and behave as
    documented; `gbrain chronicle-backfill` (operator-only) is verified the
-   same way. As of v0.42.73.2, `auto_chronicle` is a registered
+   same way. As of v0.46.25.0, `auto_chronicle` is a registered
    `KNOWN_CONFIG_KEYS` entry, so it no longer requires the `--force` flag that
    the v0.42.57.0 config-key registry bug forced. The chronicle judge token
    limit is now raised through the supported `chronicle.judge_max_tokens=8000`
@@ -230,12 +230,47 @@ operator MUST verify the following after rebuild and before deploying:
    `skills-factory/gbrain/SKILL.md` if it references the version.
 
 7. **Local patch.** The Dockerfile applies one patch to gbrain source
-   after the git clone:
-   - `patches/gbrain-inline-worker-gateway.patch` (git apply) — configures the
-     AI gateway in the PGLite inline worker (`--follow`) path. If this patch
-     fails to apply, the build will fail loudly — re-create the patch against
-     the new gbrain source.
-   - **Chronicle judge token limit.** As of v0.42.73.2, the chronicle judge
+   after the git clone: `patches/gbrain-inline-worker-gateway.patch`
+   (git apply; the file is selectable via the `GBRAIN_PATCH_FILE` build
+   arg, default = this canonical current patch). If the patch fails to
+   apply, the build will fail loudly — re-create the patch against the
+   new gbrain source. The current patch maintains these compatibility
+   seams:
+   - **Provider API-key bridge/config** (`src/commands/config.ts`,
+     `src/core/ai/provider-env.ts`, `src/core/config.ts`): any
+     `*_api_key` config key is routed to the file plane, accepted without
+     `--force`, and folded into its uppercase `*_API_KEY` env var for
+     providers upstream does not map (DeepSeek, Groq, Together, ...), so
+     provider keys written to the config file reach the gateway without
+     relying on `process.env` propagation. Upstream bug: #3394.
+   - **Gateway refresh + chronicle job registration**
+     (`src/commands/jobs.ts`): `chronicle_extract` is registered via
+     `registerBuiltinJob` and added to the gateway-refresh job coverage,
+     so the LLM-backed worker refreshes the gateway before running
+     (previously it silently returned `no_events` on PGLite). Upstream
+     bug: #3394.
+   - **Embedding disable / keyword-only operations**
+     (`src/core/ops/pages.ts`, `src/core/ops/search.ts`): `put_page`
+     forces `noEmbed` when the `embedding_disabled` sentinel is set, and
+     the `query` op honors `search.mcp_keyword_only` (keyword text
+     search; image/cross-modal queries reject loudly).
+   - **E5 preprocess / revision signatures** (`src/core/ai/gateway.ts`,
+     `src/core/embedding.ts`): model-gated `query:`/`passage:` prefixing
+     before truncation/batching/retry, and a revision-aware E5 signature
+     suffix (`e5-query-passage-v1[@revision]`) shared by the embed loop
+     and the migration planner so raw or revision-drifted vectors are
+     detected as stale.
+   - **Embedding migration sentinel handling/finalization**
+     (`src/core/embedding-migration.ts`,
+     `src/commands/migrate-embeddings.ts`, `src/commands/embed.ts`):
+     E5-aware `migrationSignature`; the persisted `embedding_disabled`
+     sentinel is lifted on successful migration and on the verified-skip
+     carve-out; a zero-failure stale backfill finalizes a matching
+     in-flight migration.
+   - **Bundled fixture** (`test/ai/e5-preprocess.test.ts`): the patch
+     adds its own test file pinning the E5 seams; keep it in sync when
+     re-creating the patch.
+   - **Chronicle judge token limit.** As of v0.46.25.0, the chronicle judge
      token limit is raised through the supported
      `chronicle.judge_max_tokens=8000` configuration key (set during
      activation) instead of the previous source patch/sed on
@@ -244,11 +279,30 @@ operator MUST verify the following after rebuild and before deploying:
      used; if it is still present in the Dockerfile it should be removed. If
      gbrain changes the default or the config key name, verify the effective
      judge token limit is still 8000 after build.
+   - **Historical baseline patches (upgrade conformance).** When the
+     upgrade-conformance baseline override is set to the pre-upgrade pin
+     `15b9863d13635d173562a54f55a1d388bfcf546b` (gbrain 0.42.73.2), the
+     baseline build also passes
+     `--build-arg GBRAIN_PATCH_FILE=legacy/gbrain-inline-worker-gateway.0.42.73.2.patch`
+     so the historical image is patched EXACTLY as production ran it at
+     immutable pre-upgrade commit `1fc78e6` — the production patch
+     immediately before the v0.46.25.0 upgrade (not merely the older
+     pin-introduction commit `4f6a7c6`): the legacy file is byte-identical
+     to `git show 1fc78e6:patches/gbrain-inline-worker-gateway.patch` — do
+     not edit it or add a header. The static ref → patch mapping lives in
+     `tests/runtime/gbrain_conformance_support.py`
+     (`GBRAIN_LEGACY_PATCH_MAPPING`) and is never user-controlled. Any ref
+     without a legacy mapping (or a mapped ref whose declared file is missing
+     from `patches/`) resolves to the canonical current patch; production and
+     candidate builds always apply the canonical current patch. When a future
+     upgrade repeats this pattern, capture the old pin's patch from its own
+     validated commit into a new `patches/legacy/<file>` and add a mapping
+     entry.
    The patch is documented inline in `Dockerfile.hermes`. Remove individual
    hunks when their corresponding behavior is fixed upstream.
 
-8. **Migrations / activation.** The v0.42.73.2 upgrade introduces database
-   migrations v123–v125. These MUST be applied by running the activation
+8. **Migrations / activation.** The v0.46.25.0 upgrade introduces database
+   schema migrations. These MUST be applied by running the activation
    (`josemar-gbrain reindex`) against the rebuilt image before the upgraded
    gbrain is considered ready. Reindex runs `gbrain init`/schema setup, which
    applies pending migrations to the PGLite database under

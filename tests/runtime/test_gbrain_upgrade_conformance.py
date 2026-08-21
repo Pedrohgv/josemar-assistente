@@ -2,9 +2,14 @@
 
 Runs the SAME disposable Compose project/volumes through a full upgrade:
 
-  - baseline build/start (Dockerfile default ``GBRAIN_REF``), reindex, and
-    representative logical state created through the supported public APIs
-    (capture/put/link)
+  - baseline build/start at the EFFECTIVE baseline ref (the committed
+    Dockerfile ``GBRAIN_REF``, or the validated upgrade-only
+    ``GBRAIN_CONFORMANCE_BASELINE_REF`` override — exact 40-hex, checked
+    BEFORE any Docker invocation — when the Dockerfile pin is the
+    post-upgrade ref and the real old -> new migration must be proven),
+    baseline source-ref proof (``/opt/gbrain/.git/HEAD`` equals the effective
+    baseline ref), reindex, and representative logical state created through
+    the supported public APIs (capture/put/link)
   - ``docker compose stop`` preserving volumes
   - candidate image build with the validated ``GBRAIN_REF`` build arg
   - force-recreate ``--no-build`` against the SAME volumes
@@ -33,9 +38,13 @@ Runs the SAME disposable Compose project/volumes through a full upgrade:
 
 The gate is strict: ``RUN_DOCKER_TESTS=1`` AND ``RUN_GBRAIN_UPGRADE_CONFORMANCE=1``
 AND an exact ``GBRAIN_CONFORMANCE_CANDIDATE_REF`` (40-hex, prevalidated BEFORE
-any Docker invocation, and rejected when equal to the canonical baseline
-``GBRAIN_REF``). Fast host-side gate/ref/pre-Docker/no-volume-delete tests in
-this module always run and need no Docker.
+any Docker invocation, and rejected when equal to the EFFECTIVE baseline
+``GBRAIN_REF`` — the validated ``GBRAIN_CONFORMANCE_BASELINE_REF`` override
+when present, otherwise the canonical Dockerfile pin). The baseline override
+is OPTIONAL and upgrade-only: absent means the baseline stays the committed
+Dockerfile pin (current behavior unchanged). Fast host-side
+gate/ref/pre-Docker/no-volume-delete tests in this module always run and need
+no Docker.
 
 The JSON report (``dump_folder/gbrain-conformance/gbrain-upgrade-conformance.json``)
 carries the baseline/candidate refs, the action list, the logical result, the
@@ -61,7 +70,9 @@ from .gbrain_conformance_support import (
     CONFORMANCE_EMPTY_ENV_KEYS,
     CommandEvidence,
     GbrainConformanceRuntime,
+    baseline_override_active,
     conformance_report_dir,
+    effective_baseline_ref,
     normalize_candidate_ref,
     parse_dockerfile_gbrain_ref,
     write_report,
@@ -121,6 +132,7 @@ def _classify_issue_125_git_move(
 # classification. The report persists an explicit result for each.
 UPGRADE_MATRIX = {
     "baseline_build_start": "core",
+    "baseline_source_ref": "core",
     "baseline_reindex": "operator_only",
     "baseline_state_create": "core",
     "stop_preserve_volumes": "core",
@@ -217,13 +229,15 @@ def _candidate_ref() -> str:
 
 
 def _validated_candidate_ref() -> str:
-    """Validate the candidate ref and REJECT equality with the canonical
-    baseline ``GBRAIN_REF``. Runs before any Docker invocation."""
+    """Validate the candidate ref and REJECT equality with the EFFECTIVE
+    baseline ref: the validated ``GBRAIN_CONFORMANCE_BASELINE_REF`` override
+    when present, otherwise the canonical Dockerfile ``GBRAIN_REF``. Runs
+    before any Docker invocation."""
     candidate = _candidate_ref()
-    baseline = parse_dockerfile_gbrain_ref()
+    baseline = effective_baseline_ref()
     if candidate == baseline:
         raise ValueError(
-            "GBRAIN_CONFORMANCE_CANDIDATE_REF must differ from the canonical "
+            "GBRAIN_CONFORMANCE_CANDIDATE_REF must differ from the effective "
             f"baseline GBRAIN_REF ({baseline})"
         )
     return candidate
@@ -259,12 +273,19 @@ class GbrainUpgradeConformanceTestCase(unittest.TestCase):
     def setUp(self) -> None:
         # Candidate ref validated BEFORE the first Docker invocation.
         self.candidate_ref = _validated_candidate_ref()
-        self.baseline_ref = parse_dockerfile_gbrain_ref()
+        # Effective baseline: the validated upgrade-only override when set,
+        # otherwise the committed Dockerfile pin (unchanged behavior).
+        self.baseline_ref = effective_baseline_ref()
+        self.dockerfile_ref = parse_dockerfile_gbrain_ref()
+        self.baseline_ref_source = (
+            "override" if baseline_override_active() else "dockerfile"
+        )
         self._evidence: list[CommandEvidence] = []
         self._matrix: dict[str, str] = {
             op: "not_run" for op in {**UPGRADE_MATRIX, **CANDIDATE_OPERATIONS}
         }
         self._baseline_version: str | None = None
+        self._baseline_source_ref: str | None = None
         self._candidate_version: str | None = None
         self._gbrain_version: str | None = None
         self._logical_result: str = "not_run"
@@ -277,8 +298,9 @@ class GbrainUpgradeConformanceTestCase(unittest.TestCase):
         # Pre-start source state seeding: real template .sync-manifest +
         # canonical josemar schema pack into the disposable source-agent-state.
         self.runtime.seed_source_state()
-        # Baseline build/start (Dockerfile default GBRAIN_REF).
-        self.runtime.up("hermes", timeout=900)
+        # Baseline build/start at the effective baseline ref (Dockerfile
+        # default, or the validated override via the upgrade-only path).
+        self.runtime.up_baseline("hermes", timeout=900)
         self._matrix["baseline_build_start"] = "pass"
         # Wait for the exact hermes-writable surface before any exec probe.
         self.runtime.wait_until_hermes_writable(timeout=120)
@@ -366,6 +388,9 @@ class GbrainUpgradeConformanceTestCase(unittest.TestCase):
         environment dumps."""
         metadata = {
             "baseline_ref": self.baseline_ref,
+            "baseline_ref_source": self.baseline_ref_source,
+            "dockerfile_gbrain_ref": self.dockerfile_ref,
+            "baseline_source_ref": self._baseline_source_ref,
             "candidate_ref": self.candidate_ref,
             "baseline_gbrain_version": self._baseline_version,
             "candidate_gbrain_version": self._candidate_version,
@@ -398,6 +423,7 @@ class GbrainUpgradeConformanceRuntimeTests(
 
     def test_baseline_to_candidate_upgrade_conformance(self) -> None:
         try:
+            self._scenario_baseline_source_ref()
             self._scenario_baseline_reindex()
             self._scenario_baseline_schema_status_probe()
             self._scenario_baseline_state()
@@ -413,6 +439,24 @@ class GbrainUpgradeConformanceRuntimeTests(
             self._scenario_issue_125_probe()
         finally:
             self._write_report()
+
+    def _scenario_baseline_source_ref(self) -> None:
+        """Prove the baseline source ref: ``/opt/gbrain/.git/HEAD`` must
+        equal the EFFECTIVE baseline ref (the validated override when
+        present, otherwise the Dockerfile pin).
+
+        This provenance proof defeats false success for an old-candidate
+        downgrade: the report carries the exact baseline HEAD alongside the
+        candidate source-ref proof, and the pre-Docker equality rejection
+        already forbids candidate == effective baseline (a no-op that would
+        otherwise pass trivially)."""
+        self._matrix["baseline_source_ref"] = "fail"
+        ev = self.runtime.run_as_hermes("cat", "/opt/gbrain/.git/HEAD")
+        self.assertEqual(ev.returncode, 0, ev.stderr)
+        self.assertEqual(ev.stdout.strip(), self.baseline_ref, ev.stderr)
+        self._evidence.append(ev)
+        self._baseline_source_ref = ev.stdout.strip()
+        self._matrix["baseline_source_ref"] = "pass"
 
     def _scenario_baseline_reindex(self) -> None:
         """Baseline operator activation returns the success envelope and the
@@ -801,10 +845,81 @@ class GbrainUpgradeConformanceGateStructureTests(unittest.TestCase):
                 _candidate_ref()
 
     def test_candidate_ref_rejects_equality_with_baseline(self) -> None:
-        baseline = parse_dockerfile_gbrain_ref()
-        with mock.patch.dict(os.environ, {"GBRAIN_CONFORMANCE_CANDIDATE_REF": baseline}):
-            with self.assertRaisesRegex(ValueError, "must differ"):
-                _validated_candidate_ref()
+        """The candidate must differ from the EFFECTIVE baseline: the
+        validated override when present, otherwise the Dockerfile pin."""
+        # Without the override the effective baseline is the Dockerfile pin.
+        with mock.patch.dict(
+            os.environ,
+            {"GBRAIN_CONFORMANCE_BASELINE_REF": "", "GBRAIN_CONFORMANCE_CANDIDATE_REF": ""},
+        ):
+            baseline = parse_dockerfile_gbrain_ref()
+            with mock.patch.dict(
+                os.environ, {"GBRAIN_CONFORMANCE_CANDIDATE_REF": baseline}
+            ):
+                with self.assertRaisesRegex(ValueError, "must differ"):
+                    _validated_candidate_ref()
+        # With the override the effective baseline is the override: a
+        # candidate equal to it (the no-op / old-candidate downgrade) is
+        # rejected before any Docker invocation.
+        override = "a" * 40
+        with mock.patch.dict(
+            os.environ,
+            {"GBRAIN_CONFORMANCE_BASELINE_REF": override, "GBRAIN_CONFORMANCE_CANDIDATE_REF": ""},
+        ):
+            with mock.patch.dict(
+                os.environ, {"GBRAIN_CONFORMANCE_CANDIDATE_REF": override}
+            ):
+                with self.assertRaisesRegex(ValueError, "must differ"):
+                    _validated_candidate_ref()
+        # The real old -> new configuration is allowed: baseline override =
+        # old ref, candidate = the committed Dockerfile pin (the new ref).
+        dockerfile = parse_dockerfile_gbrain_ref()
+        with mock.patch.dict(
+            os.environ,
+            {"GBRAIN_CONFORMANCE_BASELINE_REF": "a" * 40, "GBRAIN_CONFORMANCE_CANDIDATE_REF": ""},
+        ):
+            with mock.patch.dict(
+                os.environ, {"GBRAIN_CONFORMANCE_CANDIDATE_REF": dockerfile}
+            ):
+                self.assertEqual(_validated_candidate_ref(), dockerfile)
+
+    def test_baseline_ref_honors_validated_override(self) -> None:
+        """The upgrade suite's baseline is the EFFECTIVE ref: the validated
+        override when set, otherwise the Dockerfile pin (unchanged)."""
+        override = "aBcD" * 10
+        with mock.patch.dict(os.environ, {"GBRAIN_CONFORMANCE_BASELINE_REF": override}):
+            self.assertEqual(effective_baseline_ref(), override.lower())
+        with mock.patch.dict(os.environ, {"GBRAIN_CONFORMANCE_BASELINE_REF": ""}):
+            self.assertEqual(effective_baseline_ref(), parse_dockerfile_gbrain_ref())
+        text = self._module_text()
+        self.assertIn("effective_baseline_ref", text)
+        self.assertIn("GBRAIN_CONFORMANCE_BASELINE_REF", text)
+        self.assertIn("up_baseline", text)
+
+    def test_baseline_override_invalid_fails_closed_before_docker(self) -> None:
+        with mock.patch.dict(os.environ, {"GBRAIN_CONFORMANCE_BASELINE_REF": "main"}):
+            with self.assertRaises(ValueError):
+                effective_baseline_ref()
+
+    def test_baseline_source_ref_proven_and_reported(self) -> None:
+        """The suite proves the effective baseline's /opt/gbrain/.git/HEAD
+        (guarding against an old-candidate downgrade false success) and
+        persists it with the ref provenance in the report."""
+        text = self._module_text()
+        runtime_class = text.split("class GbrainUpgradeConformanceRuntimeTests", 1)[1]
+        runtime_class = runtime_class.split("class GbrainUpgradeConformanceGateStructureTests", 1)[0]
+        self.assertIn("self._scenario_baseline_source_ref()", runtime_class)
+        self.assertIn('"cat", "/opt/gbrain/.git/HEAD"', runtime_class)
+        self.assertIn("self.baseline_ref", runtime_class)
+        self.assertIn('"baseline_source_ref": "core"', text)
+        report = text.split("def _write_report", 1)[1]
+        report = report.split("def test_baseline_to_candidate_upgrade_conformance", 1)[0]
+        for key in ("baseline_ref_source", "dockerfile_gbrain_ref", "baseline_source_ref"):
+            self.assertIn(f'"{key}"', report)
+        # The report provenance fields are computed in setUp from the
+        # explicit override presence; the report writer itself never reads
+        # the environment.
+        self.assertNotIn("os.environ", report)
 
     def test_upgrade_flow_preserves_volumes(self) -> None:
         """The upgrade must stop (preserving volumes) and force-recreate

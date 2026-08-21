@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -16,15 +17,22 @@ from unittest import mock
 from .gbrain_conformance_support import (
     CANONICAL_PACK_SOURCE,
     CONFORMANCE_EMPTY_ENV_KEYS,
+    GBRAIN_CANONICAL_PATCH_FILE,
+    GBRAIN_CONFORMANCE_BASELINE_REF_ENV,
+    GBRAIN_LEGACY_PATCH_MAPPING,
     SYNC_MANIFEST_SOURCE,
     CommandEvidence,
     GbrainConformanceRuntime,
     OWNED_JOB_NAMES,
     REPO_ROOT,
+    baseline_override_active,
     conformance_report_dir,
+    effective_baseline_ref,
+    normalize_baseline_ref,
     normalize_candidate_ref,
     parse_dockerfile_gbrain_ref,
     parse_gbrain_ref_text,
+    resolve_gbrain_patch_file,
     seed_source_state,
     write_report,
 )
@@ -89,6 +97,174 @@ class CandidateRefValidationTests(unittest.TestCase):
                     normalize_candidate_ref(ref)  # type: ignore[arg-type]
 
 
+class BaselineOverrideTests(unittest.TestCase):
+    """Upgrade-only baseline override: optional (absent -> current behavior
+    unchanged), exact 40-hex validated BEFORE any Docker invocation (fail
+    closed), and never readable by core conformance paths."""
+
+    def test_effective_baseline_without_override_is_dockerfile_ref(self) -> None:
+        with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: ""}):
+            self.assertEqual(effective_baseline_ref(), parse_dockerfile_gbrain_ref())
+        self.assertFalse(baseline_override_active())
+
+    def test_effective_baseline_with_override_is_validated_lowercased(self) -> None:
+        ref = "aBcD" * 10
+        with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: ref}):
+            self.assertTrue(baseline_override_active())
+            self.assertEqual(effective_baseline_ref(), ref.lower())
+
+    def test_normalize_baseline_ref_uses_exact_40_hex_machinery(self) -> None:
+        ref = "A" * 40
+        self.assertEqual(normalize_baseline_ref(ref), "a" * 40)
+        for bad in ("main", "abc123", "v1.0.0", "g" + "a" * 39, "a" * 41, "   "):
+            with self.subTest(ref=bad):
+                with self.assertRaises(ValueError):
+                    normalize_baseline_ref(bad)
+
+    def test_effective_baseline_rejects_invalid_override_fail_closed(self) -> None:
+        for ref in ("main", "abc123", "v0.46.25.0", "g" + "a" * 39, "a" * 41):
+            with self.subTest(ref=ref):
+                with mock.patch.dict(
+                    os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: ref}
+                ):
+                    with self.assertRaises(ValueError):
+                        effective_baseline_ref()
+
+    def test_whitespace_only_override_is_absent(self) -> None:
+        """Empty/whitespace-only means NO override: absent behavior unchanged
+        (the Dockerfile pin is the effective baseline)."""
+        with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: "  "}):
+            self.assertFalse(baseline_override_active())
+            self.assertEqual(effective_baseline_ref(), parse_dockerfile_gbrain_ref())
+
+    def test_baseline_gbrain_ref_stays_dockerfile_pin_with_override_set(self) -> None:
+        """Core contract (requirement 3): ``baseline_gbrain_ref()`` is ALWAYS
+        the committed Dockerfile pin; the override only affects the explicit
+        effective-baseline helper."""
+        runtime = GbrainConformanceRuntime()
+        with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: "a" * 40}):
+            self.assertEqual(
+                runtime.baseline_gbrain_ref(), parse_dockerfile_gbrain_ref()
+            )
+            self.assertEqual(runtime.effective_baseline_gbrain_ref(), "a" * 40)
+
+    def test_up_baseline_without_override_is_up_unchanged(self) -> None:
+        runtime = GbrainConformanceRuntime()
+        with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: ""}):
+            with mock.patch.object(runtime, "up") as up_mock:
+                with mock.patch.object(runtime, "build") as build_mock:
+                    with mock.patch.object(runtime, "start") as start_mock:
+                        runtime.up_baseline("hermes", timeout=900)
+        up_mock.assert_called_once_with("hermes", timeout=900)
+        build_mock.assert_not_called()
+        start_mock.assert_not_called()
+
+    def test_up_baseline_with_override_builds_validated_args_then_starts(self) -> None:
+        runtime = GbrainConformanceRuntime()
+        ref = "A" * 40
+        with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: ref}):
+            with mock.patch.object(runtime, "up") as up_mock:
+                with mock.patch.object(runtime, "build") as build_mock:
+                    with mock.patch.object(runtime, "start") as start_mock:
+                        runtime.up_baseline("hermes", timeout=900)
+        up_mock.assert_not_called()
+        build_mock.assert_called_once_with(
+            "hermes",
+            build_args={
+                "GBRAIN_REF": ref.lower(),
+                "GBRAIN_PATCH_FILE": GBRAIN_CANONICAL_PATCH_FILE,
+            },
+            timeout=900,
+        )
+        start_mock.assert_called_once_with("hermes", timeout=900)
+
+    def test_up_baseline_invalid_override_fails_closed_before_docker(self) -> None:
+        runtime = GbrainConformanceRuntime()
+        with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: "main"}):
+            with mock.patch.object(runtime, "up") as up_mock:
+                with mock.patch.object(runtime, "build") as build_mock:
+                    with mock.patch.object(runtime, "start") as start_mock:
+                        with self.assertRaises(ValueError):
+                            runtime.up_baseline("hermes")
+        up_mock.assert_not_called()
+        build_mock.assert_not_called()
+        start_mock.assert_not_called()
+
+    def test_build_baseline_with_override_passes_validated_build_args(self) -> None:
+        runtime = GbrainConformanceRuntime()
+        ref = "aBcD" * 10
+        with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: ref}):
+            with mock.patch.object(runtime, "build") as build_mock:
+                runtime.build_baseline("hermes")
+        build_mock.assert_called_once_with(
+            "hermes",
+            build_args={
+                "GBRAIN_REF": ref.lower(),
+                "GBRAIN_PATCH_FILE": GBRAIN_CANONICAL_PATCH_FILE,
+            },
+            timeout=900,
+        )
+
+    def test_up_baseline_with_override_for_old_pin_selects_legacy_patch(self) -> None:
+        """Requirement 3: a known historical pin drives BOTH validated build
+        args — the pin itself and its exact legacy patch file."""
+        runtime = GbrainConformanceRuntime()
+        old_ref = "15b9863d13635d173562a54f55a1d388bfcf546b"
+        with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: old_ref}):
+            with mock.patch.object(runtime, "build") as build_mock:
+                with mock.patch.object(runtime, "start") as start_mock:
+                    runtime.up_baseline("hermes")
+        build_mock.assert_called_once_with(
+            "hermes",
+            build_args={
+                "GBRAIN_REF": old_ref,
+                "GBRAIN_PATCH_FILE": (
+                    "legacy/gbrain-inline-worker-gateway.0.42.73.2.patch"
+                ),
+            },
+            timeout=600,
+        )
+        start_mock.assert_called_once_with("hermes", timeout=600)
+
+    def test_build_baseline_invalid_override_fails_closed_before_docker(self) -> None:
+        runtime = GbrainConformanceRuntime()
+        with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: "main"}):
+            with mock.patch.object(runtime, "build") as build_mock:
+                with self.assertRaises(ValueError):
+                    runtime.build_baseline("hermes")
+        build_mock.assert_not_called()
+
+    def test_candidate_build_semantics_untouched_by_override(self) -> None:
+        """Requirement 4: candidate build semantics never change; the
+        override affects baseline paths only."""
+        runtime = GbrainConformanceRuntime()
+        candidate = "b" * 40
+        with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: "a" * 40}):
+            with mock.patch.object(runtime, "build") as build_mock:
+                runtime.build_candidate(candidate, "hermes")
+        build_mock.assert_called_once_with(
+            "hermes", build_args={"GBRAIN_REF": candidate}, timeout=900
+        )
+
+    def test_core_conformance_modules_never_read_the_override(self) -> None:
+        """Core conformance stays bound to the Dockerfile pin: the core
+        modules must not reference the override env, the effective-baseline
+        helper, or the override-aware ``up_baseline`` path."""
+        for name in (
+            "test_gbrain_conformance.py",
+            "test_gbrain_conformance_embeddings.py",
+            "test_gbrain_conformance_chronicle.py",
+            "gbrain_conformance_scenarios.py",
+        ):
+            text = (REPO_ROOT / "tests" / "runtime" / name).read_text(encoding="utf-8")
+            for forbidden in (
+                "GBRAIN_CONFORMANCE_BASELINE_REF",
+                "effective_baseline_ref",
+                "up_baseline",
+            ):
+                self.assertNotIn(forbidden, text, f"{name} must not use {forbidden}")
+
+
 class DockerfileGbrainRefParserTests(unittest.TestCase):
     """Canonical single-default GBRAIN_REF parsing with clear malformed and
     ambiguous errors."""
@@ -131,6 +307,117 @@ class DockerfileGbrainRefParserTests(unittest.TestCase):
     def test_rejects_no_definition(self) -> None:
         with self.assertRaisesRegex(ValueError, "no ARG GBRAIN_REF"):
             parse_gbrain_ref_text("ARG HERMES_BASE_IMAGE=foo\n")
+
+
+# The pre-upgrade gbrain pin whose historical patch is preserved under
+# patches/legacy/ (v0.42.73.2; the production patch captured at immutable
+# commit 1fc78e6, immediately before the v0.46.25.0 upgrade).
+LEGACY_OLD_REF = "15b9863d13635d173562a54f55a1d388bfcf546b"
+LEGACY_PATCH_REL = "legacy/gbrain-inline-worker-gateway.0.42.73.2.patch"
+
+
+class LegacyPatchMappingTests(unittest.TestCase):
+    """Requirement 3: historical baseline pins resolve to their exact legacy
+    patch file; every other ref resolves to the canonical current patch. The
+    mapping is static — patch selection is derived from the validated ref and
+    is never user-controlled."""
+
+    def test_mapping_contains_only_the_old_pin_with_its_legacy_path(self) -> None:
+        self.assertEqual(
+            GBRAIN_LEGACY_PATCH_MAPPING,
+            {LEGACY_OLD_REF: LEGACY_PATCH_REL},
+        )
+
+    def test_known_old_ref_resolves_to_legacy_patch(self) -> None:
+        self.assertEqual(resolve_gbrain_patch_file(LEGACY_OLD_REF), LEGACY_PATCH_REL)
+
+    def test_known_old_ref_uppercase_normalized_before_lookup(self) -> None:
+        self.assertEqual(
+            resolve_gbrain_patch_file(LEGACY_OLD_REF.upper()), LEGACY_PATCH_REL
+        )
+
+    def test_unknown_ref_resolves_to_canonical_current_patch(self) -> None:
+        for ref in ("a" * 40, "b" * 40, "f" * 40):
+            with self.subTest(ref=ref):
+                self.assertEqual(
+                    resolve_gbrain_patch_file(ref), GBRAIN_CANONICAL_PATCH_FILE
+                )
+
+    def test_invalid_ref_fails_closed_before_selection(self) -> None:
+        for ref in ("main", "abc123", "v0.42.73.2", "g" + "a" * 39, "a" * 41, "  "):
+            with self.subTest(ref=ref):
+                with self.assertRaises(ValueError):
+                    resolve_gbrain_patch_file(ref)
+
+    def test_legacy_patch_file_exists_under_patches(self) -> None:
+        path = REPO_ROOT / "patches" / LEGACY_PATCH_REL
+        self.assertTrue(path.is_file(), "legacy patch file missing under patches/")
+
+    def test_legacy_patch_is_distinguishable_from_current_patch_bytes(self) -> None:
+        legacy = (REPO_ROOT / "patches" / LEGACY_PATCH_REL).read_bytes()
+        current = (REPO_ROOT / "patches" / GBRAIN_CANONICAL_PATCH_FILE).read_bytes()
+        self.assertNotEqual(legacy, current)
+
+    def test_legacy_patch_is_exact_bytes_of_validated_historical_commit(self) -> None:
+        """Requirement 2: byte-identical to
+        ``git show 1fc78e6:patches/gbrain-inline-worker-gateway.patch`` — the
+        production patch at immutable pre-upgrade commit 1fc78e6, immediately
+        before the v0.46.25.0 upgrade (not merely the older pin-introduction
+        commit 4f6a7c6) — no added header that could change apply behavior."""
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "show",
+                "1fc78e6:patches/gbrain-inline-worker-gateway.patch",
+            ],
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual(
+            (REPO_ROOT / "patches" / LEGACY_PATCH_REL).read_bytes(), proc.stdout
+        )
+
+
+class DockerfilePatchSelectionTests(unittest.TestCase):
+    """Requirement 1 + 4: Dockerfile ``GBRAIN_PATCH_FILE`` semantics — the
+    canonical current default, the selected-copy source, and the fail-loud
+    existence check before ``git apply`` with no fallback/skip behavior."""
+
+    def setUp(self) -> None:
+        self.src = (REPO_ROOT / "Dockerfile.hermes").read_text(encoding="utf-8")
+
+    def test_canonical_patch_file_matches_dockerfile_default(self) -> None:
+        """The support-layer canonical name must equal the committed
+        Dockerfile default so a build without build args applies the same
+        current patch as before."""
+        self.assertIn(
+            f"ARG GBRAIN_PATCH_FILE={GBRAIN_CANONICAL_PATCH_FILE}", self.src
+        )
+
+    def test_patch_copy_uses_selected_arg_to_existing_temp_destination(self) -> None:
+        self.assertIn(
+            "COPY patches/${GBRAIN_PATCH_FILE} "
+            "/tmp/gbrain-inline-worker-gateway.patch",
+            self.src,
+        )
+
+    def test_patch_apply_is_fail_loud_with_existence_check_before_apply(self) -> None:
+        block = re.search(r"RUN cd /opt/gbrain.*?git apply[^\n]*", self.src, re.DOTALL)
+        self.assertIsNotNone(block, "git apply block not found in Dockerfile")
+        assert block is not None
+        apply_block = block.group(0)
+        self.assertIn("test -f /tmp/gbrain-inline-worker-gateway.patch", apply_block)
+        self.assertLess(
+            apply_block.find("test -f"),
+            apply_block.find("git apply"),
+            "the fail-closed existence check must precede git apply",
+        )
+        # Fail-loud only: no fallback/skip escape hatches around the apply.
+        self.assertNotIn("|| true", apply_block)
+        self.assertNotIn("|| :", apply_block)
+        self.assertNotIn("if [ -f", apply_block)
 
 
 class SourceStateSeedingTests(unittest.TestCase):
@@ -340,8 +627,9 @@ class GbrainConformanceRuntimeCommandTests(unittest.TestCase):
 
     def test_build_baseline_has_no_build_arg_override(self) -> None:
         runtime = GbrainConformanceRuntime()
-        with mock.patch.object(runtime, "build") as build_mock:
-            runtime.build_baseline("hermes")
+        with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: ""}):
+            with mock.patch.object(runtime, "build") as build_mock:
+                runtime.build_baseline("hermes")
         build_mock.assert_called_once_with("hermes", timeout=900)
 
     def test_build_candidate_passes_validated_lowercased_build_arg(self) -> None:

@@ -26,7 +26,7 @@ Design contract (see docs/vault-recovery-operations.md):
    binary.
  2. Preflight: runs `gbrain doctor --json` through the private native binary
    (/opt/josemar/libexec/gbrain-native) with the canonical env — a strict
-   actual DB-open preflight against the pinned v0.42.73.2 doctor schema. The
+   actual DB-open preflight against the pinned v0.46.25.0 doctor schema. The
    report must contain the checks `connection`, `jsonb_integrity`,
    `schema_version`, and `pgvector` EXACTLY ONCE each with status `ok`;
    warnings on any other check are allowed, any `fail` rejects the export.
@@ -114,7 +114,7 @@ LATEST_POINTER_NAME = "latest"
 VAULT_TREE_NAME = "vault"
 GBRAIN_TREE_NAME = ".gbrain"
 
-# The pinned v0.42.73.2 doctor contract: these checks must each appear
+# The pinned v0.46.25.0 doctor contract: these checks must each appear
 # exactly once in the `checks` array with status `ok`. Warnings on any other
 # check are allowed; any `fail` anywhere rejects the preflight.
 REQUIRED_DOCTOR_CHECKS = ("connection", "jsonb_integrity", "schema_version", "pgvector")
@@ -641,7 +641,7 @@ def run_doctor(
 
 
 def validate_doctor_report(report: Dict[str, Any]) -> Dict[str, Any]:
-    """Validate a doctor report against the pinned v0.42.73.2 contract.
+    """Validate a doctor report against the pinned v0.46.25.0 contract.
 
     Required checks (connection, jsonb_integrity, schema_version, pgvector)
     must each appear exactly once with status `ok`; warnings on any other

@@ -37,7 +37,15 @@ RUN curl -fsSL -o bun-linux-x64.zip "https://github.com/oven-sh/bun/releases/dow
 # Stage 3: Install pinned gbrain CLI (deterministic ref, frozen lockfile)
 FROM ${HERMES_BASE_IMAGE} AS gbrain-builder
 
-ARG GBRAIN_REF=15b9863d13635d173562a54f55a1d388bfcf546b
+ARG GBRAIN_REF=055ac6c75a116aafdf3d00b47c9db2294612a134
+# Patch file selectable via ARG so the upgrade-conformance BASELINE build can
+# apply the HISTORICAL patch for a pre-upgrade pin (old ref ->
+# patches/legacy/gbrain-inline-worker-gateway.0.42.73.2.patch; mapping in
+# tests/runtime/gbrain_conformance_support.py, docs in tests/README.md and
+# docs/gbrain-operations.md). Default and every production build use the
+# canonical current patch. There is NO fallback/skip: a missing or
+# non-applying selected file fails the build loudly.
+ARG GBRAIN_PATCH_FILE=gbrain-inline-worker-gateway.patch
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -53,26 +61,51 @@ RUN git clone https://github.com/garrytan/gbrain.git /opt/gbrain \
 
 # Josemar local patches to gbrain source (provider-agnostic):
 #
-# 1. (git apply) One patch with two concerns: inline worker gateway + provider API key bridge:
-#    a. Configure AI gateway in PGLite inline worker (--follow) path.
-#       Without this, chronicle_extract and other LLM-backed jobs silently return
-#       no_events on PGLite (isAvailable('chat') is false). Upstream bug: #3394
-#    b. Generic *_api_key → *_API_KEY config-to-env mapping.
-#       Upstream maps a fixed set (openai/anthropic/zeroentropy/openrouter/
-#       voyage/dashscope/google) from config to env; all other providers
-#       (DeepSeek, Groq, Together, etc.) rely on process.env which may not
-#       reach subprocesses (e.g. Hermes spawning gbrain). The generic bridge
-#       complements upstream mappings only for unrecognized provider keys.
+# 1. (git apply) One patch maintaining these compatibility seams:
+#    a. Provider API-key bridge/config (src/commands/config.ts,
+#       src/core/ai/provider-env.ts, src/core/config.ts). Any *_api_key
+#       config key is routed to the file plane, accepted without --force,
+#       and folded into its uppercase *_API_KEY env var for providers
+#       upstream does not map (DeepSeek, Groq, Together, etc.), so keys
+#       written to the config file reach the gateway without depending on
+#       process.env propagation (e.g. Hermes spawning gbrain). Complements
+#       upstream mappings only for unrecognized provider keys.
 #       Upstream bug: #3394
+#    b. Gateway refresh + chronicle job registration (src/commands/jobs.ts).
+#       chronicle_extract is registered via registerBuiltinJob and listed in
+#       the gateway-refresh job coverage, so the LLM-backed worker refreshes
+#       the gateway before running; without this it silently returned
+#       no_events on PGLite (isAvailable('chat') is false).
+#       Upstream bug: #3394
+#    c. Embedding disable / keyword-only operations (src/core/ops/pages.ts,
+#       src/core/ops/search.ts). put_page forces noEmbed when the
+#       embedding_disabled sentinel is set, and the `query` op honors
+#       search.mcp_keyword_only: keyword text search, loud rejection of
+#       image/cross-modal queries that require the embedding transport.
+#    d. E5 preprocess / revision signatures (src/core/ai/gateway.ts,
+#       src/core/embedding.ts). Model-gated query:/passage: prefixing for
+#       E5 models before truncation/batching/retry, plus a revision-aware
+#       signature suffix (e5-query-passage-v1[@revision]) so raw or
+#       revision-drifted vectors are detected as stale.
+#    e. Embedding migration sentinel handling/finalization
+#       (src/core/embedding-migration.ts, src/commands/migrate-embeddings.ts,
+#       src/commands/embed.ts). E5-aware migration signature shared with the
+#       embed loop; the embedding_disabled sentinel is lifted on successful
+#       migration and on the verified-skip carve-out; a zero-failure stale
+#       backfill finalizes a matching in-flight migration.
+#    f. Bundled fixture (test/ai/e5-preprocess.test.ts). The patch adds its
+#       own test file pinning the E5 seams; keep it in sync with the seams
+#       above when re-creating the patch.
 #    Note: chronicle judge maxTokens is no longer patched in source. Upstream
 #    v0.42 exposes `chronicle.judge_max_tokens` (default 4000); Josemar sets it
 #    to 8000 in the reindex flow (scripts/josemar-gbrain) so reasoning models
 #    (e.g. DeepSeek deepseek-v4-flash) get headroom for the thinking chain.
 #    Uses git apply so the build FAILS LOUDLY if gbrain restructures the
 #    patched files. Verify patches still apply when changing GBRAIN_REF
-#    (see docs/gbrain-operations.md → "gbrain Upgrade Checklist" item 6).
-COPY patches/gbrain-inline-worker-gateway.patch /tmp/gbrain-inline-worker-gateway.patch
+#    (see docs/gbrain-operations.md → "gbrain Upgrade Checklist" item 7).
+COPY patches/${GBRAIN_PATCH_FILE} /tmp/gbrain-inline-worker-gateway.patch
 RUN cd /opt/gbrain \
+    && test -f /tmp/gbrain-inline-worker-gateway.patch \
     && git apply /tmp/gbrain-inline-worker-gateway.patch \
     && rm /tmp/gbrain-inline-worker-gateway.patch
 

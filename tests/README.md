@@ -242,7 +242,9 @@ make test-gbrain-upgrade-conformance-embeddings GBRAIN_CONFORMANCE_CANDIDATE_REF
   suite's zero-event Chronicle smoke with the provider-gated event behavior.
 - `test-gbrain-upgrade-conformance` — builds an exact candidate gbrain commit
   SHA against the same disposable volumes and proves logical state survives the
-  old-pin → candidate transition.
+  effective-baseline → candidate transition (baseline = the committed
+  Dockerfile pin, or the validated upgrade-only
+  `GBRAIN_CONFORMANCE_BASELINE_REF` override; see below).
 - `test-gbrain-upgrade-conformance-embeddings` — candidate upgrade with the
   real TEI gate.
 
@@ -255,6 +257,63 @@ tags, short SHAs, URLs, and shell fragments) and normalizes to lower-case
 before any Docker invocation. The baseline image always uses the committed
 Dockerfile default; the candidate is passed only as a test-only
 `--build-arg GBRAIN_REF=<sha>` and never changes the production pin.
+
+### Upgrade baseline override (upgrade-conformance runs only)
+
+`GBRAIN_CONFORMANCE_BASELINE_REF` is an OPTIONAL, upgrade-only override for
+the BASELINE image ref. It exists for one case: when the committed
+`Dockerfile.hermes` `GBRAIN_REF` pin is the POST-upgrade gbrain commit and
+the upgrade suite must prove the real old → new migration (baseline =
+pre-upgrade commit, candidate = the committed pin).
+
+- Absent (the default): behavior is unchanged — the baseline image builds at
+  the committed Dockerfile pin, exactly like core conformance.
+- Set: the two upgrade suites build/start the baseline image with
+  `--build-arg GBRAIN_REF=<ref>` and reject a candidate equal to the
+  effective baseline. The value must be an exact 40-hex Git commit SHA,
+  validated with the same machinery as candidate refs BEFORE any Docker
+  invocation; invalid values fail closed.
+- Provenance: the suite asserts `/opt/gbrain/.git/HEAD` inside the baseline
+  container equals the effective baseline ref, and the report persists
+  `baseline_ref`, `baseline_ref_source` (`override` / `dockerfile`),
+  `dockerfile_gbrain_ref`, and the proven `baseline_source_ref` alongside the
+  candidate source-ref proof — an old-candidate downgrade cannot pass as a
+  migration.
+
+```bash
+make test-gbrain-upgrade-conformance \
+  GBRAIN_CONFORMANCE_CANDIDATE_REF=<new-40-hex> \
+  GBRAIN_CONFORMANCE_BASELINE_REF=<old-40-hex>
+```
+
+Caveats: the override is read ONLY by the two upgrade-conformance suites;
+core/chronicle/embeddings conformance stays bound to the Dockerfile pin and
+never reads it. Do not set it for non-upgrade runs, and never set it equal to
+the candidate ref (the suite rejects that as a no-op).
+
+### Historical baseline patches (legacy mapping)
+
+A baseline image for an OLD pin must be patched exactly as it was when that
+pin was validated — the current patch is rebased on the new source and does
+not apply to the old ref. A static legacy mapping in
+`tests/runtime/gbrain_conformance_support.py` (`GBRAIN_LEGACY_PATCH_MAPPING`)
+pairs the pre-upgrade pin `15b9863d13635d173562a54f55a1d388bfcf546b`
+(gbrain 0.42.73.2) with `patches/legacy/gbrain-inline-worker-gateway.0.42.73.2.patch`,
+which is byte-identical to `git show 1fc78e6:patches/gbrain-inline-worker-gateway.patch`
+— the production patch at immutable pre-upgrade commit `1fc78e6`,
+immediately before the v0.46.25.0 upgrade (not merely the older
+pin-introduction commit `4f6a7c6`).
+
+- When the baseline override is set, the baseline build passes BOTH validated
+  build args: `--build-arg GBRAIN_REF=<ref> --build-arg GBRAIN_PATCH_FILE=<selected file>`.
+- Patch selection is derived from the validated ref only — it is never
+  user-controlled (no environment variable can select a patch file).
+- Any ref without a legacy mapping (including a mapped ref whose declared
+  file is missing from `patches/`) resolves to the canonical current patch
+  `gbrain-inline-worker-gateway.patch`; the Dockerfile applies the selected
+  file fail-loudly (`test -f` then `git apply`, no fallback/skip).
+- Candidate builds and production builds are untouched: they always apply the
+  canonical current patch via the committed `ARG GBRAIN_PATCH_FILE` default.
 
 ### Reports, cleanup, and TEI cost
 
