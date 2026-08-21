@@ -5,11 +5,13 @@ from __future__ import annotations
 import contextlib
 import functools
 import importlib.util
+import inspect
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -342,6 +344,70 @@ class TaskNotesDockerHarnessContractTests(unittest.TestCase):
         e2e = _e2e_module()
         self.assertFalse(hasattr(e2e, "_remove_disposable_state"))
         self.assertFalse(hasattr(e2e, "_cleanup"))
+
+
+class TaskNotesE2ECallResultCompatTests(unittest.TestCase):
+    """Fast contract tests for the narrow MCP SDK compatibility accessors in
+    real_gbrain_e2e.py (mcp==2.0.0 uses is_error/structured_content; legacy
+    SDKs used isError/structuredContent). No Docker required."""
+
+    @staticmethod
+    def _e2e():
+        return _e2e_module()
+
+    def test_error_flag_current_sdk_field_wins(self) -> None:
+        e2e = self._e2e()
+        self.assertTrue(e2e._result_is_error(types.SimpleNamespace(is_error=True)))
+        self.assertFalse(e2e._result_is_error(types.SimpleNamespace(is_error=False)))
+
+    def test_error_flag_legacy_sdk_field_fallback(self) -> None:
+        e2e = self._e2e()
+        self.assertTrue(e2e._result_is_error(types.SimpleNamespace(isError=True)))
+        self.assertFalse(e2e._result_is_error(types.SimpleNamespace(isError=False)))
+
+    def test_error_flag_absent_both_fields_raises(self) -> None:
+        e2e = self._e2e()
+        with self.assertRaisesRegex(AttributeError, "neither is_error nor isError"):
+            e2e._result_is_error(types.SimpleNamespace())
+
+    def test_structured_content_current_sdk_field_wins(self) -> None:
+        e2e = self._e2e()
+        payload = {"state": "applied_and_committed"}
+        self.assertEqual(
+            payload,
+            e2e._result_structured_content(
+                types.SimpleNamespace(structured_content=payload)
+            ),
+        )
+
+    def test_structured_content_legacy_sdk_field_fallback(self) -> None:
+        e2e = self._e2e()
+        payload = {"state": "applied_and_committed"}
+        self.assertEqual(
+            payload,
+            e2e._result_structured_content(
+                types.SimpleNamespace(structuredContent=payload)
+            ),
+        )
+
+    def test_structured_content_absent_both_fields_raises(self) -> None:
+        e2e = self._e2e()
+        with self.assertRaisesRegex(
+            AttributeError, "neither structured_content nor structuredContent"
+        ):
+            e2e._result_structured_content(types.SimpleNamespace())
+
+    def test_call_uses_compat_accessors(self) -> None:
+        """The lifecycle call() helper must route through the accessors, not
+        raw attribute reads, so the fix cannot silently regress."""
+        e2e = self._e2e()
+        call_source = inspect.getsource(e2e.call)
+        self.assertIn("if _result_is_error(result):", call_source)
+        self.assertIn("structured = _result_structured_content(result)", call_source)
+        self.assertNotIn("result.isError", call_source)
+        self.assertNotIn("result.structuredContent", call_source)
+        self.assertNotIn("result.is_error", call_source)
+        self.assertNotIn("result.structured_content", call_source)
 
 
 if __name__ == "__main__":

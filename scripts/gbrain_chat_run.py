@@ -142,20 +142,210 @@ def _chat_subcommand_allowed(gbrain_args: list[str]) -> bool:
     return True
 
 
+# gbrain-specific explicit classification of the documented Josemar public /
+# operator command surface (skills-factory/gbrain/SKILL.md + its references/,
+# plus the operator runbook). This is the single machine-readable source of
+# truth for the issue #127 conformance matrix: every documented operation is
+# classified here, and the policy tests assert the classification against the
+# actual allowlist so a newly allowlisted command cannot drift without a
+# coverage entry.
+#
+# Categories:
+#   core               - provider-free public commands (deep/smoke coverage)
+#   chronicle_read     - Chronicle zero-LLM read smoke (no LLM required)
+#   embeddings_gated   - requires the TEI embeddings feature (separate gate)
+#   operator_only      - operator/cron maintenance, never agent-facing
+#   forbidden          - rejected/unsafe even under an allowlisted parent
+#   probe_unavailable  - known discrepancy; classified probe/unavailable
+#
+# Scope boundary: this classifies the NATIVE gbrain command surface the
+# adapter allowlists/rejects. The `josemar-gbrain` wrapper subcommands
+# (reindex/refresh/refresh-embeddings/enable-embeddings/disable-embeddings/
+# embed-backfill) are a separate operator surface handled by
+# scripts/josemar-gbrain; `reindex`/`refresh` appear here only because the
+# adapter inventory has always listed them as operator-only.
+GBRAIN_OPERATION_CLASSIFICATION = {
+    # --- core public surface ---
+    "status": "core",
+    "search": "core",
+    "get": "core",
+    "capture": "core",
+    "put": "core",
+    "link": "core",
+    "backlinks": "core",
+    "graph": "core",
+    "tags": "core",
+    "history": "core",
+    "delete": "core",
+    "revert": "core",
+    "restore": "core",
+    "doctor": "core",
+    "sources": "core",  # read-only `sources list` only
+    # --- Chronicle zero-LLM read smoke ---
+    "day": "chronicle_read",
+    "since": "chronicle_read",
+    "last-seen": "chronicle_read",
+    "on-this-day": "chronicle_read",
+    "orient": "chronicle_read",
+    "timeline": "chronicle_read",
+    "ontology": "chronicle_read",
+    # --- embeddings/provider-gated ---
+    "query": "embeddings_gated",
+    # --- operator-only (never agent-facing) ---
+    "init": "operator_only",
+    "config": "operator_only",
+    "sync": "operator_only",
+    "extract": "operator_only",
+    "embed": "operator_only",
+    "migrate": "operator_only",
+    "schema": "operator_only",
+    "reindex": "operator_only",
+    "refresh": "operator_only",
+    "import": "operator_only",
+    "export": "operator_only",
+    "jobs": "operator_only",
+    "chronicle-backfill": "operator_only",
+    # --- forbidden/rejected ---
+    "put --stdin": "forbidden",
+    # --- known discrepancy: probe/unavailable ---
+    # `schema-status` is the agent-facing spelling (the underscore
+    # `schema_status` is not a command). It is allowlisted as a read-only
+    # diagnostic but carries a known discrepancy, so the conformance matrix
+    # treats it as a probe, not a hard assertion.
+    "schema-status": "probe_unavailable",
+}
+
+
+def _classification_category(category: str) -> frozenset[str]:
+    """Names classified under ``category`` in GBRAIN_OPERATION_CLASSIFICATION."""
+    return frozenset(
+        name
+        for name, cat in GBRAIN_OPERATION_CLASSIFICATION.items()
+        if cat == category
+    )
+
+
+# Known conformance gate env vars that can own a coverage entry (the opt-in
+# Docker runtime gates defined in the Makefile). A coverage entry's gate must
+# be one of these; the fast policy guard rejects unknown gates so a coverage
+# entry can never silently point at a gate that does not exist.
+KNOWN_CONFORMANCE_GATES = frozenset(
+    {
+        "RUN_GBRAIN_CONFORMANCE",
+        "RUN_GBRAIN_CHRONICLE_CONFORMANCE",
+        "RUN_GBRAIN_EMBEDDING_CONFORMANCE",
+        "RUN_GBRAIN_UPGRADE_CONFORMANCE",
+    }
+)
+
+# Machine-readable runtime coverage manifest (issue #127 W2a exhaustive
+# coverage guard, PR #129 MAJOR finding): every classified SUPPORTED
+# operation/variant maps to the real scenario method that exercises it and
+# the conformance gate env that owns that scenario. This is the single
+# mechanical record that a documented supported surface is actually covered
+# by a runtime scenario — the fast policy guard asserts:
+#
+#   - every supported classification (core / chronicle_read /
+#     embeddings_gated / probe_unavailable) has a coverage entry;
+#   - every coverage entry's scenario symbol exists in the runtime test
+#     module(s) owned by its gate;
+#   - every coverage entry's gate is a known conformance gate env;
+#   - operator_only / forbidden surfaces have NO coverage entry (they are
+#     rejected by the adapter, never exercised as supported operations).
+#
+# Scenario symbols are the real method names in the owning runtime test
+# modules (tests/runtime/gbrain_conformance_scenarios.py for the core gate,
+# tests/runtime/test_gbrain_conformance_chronicle.py for the Chronicle gate,
+# tests/runtime/test_gbrain_conformance_embeddings.py for the embeddings
+# gate). The core scenarios live in the reusable CoreScenarioMixin so the
+# candidate upgrade suite can rerun them against a candidate image.
+GBRAIN_OPERATION_COVERAGE = {
+    # --- core public surface (RUN_GBRAIN_CONFORMANCE) ---
+    "status": ("_scenario_status", "RUN_GBRAIN_CONFORMANCE"),
+    "search": ("_scenario_get_search_tags", "RUN_GBRAIN_CONFORMANCE"),
+    "get": ("_scenario_get_search_tags", "RUN_GBRAIN_CONFORMANCE"),
+    "capture": ("_scenario_public_write_contracts", "RUN_GBRAIN_CONFORMANCE"),
+    "put": ("_scenario_public_write_contracts", "RUN_GBRAIN_CONFORMANCE"),
+    "link": ("_scenario_links_backlinks_graph", "RUN_GBRAIN_CONFORMANCE"),
+    "backlinks": ("_scenario_links_backlinks_graph", "RUN_GBRAIN_CONFORMANCE"),
+    "graph": ("_scenario_links_backlinks_graph", "RUN_GBRAIN_CONFORMANCE"),
+    "tags": ("_scenario_get_search_tags", "RUN_GBRAIN_CONFORMANCE"),
+    "history": ("_scenario_recovery_history_revert", "RUN_GBRAIN_CONFORMANCE"),
+    "delete": ("_scenario_soft_delete_restore", "RUN_GBRAIN_CONFORMANCE"),
+    "revert": ("_scenario_recovery_history_revert", "RUN_GBRAIN_CONFORMANCE"),
+    "restore": ("_scenario_soft_delete_restore", "RUN_GBRAIN_CONFORMANCE"),
+    "doctor": ("_scenario_doctor", "RUN_GBRAIN_CONFORMANCE"),
+    "sources": ("_scenario_sources_list", "RUN_GBRAIN_CONFORMANCE"),
+    # --- Chronicle zero-LLM read smoke (RUN_GBRAIN_CONFORMANCE) ---
+    "day": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    "since": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    "last-seen": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    "on-this-day": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    "orient": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    "timeline": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    "ontology": ("_scenario_chronicle_zero_llm", "RUN_GBRAIN_CONFORMANCE"),
+    # --- embeddings/provider-gated (RUN_GBRAIN_EMBEDDING_CONFORMANCE) ---
+    "query": ("_scenario_query_no_expand", "RUN_GBRAIN_EMBEDDING_CONFORMANCE"),
+    # --- known discrepancy probe (RUN_GBRAIN_CONFORMANCE) ---
+    "schema-status": ("_scenario_schema_status_probe", "RUN_GBRAIN_CONFORMANCE"),
+}
+
+# Machine-readable OPERATOR-surface coverage manifest (PR #129 re-review):
+# the six supported `josemar-gbrain` wrapper operations (reindex, refresh,
+# refresh-embeddings, embed-backfill, enable-embeddings, disable-embeddings)
+# map to the real runtime scenario method that exercises each and the
+# conformance gate env that owns that scenario. This is deliberately SEPARATE
+# from GBRAIN_OPERATION_COVERAGE (which covers the NATIVE gbrain command
+# surface the public adapter allowlists/rejects): the wrapper operations are
+# operator-only, never exposed through the public adapter, and never added to
+# the native coverage manifest. The fast policy guard asserts:
+#
+#   - the manifest covers exactly the six supported wrapper operations;
+#   - no wrapper operation appears in the public adapter surface or in the
+#     native GBRAIN_OPERATION_COVERAGE (public/native vs operator scope);
+#   - every scenario symbol exists in the runtime test module(s) owned by its
+#     gate;
+#   - every gate is a known conformance gate env;
+#   - every wrapper operation is dispatched by scripts/josemar-gbrain
+#     (usage + main dispatch source contract).
+JOSEMAR_GBRAIN_OPERATOR_COVERAGE = {
+    # --- core activation/reconciliation (RUN_GBRAIN_CONFORMANCE) ---
+    "reindex": ("_scenario_reindex", "RUN_GBRAIN_CONFORMANCE"),
+    "refresh": ("_scenario_external_edit_refresh", "RUN_GBRAIN_CONFORMANCE"),
+    # --- embedding lifecycle (RUN_GBRAIN_EMBEDDING_CONFORMANCE) ---
+    "refresh-embeddings": (
+        "_scenario_stale_edit_refresh",
+        "RUN_GBRAIN_EMBEDDING_CONFORMANCE",
+    ),
+    "embed-backfill": ("_scenario_embed_backfill", "RUN_GBRAIN_EMBEDDING_CONFORMANCE"),
+    "enable-embeddings": (
+        "_scenario_enable_embeddings",
+        "RUN_GBRAIN_EMBEDDING_CONFORMANCE",
+    ),
+    "disable-embeddings": (
+        "_scenario_disable_embeddings",
+        "RUN_GBRAIN_EMBEDDING_CONFORMANCE",
+    ),
+}
+
+
 # Mechanical command inventory for policy tests: the docs-policy suite
 # asserts the documented user-facing surface against this single export
-# instead of maintaining a fragile duplicate list.
+# instead of maintaining a fragile duplicate list. It also exports the
+# exhaustive coverage manifest and the known gate envs so the fast guard can
+# prove every classified supported surface maps to a real scenario/gate, and
+# the separate operator-surface coverage manifest (josemar-gbrain wrapper
+# operations) so the operator surface is governed without leaking into the
+# public/native surface.
 CHAT_COMMAND_INVENTORY = {
     "subcommands": sorted(CHAT_SUBCOMMANDS),
     "subsubcommands": {name: sorted(subs) for name, subs in CHAT_SUBSUBCOMMANDS.items()},
     "rejected_arguments": {name: list(forms) for name, forms in CHAT_REJECTED_ARGUMENTS.items()},
-    "operator_only": sorted(
-        {
-            "init", "config", "sync", "extract", "embed", "migrate", "schema",
-            "reindex", "refresh", "import", "export", "jobs",
-            "chronicle-backfill",
-        }
-    ),
+    "operator_only": sorted(_classification_category("operator_only")),
+    "classification": dict(sorted(GBRAIN_OPERATION_CLASSIFICATION.items())),
+    "coverage": dict(sorted(GBRAIN_OPERATION_COVERAGE.items())),
+    "operator_coverage": dict(sorted(JOSEMAR_GBRAIN_OPERATOR_COVERAGE.items())),
+    "known_gates": sorted(KNOWN_CONFORMANCE_GATES),
 }
 
 

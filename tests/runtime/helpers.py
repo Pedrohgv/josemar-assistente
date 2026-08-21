@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 import hashlib
 import os
 from pathlib import Path
@@ -258,8 +259,40 @@ def hermes_writable_probe_command() -> str:
     return "su -s /bin/sh hermes -c " f"'touch {probes} && rm -f {probes}'"
 
 
+def _validate_compose_overlay(path: Path | str) -> Path:
+    """Validate an explicit additional compose overlay and return its resolved
+    path.
+
+    The overlay must:
+      - exist (FileNotFoundError otherwise),
+      - not itself be a symlink (ValueError otherwise),
+      - resolve to a regular file (ValueError otherwise).
+
+    Relative paths are resolved against REPO_ROOT (where compose actually
+    runs, see ComposeRuntime.run), not the caller's process CWD, so the
+    rendered command is deterministic regardless of where the test process
+    was launched. The resolved path is what compose actually receives.
+    """
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = REPO_ROOT / candidate
+    if not candidate.exists():
+        raise FileNotFoundError(f"compose overlay does not exist: {candidate}")
+    if candidate.is_symlink():
+        raise ValueError(f"compose overlay must not be a symlink: {candidate}")
+    resolved = candidate.resolve()
+    if not resolved.is_file():
+        raise ValueError(f"compose overlay must be a regular file: {candidate}")
+    return resolved
+
+
 class ComposeRuntime:
-    def __init__(self, *, include_aux_ml: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        include_aux_ml: bool = False,
+        overlays: Sequence[Path | str] = (),
+    ) -> None:
         token = uuid.uuid4().hex[:12]
         if len(token) != 12:
             raise AssertionError("Generated test token must be 12 hex chars")
@@ -268,6 +301,10 @@ class ComposeRuntime:
         if not self.container_prefix.strip() or self.container_prefix == "josemar":
             raise AssertionError("Runtime tests must not use the production container prefix")
         self.include_aux_ml = include_aux_ml
+        # Explicit additional compose overlays, validated up front (exists,
+        # resolved, regular, non-symlink) and rendered in caller order between
+        # the base docker-compose.yml and the final test-isolation overlay.
+        self._overlays = tuple(_validate_compose_overlay(p) for p in overlays)
         self._state_dir: Path | None = None
         self._credentials_dir: Path | None = None
         self._env_file: Path | None = None
@@ -328,25 +365,34 @@ class ComposeRuntime:
         return self._state_dir, self._credentials_dir
 
     def compose_command(self) -> list[str]:
-        """Base `docker compose` invocation, always carrying the dedicated
-        test-isolation overlay so the real agent-state/credentials bind mounts
-        from docker-compose.yml are replaced with disposable empty dirs, and
-        always pinning the disposable env-file so the repo `.env` is never
-        read (defense in depth against production-like values)."""
+        """Base `docker compose` invocation.
+
+        Ordering is fixed: base ``docker-compose.yml``, then any validated
+        explicit additional overlays (in caller order), then the dedicated
+        test-isolation overlay LAST so the disposable agent-state/credentials
+        bind mounts always win over every other file. Always pins the
+        disposable env-file so the repo `.env` is never read (defense in
+        depth against production-like values). With no explicit overlays the
+        command is byte-for-byte identical to the pre-overlay behavior."""
         self._ensure_disposable_mounts()
         assert self._env_file is not None
-        return [
+        command = [
             "docker",
             "compose",
             "--env-file",
             str(self._env_file),
             "-f",
             "docker-compose.yml",
+        ]
+        for overlay in self._overlays:
+            command += ["-f", str(overlay)]
+        command += [
             "-f",
             str(TEST_ISOLATION_OVERLAY),
             "-p",
             self.project,
         ]
+        return command
 
     def run(self, *args: str, check: bool = True, timeout: int = 120) -> subprocess.CompletedProcess[str]:
         command = [*self.compose_command(), *args]
@@ -363,6 +409,49 @@ class ComposeRuntime:
     def up(self, *services: str, timeout: int = 600) -> None:
         args = ["up", "-d", "--build", *services]
         self.run(*args, timeout=timeout)
+
+    def build(
+        self,
+        *services: str,
+        build_args: Mapping[str, str] | None = None,
+        timeout: int = 600,
+    ) -> None:
+        """Build images with explicit build args.
+
+        Build args are passed as separate argv tokens (``--build-arg
+        KEY=VALUE``) with no shell interpolation, so values are never
+        re-parsed by a shell. ``up()`` keeps its automatic ``--build``
+        behavior; this method is for explicit rebuilds (e.g. a candidate
+        gbrain ref) without starting services."""
+        args = ["build"]
+        for key, value in (build_args or {}).items():
+            args += ["--build-arg", f"{key}={value}"]
+        args += list(services)
+        self.run(*args, timeout=timeout)
+
+    def start(self, *services: str, timeout: int = 600) -> None:
+        """Start services WITHOUT an implicit build (uses existing images).
+
+        Unlike ``up()`` (which always passes ``--build``), this never
+        triggers a build, so it is safe to reuse an image built separately."""
+        self.run("up", "-d", "--no-build", *services, timeout=timeout)
+
+    def recreate(self, *services: str, timeout: int = 600) -> None:
+        """Force-recreate services WITHOUT an implicit build and WITHOUT
+        deleting volumes.
+
+        Used by upgrade flows that replace an image in place and recreate the
+        same Compose project against the same disposable volumes. Only
+        ``down()`` (with ``-v``) deletes project volumes at final teardown."""
+        self.run("up", "-d", "--force-recreate", "--no-build", *services, timeout=timeout)
+
+    def stop(self, *services: str, timeout: int = 180) -> None:
+        """Stop services while PRESERVING volumes.
+
+        ``docker compose stop`` never removes containers or their volumes;
+        only ``down()`` (with ``-v``) deletes project volumes at final
+        teardown."""
+        self.run("stop", *services, timeout=timeout)
 
     def wait_until_hermes_writable(self, timeout: int = 90) -> None:
         """Wait until every HERMES_WRITABLE_PROBE_PATHS entry is writable

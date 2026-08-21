@@ -360,5 +360,394 @@ class GbrainTransparentWrapperPolicyTest(unittest.TestCase):
         self.assertIn("--stdin", inventory["rejected_arguments"]["put"])
 
 
+class GbrainOperationClassificationTests(unittest.TestCase):
+    """The gbrain operation classification (issue #127 W2a) is the single
+    machine-readable record of the documented Josemar public/operator surface.
+
+    These guards prevent a classified supported command from drifting from the
+    actual allowlist/policy and ensure every documented operation is accounted
+    for without brittle arbitrary Markdown prose parsing: the classification
+    manifest in scripts/gbrain_chat_run.py IS the explicit documented record,
+    and the adapter's allowlist/rejection sets are asserted against it."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+
+        repo_root = Path(__file__).resolve().parents[2]
+        adapter = repo_root / "scripts" / "gbrain_chat_run.py"
+        spec = importlib.util.spec_from_file_location("gbrain_chat_run_cls", adapter)
+        assert spec is not None and spec.loader is not None
+        cls.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.mod)
+        cls.classification = cls.mod.GBRAIN_OPERATION_CLASSIFICATION
+        cls.subcommands = set(cls.mod.CHAT_SUBCOMMANDS)
+        cls.rejected = cls.mod.CHAT_REJECTED_ARGUMENTS
+
+    @classmethod
+    def _category(cls, category):
+        return frozenset(
+            name
+            for name, cat in cls.classification.items()
+            if cat == category
+        )
+
+    def test_classification_categories_are_exactly_the_defined_set(self):
+        allowed = {
+            "core",
+            "chronicle_read",
+            "embeddings_gated",
+            "operator_only",
+            "forbidden",
+            "probe_unavailable",
+        }
+        self.assertTrue(set(self.classification.values()) <= allowed)
+
+    def test_supported_commands_are_allowlisted(self):
+        """Every command classified as core/chronicle_read/embeddings_gated
+        must be on the actual agent-facing allowlist (no drift where docs say
+        supported but the adapter rejects)."""
+        supported = (
+            self._category("core")
+            | self._category("chronicle_read")
+            | self._category("embeddings_gated")
+        )
+        for cmd in sorted(supported):
+            self.assertIn(cmd, self.subcommands, cmd)
+
+    def test_probe_commands_are_allowlisted(self):
+        """probe_unavailable commands are still public (allowlisted) but carry
+        a known discrepancy, so they are probes, not hard assertions."""
+        for cmd in sorted(self._category("probe_unavailable")):
+            self.assertIn(cmd, self.subcommands, cmd)
+
+    def test_operator_only_commands_not_allowlisted(self):
+        for cmd in sorted(self._category("operator_only")):
+            self.assertNotIn(cmd, self.subcommands, cmd)
+
+    def test_forbidden_forms_match_rejected_arguments(self):
+        """Every forbidden classification must be an actual rejected argument
+        form in the adapter policy."""
+        for form in sorted(self._category("forbidden")):
+            parent, _, flag = form.partition(" ")
+            self.assertIn(parent, self.rejected, form)
+            self.assertIn(flag, self.rejected[parent], form)
+
+    def test_every_allowlisted_command_is_classified(self):
+        """A newly allowlisted command must have a classification/coverage
+        entry (the issue #127 guard against unclassified supported ops)."""
+        missing = sorted(self.subcommands - set(self.classification))
+        self.assertEqual([], missing, "allowlisted commands without a classification entry")
+
+    def test_classification_covers_full_documented_surface(self):
+        """Every classified command is either allowlisted, operator-only, or
+        forbidden — no classified command may sit in a limbo state."""
+        known = (
+            set(self.subcommands)
+            | self._category("operator_only")
+            | self._category("forbidden")
+        )
+        self.assertEqual(set(self.classification), known)
+
+    def test_schema_status_classified_probe_unavailable(self):
+        self.assertEqual(self.classification["schema-status"], "probe_unavailable")
+        self.assertIn("schema-status", self.subcommands)
+
+    def test_put_stdin_forbidden_and_rejected(self):
+        self.assertEqual(self.classification["put --stdin"], "forbidden")
+        self.assertIn("--stdin", self.rejected["put"])
+
+    def test_query_classified_embeddings_gated(self):
+        self.assertEqual(self.classification["query"], "embeddings_gated")
+
+    def test_chronicle_read_commands_classified(self):
+        for cmd in (
+            "day",
+            "since",
+            "last-seen",
+            "on-this-day",
+            "orient",
+            "timeline",
+            "ontology",
+        ):
+            self.assertEqual(self.classification[cmd], "chronicle_read", cmd)
+
+    def test_inventory_exports_classification(self):
+        """CHAT_COMMAND_INVENTORY carries the classification and derives
+        operator_only from it (single source of truth)."""
+        inventory = self.mod.CHAT_COMMAND_INVENTORY
+        self.assertEqual(
+            inventory["classification"],
+            dict(sorted(self.classification.items())),
+        )
+        self.assertEqual(
+            set(inventory["operator_only"]),
+            self._category("operator_only"),
+        )
+
+    def test_every_supported_operation_has_coverage(self):
+        """Every classified SUPPORTED operation (core / chronicle_read /
+        embeddings_gated / probe_unavailable) must have a coverage entry
+        mapping it to a real scenario symbol and a known gate env. A newly
+        classified/documented supported operation with no mechanical runtime
+        coverage fails here (PR #129 MAJOR finding: the exhaustive-coverage
+        guard must prove runtime coverage, not just classification)."""
+        supported = (
+            self._category("core")
+            | self._category("chronicle_read")
+            | self._category("embeddings_gated")
+            | self._category("probe_unavailable")
+        )
+        missing = sorted(supported - set(self.mod.GBRAIN_OPERATION_COVERAGE))
+        self.assertEqual(
+            [],
+            missing,
+            "supported operations without a runtime coverage entry",
+        )
+
+    def test_coverage_only_for_supported_surfaces(self):
+        """operator_only / forbidden surfaces must NOT have coverage entries:
+        they are rejected by the adapter, never exercised as supported
+        operations."""
+        unsupported = self._category("operator_only") | self._category("forbidden")
+        extra = sorted(set(self.mod.GBRAIN_OPERATION_COVERAGE) & unsupported)
+        self.assertEqual(
+            [],
+            extra,
+            "unsupported (operator_only/forbidden) operations must not have "
+            "coverage entries",
+        )
+
+    def test_coverage_gates_are_known(self):
+        """Every coverage entry's gate must be a known conformance gate env
+        (the opt-in Docker runtime gates defined in the Makefile)."""
+        for op, (scenario, gate) in self.mod.GBRAIN_OPERATION_COVERAGE.items():
+            self.assertIn(
+                gate,
+                self.mod.KNOWN_CONFORMANCE_GATES,
+                f"{op} ({scenario}): unknown gate {gate!r}",
+            )
+
+    def test_coverage_scenario_symbols_exist_in_owning_modules(self):
+        """Every coverage entry's scenario symbol must exist (as a real
+        method definition) in the runtime test module(s) owned by its gate.
+        This is the mechanical proof that a classified supported surface has
+        actual runtime coverage, not just a classification entry."""
+        for op, (scenario, gate) in self.mod.GBRAIN_OPERATION_COVERAGE.items():
+            modules = _GATE_COVERAGE_MODULES.get(gate)
+            self.assertIsNotNone(
+                modules,
+                f"{op}: no coverage modules registered for gate {gate!r}",
+            )
+            assert modules is not None
+            texts = [
+                (REPO_ROOT / rel).read_text(encoding="utf-8") for rel in modules
+            ]
+            self.assertTrue(
+                any(f"def {scenario}" in text for text in texts),
+                f"{op}: scenario {scenario!r} not defined in {modules}",
+            )
+
+    def test_inventory_exports_coverage(self):
+        """CHAT_COMMAND_INVENTORY exports the coverage manifest and the known
+        gate envs (single machine-readable source of truth)."""
+        inventory = self.mod.CHAT_COMMAND_INVENTORY
+        self.assertEqual(
+            inventory["coverage"],
+            dict(sorted(self.mod.GBRAIN_OPERATION_COVERAGE.items())),
+        )
+        self.assertEqual(
+            set(inventory["known_gates"]),
+            set(self.mod.KNOWN_CONFORMANCE_GATES),
+        )
+
+
+class GbrainOperatorCoverageTests(unittest.TestCase):
+    """The operator-surface coverage manifest (PR #129 re-review) governs the
+    supported `josemar-gbrain` wrapper operations WITHOUT leaking them into
+    the public adapter or the native coverage manifest.
+
+    The supported labels are NOT hard-coded here: they are derived from the
+    wrapper's own main() case dispatch (excluding the catch-all `*)`), and
+    the manifest keys must exactly equal that derived set — a newly
+    dispatched operation without a manifest entry (or a manifest entry
+    without a dispatch) fails here. These guards prevent a supported wrapper
+    operation from drifting from the actual wrapper dispatch or from the
+    runtime scenarios that exercise it: the manifest in
+    scripts/gbrain_chat_run.py IS the explicit machine-readable record, and
+    the fast guards assert it against the wrapper source and the owning
+    runtime test modules."""
+
+    # Case-label shape in the wrapper main() dispatch: a non-empty
+    # whitespace-free token without parens/asterisk followed by `)` at end
+    # of line. The catch-all `*)` cannot match (leading `*` is excluded), so
+    # only real top-level subcommand labels are captured.
+    _MAIN_CASE_LABEL_RE = re.compile(
+        r"^[ \t]*([^ \t()*][^ \t()]*)\)[ \t]*$", re.MULTILINE
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+
+        repo_root = Path(__file__).resolve().parents[2]
+        adapter = repo_root / "scripts" / "gbrain_chat_run.py"
+        spec = importlib.util.spec_from_file_location("gbrain_chat_run_op", adapter)
+        assert spec is not None and spec.loader is not None
+        cls.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.mod)
+        cls.operator_coverage = cls.mod.JOSEMAR_GBRAIN_OPERATOR_COVERAGE
+        cls.wrapper_src = (repo_root / "scripts" / "josemar-gbrain").read_text(
+            encoding="utf-8"
+        )
+        cls.wrapper_operations = cls._main_dispatch_labels(cls.wrapper_src)
+
+    @staticmethod
+    def _extract_shell_function(src, name):
+        header = re.compile(rf"^{name}\(\)\s*\{{", re.MULTILINE)
+        start = header.search(src)
+        assert start is not None, f"Could not find function {name}"
+        body_start = start.end()
+        close = re.compile(r"^}$", re.MULTILINE)
+        match = close.search(src, body_start)
+        assert match is not None, f"Could not find end of function {name}"
+        return src[body_start:match.start()]
+
+    @classmethod
+    def _main_dispatch_labels(cls, src):
+        """Top-level supported labels from the wrapper main() case dispatch,
+        excluding the catch-all `*)`. Parsing is bounded to the main()
+        function body: only case-label-shaped lines (a token followed by `)`
+        at end of line) are captured, never generic labels elsewhere in the
+        source."""
+        main_body = cls._extract_shell_function(src, "main")
+        return frozenset(cls._MAIN_CASE_LABEL_RE.findall(main_body))
+
+    def test_operator_coverage_exactly_matches_main_dispatch(self):
+        """The operator coverage manifest keys must exactly equal the
+        top-level labels dispatched by the wrapper main() case (excluding
+        the catch-all): no manifest entry may name an undispatched operation
+        and no dispatched operation may lack a manifest entry."""
+        self.assertEqual(
+            set(self.operator_coverage),
+            self.wrapper_operations,
+            "the operator coverage manifest must exactly match the "
+            "top-level labels dispatched by scripts/josemar-gbrain main()",
+        )
+
+    def test_synthetic_extra_main_dispatch_label_detected(self):
+        """A new top-level label added to the wrapper main() dispatch (but
+        not to the operator coverage manifest) must be detected: the derived
+        set differs from the manifest keys, so the exact-equality guard
+        fails — the manifest cannot drift from the actual dispatch."""
+        synthetic = "new-operation"
+        main_body = self._extract_shell_function(self.wrapper_src, "main")
+        synthetic_body = main_body.replace(
+            "        *)", f"        {synthetic})\n        *)", 1
+        )
+        synthetic_src = self.wrapper_src.replace(main_body, synthetic_body)
+        derived = self._main_dispatch_labels(synthetic_src)
+        self.assertIn(synthetic, derived)
+        self.assertNotEqual(
+            set(self.operator_coverage),
+            derived,
+            "a dispatch label absent from the operator coverage manifest "
+            "must be detected by the exact-equality guard",
+        )
+
+    def test_operator_coverage_operations_not_in_public_adapter_surface(self):
+        """Scope: the wrapper operations are operator-only and must never be
+        exposed through the public adapter (not allowlisted). They may appear
+        in the native classification ONLY as operator_only (the adapter
+        rejects them), never as a supported agent-facing surface."""
+        subcommands = set(self.mod.CHAT_SUBCOMMANDS)
+        for op in self.wrapper_operations:
+            self.assertNotIn(op, subcommands, op)
+            classification = self.mod.GBRAIN_OPERATION_CLASSIFICATION.get(op)
+            if classification is not None:
+                self.assertEqual(
+                    classification,
+                    "operator_only",
+                    f"{op}: wrapper operation must not be classified as a "
+                    "supported agent-facing surface",
+                )
+
+    def test_operator_coverage_operations_not_in_native_coverage(self):
+        """Scope: the wrapper operations must never be added to the native
+        GBRAIN_OPERATION_COVERAGE manifest (public/native vs operator)."""
+        for op in self.wrapper_operations:
+            self.assertNotIn(op, self.mod.GBRAIN_OPERATION_COVERAGE, op)
+
+    def test_operator_coverage_gates_are_known(self):
+        """Every operator coverage entry's gate must be a known conformance
+        gate env (the opt-in Docker runtime gates defined in the Makefile)."""
+        for op, (scenario, gate) in self.operator_coverage.items():
+            self.assertIn(
+                gate,
+                self.mod.KNOWN_CONFORMANCE_GATES,
+                f"{op} ({scenario}): unknown gate {gate!r}",
+            )
+
+    def test_operator_coverage_scenario_symbols_exist_in_owning_modules(self):
+        """Every operator coverage entry's scenario symbol must exist (as a
+        real method definition) in the runtime test module(s) owned by its
+        gate — the mechanical proof that a supported wrapper operation has
+        actual runtime coverage."""
+        for op, (scenario, gate) in self.operator_coverage.items():
+            modules = _GATE_COVERAGE_MODULES.get(gate)
+            self.assertIsNotNone(
+                modules,
+                f"{op}: no coverage modules registered for gate {gate!r}",
+            )
+            assert modules is not None
+            texts = [
+                (REPO_ROOT / rel).read_text(encoding="utf-8") for rel in modules
+            ]
+            self.assertTrue(
+                any(f"def {scenario}" in text for text in texts),
+                f"{op}: scenario {scenario!r} not defined in {modules}",
+            )
+
+    def test_operator_coverage_tied_to_wrapper_usage_dispatch(self):
+        """Secondary source contract: every supported wrapper operation
+        (derived from the main() dispatch above) also appears in the wrapper
+        usage() string. The authoritative supported-label set is the main()
+        dispatch derivation, not usage()."""
+        usage_body = self._extract_shell_function(self.wrapper_src, "usage")
+        for op in self.wrapper_operations:
+            self.assertIn(op, usage_body, f"{op} missing from wrapper usage()")
+
+    def test_inventory_exports_operator_coverage(self):
+        """CHAT_COMMAND_INVENTORY exports the operator coverage manifest
+        (single machine-readable source of truth)."""
+        inventory = self.mod.CHAT_COMMAND_INVENTORY
+        self.assertEqual(
+            inventory["operator_coverage"],
+            dict(sorted(self.operator_coverage.items())),
+        )
+
+
+# Runtime test modules that own the coverage scenarios, keyed by the gate env
+# a coverage entry can reference. The core gate's scenarios live in the
+# reusable CoreScenarioMixin (tests/runtime/gbrain_conformance_scenarios.py)
+# plus the core runtime test module; the other gates own their scenarios
+# directly in their test modules.
+_GATE_COVERAGE_MODULES = {
+    "RUN_GBRAIN_CONFORMANCE": (
+        "tests/runtime/gbrain_conformance_scenarios.py",
+        "tests/runtime/test_gbrain_conformance.py",
+    ),
+    "RUN_GBRAIN_CHRONICLE_CONFORMANCE": (
+        "tests/runtime/test_gbrain_conformance_chronicle.py",
+    ),
+    "RUN_GBRAIN_EMBEDDING_CONFORMANCE": (
+        "tests/runtime/test_gbrain_conformance_embeddings.py",
+    ),
+    "RUN_GBRAIN_UPGRADE_CONFORMANCE": (
+        "tests/runtime/test_gbrain_upgrade_conformance.py",
+    ),
+}
+
+
 if __name__ == "__main__":
     unittest.main()

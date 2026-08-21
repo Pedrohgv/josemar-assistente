@@ -15,5 +15,7 @@
 #   GBRAIN_SCHEMA_PACK=josemar  (in your .env)
 #   josemar-gbrain reindex      (operator command)
 api_version: "gbrain-schema-pack-v1"
+name: josemar
+version: 1.0.0
 extends: gbrain-base-v2
 page_types: []
