@@ -418,6 +418,45 @@ proves the identical retry completes. It records the v0.46.25.0 mechanism
 honestly: bounded retry plus supported operator recovery, not a claim of
 automatic self-healing inside the upstream one-hour foreign-queue grace.
 
+## v0.46.25.0 Dream Compatibility Contract (issue #126/#67 handoff)
+
+The pinned Dream cycle is governed by explicit config routes and bounded
+defaults. Operators must not assume unvalidated model selection.
+
+### Routing and config
+
+- Triage route: `models.dream.triage`; synthesis route:
+  `models.dream.synthesize`. Each falls back to normal model resolution when
+  unset; they are independent — do not assume one implies the other.
+- Do not select a production #67 model: #67 is not validated for this
+  deployment, and the #126 Dream gate covers only the Anthropic-compatible
+  route.
+- Non-Anthropic resolved child models require `agent.use_gateway_loop=true`.
+  The gate runs BEFORE oneshot dispatch, so `dream.synthesize.mode=oneshot`
+  does not bypass it. #67 must deliberately enable AND validate
+  `agent.use_gateway_loop` before any non-Anthropic model is used.
+
+### Dry-run is not read-only
+
+`gbrain dream --dry-run` runs (and caches) triage verdicts but skips
+synthesis: it is not zero-LLM and not read-only — it still consumes triage
+model calls and writes triage cache state. Retune the triage cache with
+`gbrain dream retriage --force` when the cached verdicts are stale or were
+produced under a different route/model.
+
+### Bounded defaults
+
+- `max_turns`: 16.
+- Daily `max_submissions`: 0 (disabled).
+- Triage: `max_chars` 24000, `max_tokens` 2048, `max_ms` 300000 (0 =
+  unlimited), `concurrency` 4 (valid range 1–16).
+- `max_chunks`: 24.
+- Subagent timeout: 30 min; wait timeout: 35 min.
+- Optional inline concurrency 1 (PGLite serial) for synthesis child work.
+
+This contract does not claim automatic #4361 recovery; rollback remains
+covered by the fail-safe policy in the migration section above.
+
 ## Environment Defaults
 
 | Variable | Default | Notes |
