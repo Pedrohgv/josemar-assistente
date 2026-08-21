@@ -20,9 +20,12 @@ covers:
     expected no-embedding warning (base deploy runs keyword-only)
   - ``gbrain sources list --json``: the single registered source resolves to
     the vault path (read-only sources surface)
-  - ``gbrain schema-status`` probe: the agent-facing spelling is allowlisted
-    but the pinned native CLI has no such command (known discrepancy,
-    classified probe_unavailable)
+  - ``gbrain schema-status`` probe: report-only classification (PR #129
+    re-review) — ``fixed`` when success returns the stable expected schema
+    fact, ``present`` for the exact current ``Unknown command`` failure,
+    ``changed_failure_mode`` for any other failure, ``inconclusive`` only
+    when the harness cannot establish the probe; the classification is
+    persisted in the report
   - path-prefix type inference: seeded pages carry the inferred types
     (people/ -> person, projects/ -> project, notes/ -> note) and an inbox/
     page falls back to the default concept type
@@ -89,6 +92,7 @@ from .gbrain_conformance_scenarios import (
     CONFORMANCE_MATRIX,
     LOCK_HOLDER_SCRIPT,
     CoreScenarioMixin,
+    _classify_schema_status_probe,
 )
 from .gbrain_conformance_support import (
     CONFORMANCE_EMPTY_ENV_KEYS,
@@ -132,6 +136,7 @@ class GbrainConformanceTestCase(unittest.TestCase):
             for op in CONFORMANCE_MATRIX
         }
         self._gbrain_version: str | None = None
+        self._schema_status_classification: str = "inconclusive"
         self._report_path: Path | None = None
 
         self.runtime = GbrainConformanceRuntime()
@@ -228,6 +233,7 @@ class GbrainConformanceTestCase(unittest.TestCase):
         metadata = {
             "baseline_ref": self.runtime.baseline_gbrain_ref(),
             "gbrain_version": self._gbrain_version,
+            "schema_status_probe": self._schema_status_classification,
             "matrix": self._matrix,
         }
         self._report_path = write_report(
@@ -448,6 +454,46 @@ class GbrainConformanceGateStructureTests(unittest.TestCase):
         for key in ("doctor", "sources_list", "schema_status_probe", "type_inference"):
             self.assertIn(f'self._matrix["{key}"]', text)
 
+    def test_schema_status_probe_is_report_only_classification(self) -> None:
+        """The schema-status probe must classify and record
+        fixed/present/changed_failure_mode/inconclusive — never hard-assert
+        the current ``Unknown command`` failure (a real upstream fix must be
+        recorded, not rejected)."""
+        text = self._scenario_text()
+        probe = text.split("def _scenario_schema_status_probe", 1)[1]
+        probe = probe.split("def _scenario_type_inference", 1)[0]
+        body = probe.split('"""', 2)[2]  # strip the method docstring
+        # No hard assertions on the current failure signature anywhere in
+        # the probe scenario body.
+        self.assertNotIn("assertEqual", body)
+        self.assertNotIn("assertNotEqual", body)
+        self.assertNotIn("assertIn", body)
+        self.assertNotIn("assertNotIn", body)
+        # The classification is recorded in the matrix and exposed for the
+        # host report.
+        self.assertIn('self._matrix["schema_status_probe"] = classification', body)
+        self.assertIn("self._schema_status_classification = classification", body)
+        # The pure oracle holds the three behavioral classifications.
+        classifier = text.split("def _classify_schema_status_probe", 1)[1]
+        classifier = classifier.split("class CoreScenarioMixin", 1)[0]
+        for classification in ("fixed", "present", "changed_failure_mode"):
+            self.assertIn(f'return "{classification}"', classifier)
+
+    def test_schema_status_probe_classification_persisted_in_report(self) -> None:
+        """The core report persists the probe classification (the baseline
+        measurement) so the parent can cite it."""
+        text = self._module_text()
+        self.assertIn("_schema_status_classification", text)
+        report = text.split("def _write_report", 1)[1]
+        report = report.split("class GbrainConformanceRuntimeTests", 1)[0]
+        self.assertIn(
+            '"schema_status_probe": self._schema_status_classification', report
+        )
+        # The setUp initializes it to inconclusive before any probe runs.
+        base = text.split("def setUp", 1)[1]
+        base = base.split("def tearDown", 1)[0]
+        self.assertIn('self._schema_status_classification: str = "inconclusive"', base)
+
     def test_get_search_tags_scenarios_present(self) -> None:
         """The scenario module must exercise get/search/tags with the
         deterministic provider-free facts."""
@@ -658,6 +704,135 @@ class GbrainConformanceGateStructureTests(unittest.TestCase):
             self.assertIn(key, text)
         self.assertIn('self._matrix[key] = "fail"', text)
         self.assertIn('self._matrix[key] = "pass"', text)
+
+
+class _ScriptedSchemaStatusRuntime:
+    """Minimal stand-in for ``GbrainConformanceRuntime`` used ONLY by the
+    host-side schema-status probe tests: returns a scripted
+    ``CommandEvidence`` (or raises) so ``_probe_schema_status``
+    classification semantics are exercised without Docker."""
+
+    def __init__(
+        self,
+        *,
+        returncode: int = 1,
+        stdout: str = "",
+        stderr: str = "Unknown command: schema-status",
+        raise_error: bool = False,
+    ) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.raise_error = raise_error
+
+    def run_as_hermes(
+        self, *command: str, check: bool = True, timeout: int = 60,
+    ) -> CommandEvidence:
+        if self.raise_error:
+            raise RuntimeError("harness could not run the probe")
+        return CommandEvidence(
+            command=list(command),
+            returncode=self.returncode,
+            stdout=self.stdout,
+            stderr=self.stderr,
+            elapsed_seconds=0.0,
+        )
+
+
+class GbrainSchemaStatusClassificationTests(unittest.TestCase):
+    """Host-side semantics for the PR #129 re-review schema-status oracle
+    (``_classify_schema_status_probe``): ``fixed`` requires success with the
+    stable expected schema fact; ``present`` is the exact current
+    ``Unknown command`` signature; anything else is ``changed_failure_mode``.
+    No Docker required."""
+
+    @staticmethod
+    def _ev(returncode: int, stdout: str = "", stderr: str = "") -> CommandEvidence:
+        return CommandEvidence(
+            command=["gbrain", "schema-status"],
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            elapsed_seconds=0.0,
+        )
+
+    def test_fixed_requires_success_with_both_expected_facts(self) -> None:
+        ev = self._ev(0, '{"schema_version": 1, "schema_pack": "josemar"}')
+        self.assertEqual(_classify_schema_status_probe(ev), "fixed")
+
+    def test_fixed_not_reached_without_expected_facts(self) -> None:
+        """Success alone is NOT fixed: the output must carry the stable
+        expected schema fact (schema version + canonical pack)."""
+        for stdout in ("", "ok", '{"schema_pack": "josemar"}', '{"schema_version": 1}'):
+            self.assertEqual(
+                _classify_schema_status_probe(self._ev(0, stdout)),
+                "changed_failure_mode",
+            )
+
+    def test_present_requires_exact_unknown_command_failure(self) -> None:
+        ev = self._ev(1, stderr="Unknown command: schema-status")
+        self.assertEqual(_classify_schema_status_probe(ev), "present")
+
+    def test_changed_failure_mode_for_other_failures(self) -> None:
+        for stderr in ("", "boom", "no such command"):
+            self.assertEqual(
+                _classify_schema_status_probe(self._ev(1, stderr=stderr)),
+                "changed_failure_mode",
+            )
+
+
+class GbrainSchemaStatusProbeTests(unittest.TestCase):
+    """Host-side semantics for the PR #129 re-review probe method
+    (``_probe_schema_status``): every completed probe classifies into
+    fixed/present/changed_failure_mode, and ``inconclusive`` is returned
+    ONLY when the harness cannot establish the probe (an exception running
+    it, with no evidence appended). No Docker required."""
+
+    @staticmethod
+    def _probe(runtime: _ScriptedSchemaStatusRuntime) -> str:
+        case = GbrainConformanceRuntimeTests.__new__(GbrainConformanceRuntimeTests)
+        case.runtime = runtime  # type: ignore[assignment]
+        case._evidence = []
+        classification = case._probe_schema_status()
+        return classification
+
+    def test_probe_classifies_fixed_for_success_with_expected_facts(self) -> None:
+        runtime = _ScriptedSchemaStatusRuntime(
+            returncode=0, stdout='{"schema_version": 1, "schema_pack": "josemar"}',
+        )
+        self.assertEqual(self._probe(runtime), "fixed")
+
+    def test_probe_classifies_present_for_current_unknown_command(self) -> None:
+        runtime = _ScriptedSchemaStatusRuntime(
+            returncode=1, stderr="Unknown command: schema-status",
+        )
+        self.assertEqual(self._probe(runtime), "present")
+
+    def test_probe_classifies_changed_failure_mode_for_other_failure(self) -> None:
+        runtime = _ScriptedSchemaStatusRuntime(returncode=1, stderr="boom")
+        self.assertEqual(self._probe(runtime), "changed_failure_mode")
+
+    def test_probe_changed_failure_mode_when_success_without_expected_fact(self) -> None:
+        runtime = _ScriptedSchemaStatusRuntime(returncode=0, stdout="schema ok")
+        self.assertEqual(self._probe(runtime), "changed_failure_mode")
+
+    def test_inconclusive_only_when_harness_cannot_establish_probe(self) -> None:
+        """A harness exception (the probe cannot be established at all) is
+        the ONLY inconclusive path, and no evidence is appended."""
+        runtime = _ScriptedSchemaStatusRuntime(raise_error=True)
+        case = GbrainConformanceRuntimeTests.__new__(GbrainConformanceRuntimeTests)
+        case.runtime = runtime  # type: ignore[assignment]
+        case._evidence = []
+        self.assertEqual(case._probe_schema_status(), "inconclusive")
+        self.assertEqual(case._evidence, [])
+
+    def test_completed_probe_appends_evidence(self) -> None:
+        runtime = _ScriptedSchemaStatusRuntime()
+        case = GbrainConformanceRuntimeTests.__new__(GbrainConformanceRuntimeTests)
+        case.runtime = runtime  # type: ignore[assignment]
+        case._evidence = []
+        self.assertEqual(case._probe_schema_status(), "present")
+        self.assertEqual(len(case._evidence), 1)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,41 @@ The Josemar gbrain integration is intentionally minimal:
   refresh therefore proves the vault Git prerequisite already exists. This
   repository is local-only and has no remote consumer.
 
+## Conformance Coverage Index
+
+Maintainers' index of the operation-level coverage owned by the gbrain
+conformance suites (issue #127), matching the current manifests
+(`scripts/gbrain_chat_run.py::GBRAIN_OPERATION_CLASSIFICATION` and the
+`CONFORMANCE_MATRIX` / `EMBEDDING_CONFORMANCE_MATRIX` /
+`CHRONICLE_CONFORMANCE_MATRIX` in `tests/runtime/`). "Deep" = exercised
+end-to-end against deterministic synthetic state; "smoke" = probe records a
+classification without hard-asserting. Gates: core =
+`RUN_DOCKER_TESTS=1` + `RUN_GBRAIN_CONFORMANCE=1`; chronicle and embeddings
+add `RUN_GBRAIN_CHRONICLE_CONFORMANCE=1` / `RUN_GBRAIN_EMBEDDING_CONFORMANCE=1`
+respectively (feature-gated, never on `make test`/`verify`). See
+`tests/README.md` → "Operation-level coverage index" for the full legend and
+scenario names.
+
+| Operation | Surface | Gate | Coverage | Probe status |
+| --- | --- | --- | --- | --- |
+| `status`, `search`, `get`, `capture`, `put`, `link`, `backlinks`, `graph`, `tags`, `history`, `delete`, `revert`, `restore`, `doctor`, `sources list` | public `gbrain` | core | deep | — |
+| `put --stdin` | public `gbrain` (rejected) | core | deep (asserts rejection) | — |
+| `timeline`, `day`/`day --week`, `since`, `last-seen`, `on-this-day`, `orient`, `ontology` | public `gbrain` | core + chronicle | core zero-event smoke; chronicle provider-gated deep event behavior | — |
+| `search` (semantic/hybrid), `query --no-expand` | public `gbrain` | embeddings | deep | — |
+| `reindex` | operator (`josemar-gbrain`) | core + embeddings | deep; probe | #124 probe: report-only |
+| `refresh` | operator (`josemar-gbrain`) | core | deep | — |
+| `embed-backfill`, `enable-embeddings`, `disable-embeddings` | operator (`josemar-gbrain`) | embeddings | deep | — |
+| `refresh-embeddings` | operator (`josemar-gbrain`; sole chat-allowed maintenance command) | embeddings | deep | — |
+| `schema-status` | public `gbrain` (allowlisted read-only diagnostic) | core | smoke | `fixed` / `present` / `changed_failure_mode` / `inconclusive` (report-only) |
+| reindex probe (issue #124) | operator-only classification | embeddings | smoke | `fixed` / `present` / `changed_failure_mode` / `inconclusive` (report-only) |
+
+Native commands classified `operator_only` in the adapter inventory but
+without a direct coverage entry (`init`, `config`, `sync`, `extract`, `embed`,
+`migrate`, `schema`, `import`, `export`, `jobs`, `chronicle-backfill`) are
+reached only through the `josemar-gbrain` subcommands above. The upgrade gates
+(`RUN_GBRAIN_UPGRADE_CONFORMANCE`) re-run the applicable core/embeddings
+scenarios against a candidate pin; they own no additional operations.
+
 ## Issue #110: Safe gbrain Adapter — Access Non-Negotiables
 
 The public `gbrain` command is the single agent-facing gateway for vault

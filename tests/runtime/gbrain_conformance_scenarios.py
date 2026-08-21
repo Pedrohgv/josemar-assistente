@@ -21,6 +21,8 @@ and, later, the candidate upgrade runtime class):
   - ``self._matrix``: ``dict[str, str]`` keyed by ``CONFORMANCE_MATRIX``
   - ``self._evidence``: ``list[CommandEvidence]``
   - ``self._gbrain_version``: ``str | None`` (set by the status scenario)
+  - ``self._schema_status_classification``: ``str`` (set by the schema-status
+    probe scenario; the host report persists and cites it)
   - ``self._report_path``: ``Path | None``
 """
 
@@ -154,6 +156,13 @@ CHRONICLE_TIMELINE_SLUG = "notes/welcome"
 # real runtime coverage).
 DOCTOR_CORE_CHECKS = ("connection", "jsonb_integrity", "schema_version", "pgvector")
 
+# Stable expected schema fact for a FIXED ``gbrain schema-status`` (PR #129
+# re-review): the schema version and the canonical active pack — the same
+# deterministic runtime facts the status scenario asserts. A real upstream
+# fix is classified ``fixed`` only when the command succeeds AND the output
+# carries both tokens (robust to JSON and text rendering).
+SCHEMA_STATUS_EXPECTED_FACTS = ("schema_version", "josemar")
+
 # Conformance matrix: every operation this suite owns, with its
 # classification. The report persists an explicit result for each.
 CONFORMANCE_MATRIX = {
@@ -200,6 +209,29 @@ CONFORMANCE_MATRIX = {
 }
 
 
+def _classify_schema_status_probe(ev: CommandEvidence) -> str:
+    """Pure PR #129 re-review oracle for the ``gbrain schema-status`` probe.
+
+    Report-only classification of the ACTUAL behavior, so a real upstream
+    fix is recorded as ``fixed`` instead of rejecting the run:
+
+      - ``fixed``: the command succeeds and the output carries the stable
+        expected schema fact (``SCHEMA_STATUS_EXPECTED_FACTS``).
+      - ``present``: the exact current failure signature — the pinned
+        native CLI reports ``Unknown command``.
+      - ``changed_failure_mode``: any other failure, or a success that does
+        not deliver the stable expected schema fact.
+    """
+    if ev.returncode == 0:
+        output = ev.stdout + ev.stderr
+        if all(fact in output for fact in SCHEMA_STATUS_EXPECTED_FACTS):
+            return "fixed"
+        return "changed_failure_mode"
+    if "Unknown command" in ev.stderr:
+        return "present"
+    return "changed_failure_mode"
+
+
 class CoreScenarioMixin(unittest.TestCase):
     """Provider-free core operation scenarios (issue #127 W2b).
 
@@ -208,8 +240,11 @@ class CoreScenarioMixin(unittest.TestCase):
     and is always mixed into a host runtime test class (which supplies
     ``self.runtime``, ``self._matrix``, ``self._evidence`` and the base
     setup). Every scenario records its outcome in ``self._matrix`` (fail ->
-    pass) and appends complete ``CommandEvidence`` to ``self._evidence``.
-    The scenarios are written against the mixin contract above so the same
+    pass), except the schema-status probe, which records its
+    fixed/present/changed_failure_mode/inconclusive classification instead
+    (PR #129 re-review: report-only, never a hard assertion). Every scenario
+    appends complete ``CommandEvidence`` to ``self._evidence``. The
+    scenarios are written against the mixin contract above so the same
     methods can run against the baseline runtime (core suite) and, later,
     against a candidate image (upgrade suite).
     """
@@ -221,6 +256,7 @@ class CoreScenarioMixin(unittest.TestCase):
     _matrix: dict[str, str]
     _evidence: list[CommandEvidence]
     _gbrain_version: str | None
+    _schema_status_classification: str
     _report_path: Path | None
 
     def _scenario_provenance(self) -> None:
@@ -330,19 +366,41 @@ class CoreScenarioMixin(unittest.TestCase):
         self._matrix["sources_list"] = "pass"
 
     def _scenario_schema_status_probe(self) -> None:
-        """``gbrain schema-status`` probe: the agent-facing spelling is
+        """``gbrain schema-status`` probe (PR #129 re-review): report-only
+        classification, never a hard assertion. The agent-facing spelling is
         allowlisted by the public adapter but the pinned native CLI has no
         such command (known discrepancy, classified probe_unavailable). The
-        probe records the actual behavior — the native CLI reports the
-        unknown command — instead of hard-asserting a success contract."""
-        self._matrix["schema_status_probe"] = "fail"
-        ev = self.runtime.run_as_hermes(
-            "gbrain", "schema-status", check=False, timeout=60
-        )
-        self.assertNotEqual(ev.returncode, 0, ev.stdout + ev.stderr)
-        self.assertIn("Unknown command", ev.stderr)
+        probe records the ACTUAL classification so a real upstream fix is
+        recorded as ``fixed`` instead of rejecting the candidate rerun:
+
+          - ``fixed``: success returning the stable expected schema fact
+          - ``present``: the exact current ``Unknown command`` failure
+          - ``changed_failure_mode``: any other failure (or a success
+            without the stable expected fact)
+          - ``inconclusive``: only when the harness/setup cannot establish
+            the probe (an exception running it)
+
+        The classification is recorded in the matrix and exposed through
+        ``self._schema_status_classification`` so the host report persists
+        and cites it (baseline in the core suite; baseline and candidate in
+        the upgrade suite)."""
+        classification = self._probe_schema_status()
+        self._matrix["schema_status_probe"] = classification
+        self._schema_status_classification = classification
+
+    def _probe_schema_status(self) -> str:
+        """Run the probe and classify it. ``inconclusive`` ONLY when the
+        harness/setup cannot establish the probe (an exception running the
+        command); every completed probe classifies into
+        fixed/present/changed_failure_mode."""
+        try:
+            ev = self.runtime.run_as_hermes(
+                "gbrain", "schema-status", check=False, timeout=60,
+            )
+        except Exception:
+            return "inconclusive"
         self._evidence.append(ev)
-        self._matrix["schema_status_probe"] = "pass"
+        return _classify_schema_status_probe(ev)
 
     def _scenario_type_inference(self) -> None:
         """Path-prefix type inference: the seeded pages carry the inferred

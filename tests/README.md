@@ -301,3 +301,62 @@ LLM. The core suite's zero-event Chronicle smoke and this provider-gated event
 behavior are deliberately separate gates: the former stays provider-free and
 always runnable, the latter is the explicit opt-in that exercises the LLM
 judge path.
+
+### Operation-level coverage index
+
+The table below is the maintainers' index for the current manifests: every
+operation owned by the conformance suites, its surface, its gate, and its
+coverage depth. "Deep" means the operation is exercised end-to-end against
+deterministic synthetic state; "smoke" means a probe records a classification
+without hard-asserting the outcome. Scenario names in parentheses are the
+`CoreScenarioMixin` / suite methods that own the coverage.
+
+| Operation | Surface | Gate | Coverage | Probe status |
+| --- | --- | --- | --- | --- |
+| `status` | public `gbrain` | core | deep (`status`) | — |
+| `search` | public `gbrain` | core | deep (`search`, `get_search_tags`) | — |
+| `get` | public `gbrain` | core | deep (`get`, `type_inference`) | — |
+| `capture` | public `gbrain` | core | deep (`capture`, `public_write_contracts`) | — |
+| `put` | public `gbrain` | core | deep (`put`, `public_write_contracts`) | — |
+| `link` | public `gbrain` | core | deep (`link`, `links_backlinks_graph`) | — |
+| `backlinks` | public `gbrain` | core | deep (`backlinks`, `links_backlinks_graph`) | — |
+| `graph` | public `gbrain` | core | deep (`graph`, `links_backlinks_graph`) | — |
+| `tags` | public `gbrain` | core | deep (`tags`, `get_search_tags`) | — |
+| `history` | public `gbrain` | core | deep (`history`, `recovery_history_revert`) | — |
+| `delete` | public `gbrain` | core | deep (`delete`, `soft_delete_restore`) | — |
+| `revert` | public `gbrain` | core | deep (`revert`, `recovery_history_revert`) | — |
+| `restore` | public `gbrain` | core | deep (`restore`, `soft_delete_restore`) | — |
+| `doctor` | public `gbrain` | core | deep (`doctor`) | — |
+| `sources list` | public `gbrain` | core | deep (`sources_list`) | — |
+| `put --stdin` | public `gbrain` (rejected) | core | deep (`put --stdin` asserts rejection) | — |
+| `timeline`, `day`/`day --week`, `since`, `last-seen`, `on-this-day`, `orient`, `ontology` | public `gbrain` | core + chronicle | core zero-event smoke (`chronicle_*`); chronicle provider-gated deep event behavior | — |
+| `search` (semantic/hybrid) | public `gbrain` | embeddings | deep (`semantic_search`) | — |
+| `query --no-expand` | public `gbrain` | embeddings | deep (`query_no_expand`) | — |
+| `reindex` | operator (`josemar-gbrain`) | core + embeddings | deep (`reindex`, `public_reindex_rejected`); probe (`reindex_probe`, `reindex_probe_workaround`) | #124 probe: report-only |
+| `refresh` | operator (`josemar-gbrain`) | core | deep (`refresh`, `external_edit_pre_refresh`, `external_edit_post_refresh`, `refresh_lock_busy`) | — |
+| `embed-backfill` | operator (`josemar-gbrain`) | embeddings | deep (`embed_backfill`) | — |
+| `enable-embeddings` | operator (`josemar-gbrain`) | embeddings | deep (`enable_embeddings`) | — |
+| `disable-embeddings` | operator (`josemar-gbrain`) | embeddings | deep (`disable_embeddings`, `disable_keyword_sentinel`, `disable_vectors_preserved`) | — |
+| `refresh-embeddings` | operator (`josemar-gbrain`; sole chat-allowed maintenance command) | embeddings | deep (`stale_edit_refresh`) | — |
+| `schema-status` | public `gbrain` (allowlisted read-only diagnostic) | core | smoke (`schema_status_probe`) | `fixed` / `present` / `changed_failure_mode` / `inconclusive` (report-only) |
+| reindex probe (issue #124) | operator-only classification | embeddings | smoke (`issue124_proof`, `reindex_probe`, `reindex_probe_workaround`) | `fixed` / `present` / `changed_failure_mode` / `inconclusive` (report-only) |
+
+Notes:
+
+- **Surface.** "public" is the agent-facing `gbrain` command (issue #110 safe
+  adapter); "operator" is the `scripts/josemar-gbrain` wrapper, never
+  agent-facing.
+- **Gates.** core = `RUN_DOCKER_TESTS=1` + `RUN_GBRAIN_CONFORMANCE=1`;
+  chronicle = + `RUN_GBRAIN_CHRONICLE_CONFORMANCE=1`; embeddings = +
+  `RUN_GBRAIN_EMBEDDING_CONFORMANCE=1`. The upgrade gates
+  (`RUN_GBRAIN_UPGRADE_CONFORMANCE`) re-run the applicable provider-free core
+  scenarios (and the TEI gate for the embeddings variant) against a candidate
+  pin; they own no additional operations.
+- **Probe status.** Report-only classifications recorded in the report
+  metadata, never hard-asserted; a fixing PR converts the probe to a hard
+  regression assertion.
+- **Not owned by any suite.** Native commands classified `operator_only` in
+  the adapter inventory but without a direct coverage entry (`init`, `config`,
+  `sync`, `extract`, `embed`, `migrate`, `schema`, `import`, `export`, `jobs`,
+  `chronicle-backfill`) are reached only through the `josemar-gbrain`
+  subcommands above.

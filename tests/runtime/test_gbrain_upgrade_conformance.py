@@ -24,6 +24,12 @@ Runs the SAME disposable Compose project/volumes through a full upgrade:
   - issue #125 dedicated git-move probe with a fixed/present/
     changed_failure_mode/inconclusive classification that never hard-fails
     just because the issue is open
+  - schema-status probe classification on BOTH runtimes (PR #129 re-review):
+    the baseline classification is recorded in the baseline phase and the
+    candidate classification after the candidate rerun — report-only
+    fixed/present/changed_failure_mode/inconclusive, never a hard assertion
+    that could reject a real upstream fix — and both are persisted in the
+    report
 
 The gate is strict: ``RUN_DOCKER_TESTS=1`` AND ``RUN_GBRAIN_UPGRADE_CONFORMANCE=1``
 AND an exact ``GBRAIN_CONFORMANCE_CANDIDATE_REF`` (40-hex, prevalidated BEFORE
@@ -33,7 +39,8 @@ this module always run and need no Docker.
 
 The JSON report (``dump_folder/gbrain-conformance/gbrain-upgrade-conformance.json``)
 carries the baseline/candidate refs, the action list, the logical result, the
-#125 classification, and the operation result matrix — command/result metadata
+#125 classification, the baseline/candidate schema-status probe
+classifications, and the operation result matrix — command/result metadata
 only, never environment dumps.
 """
 
@@ -262,6 +269,8 @@ class GbrainUpgradeConformanceTestCase(unittest.TestCase):
         self._gbrain_version: str | None = None
         self._logical_result: str = "not_run"
         self._issue_125_classification: str = "inconclusive"
+        self._schema_status_probe_baseline: str = "inconclusive"
+        self._schema_status_probe_candidate: str = "inconclusive"
         self._report_path: Path | None = None
 
         self.runtime = GbrainConformanceRuntime()
@@ -363,6 +372,8 @@ class GbrainUpgradeConformanceTestCase(unittest.TestCase):
             "actions": list(UPGRADE_MATRIX),
             "logical_result": self._logical_result,
             "issue_125_git_move": self._issue_125_classification,
+            "schema_status_probe_baseline": self._schema_status_probe_baseline,
+            "schema_status_probe_candidate": self._schema_status_probe_candidate,
             "matrix": self._matrix,
             "candidate_operations": {
                 op: self._matrix.get(op, "not_run") for op in CANDIDATE_OPERATIONS
@@ -388,6 +399,7 @@ class GbrainUpgradeConformanceRuntimeTests(
     def test_baseline_to_candidate_upgrade_conformance(self) -> None:
         try:
             self._scenario_baseline_reindex()
+            self._scenario_baseline_schema_status_probe()
             self._scenario_baseline_state()
             self._scenario_stop_preserve_volumes()
             self._scenario_candidate_build()
@@ -418,6 +430,14 @@ class GbrainUpgradeConformanceRuntimeTests(
         self.assertEqual(ev.returncode, 0, ev.stderr)
         self._evidence.append(ev)
         self._baseline_version = json.loads(ev.stdout).get("version")
+
+    def _scenario_baseline_schema_status_probe(self) -> None:
+        """Baseline schema-status probe classification (PR #129 re-review):
+        recorded in the baseline phase (after baseline reindex) so the
+        upgrade report can cite BOTH the baseline and the candidate
+        classification. Report-only — never a hard assertion."""
+        self._scenario_schema_status_probe()
+        self._schema_status_probe_baseline = self._schema_status_classification
 
     def _scenario_baseline_state(self) -> None:
         """Create representative logical state through the supported public
@@ -530,6 +550,7 @@ class GbrainUpgradeConformanceRuntimeTests(
         self._scenario_doctor()
         self._scenario_sources_list()
         self._scenario_schema_status_probe()
+        self._schema_status_probe_candidate = self._schema_status_classification
         self._scenario_type_inference()
         self._scenario_get_search_tags()
         self._scenario_links_backlinks_graph()
@@ -809,6 +830,47 @@ class GbrainUpgradeConformanceGateStructureTests(unittest.TestCase):
         self.assertIn("write_report", text)
         self.assertIn("conformance_report_dir", text)
         self.assertIn("gbrain-upgrade-conformance", text)
+
+    def test_schema_status_probe_classifications_persisted(self) -> None:
+        """The upgrade report persists BOTH the baseline and the candidate
+        schema-status probe classifications so the parent can cite them."""
+        text = self._module_text()
+        self.assertIn("_schema_status_probe_baseline", text)
+        self.assertIn("_schema_status_probe_candidate", text)
+        report = text.split("def _write_report", 1)[1]
+        report = report.split("def test_baseline_to_candidate_upgrade_conformance", 1)[0]
+        self.assertIn(
+            '"schema_status_probe_baseline": self._schema_status_probe_baseline',
+            report,
+        )
+        self.assertIn(
+            '"schema_status_probe_candidate": self._schema_status_probe_candidate',
+            report,
+        )
+        # Both are initialized to inconclusive before any probe runs.
+        base = text.split("def setUp", 1)[1]
+        base = base.split("def tearDown", 1)[0]
+        self.assertIn('self._schema_status_probe_baseline: str = "inconclusive"', base)
+        self.assertIn('self._schema_status_probe_candidate: str = "inconclusive"', base)
+
+    def test_baseline_probe_and_candidate_snapshot_never_reject_fix(self) -> None:
+        """The baseline probe runs in the baseline phase (after baseline
+        reindex), and the candidate rerun snapshots its classification — a
+        real upstream fix on the candidate is recorded, never rejected."""
+        text = self._module_text()
+        runtime_class = text.split("class GbrainUpgradeConformanceRuntimeTests", 1)[1]
+        runtime_class = runtime_class.split("class GbrainUpgradeConformanceGateStructureTests", 1)[0]
+        self.assertIn("self._scenario_baseline_schema_status_probe()", runtime_class)
+        self.assertIn(
+            "self._schema_status_probe_candidate = self._schema_status_classification",
+            runtime_class,
+        )
+        flow = runtime_class.split("def test_baseline_to_candidate_upgrade_conformance", 1)[1]
+        flow = flow.split("def _scenario_baseline_reindex", 1)[0]
+        self.assertLess(
+            flow.index("self._scenario_baseline_reindex()"),
+            flow.index("self._scenario_baseline_schema_status_probe()"),
+        )
 
     def test_issue_125_probe_never_hard_fails(self) -> None:
         """The #125 probe must classify (fixed/present/changed_failure_mode/

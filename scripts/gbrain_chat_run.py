@@ -290,12 +290,53 @@ GBRAIN_OPERATION_COVERAGE = {
     "schema-status": ("_scenario_schema_status_probe", "RUN_GBRAIN_CONFORMANCE"),
 }
 
+# Machine-readable OPERATOR-surface coverage manifest (PR #129 re-review):
+# the six supported `josemar-gbrain` wrapper operations (reindex, refresh,
+# refresh-embeddings, embed-backfill, enable-embeddings, disable-embeddings)
+# map to the real runtime scenario method that exercises each and the
+# conformance gate env that owns that scenario. This is deliberately SEPARATE
+# from GBRAIN_OPERATION_COVERAGE (which covers the NATIVE gbrain command
+# surface the public adapter allowlists/rejects): the wrapper operations are
+# operator-only, never exposed through the public adapter, and never added to
+# the native coverage manifest. The fast policy guard asserts:
+#
+#   - the manifest covers exactly the six supported wrapper operations;
+#   - no wrapper operation appears in the public adapter surface or in the
+#     native GBRAIN_OPERATION_COVERAGE (public/native vs operator scope);
+#   - every scenario symbol exists in the runtime test module(s) owned by its
+#     gate;
+#   - every gate is a known conformance gate env;
+#   - every wrapper operation is dispatched by scripts/josemar-gbrain
+#     (usage + main dispatch source contract).
+JOSEMAR_GBRAIN_OPERATOR_COVERAGE = {
+    # --- core activation/reconciliation (RUN_GBRAIN_CONFORMANCE) ---
+    "reindex": ("_scenario_reindex", "RUN_GBRAIN_CONFORMANCE"),
+    "refresh": ("_scenario_external_edit_refresh", "RUN_GBRAIN_CONFORMANCE"),
+    # --- embedding lifecycle (RUN_GBRAIN_EMBEDDING_CONFORMANCE) ---
+    "refresh-embeddings": (
+        "_scenario_stale_edit_refresh",
+        "RUN_GBRAIN_EMBEDDING_CONFORMANCE",
+    ),
+    "embed-backfill": ("_scenario_embed_backfill", "RUN_GBRAIN_EMBEDDING_CONFORMANCE"),
+    "enable-embeddings": (
+        "_scenario_enable_embeddings",
+        "RUN_GBRAIN_EMBEDDING_CONFORMANCE",
+    ),
+    "disable-embeddings": (
+        "_scenario_disable_embeddings",
+        "RUN_GBRAIN_EMBEDDING_CONFORMANCE",
+    ),
+}
+
 
 # Mechanical command inventory for policy tests: the docs-policy suite
 # asserts the documented user-facing surface against this single export
 # instead of maintaining a fragile duplicate list. It also exports the
 # exhaustive coverage manifest and the known gate envs so the fast guard can
-# prove every classified supported surface maps to a real scenario/gate.
+# prove every classified supported surface maps to a real scenario/gate, and
+# the separate operator-surface coverage manifest (josemar-gbrain wrapper
+# operations) so the operator surface is governed without leaking into the
+# public/native surface.
 CHAT_COMMAND_INVENTORY = {
     "subcommands": sorted(CHAT_SUBCOMMANDS),
     "subsubcommands": {name: sorted(subs) for name, subs in CHAT_SUBSUBCOMMANDS.items()},
@@ -303,6 +344,7 @@ CHAT_COMMAND_INVENTORY = {
     "operator_only": sorted(_classification_category("operator_only")),
     "classification": dict(sorted(GBRAIN_OPERATION_CLASSIFICATION.items())),
     "coverage": dict(sorted(GBRAIN_OPERATION_COVERAGE.items())),
+    "operator_coverage": dict(sorted(JOSEMAR_GBRAIN_OPERATOR_COVERAGE.items())),
     "known_gates": sorted(KNOWN_CONFORMANCE_GATES),
 }
 

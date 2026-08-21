@@ -562,6 +562,139 @@ class GbrainOperationClassificationTests(unittest.TestCase):
         )
 
 
+class GbrainOperatorCoverageTests(unittest.TestCase):
+    """The operator-surface coverage manifest (PR #129 re-review) governs the
+    six supported `josemar-gbrain` wrapper operations (reindex, refresh,
+    refresh-embeddings, embed-backfill, enable-embeddings, disable-embeddings)
+    WITHOUT leaking them into the public adapter or the native coverage
+    manifest.
+
+    These guards prevent a supported wrapper operation from drifting from the
+    actual wrapper dispatch or from the runtime scenarios that exercise it:
+    the manifest in scripts/gbrain_chat_run.py IS the explicit machine-readable
+    record, and the fast guards assert it against the wrapper source and the
+    owning runtime test modules."""
+
+    WRAPPER_OPERATIONS = (
+        "reindex",
+        "refresh",
+        "refresh-embeddings",
+        "embed-backfill",
+        "enable-embeddings",
+        "disable-embeddings",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+
+        repo_root = Path(__file__).resolve().parents[2]
+        adapter = repo_root / "scripts" / "gbrain_chat_run.py"
+        spec = importlib.util.spec_from_file_location("gbrain_chat_run_op", adapter)
+        assert spec is not None and spec.loader is not None
+        cls.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.mod)
+        cls.operator_coverage = cls.mod.JOSEMAR_GBRAIN_OPERATOR_COVERAGE
+        cls.wrapper_src = (repo_root / "scripts" / "josemar-gbrain").read_text(
+            encoding="utf-8"
+        )
+
+    @staticmethod
+    def _extract_shell_function(src, name):
+        header = re.compile(rf"^{name}\(\)\s*\{{", re.MULTILINE)
+        start = header.search(src)
+        assert start is not None, f"Could not find function {name}"
+        body_start = start.end()
+        close = re.compile(r"^}$", re.MULTILINE)
+        match = close.search(src, body_start)
+        assert match is not None, f"Could not find end of function {name}"
+        return src[body_start:match.start()]
+
+    def test_operator_coverage_exactly_six_supported_wrapper_operations(self):
+        self.assertEqual(
+            set(self.operator_coverage),
+            set(self.WRAPPER_OPERATIONS),
+            "the operator coverage manifest must cover exactly the six "
+            "supported josemar-gbrain wrapper operations",
+        )
+
+    def test_operator_coverage_operations_not_in_public_adapter_surface(self):
+        """Scope: the wrapper operations are operator-only and must never be
+        exposed through the public adapter (not allowlisted). They may appear
+        in the native classification ONLY as operator_only (the adapter
+        rejects them), never as a supported agent-facing surface."""
+        subcommands = set(self.mod.CHAT_SUBCOMMANDS)
+        for op in self.WRAPPER_OPERATIONS:
+            self.assertNotIn(op, subcommands, op)
+            classification = self.mod.GBRAIN_OPERATION_CLASSIFICATION.get(op)
+            if classification is not None:
+                self.assertEqual(
+                    classification,
+                    "operator_only",
+                    f"{op}: wrapper operation must not be classified as a "
+                    "supported agent-facing surface",
+                )
+
+    def test_operator_coverage_operations_not_in_native_coverage(self):
+        """Scope: the wrapper operations must never be added to the native
+        GBRAIN_OPERATION_COVERAGE manifest (public/native vs operator)."""
+        for op in self.WRAPPER_OPERATIONS:
+            self.assertNotIn(op, self.mod.GBRAIN_OPERATION_COVERAGE, op)
+
+    def test_operator_coverage_gates_are_known(self):
+        """Every operator coverage entry's gate must be a known conformance
+        gate env (the opt-in Docker runtime gates defined in the Makefile)."""
+        for op, (scenario, gate) in self.operator_coverage.items():
+            self.assertIn(
+                gate,
+                self.mod.KNOWN_CONFORMANCE_GATES,
+                f"{op} ({scenario}): unknown gate {gate!r}",
+            )
+
+    def test_operator_coverage_scenario_symbols_exist_in_owning_modules(self):
+        """Every operator coverage entry's scenario symbol must exist (as a
+        real method definition) in the runtime test module(s) owned by its
+        gate — the mechanical proof that a supported wrapper operation has
+        actual runtime coverage."""
+        for op, (scenario, gate) in self.operator_coverage.items():
+            modules = _GATE_COVERAGE_MODULES.get(gate)
+            self.assertIsNotNone(
+                modules,
+                f"{op}: no coverage modules registered for gate {gate!r}",
+            )
+            assert modules is not None
+            texts = [
+                (REPO_ROOT / rel).read_text(encoding="utf-8") for rel in modules
+            ]
+            self.assertTrue(
+                any(f"def {scenario}" in text for text in texts),
+                f"{op}: scenario {scenario!r} not defined in {modules}",
+            )
+
+    def test_operator_coverage_tied_to_wrapper_usage_dispatch(self):
+        """Every supported wrapper operation must be dispatched by
+        scripts/josemar-gbrain: it appears in the usage() string and in the
+        main() case dispatch (source contract)."""
+        usage_body = self._extract_shell_function(self.wrapper_src, "usage")
+        main_body = self._extract_shell_function(self.wrapper_src, "main")
+        for op in self.WRAPPER_OPERATIONS:
+            self.assertIn(op, usage_body, f"{op} missing from wrapper usage()")
+            self.assertIn(
+                f"{op})",
+                main_body,
+                f"{op} missing from wrapper main() dispatch",
+            )
+
+    def test_inventory_exports_operator_coverage(self):
+        """CHAT_COMMAND_INVENTORY exports the operator coverage manifest
+        (single machine-readable source of truth)."""
+        inventory = self.mod.CHAT_COMMAND_INVENTORY
+        self.assertEqual(
+            inventory["operator_coverage"],
+            dict(sorted(self.operator_coverage.items())),
+        )
+
+
 # Runtime test modules that own the coverage scenarios, keyed by the gate env
 # a coverage entry can reference. The core gate's scenarios live in the
 # reusable CoreScenarioMixin (tests/runtime/gbrain_conformance_scenarios.py)
