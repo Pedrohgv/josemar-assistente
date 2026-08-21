@@ -564,24 +564,26 @@ class GbrainOperationClassificationTests(unittest.TestCase):
 
 class GbrainOperatorCoverageTests(unittest.TestCase):
     """The operator-surface coverage manifest (PR #129 re-review) governs the
-    six supported `josemar-gbrain` wrapper operations (reindex, refresh,
-    refresh-embeddings, embed-backfill, enable-embeddings, disable-embeddings)
-    WITHOUT leaking them into the public adapter or the native coverage
-    manifest.
+    supported `josemar-gbrain` wrapper operations WITHOUT leaking them into
+    the public adapter or the native coverage manifest.
 
-    These guards prevent a supported wrapper operation from drifting from the
-    actual wrapper dispatch or from the runtime scenarios that exercise it:
-    the manifest in scripts/gbrain_chat_run.py IS the explicit machine-readable
-    record, and the fast guards assert it against the wrapper source and the
-    owning runtime test modules."""
+    The supported labels are NOT hard-coded here: they are derived from the
+    wrapper's own main() case dispatch (excluding the catch-all `*)`), and
+    the manifest keys must exactly equal that derived set — a newly
+    dispatched operation without a manifest entry (or a manifest entry
+    without a dispatch) fails here. These guards prevent a supported wrapper
+    operation from drifting from the actual wrapper dispatch or from the
+    runtime scenarios that exercise it: the manifest in
+    scripts/gbrain_chat_run.py IS the explicit machine-readable record, and
+    the fast guards assert it against the wrapper source and the owning
+    runtime test modules."""
 
-    WRAPPER_OPERATIONS = (
-        "reindex",
-        "refresh",
-        "refresh-embeddings",
-        "embed-backfill",
-        "enable-embeddings",
-        "disable-embeddings",
+    # Case-label shape in the wrapper main() dispatch: a non-empty
+    # whitespace-free token without parens/asterisk followed by `)` at end
+    # of line. The catch-all `*)` cannot match (leading `*` is excluded), so
+    # only real top-level subcommand labels are captured.
+    _MAIN_CASE_LABEL_RE = re.compile(
+        r"^[ \t]*([^ \t()*][^ \t()]*)\)[ \t]*$", re.MULTILINE
     )
 
     @classmethod
@@ -598,6 +600,7 @@ class GbrainOperatorCoverageTests(unittest.TestCase):
         cls.wrapper_src = (repo_root / "scripts" / "josemar-gbrain").read_text(
             encoding="utf-8"
         )
+        cls.wrapper_operations = cls._main_dispatch_labels(cls.wrapper_src)
 
     @staticmethod
     def _extract_shell_function(src, name):
@@ -610,12 +613,46 @@ class GbrainOperatorCoverageTests(unittest.TestCase):
         assert match is not None, f"Could not find end of function {name}"
         return src[body_start:match.start()]
 
-    def test_operator_coverage_exactly_six_supported_wrapper_operations(self):
+    @classmethod
+    def _main_dispatch_labels(cls, src):
+        """Top-level supported labels from the wrapper main() case dispatch,
+        excluding the catch-all `*)`. Parsing is bounded to the main()
+        function body: only case-label-shaped lines (a token followed by `)`
+        at end of line) are captured, never generic labels elsewhere in the
+        source."""
+        main_body = cls._extract_shell_function(src, "main")
+        return frozenset(cls._MAIN_CASE_LABEL_RE.findall(main_body))
+
+    def test_operator_coverage_exactly_matches_main_dispatch(self):
+        """The operator coverage manifest keys must exactly equal the
+        top-level labels dispatched by the wrapper main() case (excluding
+        the catch-all): no manifest entry may name an undispatched operation
+        and no dispatched operation may lack a manifest entry."""
         self.assertEqual(
             set(self.operator_coverage),
-            set(self.WRAPPER_OPERATIONS),
-            "the operator coverage manifest must cover exactly the six "
-            "supported josemar-gbrain wrapper operations",
+            self.wrapper_operations,
+            "the operator coverage manifest must exactly match the "
+            "top-level labels dispatched by scripts/josemar-gbrain main()",
+        )
+
+    def test_synthetic_extra_main_dispatch_label_detected(self):
+        """A new top-level label added to the wrapper main() dispatch (but
+        not to the operator coverage manifest) must be detected: the derived
+        set differs from the manifest keys, so the exact-equality guard
+        fails — the manifest cannot drift from the actual dispatch."""
+        synthetic = "new-operation"
+        main_body = self._extract_shell_function(self.wrapper_src, "main")
+        synthetic_body = main_body.replace(
+            "        *)", f"        {synthetic})\n        *)", 1
+        )
+        synthetic_src = self.wrapper_src.replace(main_body, synthetic_body)
+        derived = self._main_dispatch_labels(synthetic_src)
+        self.assertIn(synthetic, derived)
+        self.assertNotEqual(
+            set(self.operator_coverage),
+            derived,
+            "a dispatch label absent from the operator coverage manifest "
+            "must be detected by the exact-equality guard",
         )
 
     def test_operator_coverage_operations_not_in_public_adapter_surface(self):
@@ -624,7 +661,7 @@ class GbrainOperatorCoverageTests(unittest.TestCase):
         in the native classification ONLY as operator_only (the adapter
         rejects them), never as a supported agent-facing surface."""
         subcommands = set(self.mod.CHAT_SUBCOMMANDS)
-        for op in self.WRAPPER_OPERATIONS:
+        for op in self.wrapper_operations:
             self.assertNotIn(op, subcommands, op)
             classification = self.mod.GBRAIN_OPERATION_CLASSIFICATION.get(op)
             if classification is not None:
@@ -638,7 +675,7 @@ class GbrainOperatorCoverageTests(unittest.TestCase):
     def test_operator_coverage_operations_not_in_native_coverage(self):
         """Scope: the wrapper operations must never be added to the native
         GBRAIN_OPERATION_COVERAGE manifest (public/native vs operator)."""
-        for op in self.WRAPPER_OPERATIONS:
+        for op in self.wrapper_operations:
             self.assertNotIn(op, self.mod.GBRAIN_OPERATION_COVERAGE, op)
 
     def test_operator_coverage_gates_are_known(self):
@@ -672,18 +709,13 @@ class GbrainOperatorCoverageTests(unittest.TestCase):
             )
 
     def test_operator_coverage_tied_to_wrapper_usage_dispatch(self):
-        """Every supported wrapper operation must be dispatched by
-        scripts/josemar-gbrain: it appears in the usage() string and in the
-        main() case dispatch (source contract)."""
+        """Secondary source contract: every supported wrapper operation
+        (derived from the main() dispatch above) also appears in the wrapper
+        usage() string. The authoritative supported-label set is the main()
+        dispatch derivation, not usage()."""
         usage_body = self._extract_shell_function(self.wrapper_src, "usage")
-        main_body = self._extract_shell_function(self.wrapper_src, "main")
-        for op in self.WRAPPER_OPERATIONS:
+        for op in self.wrapper_operations:
             self.assertIn(op, usage_body, f"{op} missing from wrapper usage()")
-            self.assertIn(
-                f"{op})",
-                main_body,
-                f"{op} missing from wrapper main() dispatch",
-            )
 
     def test_inventory_exports_operator_coverage(self):
         """CHAT_COMMAND_INVENTORY exports the operator coverage manifest

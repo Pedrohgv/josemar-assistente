@@ -358,5 +358,11 @@ Notes:
 - **Not owned by any suite.** Native commands classified `operator_only` in
   the adapter inventory but without a direct coverage entry (`init`, `config`,
   `sync`, `extract`, `embed`, `migrate`, `schema`, `import`, `export`, `jobs`,
-  `chronicle-backfill`) are reached only through the `josemar-gbrain`
-  subcommands above.
+  `chronicle-backfill`) are not all reached through the `josemar-gbrain`
+  subcommands above: `init`, `config`, `sync`, `extract`, `embed`, `migrate`,
+  and `schema` are exercised indirectly by those subcommands; the chronicle
+  gate exercises `jobs submit chronicle_extract --follow` through a separately
+  shared-lock-protected private-native command
+  (`/opt/josemar/libexec/gbrain-native` under the lock runner), not the
+  wrapper; the remaining commands (`import`, `export`, other `jobs` forms,
+  `chronicle-backfill`) stay unsupported/unowned unless adopted.

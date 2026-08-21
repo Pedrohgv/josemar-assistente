@@ -86,9 +86,16 @@ scenario names.
 Native commands classified `operator_only` in the adapter inventory but
 without a direct coverage entry (`init`, `config`, `sync`, `extract`, `embed`,
 `migrate`, `schema`, `import`, `export`, `jobs`, `chronicle-backfill`) are
-reached only through the `josemar-gbrain` subcommands above. The upgrade gates
-(`RUN_GBRAIN_UPGRADE_CONFORMANCE`) re-run the applicable core/embeddings
-scenarios against a candidate pin; they own no additional operations.
+not all reached through the `josemar-gbrain` subcommands above: `init`,
+`config`, `sync`, `extract`, `embed`, `migrate`, and `schema` are exercised
+indirectly by those subcommands; the chronicle gate exercises
+`jobs submit chronicle_extract --follow` through a separately shared-lock-
+protected private-native commands (`/opt/josemar/libexec/gbrain-native` under
+the lock runner), not the wrapper; the remaining commands (`import`, `export`,
+other `jobs` forms, `chronicle-backfill`) stay unsupported/unowned unless
+adopted. The upgrade gates (`RUN_GBRAIN_UPGRADE_CONFORMANCE`) re-run the
+applicable core/embeddings scenarios against a candidate pin; they own no
+additional operations.
 
 ## Issue #110: Safe gbrain Adapter — Access Non-Negotiables
 
