@@ -64,17 +64,26 @@ def patched_wrapper(tmp: Path, fake_gbrain: Path, lock_path: Path) -> Path:
 
 class FakeGbrain:
     """A fake `gbrain` binary that logs every invocation and the enforced
-    startup-hook env value."""
+    startup-hook env value. Optional `fail_patterns` cause any invocation
+    whose full command line contains the pattern to exit nonzero with a
+    stderr note, so failure paths (e.g. a failing `init --migrate-only`) can
+    be exercised."""
 
-    def __init__(self, tmp: Path):
+    def __init__(self, tmp: Path, fail_patterns: list[str] | None = None):
         self.log = tmp / "gbrain-calls.log"
         self.env_log = tmp / "gbrain-env.log"
         self.script = tmp / "gbrain"
+        fail_guards = "\n".join(
+            f'case "$*" in\n  *{pat}*) echo "scripted-failure: {pat}" >&2; exit 5 ;;\nesac'
+            for pat in (fail_patterns or [])
+        )
+        if fail_guards:
+            fail_guards += "\n"
         self.script.write_text(
             f"""#!/bin/sh
 echo "$*" >> "{self.log}"
 printf 'GBRAIN_SKIP_STARTUP_HOOKS=%s\\n' "${{GBRAIN_SKIP_STARTUP_HOOKS:-}}" >> "{self.env_log}"
-case "$1" in
+{fail_guards}case "$1" in
   config) echo "ok" ;;
   sync) echo '{{"status":"ok"}}' ;;
   extract) echo '{{"status":"ok"}}' ;;
@@ -433,6 +442,186 @@ class ManualRefreshReindexLockBehaviorTests(unittest.TestCase):
             marker.exists(),
             "sitecustomize must not execute in the isolated pre-lock helpers",
         )
+
+
+class ReindexStateAwareBehaviorTests(unittest.TestCase):
+    """Issue #124 gate-1 remediation: fresh init may run ONLY when BOTH the
+    canonical config.json and the canonical brain.pglite surface are absent
+    and neither is a symlink. Every guard violation fails closed before any
+    native init with a structured nonzero error; a corrupt regular config
+    stays classified as existing and only `init --migrate-only` may run.
+
+    These tests run the patched real wrapper against a scripted fake gbrain
+    and assert the recorded native argv (FakeGbrain.calls) plus exit codes.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="gbrain-state-aware-")
+        self.tmp = Path(self._tmp.name)
+        self.lock_path = self.tmp / "locks" / "tasknotes.lock"
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock_path.touch()
+        self.state_dir = self.tmp / "state" / ".gbrain"
+        self.config_path = self.state_dir / "config.json"
+        self.pglite_path = self.state_dir / "brain.pglite"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def env(self, **extra) -> dict:
+        env = os.environ.copy()
+        env.update({"HOME": str(self.tmp), "GBRAIN_SCHEMA_PACK": "gbrain-base"})
+        env.update(extra)
+        return env
+
+    def run_reindex(self, fake: FakeGbrain) -> subprocess.CompletedProcess[str]:
+        wrapper = patched_wrapper(self.tmp, fake.script, self.lock_path)
+        return subprocess.run(
+            [str(wrapper), "reindex"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+            env=self.env(),
+        )
+
+    def test_genuinely_fresh_state_runs_fresh_init_only(self) -> None:
+        """(1) No config and no PGLite artifact: the fresh vector
+        `init --pglite --no-embedding` plus the fresh-only keyword write run;
+        migrate-only must not."""
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"success": true', result.stdout)
+        calls = fake.calls()
+        self.assertIn("init --pglite --no-embedding", calls)
+        self.assertIn("config set search.mcp_keyword_only true", calls)
+        self.assertNotIn("init --migrate-only", calls)
+
+    def test_corrupt_regular_config_invokes_only_migrate_only(self) -> None:
+        """(2) A corrupt regular config remains classified as initialized:
+        only `init --migrate-only` runs, the bytes are untouched, and no
+        keyword write / no-embedding command is issued."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        original = b"not-json-{corrupt"
+        self.config_path.write_bytes(original)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = fake.calls()
+        self.assertIn("init --migrate-only", calls)
+        joined = " ".join(calls)
+        self.assertNotIn("init --pglite", joined,
+                         "no fresh init may run for an existing config")
+        self.assertNotIn("--no-embedding", joined,
+                         "no-embedding must never be passed to migrate-only")
+        self.assertFalse(
+            any(c.startswith("config set search.mcp_keyword_only") for c in calls),
+            "the existing-config branch must not write keyword mode",
+        )
+        self.assertEqual(self.config_path.read_bytes(), original,
+                         "corrupt config bytes must be left unchanged")
+
+    def test_config_absent_with_pglite_dir_fails_closed_before_init(self) -> None:
+        """(3) Config absent but a brain.pglite artifact exists (canonical
+        directory form): structured nonzero error before any init, artifact
+        untouched."""
+        self.pglite_path.mkdir(parents=True, exist_ok=True)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_pglite_without_config", result.stdout)
+        self.assertNotIn('"success": true', result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+        self.assertTrue(self.pglite_path.is_dir(), "artifact must not be clobbered")
+
+    def test_config_absent_with_pglite_file_fails_closed(self) -> None:
+        """(3b) brain.pglite existing in any form (here: a plain file) with
+        no config must also fail closed."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.pglite_path.write_text("stray", encoding="utf-8")
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_pglite_without_config", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+
+    def test_directory_config_fails_closed_without_clobber(self) -> None:
+        """(4) A directory at the config path is a non-regular existing
+        entry: fail closed before init and never clobber it."""
+        self.config_path.mkdir(parents=True, exist_ok=True)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_not_regular", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+        self.assertTrue(self.config_path.is_dir(), "directory must not be clobbered")
+
+    def test_symlinked_config_fails_closed_without_clobber(self) -> None:
+        """(4) A config symlink to a real target fails closed; the symlink
+        and its decoy target stay untouched."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        decoy = self.tmp / "decoy-config"
+        decoy.write_text("precious\n", encoding="utf-8")
+        self.config_path.symlink_to(decoy)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_symlink", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+        self.assertTrue(self.config_path.is_symlink(), "symlink must not be clobbered")
+        self.assertEqual(decoy.read_text(encoding="utf-8").strip(), "precious",
+                         "decoy target must be untouched")
+
+    def test_dangling_symlinked_config_fails_closed(self) -> None:
+        """(4) A dangling config symlink also fails closed (no init)."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path.symlink_to(self.tmp / "missing-config-target")
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_symlink", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+
+    def test_symlinked_pglite_fails_closed_without_clobber(self) -> None:
+        """(5) A brain.pglite symlink fails closed even with a regular
+        config present; the symlink and its target stay untouched."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text("{}", encoding="utf-8")
+        decoy = self.tmp / "decoy-pglite"
+        decoy.mkdir()
+        self.pglite_path.symlink_to(decoy)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_pglite_symlink", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+        self.assertTrue(self.pglite_path.is_symlink(), "symlink must not be clobbered")
+
+    def test_dangling_symlinked_pglite_fails_closed(self) -> None:
+        """(5) A dangling brain.pglite symlink also fails closed (no init)."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text("{}", encoding="utf-8")
+        self.pglite_path.symlink_to(self.tmp / "missing-pglite-target")
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_pglite_symlink", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+
+    def test_migrate_only_failure_is_terminal_no_fresh_fallback(self) -> None:
+        """(6) A failing `init --migrate-only` returns nonzero with the
+        structured init error and must NOT fall back to fresh init."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text("{}", encoding="utf-8")
+        fake = FakeGbrain(self.tmp, fail_patterns=["init --migrate-only"])
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_init_failed", result.stdout)
+        calls = fake.calls()
+        self.assertIn("init --migrate-only", calls)
+        self.assertNotIn("init --pglite", " ".join(calls),
+                         "no fresh-init fallback after a migrate-only failure")
 
 
 if __name__ == "__main__":

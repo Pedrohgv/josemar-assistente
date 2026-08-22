@@ -296,7 +296,9 @@ make test-gbrain-upgrade-conformance-embeddings GBRAIN_CONFORMANCE_CANDIDATE_REF
   Dockerfile pin, or the validated upgrade-only
   `GBRAIN_CONFORMANCE_BASELINE_REF` override; see below).
 - `test-gbrain-upgrade-conformance-embeddings` — candidate upgrade with the
-  real TEI gate.
+  real TEI gate; the candidate `josemar-gbrain reindex` runs as the issue #124
+  hard preservation regression (classification required exactly `fixed`, no
+  recovery path).
 
 ### Candidate refs are exact SHAs only
 
@@ -384,14 +386,20 @@ v0.46.26.0 upgrade.
 - The embeddings gates download the E5/TEI model on first run and are
   expensive; they are explicit and infrequent by design.
 
-### Known regression probes (#124 / #125)
+### Known regression probes (#125)
 
-The suite contains explicit reproducible probes for the known open regressions
-#124 and #125. Each probe is classified in the report as `fixed`, `present`,
-`changed_failure_mode`, or `inconclusive` — the canonical baseline target does
-not fail permanently solely because a known issue is open. When the owning bug
-is fixed, the fixing PR converts the corresponding probe to a hard regression
-assertion.
+The suite contains an explicit reproducible probe for the known open regression
+#125, classified in the report as `fixed`, `present`, `changed_failure_mode`,
+or `inconclusive` — the canonical baseline target does not fail permanently
+solely because a known issue is open. When the owning bug is fixed, the fixing
+PR converts the corresponding probe to a hard regression assertion.
+
+Issue #124 is NOT a probe anymore: it is a hard preservation regression. The
+former report-only reindex probe and its workaround path were converted into a
+hard gate — the reindex classification must be exactly `fixed` in the
+embeddings and upgrade-embeddings suites (see the "Operation-level coverage
+index" below), and the suite fails on any other outcome. The only remaining
+report-only classifications are `schema-status` and the #125 upgrade probe.
 
 ### Sync-move regression characterization (issue #125 W1)
 
@@ -482,14 +490,14 @@ without hard-asserting the outcome. Scenario names in parentheses are the
 | `timeline`, `day`/`day --week`, `since`, `last-seen`, `on-this-day`, `orient`, `ontology` | public `gbrain` | core + chronicle | core zero-event smoke (`chronicle_*`); chronicle provider-gated deep event behavior | — |
 | `search` (semantic/hybrid) | public `gbrain` | embeddings | deep (`semantic_search`) | — |
 | `query --no-expand` | public `gbrain` | embeddings | deep (`query_no_expand`) | — |
-| `reindex` | operator (`josemar-gbrain`) | core + embeddings | deep (`reindex`, `public_reindex_rejected`); probe (`reindex_probe`, `reindex_probe_workaround`) | #124 probe: report-only |
+| `reindex` | operator (`josemar-gbrain`) | core + embeddings | deep (`reindex`, `public_reindex_rejected`); hard #124 preservation gate (`issue124_proof`, `reindex_probe`, `reindex_mode_preserved`, `reindex_config_preserved`, `reindex_marker_preserved`, `reindex_coverage_preserved`, `reindex_semantic_retrieval`) | #124 hard gate: classification required exactly `fixed` |
 | `refresh` | operator (`josemar-gbrain`) | core | deep (`refresh`, `external_edit_pre_refresh`, `external_edit_post_refresh`, `refresh_lock_busy`) | — |
 | `embed-backfill` | operator (`josemar-gbrain`) | embeddings | deep (`embed_backfill`) | — |
 | `enable-embeddings` | operator (`josemar-gbrain`) | embeddings | deep (`enable_embeddings`) | — |
 | `disable-embeddings` | operator (`josemar-gbrain`) | embeddings | deep (`disable_embeddings`, `disable_keyword_sentinel`, `disable_vectors_preserved`) | — |
 | `refresh-embeddings` | operator (`josemar-gbrain`; sole chat-allowed maintenance command) | embeddings | deep (`stale_edit_refresh`) | — |
 | `schema-status` | public `gbrain` (allowlisted read-only diagnostic) | core | smoke (`schema_status_probe`) | `fixed` / `present` / `changed_failure_mode` / `inconclusive` (report-only) |
-| reindex probe (issue #124) | operator-only classification | embeddings | smoke (`issue124_proof`, `reindex_probe`, `reindex_probe_workaround`) | `fixed` / `present` / `changed_failure_mode` / `inconclusive` (report-only) |
+| reindex preservation (issue #124) | operator-only classification | embeddings | hard (`issue124_proof`, `reindex_probe`, `reindex_mode_preserved`, `reindex_config_preserved`, `reindex_marker_preserved`, `reindex_coverage_preserved`, `reindex_semantic_retrieval`) | hard gate: classification required exactly `fixed` (no recovery path) |
 
 Notes:
 
@@ -504,7 +512,10 @@ Notes:
   pin; they own no additional operations.
 - **Probe status.** Report-only classifications recorded in the report
   metadata, never hard-asserted; a fixing PR converts the probe to a hard
-  regression assertion.
+  regression assertion. Issue #124 is the converted case: its reindex
+  classification is hard-asserted (exactly `fixed`) in the embeddings and
+  upgrade-embeddings suites, and its former workaround/recovery path is
+  eliminated.
 - **Not owned by any suite.** Native commands classified `operator_only` in
   the adapter inventory but without a direct coverage entry (`init`, `config`,
   `sync`, `extract`, `embed`, `migrate`, `schema`, `import`, `export`, `jobs`,

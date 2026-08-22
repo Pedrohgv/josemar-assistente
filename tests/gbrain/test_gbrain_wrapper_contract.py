@@ -51,6 +51,39 @@ def _extract_function(src: str, name: str) -> str:
     return src[body_start:match.start()]
 
 
+def _extract_state_branches(body: str) -> tuple[str, str]:
+    """Split do_reindex's state-classification if/else (issue #124) into
+    (existing_config_block, missing_config_block).
+
+    The block is located by its opener ``if [ -f "$GBRAIN_CONFIG_PATH" ]; then``
+    and bounded by balancing ``if ...; then`` / ``fi`` depth (each branch
+    contains one nested ``if echo "$init_output" ...; then ... fi`` guard), so
+    assertions scope to the exact branch instead of the whole function.
+    """
+    opener = re.search(r'if \[ -f "\$GBRAIN_CONFIG_PATH" \]; then', body)
+    assert opener is not None, "state-classification if/else block not found"
+    lines = body[opener.start():].splitlines()
+    depth = 0
+    else_line = None
+    close_line = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("if ") and stripped.endswith("; then"):
+            depth += 1
+        elif stripped == "else" and depth == 1:
+            else_line = index
+        elif stripped == "fi":
+            depth -= 1
+            if depth == 0:
+                close_line = index
+                break
+    assert else_line is not None and close_line is not None, \
+        "could not bound the state-classification block"
+    existing = "\n".join(lines[1:else_line])
+    fresh = "\n".join(lines[else_line + 1:close_line])
+    return existing, fresh
+
+
 class GbrainSchemaSourcePackContractTests(unittest.TestCase):
     """Schema source pack install contract tests."""
 
@@ -109,14 +142,89 @@ class GbrainSchemaSourcePackContractTests(unittest.TestCase):
 
 
 class GbrainReindexActivationContractTests(unittest.TestCase):
-    """reindex performs initial activation via the native gbrain CLI."""
+    """reindex is state-aware activation via the native gbrain CLI (issue #124).
+
+    The canonical $GBRAIN_HOME/.gbrain/config.json regular file classifies
+    the state: an existing config means initialized (only `init --migrate-only`,
+    terminal on failure, no fresh fallback); a missing config means fresh
+    (`init --pglite --no-embedding` + keyword-only). Schema pack validation/
+    install precedes either init path; all other steps stay unchanged.
+    """
 
     def setUp(self) -> None:
         self.src = _read(WRAPPER_PATH)
 
-    def test_reindex_performs_init(self) -> None:
+    def test_reindex_classifies_state_via_canonical_config_json(self) -> None:
+        """State classification must use the canonical
+        $GBRAIN_HOME/.gbrain/config.json regular file surface, derived from
+        the existing state-dir variable — no new sentinel/state store and no
+        direct config JSON edits."""
+        self.assertIn('GBRAIN_CONFIG_PATH="${GBRAIN_STATE_DIR}/config.json"', self.src)
         body = _extract_function(self.src, "do_reindex")
-        self.assertIn("init --pglite --no-embedding", body)
+        self.assertIn('if [ -f "$GBRAIN_CONFIG_PATH" ]; then', body)
+        self.assertIn("else", body)
+
+    def test_reindex_fresh_branch_uses_pglite_no_embedding_init(self) -> None:
+        """Missing config.json => fresh activation: init --pglite
+        --no-embedding."""
+        body = _extract_function(self.src, "do_reindex")
+        _, fresh = _extract_state_branches(body)
+        self.assertIn("init --pglite --no-embedding", fresh)
+
+    def test_reindex_existing_branch_uses_migrate_only_init(self) -> None:
+        """Existing config.json => initialized: ONLY init --migrate-only."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, _ = _extract_state_branches(body)
+        self.assertIn("init --migrate-only", existing)
+
+    def test_reindex_existing_branch_omits_no_embedding(self) -> None:
+        """init --migrate-only must not receive --no-embedding: it loads the
+        existing config and runs schema init only."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, _ = _extract_state_branches(body)
+        self.assertNotIn("--no-embedding", existing)
+
+    def test_reindex_fresh_and_existing_init_are_separate_branches(self) -> None:
+        """The fresh init must never appear in the existing-config branch and
+        vice versa: the branches are exclusive by construction."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, fresh = _extract_state_branches(body)
+        self.assertNotIn("init --pglite", existing)
+        self.assertNotIn("init --migrate-only", fresh)
+
+    def test_reindex_existing_branch_does_not_set_keyword_only(self) -> None:
+        """The existing-config branch must not write search.mcp_keyword_only:
+        initialized state keeps its current search mode."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, _ = _extract_state_branches(body)
+        self.assertNotIn("search.mcp_keyword_only", existing)
+
+    def test_reindex_fresh_branch_sets_keyword_only(self) -> None:
+        """Only the fresh branch pins keyword-only search mode."""
+        body = _extract_function(self.src, "do_reindex")
+        _, fresh = _extract_state_branches(body)
+        self.assertIn("config set search.mcp_keyword_only true", fresh)
+
+    def test_reindex_existing_init_failure_is_terminal_without_fallback(self) -> None:
+        """A failed --migrate-only init must be a structured nonzero error and
+        terminal: the existing branch returns 1 with no fresh-init fallback."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, _ = _extract_state_branches(body)
+        self.assertIn("gbrain_init_failed", existing)
+        # The failure JSON is Python-generated (json.dumps), so the source
+        # contains the Python literal `False` which serializes to JSON `false`.
+        self.assertIn('"success": False', existing)
+        self.assertIn("return 1", existing)
+        self.assertNotIn("init --pglite", existing)
+
+    def test_reindex_init_failures_structured_in_both_branches(self) -> None:
+        """Both init branches must surface structured gbrain_init_failed /
+        gbrain_init_blocked errors."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, fresh = _extract_state_branches(body)
+        for block in (existing, fresh):
+            self.assertIn("gbrain_init_failed", block)
+            self.assertIn("gbrain_init_blocked", block)
 
     def test_reindex_configures_repo_path(self) -> None:
         body = _extract_function(self.src, "do_reindex")
@@ -126,10 +234,6 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
     def test_reindex_configures_global_basename(self) -> None:
         body = _extract_function(self.src, "do_reindex")
         self.assertIn("config set link_resolution.global_basename true", body)
-
-    def test_reindex_configures_keyword_only(self) -> None:
-        body = _extract_function(self.src, "do_reindex")
-        self.assertIn("config set search.mcp_keyword_only true", body)
 
     def test_reindex_configures_chronicle_judge_token_budget(self) -> None:
         """Chronicle uses the supported upstream config rather than a source patch."""
@@ -173,18 +277,25 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         self.assertIn("gbrain_extract_links_failed", body)
 
     def test_reindex_does_not_pass_schema_pack_flag(self) -> None:
-        match = re.search(r'init_output=\$\(.*?init\b(.*?)2>&1\)', self.src, re.DOTALL)
-        self.assertIsNotNone(match, "Could not find init invocation in wrapper")
-        assert match is not None
-        init_args = match.group(1)
-        self.assertNotIn("--schema-pack", init_args)
+        """Neither init invocation (fresh --pglite nor existing
+        --migrate-only) may receive the schema-pack flag: the schema is
+        installed via the pack install step."""
+        body = _extract_function(self.src, "do_reindex")
+        init_lines = re.findall(r'"\$GBRAIN_BIN" init ([^\n]*2>&1)', body)
+        self.assertGreaterEqual(len(init_lines), 2,
+                                "expected both the fresh and existing init branches")
+        for line in init_lines:
+            self.assertNotIn("--schema-pack", line)
 
     def test_reindex_does_not_pass_non_interactive_flag(self) -> None:
-        match = re.search(r'init_output=\$\(.*?init\b(.*?)2>&1\)', self.src, re.DOTALL)
-        self.assertIsNotNone(match, "Could not find init invocation in wrapper")
-        assert match is not None
-        init_args = match.group(1)
-        self.assertNotIn("--non-interactive", init_args)
+        """Neither init invocation (fresh --pglite nor existing
+        --migrate-only) may pass --non-interactive."""
+        body = _extract_function(self.src, "do_reindex")
+        init_lines = re.findall(r'"\$GBRAIN_BIN" init ([^\n]*2>&1)', body)
+        self.assertGreaterEqual(len(init_lines), 2,
+                                "expected both the fresh and existing init branches")
+        for line in init_lines:
+            self.assertNotIn("--non-interactive", line)
 
     def test_reindex_exports_skip_startup_hooks(self) -> None:
         body = _extract_function(self.src, "do_reindex")
@@ -201,13 +312,35 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         body = _extract_function(self.src, "do_reindex")
         self.assertIn("schema_source_missing", body)
 
-    def test_reindex_schema_install_before_init(self) -> None:
-        """schema pack install must happen BEFORE gbrain init."""
+    def test_reindex_schema_install_before_both_init_paths(self) -> None:
+        """Schema pack install must happen BEFORE both the fresh --pglite
+        init and the existing --migrate-only init."""
         body = _extract_function(self.src, "do_reindex")
         install_pos = body.find("install_source_pack")
-        init_pos = body.find("init --pglite")
-        self.assertLess(install_pos, init_pos,
-                        "schema pack install must precede gbrain init")
+        fresh_init_pos = body.find("init --pglite")
+        migrate_init_pos = body.find("init --migrate-only")
+        self.assertGreater(install_pos, -1)
+        self.assertGreater(fresh_init_pos, -1)
+        self.assertGreater(migrate_init_pos, -1)
+        self.assertLess(install_pos, fresh_init_pos,
+                        "schema pack install must precede the fresh init")
+        self.assertLess(install_pos, migrate_init_pos,
+                        "schema pack install must precede the migrate-only init")
+
+    def test_reindex_state_classification_after_lock_before_sync(self) -> None:
+        """The state classification must happen after lock acquisition and
+        before any sync work (issue #124): current ordering is preserved."""
+        body = _extract_function(self.src, "do_reindex")
+        lock_pos = body.find("acquire_tasknotes_lock reindex")
+        class_pos = body.find('if [ -f "$GBRAIN_CONFIG_PATH" ]')
+        sync_pos = body.find("run_sync_extract_links")
+        self.assertGreater(lock_pos, -1)
+        self.assertGreater(class_pos, -1)
+        self.assertGreater(sync_pos, -1)
+        self.assertLess(lock_pos, class_pos,
+                        "state classification must follow lock acquisition")
+        self.assertLess(class_pos, sync_pos,
+                        "state classification must precede the full sync")
 
     def test_reindex_schema_install_before_sync(self) -> None:
         """schema pack install must happen BEFORE gbrain sync."""
@@ -293,6 +426,16 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         body = _extract_function(self.src, "do_reindex")
         self.assertIn('mkdir -p "$GBRAIN_STATE_DIR"', body)
 
+    def test_reindex_does_not_invoke_embedding_operations(self) -> None:
+        """reindex must not invoke enable-embeddings, migrate embeddings,
+        embed, or embed-backfill (issue #124: embedding activation stays
+        explicit and is never triggered by reindex)."""
+        body = _extract_function(self.src, "do_reindex")
+        for op in ("enable-embeddings", "migrate embeddings",
+                   "embed --stale", "embed-backfill",
+                   "embed --include-null-signature"):
+            self.assertNotIn(op, body)
+
     def test_reindex_persists_schema_pack_marker_atomically(self) -> None:
         """The active schema pack marker must be written atomically: temp
         file in the SAME directory, fsync, then rename (replacing any stale
@@ -325,6 +468,119 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         body = _extract_function(self.src, "do_reindex")
         self.assertIn("os.path.islink(path)", body)
         self.assertIn("os.path.islink(parent)", body)
+
+
+class GbrainReindexStateGuardContractTests(unittest.TestCase):
+    """Issue #124 gate-1 remediation: fresh init may run ONLY when BOTH the
+    canonical config.json and the canonical brain.pglite surface are absent
+    and neither is a symlink. Every violation fails closed before native init
+    with a structured nonzero error and no fresh fallback."""
+
+    def setUp(self) -> None:
+        self.src = _read(WRAPPER_PATH)
+
+    def test_pglite_path_constant_derived_from_state_dir(self) -> None:
+        """The canonical PGLite artifact path must be derived from the
+        existing state-dir variable (gbrainPath('brain.pglite')), not a new
+        sentinel store."""
+        self.assertIn('GBRAIN_PGLITE_PATH="${GBRAIN_STATE_DIR}/brain.pglite"', self.src)
+
+    def test_guard_rejects_symlinked_config(self) -> None:
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn('[ -L "$GBRAIN_CONFIG_PATH" ]', body)
+        self.assertIn("gbrain_state_config_symlink", body)
+
+    def test_guard_rejects_nonregular_config_entry(self) -> None:
+        """Any existing config entry that is not a regular file (e.g. a
+        directory) must fail closed."""
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn('[ -e "$GBRAIN_CONFIG_PATH" ] && [ ! -f "$GBRAIN_CONFIG_PATH" ]', body)
+        self.assertIn("gbrain_state_config_not_regular", body)
+
+    def test_guard_rejects_symlinked_pglite(self) -> None:
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn('[ -L "$GBRAIN_PGLITE_PATH" ]', body)
+        self.assertIn("gbrain_state_pglite_symlink", body)
+
+    def test_guard_rejects_pglite_without_config(self) -> None:
+        """Config absent but brain.pglite present in any form must fail
+        closed: fresh init may never run over existing state."""
+        body = _extract_function(self.src, "do_reindex")
+        self.assertIn(
+            '[ ! -e "$GBRAIN_CONFIG_PATH" ] && [ -e "$GBRAIN_PGLITE_PATH" ]', body
+        )
+        self.assertIn("gbrain_state_pglite_without_config", body)
+
+    def test_guard_failures_are_structured_and_return_nonzero(self) -> None:
+        """Each guard violation must emit a structured success:false reindex
+        error and return 1 from do_reindex (no native init, no fallback)."""
+        body = _extract_function(self.src, "do_reindex")
+        for tag in (
+            "gbrain_state_config_symlink",
+            "gbrain_state_config_not_regular",
+            "gbrain_state_pglite_symlink",
+            "gbrain_state_pglite_without_config",
+        ):
+            pos = body.find(tag)
+            self.assertGreater(pos, -1, f"missing guard error tag {tag}")
+            line_start = body.rfind("\n", 0, pos) + 1
+            line_end = body.find("\n", pos)
+            line = body[line_start:line_end if line_end != -1 else len(body)]
+            self.assertIn('"success": false', line, f"{tag} must be structured")
+            after = body[pos:pos + 250]
+            self.assertIn("return 1", after, f"{tag} must return nonzero")
+
+    def test_guard_precedes_both_init_paths_and_classification(self) -> None:
+        """The guard must run before the fresh --pglite init, the existing
+        --migrate-only init, the state classification, and the sync."""
+        body = _extract_function(self.src, "do_reindex")
+        guard_pos = body.find('if [ -L "$GBRAIN_CONFIG_PATH" ]')
+        self.assertGreater(guard_pos, -1, "state guard must exist")
+        for needle, name in (
+            ("init --pglite", "fresh init"),
+            ("init --migrate-only", "migrate-only init"),
+            ('if [ -f "$GBRAIN_CONFIG_PATH" ]', "state classification"),
+            ("run_sync_extract_links", "sync"),
+        ):
+            pos = body.find(needle)
+            self.assertGreater(pos, -1, f"missing {name}")
+            self.assertLess(guard_pos, pos, f"state guard must precede {name}")
+
+    def test_guard_after_lock_and_schema_install(self) -> None:
+        """The guard runs under the already-acquired lock and after schema
+        pack validation/install, immediately before the state classification."""
+        body = _extract_function(self.src, "do_reindex")
+        lock_pos = body.find("acquire_tasknotes_lock reindex")
+        install_pos = body.find("install_source_pack")
+        guard_pos = body.find('if [ -L "$GBRAIN_CONFIG_PATH" ]')
+        class_pos = body.find('if [ -f "$GBRAIN_CONFIG_PATH" ]')
+        self.assertLess(lock_pos, guard_pos, "guard must run under the lock")
+        self.assertLess(install_pos, guard_pos,
+                        "schema pack install must precede the guard")
+        self.assertLess(guard_pos, class_pos,
+                        "guard must precede the state classification")
+
+    def test_existing_branch_does_not_require_pglite(self) -> None:
+        """The existing-config branch keys on the regular config only and
+        must not gate on brain.pglite existence."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, _ = _extract_state_branches(body)
+        self.assertNotIn("GBRAIN_PGLITE_PATH", existing)
+
+    def test_guard_block_has_no_embedding_repair_calls(self) -> None:
+        """The guard block must never attempt an embedding repair (no embed,
+        no migrate embeddings, no enable-embeddings invocation)."""
+        body = _extract_function(self.src, "do_reindex")
+        guard_start = body.find('if [ -L "$GBRAIN_CONFIG_PATH" ]')
+        last_guard = body.find("gbrain_state_pglite_without_config")
+        guard_end = body.find("\n    fi\n", last_guard)
+        self.assertGreater(guard_start, -1)
+        self.assertGreater(last_guard, -1)
+        self.assertGreater(guard_end, -1, "could not bound the guard block")
+        guard_block = body[guard_start:guard_end]
+        for op in ('"$GBRAIN_BIN" embed', "embed --stale", "embed-backfill",
+                   "enable-embeddings", "migrate embeddings"):
+            self.assertNotIn(op, guard_block)
 
 
 class GbrainRefreshContractTests(unittest.TestCase):
@@ -983,13 +1239,17 @@ class GbrainEmbedBackfillPreservationContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.src = _read(WRAPPER_PATH)
 
-    def test_reindex_still_uses_no_embedding_init(self) -> None:
+    def test_reindex_fresh_branch_still_uses_no_embedding_init(self) -> None:
+        """The fresh-activation branch must keep the no-embedding PGLite init."""
         body = _extract_function(self.src, "do_reindex")
-        self.assertIn("init --pglite --no-embedding", body)
+        _, fresh = _extract_state_branches(body)
+        self.assertIn("init --pglite --no-embedding", fresh)
 
-    def test_reindex_still_sets_keyword_only(self) -> None:
+    def test_reindex_fresh_branch_still_sets_keyword_only(self) -> None:
+        """The fresh-activation branch must keep keyword-only search mode."""
         body = _extract_function(self.src, "do_reindex")
-        self.assertIn("config set search.mcp_keyword_only true", body)
+        _, fresh = _extract_state_branches(body)
+        self.assertIn("config set search.mcp_keyword_only true", fresh)
 
     def test_reindex_does_not_invoke_embed(self) -> None:
         body = _extract_function(self.src, "do_reindex")
@@ -1703,9 +1963,13 @@ class GbrainEnableDisableEmbeddingsPreservationContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.src = _read(WRAPPER_PATH)
 
-    def test_reindex_still_sets_keyword_only_true(self) -> None:
+    def test_reindex_keyword_only_true_only_in_fresh_branch(self) -> None:
+        """reindex pins keyword-only only on fresh activation; the
+        existing-config branch must not touch search.mcp_keyword_only."""
         body = _extract_function(self.src, "do_reindex")
-        self.assertIn("config set search.mcp_keyword_only true", body)
+        existing, fresh = _extract_state_branches(body)
+        self.assertIn("config set search.mcp_keyword_only true", fresh)
+        self.assertNotIn("search.mcp_keyword_only", existing)
 
     def test_reindex_does_not_invoke_enable_embeddings(self) -> None:
         body = _extract_function(self.src, "do_reindex")

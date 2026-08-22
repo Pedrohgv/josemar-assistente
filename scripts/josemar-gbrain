@@ -3,8 +3,11 @@
 # native gbrain CLI.
 #
 # Subcommands:
-#   reindex - operator-only initial activation: init, config, sync, extract,
-#             extract links, schema sync (if custom pack), git safe.directory.
+#   reindex - operator-only activation, state-aware (issue #124): fresh
+#             activation when no config.json exists (init --pglite
+#             --no-embedding + keyword-only), migrate-only init when
+#             initialized; then config, sync, extract, extract links, schema
+#             sync (if custom pack), git safe.directory.
 #   refresh - recurring lightweight reconciliation for manual Obsidian edits:
 #             sync, extract stale content, extract links. No init/schema work.
 #   embed-backfill - operator-only one-shot embedding backfill (issue #65).
@@ -85,6 +88,14 @@ GBRAIN_SCHEMA_SOURCE_ROOT="/opt/data/.gbrain/schema-packs"
 GBRAIN_BIN="/opt/josemar/libexec/gbrain-native"
 GBRAIN_TASKNOTES_LOCK="/opt/data/.locks/tasknotes.lock"
 GBRAIN_STATE_DIR="${GBRAIN_HOME}/.gbrain"
+# Canonical gbrain file-plane config: its existence as a regular file is the
+# initialized-state surface for state-aware reindex (issue #124). Derived from
+# the existing state-dir variable; no separate sentinel/state store.
+GBRAIN_CONFIG_PATH="${GBRAIN_STATE_DIR}/config.json"
+# Canonical PGLite data artifact (gbrainPath('brain.pglite')). Fresh init may
+# run ONLY when BOTH canonical surfaces are absent and neither is a symlink
+# (issue #124 gate-1 remediation).
+GBRAIN_PGLITE_PATH="${GBRAIN_STATE_DIR}/brain.pglite"
 GBRAIN_SCHEMA_PACK_MARKER="${GBRAIN_STATE_DIR}/active-schema-pack"
 
 # Fixed interpreter/tool paths: no PATH resolution for anything that touches
@@ -543,9 +554,42 @@ PY
         fi
     fi
 
-    # --- Native init: PGLite, no embedding ---
-    init_output=$("$GBRAIN_BIN" init --pglite --no-embedding 2>&1) || {
-        emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
+    # --- State guard (issue #124 gate-1 remediation): fresh init may run
+    # ONLY when BOTH canonical surfaces (config.json and brain.pglite) are
+    # absent and neither is a symlink. Each violation below fails closed with
+    # a structured nonzero reindex error before any native init — no fresh
+    # fallback, no clobbering. A corrupt regular config still classifies as
+    # existing (migrate-only, terminal).
+    if [ -L "$GBRAIN_CONFIG_PATH" ]; then
+        emit_json '{"success": false, "action": "reindex", "error": "gbrain_state_config_symlink", "message": "Config path is a symlink; refusing reindex without clobbering it."}'
+        return 1
+    fi
+    if [ -e "$GBRAIN_CONFIG_PATH" ] && [ ! -f "$GBRAIN_CONFIG_PATH" ]; then
+        emit_json '{"success": false, "action": "reindex", "error": "gbrain_state_config_not_regular", "message": "Config path exists but is not a regular file; refusing reindex."}'
+        return 1
+    fi
+    if [ -L "$GBRAIN_PGLITE_PATH" ]; then
+        emit_json '{"success": false, "action": "reindex", "error": "gbrain_state_pglite_symlink", "message": "PGLite data path is a symlink; refusing reindex without clobbering it."}'
+        return 1
+    fi
+    if [ ! -e "$GBRAIN_CONFIG_PATH" ] && [ -e "$GBRAIN_PGLITE_PATH" ]; then
+        emit_json '{"success": false, "action": "reindex", "error": "gbrain_state_pglite_without_config", "message": "PGLite data exists but config.json is missing; refusing fresh init over existing state."}'
+        return 1
+    fi
+
+    # --- State classification (issue #124): the canonical config.json
+    # regular file under the state dir is the initialized marker. An existing
+    # config means initialized: run ONLY `init --migrate-only` (loads the
+    # existing config, runs schema init; no saveConfig, no fresh provider
+    # setup) — failure is structured, nonzero, and terminal with no fresh
+    # fallback. A missing config means fresh: full PGLite init without
+    # embedding, then keyword-only mode. The config file surface is only
+    # classified here — never edited directly, and no new sentinel store.
+    if [ -f "$GBRAIN_CONFIG_PATH" ]; then
+        # --- Existing config: initialized. Migrate-only init only; the
+        # existing search mode and provider config are preserved. ---
+        init_output=$("$GBRAIN_BIN" init --migrate-only 2>&1) || {
+            emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -555,10 +599,10 @@ print(json.dumps({
 }, ensure_ascii=False))
 PY
 )"
-        return 1
-    }
-    if echo "$init_output" | grep -iE "\b(error|fatal|blocked|aborted|panic)\b" | grep -viE "no embedding|embedding disabled|warn|error_|_error|errors_|migration" >/dev/null 2>&1; then
-        emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
+            return 1
+        }
+        if echo "$init_output" | grep -iE "\b(error|fatal|blocked|aborted|panic)\b" | grep -viE "no embedding|embedding disabled|warn|error_|_error|errors_|migration" >/dev/null 2>&1; then
+            emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -568,7 +612,53 @@ print(json.dumps({
 }, ensure_ascii=False))
 PY
 )"
-        return 1
+            return 1
+        fi
+    else
+        # --- Missing config: fresh activation. PGLite init, no embedding,
+        # then keyword-only search mode. ---
+        init_output=$("$GBRAIN_BIN" init --pglite --no-embedding 2>&1) || {
+            emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_init_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            return 1
+        }
+        if echo "$init_output" | grep -iE "\b(error|fatal|blocked|aborted|panic)\b" | grep -viE "no embedding|embedding disabled|warn|error_|_error|errors_|migration" >/dev/null 2>&1; then
+            emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_init_blocked",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            return 1
+        fi
+
+        # Fresh activation pins keyword-only search mode (semantic mode is
+        # enabled only by an explicit later operator action, issue #65).
+        config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
+            emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_config_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            return 1
+        }
     fi
 
     config_output=$("$GBRAIN_BIN" config set sync.repo_path "$GBRAIN_BRAIN_REPO" 2>&1) || {
@@ -586,20 +676,6 @@ PY
     }
 
     config_output=$("$GBRAIN_BIN" config set link_resolution.global_basename true 2>&1) || {
-        emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
-import json, sys
-out = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_config_failed",
-    "message": out[:4000],
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    }
-
-    config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
         emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
 import json, sys
 out = sys.argv[1]
