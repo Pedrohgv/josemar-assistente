@@ -1893,9 +1893,52 @@ class GbrainDockerLayoutContractTests(unittest.TestCase):
 
     def test_gbrain_ref_is_pinned_to_the_supported_release(self) -> None:
         self.assertIn(
-            "ARG GBRAIN_REF=15b9863d13635d173562a54f55a1d388bfcf546b",
+            "ARG GBRAIN_REF=69aea15e8098dd2d7ac1813f8e42865186cd7c2a",
             self.src,
         )
+
+    def test_gbrain_patch_file_defaults_to_canonical_current_patch(self) -> None:
+        """Requirement 1: the patch file is selectable via an ARG whose
+        default is the canonical current patch, so production builds keep
+        applying exactly the same bytes as before."""
+        self.assertIn(
+            "ARG GBRAIN_PATCH_FILE=gbrain-inline-worker-gateway.patch", self.src
+        )
+
+    def test_patch_copy_uses_selected_file_into_existing_temp_destination(self) -> None:
+        """Requirement 1: the COPY source follows the selected patch file
+        (default canonical; legacy file selectable for historical baseline
+        builds) into the unchanged temp destination."""
+        self.assertIn(
+            "COPY patches/${GBRAIN_PATCH_FILE} "
+            "/tmp/gbrain-inline-worker-gateway.patch",
+            self.src,
+        )
+
+    def test_patch_apply_is_fail_loud_with_no_fallback(self) -> None:
+        """Requirement 1: a fail-closed existence check precedes `git apply`;
+        there is no fallback or skip behavior for a missing/non-applying
+        selected patch file."""
+        lines = self.src.splitlines()
+        start = next(
+            i
+            for i, line in enumerate(lines)
+            if line.startswith("RUN cd /opt/gbrain")
+        )
+        end = start + 1
+        while end < len(lines) and lines[end].lstrip().startswith("&& "):
+            end += 1
+        apply_block = "\n".join(lines[start:end])
+        self.assertIn("test -f /tmp/gbrain-inline-worker-gateway.patch", apply_block)
+        self.assertLess(
+            apply_block.find("test -f"),
+            apply_block.find("git apply"),
+            "the fail-closed existence check must precede git apply",
+        )
+        self.assertIn("rm /tmp/gbrain-inline-worker-gateway.patch", apply_block)
+        self.assertNotIn("|| true", apply_block)
+        self.assertNotIn("|| :", apply_block)
+        self.assertNotIn("if [ -f", apply_block)
 
     def test_no_gbrain_skill_symlink(self) -> None:
         """The gbrain-skill symlink must not be created (Josemar uses gbrain directly)."""

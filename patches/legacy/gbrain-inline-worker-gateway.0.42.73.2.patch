@@ -1,34 +1,8 @@
 diff --git a/src/commands/config.ts b/src/commands/config.ts
-index e96021fbef6d105da0d65e944e5e8f88505bbbb7..c09463f6b139983fff6249c606b8baf1e2feb667 100644
+index 59be2005..a25af19b 100644
 --- a/src/commands/config.ts
 +++ b/src/commands/config.ts
-@@ -136,7 +136,13 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
-       }
-       return;
-     }
--    if (FILE_PLANE_API_KEYS.includes(key)) {
-+    // JOSEMAR PATCH: generic provider key bridge — route ANY *_api_key
-+    // (deepseek_api_key, groq_api_key, together_api_key, mistral_api_key,
-+    // ...) to the file plane like the fixed FILE_PLANE_API_KEYS list above.
-+    // The gateway folds arbitrary config *_api_key entries into env via
-+    // mergedProviderEnv (provider-env.ts), so a DB-plane write would be a
-+    // silent no-op. Upstream bug: #3394
-+    if (FILE_PLANE_API_KEYS.includes(key) || key.endsWith('_api_key')) {
-       const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
-       const cfg = loadConfigFileOnly() as unknown as Record<string, unknown> | null;
-       if (cfg && key in cfg) {
-@@ -252,7 +258,9 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
-     // Vendor credentials are file-plane canonical (see FILE_PLANE_API_KEYS).
-     // Routed, not refused: unlike embedding_model there is nothing to re-init,
-     // so the user's intent is satisfiable exactly as typed.
--    if (FILE_PLANE_API_KEYS.includes(key)) {
-+    // JOSEMAR PATCH: generic provider key bridge — see the unset path above
-+    // for the rationale; same file-plane routing for any *_api_key suffix.
-+    if (FILE_PLANE_API_KEYS.includes(key) || key.endsWith('_api_key')) {
-       const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
-       const cfg = (loadConfigFileOnly() ?? { engine: 'pglite' }) as Parameters<typeof saveConfig>[0];
-       (cfg as unknown as Record<string, unknown>)[key] = value;
-@@ -308,7 +316,13 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
+@@ -175,7 +175,12 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
        const { KNOWN_CONFIG_KEYS, KNOWN_CONFIG_KEY_PREFIXES } = await import('../core/config.ts');
        const isKnown = KNOWN_CONFIG_KEYS.includes(key);
        const matchesPrefix = KNOWN_CONFIG_KEY_PREFIXES.some(p => key.startsWith(p));
@@ -36,14 +10,13 @@ index e96021fbef6d105da0d65e944e5e8f88505bbbb7..c09463f6b139983fff6249c606b8baf1
 +      // JOSEMAR PATCH: accept any *_api_key suffix so any provider key can be
 +      // set via `gbrain config set <provider>_api_key <key>` without --force.
 +      // Upstream only lists openai/anthropic/zeroentropy/openrouter/voyage/
-+      // dashscope/google + azure-openai; all other providers require --force.
-+      // Upstream bug: #3394
++      // dashscope/google; all other providers require --force. Upstream bug: #3394
 +      const matchesApiKeySuffix = key.endsWith('_api_key');
 +      if (!isKnown && !matchesPrefix && !matchesApiKeySuffix) {
          const { suggestNearest } = await import('../core/levenshtein.ts');
          const suggestion = suggestNearest(key, KNOWN_CONFIG_KEYS, 3);
          console.error(`[config] Unknown config key "${key}".`);
-@@ -325,7 +339,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
+@@ -192,7 +197,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
        const { KNOWN_CONFIG_KEYS, KNOWN_CONFIG_KEY_PREFIXES } = await import('../core/config.ts');
        const isKnown = KNOWN_CONFIG_KEYS.includes(key);
        const matchesPrefix = KNOWN_CONFIG_KEY_PREFIXES.some(p => key.startsWith(p));
@@ -53,14 +26,251 @@ index e96021fbef6d105da0d65e944e5e8f88505bbbb7..c09463f6b139983fff6249c606b8baf1
          console.error(`[config] WARN: writing unknown key "${key}" with --force. Nothing in gbrain reads this.`);
        }
      }
+diff --git a/src/commands/jobs.ts b/src/commands/jobs.ts
+index 00d78f42..7e65e307 100644
+--- a/src/commands/jobs.ts
++++ b/src/commands/jobs.ts
+@@ -462,6 +462,21 @@ HANDLER TYPES (built in)
+         // 'unhealthy' listener, a DB blip would trip emitUnhealthy's
+         // no-listener fallback and call process.exit(1) from inside the
+         // library, killing the user's CLI session.
++        //
++        // JOSEMAR PATCH: configure the AI gateway before running handlers.
++        // The main CLI dispatch (cli.ts connectEngine) calls configureGateway,
++        // but the gateway singleton may not be set in this code path. Without
++        // this, isAvailable('chat') returns false and LLM-backed jobs
++        // (chronicle_extract, etc.) silently return no_events.
++        // Upstream bug: https://github.com/garrytan/gbrain/issues (pending)
++        try {
++          const { configureGateway } = await import('../core/ai/gateway.ts');
++          const { buildGatewayConfig } = await import('../core/ai/build-gateway-config.ts');
++          const { loadConfig } = await import('../core/config.ts');
++          const cfg = loadConfig();
++          if (cfg) configureGateway(buildGatewayConfig(cfg));
++        } catch { /* non-fatal: gateway stays unconfigured, same as upstream behavior */ }
++
+         const worker = new MinionWorker(engine, {
+           queue: queueName, pollInterval: 100, healthCheckInterval: 0,
+         });
+diff --git a/src/commands/migrate-embeddings.ts b/src/commands/migrate-embeddings.ts
+index 3feac7dc..91d4e3bc 100644
+--- a/src/commands/migrate-embeddings.ts
++++ b/src/commands/migrate-embeddings.ts
+@@ -29,6 +29,7 @@ import {
+   applyEmbeddingMigration,
+   completeEmbeddingMigration,
+   reconcilePageSignatures,
++  migrationSignature,
+   MIGRATION_STATE_KEY,
+   type EmbeddingMigrationPlan,
+ } from '../core/embedding-migration.ts';
+@@ -205,6 +206,19 @@ export async function persistEmbeddingFileConfig(
+   cfg.embedding_model = toModel;
+   cfg.embedding_dimensions = toDims;
+   saveConfig(cfg);
++  // JOSEMAR PATCH (issue #65): clear the persisted `embedding_disabled`
++  // sentinel when the migration successfully persists model + dimensions.
++  // Historical brains initialized with `gbrain init --no-embedding` carry
++  // `embedding_disabled: true` in config.json; without clearing it here, a
++  // successful migration would leave the sentinel in place and every later
++  // `gbrain embed` / `gbrain import` would refuse via assertEmbeddingEnabled.
++  // This makes `enable-embeddings` (which runs `migrate embeddings --no-embed`)
++  // the single path that both persists the target tuple AND lifts the
++  // deferred-setup sentinel so backfill can proceed.
++  if (cfg.embedding_disabled !== undefined) {
++    cfg.embedding_disabled = undefined;
++    saveConfig(cfg);
++  }
+   configureGateway(buildGatewayConfig(cfg));
+ }
+
+@@ -262,13 +276,62 @@ export async function runMigrateEmbeddings(
+   }
+
++  // JOSEMAR PATCH (issue #65): the no-work path (brain already on the target
++  // model + dims, no dim change, no stale chunks) used to exit(0) immediately
++  // WITHOUT probing the target provider, persisting the file-plane config, or
++  // finalizing any matching in-flight migration state. That broke the
++  // re-enable-after-rollback flow: after `disable-embeddings` writes the
++  // `embedding_disabled: true` sentinel, `enable-embeddings` runs
++  // `migrate embeddings --no-embed` to lift it. When the brain was already
++  // migrated (e.g. a prior enable-embeddings succeeded, then disable, then
++  // re-enable), the no-work path skipped persistEmbeddingFileConfig (so the
++  // sentinel stayed) and skipped completeEmbeddingMigration (so an in-flight
++  // state marker from an interrupted prior run stayed set, blocking later
++  // planEmbeddingMigration resuming detection). This patch makes the no-work
++  // path:
++  //   1. probe the target provider (validates key/model/dims in one embed —
++  //      same probeTargetProvider used by the full path),
++  //   2. persist the target tuple to the file plane via
++  //      persistEmbeddingFileConfig (which clears the embedding_disabled
++  //      sentinel on success), and
++  //   3. finalize any matching in-flight migration bookkeeping via
++  //      completeEmbeddingMigration when a MIGRATION_STATE_KEY marker
++  //      matches this target (so a re-enable after an interrupted prior
++  //      migration completes cleanly).
++  // The probe is preserved for the migration target-provider probe ability
++  // even when there is no work to do.
+   if (plan.chunks_to_embed === 0 && !plan.dim_change && plan.from_model === plan.to_model) {
++    // JOSEMAR PATCH (issue #65): in dry-run mode, exit BEFORE any probe /
++    // persist / sentinel clearing / finalization so --dry-run stays
++    // side-effect-free (plan + cost estimate only; change nothing). The
++    // probe/persist/finalize below are the re-enable-after-rollback path
++    // and must only run when mutations are allowed.
++    if (flags.dryRun) {
++      if (flags.json) console.log(JSON.stringify({ status: 'skipped_no_work', plan }, null, 2));
++      else console.log('Nothing to migrate — brain is already on the target model.');
++      exit(0);
++    }
++    const noWorkProbe = await probeTargetProvider(plan.to_model, plan.to_dims);
++    if (!noWorkProbe.ok) {
++      serr(noWorkProbe.message);
++      exit(1);
++    }
++    await persistEmbeddingFileConfig(plan.to_model, plan.to_dims);
++    try {
++      const stateStr = await engine.getConfig(MIGRATION_STATE_KEY);
++      if (stateStr) {
++        const state = JSON.parse(stateStr);
++        if (state?.to_model === plan.to_model && state?.to_dims === plan.to_dims) {
++          await completeEmbeddingMigration(engine, plan);
++        }
++      }
++    } catch { /* corrupt state marker — treat as fresh */ }
+     if (flags.json) console.log(JSON.stringify({ status: 'skipped_no_work', plan }, null, 2));
+     else console.log('Nothing to migrate — brain is already on the target model.');
+     exit(0);
+   }
+
+   if (flags.dryRun) {
+     if (flags.json) console.log(JSON.stringify({ status: 'planned', plan }, null, 2));
+     exit(0);
+   }
+
+@@ -374,7 +423,13 @@ export async function runMigrateEmbeddings(
+   }
+
+   const remaining = await engine.countStaleChunks({
+-    signature: `${plan.to_model}:${plan.to_dims}`,
++    // JOSEMAR PATCH: use the versioned E5-aware migration signature so the
++    // final completion probe matches what the embed loop stamps and what
++    // applyEmbeddingMigration / reconcilePageSignatures invalidated against.
++    // Without this, E5 migrations report "incomplete" forever because the
++    // bare `<model>:<dims>` probe never matches the version-stamped pages.
++    // See issue #65 safe E5 migration.
++    signature: migrationSignature(plan.to_model, plan.to_dims),
+     includeNullSignature: true,
+   });
+
+diff --git a/src/core/operations.ts b/src/core/operations.ts
+index 2f0a3b1c..3e1c8a4d 100644
+--- a/src/core/operations.ts
++++ b/src/core/operations.ts
+@@ -1131,8 +1131,20 @@ const put_page: Operation = {
+     // Skip embedding when the AI gateway has no embedding provider configured.
+     // Checks all auth env vars for the resolved provider, not just OPENAI_API_KEY,
+     // so Gemini / Ollama / Voyage brains don't silently drop embeddings (Codex C2).
+     const { isAvailable } = await import('./ai/gateway.ts');
+-    const noEmbed = !isAvailable('embedding');
++    // JOSEMAR PATCH (issue #65): force noEmbed when the deferred-setup
++    // sentinel `embedding_disabled: true` is present in config. The sentinel
++    // is written by `gbrain init --no-embedding` and by the operator-only
++    // `disable-embeddings` wrapper. Without this, put_page would call the
++    // embedding transport even when the operator has explicitly disabled
++    // embeddings (the gateway's isAvailable('embedding') may return true
++    // when a provider key is configured but the operator has rolled back to
++    // keyword-only). This makes put_page honor the runtime opt-out, and
++    // capture inherits it because capture routes through importFromContent
++    // with the same noEmbed flag.
++    const { loadConfig } = await import('./config.ts');
++    const cfgDisabled = loadConfig()?.embedding_disabled === true;
++    const noEmbed = cfgDisabled || !isAvailable('embedding');
+     // v0.31.8 (D7 / codex OV-1): thread ctx.sourceId so put_page on a
+     // multi-source brain lands in the intended source instead of the
+     // default-source clobber path. importFromContent already accepts
+@@ -2028,8 +2039,56 @@ const query: Operation = {
+     const querySourceScope = federatedSearchScope(ctx, sourceIdParam);
+
+     // v0.27.1: image-similarity branch. Bypasses hybridSearch (which is
+     // text-only); embeds the image via embedMultimodal and runs a direct
+     // vector search against the embedding_image column.
++    // JOSEMAR PATCH (issue #65): honor the runtime keyword-only opt-out
++    // (search.mcp_keyword_only=true) in the `query` op. Upstream's `search`
++    // op already routes text queries to searchKeyword when keyword-only is
++    // set, but the `query` op (the full-control variant) did NOT — it always
++    // ran hybridSearch (vector+keyword+RRF), sending query text to the
++    // embedding provider even when the operator explicitly opted out. This
++    // patch makes the `query` op honor the same keyword-only flag:
++    //   - text queries use searchKeyword (no embedding transport call),
++    //   - image-only / image-similarity queries REJECT (they require the
++    //     embedding transport; keyword-only is the explicit opt-out of it),
++    //   - cross_modal image/both routes also REJECT under keyword-only.
++    // The reject is a loud OperationError so the agent surfaces the
++    // misconfiguration instead of silently falling back to wrong results.
++    const queryKeywordOnly = (await ctx.engine.getConfig('search.mcp_keyword_only')) === 'true';
++    if (queryKeywordOnly) {
++      if (imageData) {
++        throw new OperationError(
++          'invalid_params',
++          'Image-similarity search requires the embedding transport, but search.mcp_keyword_only is true (keyword-only opt-out). Re-enable embeddings or use text search.',
++          'Set search.mcp_keyword_only false (josemar-gbrain enable-embeddings) to use image-similarity search.',
++        );
++      }
++      // JOSEMAR PATCH (issue #65): cross_modal image/both routes require the
++      // embedding transport. Under keyword-only they would silently fall back
++      // to text hybridSearch (wrong results). Reject loudly here, INSIDE the
++      // keyword-only branch and BEFORE the keyword fallback, so enabled
++      // vector cross-modal query (keyword-only false) remains available
++      // downstream via hybridSearchCached.
++      const kwCrossModal = p.cross_modal as 'text' | 'image' | 'both' | 'auto' | undefined;
++      if (kwCrossModal === 'image' || kwCrossModal === 'both') {
++        throw new OperationError(
++          'invalid_params',
++          `cross_modal='${kwCrossModal}' requires the embedding transport, but search.mcp_keyword_only is true (keyword-only opt-out). Re-enable embeddings or use cross_modal='text'.`,
++          'Set search.mcp_keyword_only false (josemar-gbrain enable-embeddings) to use cross-modal search.',
++        );
++      }
++      if (!queryText) {
++        throw new Error('query requires either `query` (text) or `image` (base64 bytes).');
++      }
++      const raw = await ctx.engine.searchKeyword(queryText, { limit: (p.limit as number) || 20, offset: (p.offset as number) || 0, ...querySourceScope });
++      const results = dedupResults(raw);
++      stampEvidenceSafe(results);
++      await stampContentFlags(ctx.engine, results);
++      await stampUnverifiedExtractions(ctx.engine, results);
++      bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
++      maybeCaptureSearch(ctx, queryText, results, Date.now() - startedAt, false);
++      return results;
++    }
+     if (imageData) {
+       const { embedMultimodal } = await import('./ai/gateway.ts');
+       const [vec] = await embedMultimodal([
+@@ -2045,8 +2082,15 @@ const query: Operation = {
+     }
+
+     if (!queryText) {
+       throw new Error('query requires either `query` (text) or `image` (base64 bytes).');
+     }
++    // JOSEMAR PATCH (issue #65): cross_modal image/both rejection under
++    // keyword-only is handled INSIDE the keyword-only branch above (before
++    // the keyword fallback). When keyword-only is false (the case here),
++    // cross_modal image/both routes through hybridSearchCached with the
++    // embedding transport enabled — no rejection. The previous
++    // unconditional downstream rejection was erroneous and broke enabled
++    // vector cross-modal query; it has been removed.
+
+     // v0.25.0 — capture meta side-channel. hybridSearch's return contract
+     // stays SearchResult[] (Cathedral II callers depend on that); meta
 diff --git a/src/commands/embed.ts b/src/commands/embed.ts
-index 8e385f2da113163e70bd9daaaa8e9bb9d0aa64ed..470f9674337ab76e7ebff1cf82ab1e22c63201dd 100644
+index 1a2b3c4d..5e6f7a8b 100644
 --- a/src/commands/embed.ts
 +++ b/src/commands/embed.ts
-@@ -551,6 +551,56 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
+@@ -449,7 +449,61 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
+       for (const h of sfLocks.reverse()) {
          try { await h.release(); } catch { /* best-effort; TTL covers it */ }
        }
      }
++
 +    // JOSEMAR PATCH (issue #65): finalize any matching in-flight embedding
 +    // migration after a verified zero-failure stale backfill. The split
 +    // enable-embeddings + embed-backfill flow runs `migrate embeddings --no-embed`
@@ -69,10 +279,13 @@ index 8e385f2da113163e70bd9daaaa8e9bb9d0aa64ed..470f9674337ab76e7ebff1cf82ab1e22
 +    // separately. Without this hook, the migration state marker stays set after
 +    // a successful zero-stale backfill, so:
 +    //   - planEmbeddingMigration keeps reporting `resuming: true`,
-+    //   - the next `migrate embeddings` run sees a stale marker,
++    //   - the next `migrate embeddings` no-work path sees a stale marker and
++    //     may re-probe/re-persist unnecessarily,
 +    //   - the MIGRATION_COMPLETED_KEY stamp never fires for the split flow.
 +    //
-+    // The hook runs ONLY when:
++    // This hook lives in runEmbedCore IMMEDIATELY AFTER `await embedAll(...)`
++    // (NOT inside embedAllStale, where it was unreachable for the non-stale
++    // all-source path and sat after the catch-up block). It runs ONLY when:
 +    //   1. this is a stale backfill (opts.stale === true),
 +    //   2. it explicitly targets null-signature pages
 +    //      (opts.includeNullSignature === true),
@@ -80,10 +293,10 @@ index 8e385f2da113163e70bd9daaaa8e9bb9d0aa64ed..470f9674337ab76e7ebff1cf82ab1e22
 +    //   4. there are zero failures (result.failures === 0), and
 +    //   5. a MIGRATION_STATE_KEY marker exists whose revision-aware
 +    //      migrationSignature(state.to_model, state.to_dims) matches the
-+    //      current embedding signature — the shared E5-aware comparison, so
-+    //      E5 revision drift is detected and a standalone embed --stale with
-+    //      no prior migration (or a migration to a different model) is a
-+    //      no-op.
++    //      current embedding signature (so a standalone embed --stale with
++    //      no prior migration, or a migration to a different model, is a
++    //      no-op). The comparison uses the shared E5-aware migrationSignature()
++    //      so E5 revision drift is detected.
 +    // It then calls reconcilePageSignatures + completeEmbeddingMigration (the
 +    // same finalization the full `migrate embeddings` path uses). Matching
 +    // finalization errors PROPAGATE (no blanket catch) so a real failure
@@ -100,7 +313,7 @@ index 8e385f2da113163e70bd9daaaa8e9bb9d0aa64ed..470f9674337ab76e7ebff1cf82ab1e22
 +        const state = JSON.parse(stateStr);
 +        if (state?.to_model && state?.to_dims) {
 +          const currentSig = currentEmbeddingSignature();
-+          if (currentSig !== null && migrationSignature(state.to_model, state.to_dims) === currentSig) {
++          if (migrationSignature(state.to_model, state.to_dims) === currentSig) {
 +            const plan = { to_model: state.to_model, to_dims: state.to_dims, from_model: state.from_model ?? state.to_model, from_dims: state.from_dims ?? state.to_dims };
 +            await reconcilePageSignatures(engine, plan as any);
 +            const finalRemaining = await engine.countStaleChunks({ signature: currentSig, includeNullSignature: true });
@@ -114,97 +327,39 @@ index 8e385f2da113163e70bd9daaaa8e9bb9d0aa64ed..470f9674337ab76e7ebff1cf82ab1e22
      return result;
    }
    if (opts.slug) {
-diff --git a/src/commands/jobs.ts b/src/commands/jobs.ts
-index 0db3abf6ea081a6e3fc55950042581a5e09e1592..f93ab0ea68db61a75f7c9fec7664de110a5035a7 100644
---- a/src/commands/jobs.ts
-+++ b/src/commands/jobs.ts
-@@ -104,6 +104,12 @@ const GATEWAY_REFRESH_JOB_NAMES = new Set([
-   'extract-atoms-drain',
-   'embed-backfill',
-   'extract-takes-from-pages',
-+  // JOSEMAR PATCH: chronicle_extract is LLM-backed (runChronicleExtract);
-+  // without gateway refresh it silently returned no_events when the worker's
-+  // gateway singleton was unconfigured in this code path. Route it through
-+  // the upstream refreshGatewayForJob coverage instead of duplicating
-+  // gateway configuration here.
-+  'chronicle_extract',
-   'embed-catch-up',
- ]);
-
-@@ -2296,7 +2302,10 @@ export async function registerBuiltinHandlers(
-   // LLM spend per page; no shell). Enqueued by the put_page chronicle backstop
-   // and by `gbrain chronicle backfill`. Idempotent (content-addressed event
-   // slugs + projection upsert), so a retry re-runs to the same state.
--  worker.register('chronicle_extract', async (job) => {
-+  // JOSEMAR PATCH: register via registerBuiltinJob so the
-+  // GATEWAY_REFRESH_JOB_NAMES coverage applies (refreshGatewayForJob runs
-+  // before this LLM-backed handler).
-+  registerBuiltinJob(worker, engine, 'chronicle_extract', async (job) => {
-     const slug = typeof job.data.slug === 'string' ? job.data.slug : undefined;
-     if (!slug) throw new Error('chronicle_extract job requires data.slug');
-     const sourceId = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
-diff --git a/src/commands/migrate-embeddings.ts b/src/commands/migrate-embeddings.ts
-index 6e39ec1fbfb65ca465750ca3d88d23a42c5f2ae8..49fe40f18e63aafc2b20bf217219320f7569869c 100644
---- a/src/commands/migrate-embeddings.ts
-+++ b/src/commands/migrate-embeddings.ts
-@@ -430,6 +430,20 @@ export async function persistEmbeddingFileConfig(
-   fileCfg.embedding_model = toModel;
-   fileCfg.embedding_dimensions = toDims;
-   saveConfig(fileCfg);
-+  // JOSEMAR PATCH (issue #65): clear the persisted `embedding_disabled`
-+  // sentinel when the migration successfully persists model + dimensions.
-+  // Historical brains initialized with `gbrain init --no-embedding` carry
-+  // `embedding_disabled: true` in config.json; without clearing it here, a
-+  // successful migration would leave the sentinel in place and every later
-+  // `gbrain embed` / `gbrain import` would refuse via assertEmbeddingEnabled.
-+  // This makes `enable-embeddings` (which runs `migrate embeddings --no-embed`)
-+  // the single path that both persists the target tuple AND lifts the
-+  // deferred-setup sentinel so backfill can proceed. The clear is on the FILE
-+  // plane (fileCfg), so env-sourced keys are never persisted (round-2 #2).
-+  if (fileCfg.embedding_disabled !== undefined) {
-+    fileCfg.embedding_disabled = undefined;
-+    saveConfig(fileCfg);
-+  }
-   // Reconfigure the in-process gateway from the MERGED view (env still wins
-   // at runtime; when env is set it matches the target — the ≠ case was
-   // refused before apply).
-@@ -927,6 +941,31 @@ export async function runMigrateEmbeddings(
-   // completion even on a converged brain — round-2 #6). The old
-   // three-conjunct skip trusted `from_model`, which env vars poison.
-   if (ctx.verify.complete && !ctx.inflightOther && ctx.rerankerPlan.action.kind === 'none') {
-+    // JOSEMAR PATCH (issue #65): a converged brain can still carry the
-+    // deferred-setup sentinel `embedding_disabled: true` in its FILE-plane
-+    // config (e.g. after the operator's disable-embeddings rollback, which
-+    // retains the target model/dims + vectors). This verified skip exits
-+    // before the apply path (persistEmbeddingFileConfig) would ever run, so
-+    // without this carve-out enable-embeddings could never lift the sentinel
-+    // and every later `gbrain embed` / `gbrain import` would keep refusing
-+    // via assertEmbeddingEnabled. The carve-out is the MINIMUM issue #65
-+    // behavior: FILE-plane only (loadConfigFileOnly + saveConfig — env-
-+    // sourced keys are never persisted, round-2 #2), no probe, no tuple
-+    // persistence (persistEmbeddingFileConfig), no migration finalization,
-+    // and no config mutation on `--dry-run`; the sentinel is lifted ONLY
-+    // when it is explicitly `true` (a `false` or absent key is untouched, so
-+    // the D2 skip stays a side-effect-free no-op for healthy brains). When
-+    // the sentinel IS lifted, an operator-facing note is emitted alongside
-+    // the verified-skip result below.
-+    if (!flags.dryRun) {
-+      const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
-+      const fileCfg = loadConfigFileOnly();
-+      if (fileCfg?.embedding_disabled === true) {
-+        fileCfg.embedding_disabled = undefined;
-+        saveConfig(fileCfg);
-+        serr('  [migrate] lifted the deferred-setup sentinel embedding_disabled (was true) — embeddings are now enabled.');
-+      }
+diff --git a/src/core/ai/build-gateway-config.ts b/src/core/ai/build-gateway-config.ts
+index 9a4aeae0..cb9e2d72 100644
+--- a/src/core/ai/build-gateway-config.ts
++++ b/src/core/ai/build-gateway-config.ts
+@@ -63,6 +63,23 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
+   if (c.azure_openai_endpoint) envFromConfig.AZURE_OPENAI_ENDPOINT = c.azure_openai_endpoint;
+   if (c.azure_openai_deployment) envFromConfig.AZURE_OPENAI_DEPLOYMENT = c.azure_openai_deployment;
+   if (c.azure_openai_use_entra) envFromConfig.AZURE_OPENAI_USE_ENTRA = c.azure_openai_use_entra;
++  // JOSEMAR PATCH: generic provider key bridge. Upstream maps a fixed set of
++  // providers (openai/anthropic/zeroentropy/openrouter/voyage/dashscope/google
++  // + azure-openai endpoint/deployment/entra) from config file to gateway env.
++  // All other providers (deepseek, groq, together, mistral, etc.) rely on
++  // process.env, which may not reach subprocesses (e.g. Hermes spawning gbrain
++  // via s6-overlay — the gateway process has an empty env). This generic
++  // mapping folds any config key matching *_api_key into its uppercase
++  // *_API_KEY env var ONLY when upstream has not already mapped it, so any
++  // provider key written to the config file reaches the gateway without
++  // depending on process.env propagation and without overriding the explicit
++  // mappings above.
++  // Upstream bug: #3394
++  for (const [k, v] of Object.entries(c)) {
++    if (k.endsWith('_api_key') && typeof v === 'string' && v && !(k.toUpperCase() in envFromConfig)) {
++      envFromConfig[k.toUpperCase()] = v;
 +    }
-     if (flags.json) console.log(JSON.stringify({ status: 'skipped_no_work', plan, verified: ctx.verify }, null, 2));
-     else console.log('Nothing to migrate — brain is verified on the target model (schema, vectors, signatures, config).');
-     exit(0);
++  }
+
+   // v0.32 codex finding #4+#5 fix: thread local-server _BASE_URL env vars
+   // into base_urls so the gateway hits the user's configured port. Without
 diff --git a/src/core/ai/gateway.ts b/src/core/ai/gateway.ts
-index 1ebdd038e30e5ebf00fe682c27e0902c4b51162e..6c4ba4ea8708b1c53bded8737e7d15a67b198a68 100644
+index 16e196d4..9124daeb 100644
 --- a/src/core/ai/gateway.ts
 +++ b/src/core/ai/gateway.ts
-@@ -1657,6 +1657,110 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
+@@ -1594,6 +1594,110 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
  /** Minimum sub-batch size before we give up splitting and just throw. */
  const MIN_SUB_BATCH = 1;
 
@@ -315,7 +470,7 @@ index 1ebdd038e30e5ebf00fe682c27e0902c4b51162e..6c4ba4ea8708b1c53bded8737e7d15a6
  /**
   * Embed many texts. Truncates to MAX_CHARS, then dispatches based on whether
   * the recipe declares a per-batch token budget.
-@@ -1761,7 +1865,16 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
+@@ -1698,7 +1802,16 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
    const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
    const tracker = __budgetStore.getStore() ?? null;
    const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
@@ -333,48 +488,20 @@ index 1ebdd038e30e5ebf00fe682c27e0902c4b51162e..6c4ba4ea8708b1c53bded8737e7d15a6
 
    // Reserve up front for the worst-case batch token count. Embeddings have
    // no output rate, so maxOutputTokens=0. record() at the end uses the
-diff --git a/src/core/ai/provider-env.ts b/src/core/ai/provider-env.ts
-index a72d5f44e84184984cdb683b97c207c13ab7a893..27cdeed6bc9401f24645afa4f180864902dfb148 100644
---- a/src/core/ai/provider-env.ts
-+++ b/src/core/ai/provider-env.ts
-@@ -48,6 +48,23 @@ export function mergedProviderEnv(
-   if (cfg?.azure_openai_deployment) fromConfig.AZURE_OPENAI_DEPLOYMENT = cfg.azure_openai_deployment;
-   if (cfg?.azure_openai_use_entra) fromConfig.AZURE_OPENAI_USE_ENTRA = cfg.azure_openai_use_entra;
-
-+  // JOSEMAR PATCH: generic provider key bridge. Upstream maps a fixed set of
-+  // providers (openai/anthropic/zeroentropy/openrouter/voyage/dashscope/google
-+  // + azure-openai) from config file to gateway env. All other providers
-+  // (deepseek, groq, together, mistral, etc.) rely on process.env, which may
-+  // not reach subprocesses (e.g. Hermes spawning gbrain via s6-overlay — the
-+  // gateway process has an empty env). This generic mapping folds any config
-+  // key matching *_api_key into its uppercase *_API_KEY env var ONLY when
-+  // upstream has not already mapped it, so any provider key written to the
-+  // config file reaches the gateway without depending on process.env
-+  // propagation and without overriding the explicit mappings above.
-+  // Upstream bug: #3394
-+  for (const [k, v] of Object.entries(cfg ?? {})) {
-+    if (k.endsWith('_api_key') && typeof v === 'string' && v && !(k.toUpperCase() in fromConfig)) {
-+      fromConfig[k.toUpperCase()] = v;
-+    }
-+  }
-+
-   const envReal = Object.fromEntries(
-     Object.entries(env).filter(([, v]) => v !== undefined && v !== ''),
-   ) as Record<string, string>;
 diff --git a/src/core/config.ts b/src/core/config.ts
-index 338579a695415492ba410ebdc33293c3a99deece..c48cd4730eebdd5d4527a4de51741d2eee18bba4 100644
+index 4ab5a212..00e62f4a 100644
 --- a/src/core/config.ts
 +++ b/src/core/config.ts
-@@ -667,6 +667,21 @@ export function loadConfig(): GBrainConfig | null {
+@@ -598,6 +598,21 @@ export function loadConfig(): GBrainConfig | null {
      ...(process.env.ANTHROPIC_API_KEY ? { anthropic_api_key: process.env.ANTHROPIC_API_KEY } : {}),
      ...(process.env.ZEROENTROPY_API_KEY ? { zeroentropy_api_key: process.env.ZEROENTROPY_API_KEY } : {}),
      ...(process.env.OPENROUTER_API_KEY ? { openrouter_api_key: process.env.OPENROUTER_API_KEY } : {}),
-+    // JOSEMAR PATCH: generic *_API_KEY -> *_api_key env merge.
++    // JOSEMAR PATCH: generic *_API_KEY → *_api_key env merge.
 +    // Upstream only merges a fixed set of providers (openai/anthropic/
-+    // zeroentropy/openrouter; voyage/dashscope/google/azure are file-plane
-+    // only). All other provider keys (DEEPSEEK_API_KEY, GROQ_API_KEY,
++    // zeroentropy/openrouter; voyage/dashscope/google are config-plane only).
++    // All other provider keys (DEEPSEEK_API_KEY, GROQ_API_KEY,
 +    // TOGETHER_API_KEY, MISTRAL_API_KEY, etc.) are ignored by loadConfig, so
-+    // they never reach the config object and mergedProviderEnv can't map
++    // they never reach the config object and buildGatewayConfig can't map
 +    // them. This loop folds any *_API_KEY env var into its lowercase
 +    // *_api_key config field ONLY for keys upstream has not already merged,
 +    // so the explicit mappings above are preserved and not duplicated.
@@ -388,150 +515,80 @@ index 338579a695415492ba410ebdc33293c3a99deece..c48cd4730eebdd5d4527a4de51741d2e
      ...(process.env.GBRAIN_EMBEDDING_DIMENSIONS ? { embedding_dimensions: parseInt(process.env.GBRAIN_EMBEDDING_DIMENSIONS, 10) } : {}),
      ...(process.env.GBRAIN_EXPANSION_MODEL ? { expansion_model: process.env.GBRAIN_EXPANSION_MODEL } : {}),
 diff --git a/src/core/embedding-migration.ts b/src/core/embedding-migration.ts
-index 85f4a0639c65bb2dcd6142065f3533bf44aa0de9..7d7389c584390d533008655bfcf6e706a99c0cf0 100644
+index 18b9095d..5cc1c176 100644
 --- a/src/core/embedding-migration.ts
 +++ b/src/core/embedding-migration.ts
-@@ -40,6 +40,10 @@
-
+@@ -30,6 +30,10 @@
  import type { BrainEngine } from './engine.ts';
  import { resolveRecipe, embeddingDimsForModel } from './ai/model-resolver.ts';
+ import { lookupEmbeddingPrice, estimateCostFromChars } from './embedding-pricing.ts';
 +// JOSEMAR PATCH: pull the E5 detection + revision-aware signature suffix
 +// into the migration signature so it matches currentEmbeddingSignature()'s
 +// shape (issue #65).
 +import { e5SignatureSuffix } from './ai/gateway.ts';
- import { lookupEmbeddingPrice, estimateCostFromChars } from './embedding-pricing.ts';
+ import { detectEnvOverride, type EnvOverrideWarning } from './retrieval-upgrade-planner.ts';
+ import { runSchemaTransition } from './retrieval-upgrade-planner.ts';
  import { readContentChunksEmbeddingDim } from './embedding-dim-check.ts';
- import {
-@@ -587,7 +591,19 @@ export async function readDimPinnedWidths(
+@@ -83,9 +87,23 @@ export type MigrationApplyResult =
+   | { status: 'refused'; reason: 'env_override'; warning: EnvOverrideWarning }
+   | { status: 'failed'; reason: string };
 
- /** `<provider:model>:<dims>` — must match currentEmbeddingSignature()'s shape. */
+-/** `<provider:model>:<dims>` — must match currentEmbeddingSignature()'s shape. */
++/**
++ * `<provider:model>:<dims>` — must match currentEmbeddingSignature()'s shape.
++ * JOSEMAR PATCH: for E5 models the revision-aware E5 signature suffix is
++ * appended (`#${suffix}`) so the migration signature stays identical to the
++ * embed-loop's `currentEmbeddingSignature()`. The suffix folds in the TEI
++ * model revision (from GBRAIN_EMBEDDING_MODEL_REVISION) so a revision drift
++ * is detected as stale and triggers re-embedding. Without this, the embed
++ * loop stamps pages with the version segment while the migration planner /
++ * invalidator / reconciler use the bare `<model>:<dims>` form, causing a
++ * signature divergence: version-stamped pages look perpetually stale to the
++ * migration planner, and raw (un-prefixed) E5 vectors are not detected as
++ * needing re-embed. See issue #65 safe E5 migration.
++ */
  export function migrationSignature(toModel: string, toDims: number): string {
 -  return `${toModel}:${toDims}`;
 +  const base = `${toModel}:${toDims}`;
-+  // JOSEMAR PATCH: for E5 models the revision-aware E5 signature suffix is
-+  // appended (`#${suffix}`) so the migration signature stays identical to the
-+  // embed-loop's currentEmbeddingSignature(). The suffix folds in the TEI
-+  // model revision (from GBRAIN_EMBEDDING_MODEL_REVISION) so a revision drift
-+  // is detected as stale and triggers re-embedding. Without this, the embed
-+  // loop stamps pages with the version segment while the migration planner /
-+  // invalidator / reconciler use the bare `<model>:<dims>` form, causing a
-+  // signature divergence: version-stamped pages look perpetually stale to the
-+  // migration planner, and raw (un-prefixed) E5 vectors are not detected as
-+  // needing re-embed. See issue #65 safe E5 migration.
 +  const suffix = e5SignatureSuffix(toModel);
 +  return suffix ? `${base}#${suffix}` : base;
  }
 
- // #4305 chunk-model truth helpers live with the invalidation guard
+ /**
 diff --git a/src/core/embedding.ts b/src/core/embedding.ts
-index f1b2701d45c7cbbb45418465666c72945a7dbbab..e9bf59dbb59a80e41ac4d7108bd5a84bdb6ded67 100644
+index 108b854f..a8a052e5 100644
 --- a/src/core/embedding.ts
 +++ b/src/core/embedding.ts
-@@ -11,6 +11,9 @@ import {
+@@ -11,6 +11,8 @@ import {
    embedQuery as gatewayEmbedQuery,
    getEmbeddingModel as gatewayGetModel,
    getEmbeddingDimensions as gatewayGetDims,
-+  // JOSEMAR PATCH (issue #65): E5-aware signature suffix shared with
-+  // embedding-migration.ts so both signature seams can never drift.
++  isE5EmbeddingModel,
 +  e5SignatureSuffix,
  } from './ai/gateway.ts';
  import { lookupEmbeddingPrice } from './embedding-pricing.ts';
 
-@@ -176,7 +179,13 @@ export function estimateEmbeddingCostUsd(tokens: number): number {
+@@ -177,7 +179,13 @@ export function estimateEmbeddingCostUsd(tokens: number): number {
   */
- export function currentEmbeddingSignature(): string | null {
+ export function currentEmbeddingSignature(): string {
    try {
 -    return `${gatewayGetModel()}:${gatewayGetDims()}`;
 +    const base = `${gatewayGetModel()}:${gatewayGetDims()}`;
-+    // JOSEMAR PATCH (issue #65): append the revision-aware E5 signature
-+    // suffix so raw (un-prefixed) and prefixed vectors, and vectors from a
-+    // different TEI revision, are all detected as stale / incompatible.
-+    // Non-E5 models keep the exact pre-patch signature (no version segment).
++    // JOSEMAR PATCH: append the revision-aware E5 signature suffix so raw
++    // (un-prefixed) and prefixed vectors, and vectors from a different TEI
++    // revision, are all detected as stale / incompatible. Non-E5 models keep
++    // the exact pre-patch signature (no version segment). See issue #65.
 +    const suffix = e5SignatureSuffix(gatewayGetModel());
 +    return suffix ? `${base}#${suffix}` : base;
    } catch {
-     return null;
+     return `${EMBEDDING_MODEL}:${EMBEDDING_DIMENSIONS}`;
    }
-diff --git a/src/core/ops/pages.ts b/src/core/ops/pages.ts
-index a15355815dc1801202a44e0dd7cb3f636445e7c5..35429d573e1d5d3176b8f2c7d616c04e08a9aa23 100644
---- a/src/core/ops/pages.ts
-+++ b/src/core/ops/pages.ts
-@@ -300,11 +300,23 @@ const put_page: Operation = {
-     // Skip embedding when the AI gateway has no embedding provider configured.
-     // Checks all auth env vars for the resolved provider, not just OPENAI_API_KEY,
-     // so Gemini / Ollama / Voyage brains don't silently drop embeddings (Codex C2).
-+    // JOSEMAR PATCH (issue #65): force noEmbed when the deferred-setup
-+    // sentinel `embedding_disabled: true` is present in config. The sentinel
-+    // is written by `gbrain init --no-embedding` and by the operator-only
-+    // `disable-embeddings` wrapper. Without this, put_page would call the
-+    // embedding transport even when the operator has explicitly disabled
-+    // embeddings (the gateway's isAvailable('embedding') may return true
-+    // when a provider key is configured but the operator has rolled back to
-+    // keyword-only). This makes put_page honor the runtime opt-out, and
-+    // capture inherits it because capture routes through importFromContent
-+    // with the same noEmbed flag.
-     // #4216: ctx.deferEmbeds (server-side-only context field, set by the
-     // oneshot runner) also defers — chunks land `embedding IS NULL` and the
-     // standing embed machinery backfills them outside the model loop.
-     const { isAvailable } = await import('../ai/gateway.ts');
--    const noEmbed = ctx.deferEmbeds === true || !isAvailable('embedding');
-+    const { loadConfig } = await import('../config.ts');
-+    const cfgDisabled = ctx.deferEmbeds === true || loadConfig()?.embedding_disabled === true;
-+    const noEmbed = cfgDisabled || !isAvailable('embedding');
-     // v0.31.8 (D7 / codex OV-1): thread ctx.sourceId so put_page on a
-     // multi-source brain lands in the intended source instead of the
-     // default-source clobber path. importFromContent already accepts
-diff --git a/src/core/ops/search.ts b/src/core/ops/search.ts
-index 973ba7ba56af5ee38893075141d0daa8962af77a..c3c381dcde9e4e2192d16367e5632c50557e36db 100644
---- a/src/core/ops/search.ts
-+++ b/src/core/ops/search.ts
-@@ -245,6 +245,40 @@ const query: Operation = {
-     // source_id / remote grants still resolve through resolveRequestedScope).
-     const querySourceScope = federatedSearchScope(ctx, sourceIdParam);
-
-+    // JOSEMAR PATCH (issue #65): honor the runtime keyword-only opt-out
-+    // (search.mcp_keyword_only=true) in the `query` op. Upstream's `search`
-+    // op already routes text queries to searchKeyword when keyword-only is
-+    // set (T4/D17), but the `query` op (the full-control variant) did NOT —
-+    // it always ran hybridSearch, sending query text to the embedding
-+    // provider even when the operator explicitly opted out. This patch
-+    // makes the `query` op honor the same keyword-only flag:
-+    //   - text queries use searchKeyword (no embedding transport call),
-+    //   - image-only / image-similarity queries REJECT (they require the
-+    //     embedding transport; keyword-only is the explicit opt-out of it),
-+    //   - cross_modal image/both routes also REJECT under keyword-only.
-+    // The reject is a loud OperationError so the agent surfaces the
-+    // misconfiguration instead of silently falling back to wrong results.
-+    const queryKeywordOnly = (await ctx.engine.getConfig('search.mcp_keyword_only')) === 'true';
-+    if (queryKeywordOnly) {
-+      if (imageData) { throw new OperationError('invalid_params', 'Image-similarity search requires the embedding transport, but search.mcp_keyword_only is true (keyword-only opt-out). Re-enable embeddings or use text search.', 'Set search.mcp_keyword_only false (josemar-gbrain enable-embeddings) to use image-similarity search.'); }
-+      const kwCrossModal = p.cross_modal as 'text' | 'image' | 'both' | 'auto' | undefined;
-+      if (kwCrossModal === 'image' || kwCrossModal === 'both') {
-+        throw new OperationError('invalid_params', `cross_modal='${kwCrossModal}' requires the embedding transport, but search.mcp_keyword_only is true (keyword-only opt-out). Re-enable embeddings or use cross_modal='text'.`, 'Set search.mcp_keyword_only false (josemar-gbrain enable-embeddings) to use cross-modal search.');
-+      }
-+      if (!queryText) {
-+        throw new OperationError('invalid_params', 'query requires either `query` (text) or `image` (base64 bytes).', 'Pass `query` with your search text (e.g. {"query": "acme-example roadmap"}), or `image` with base64 image bytes.');
-+      }
-+      const raw = await ctx.engine.searchKeyword(queryText, { limit: (p.limit as number) || 20, offset: (p.offset as number) || 0, ...querySourceScope });
-+      const results = dedupResults(raw);
-+      stampEvidenceSafe(results);
-+      await stampContentFlags(ctx.engine, results);
-+      await stampUnverifiedExtractions(ctx.engine, results);
-+      bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
-+      maybeCaptureSearch(ctx, queryText, results, Date.now() - startedAt, false);
-+      ctx.emitResponseMeta?.('retrieval', buildRetrievalResponseMeta(queryText, results, null, { conceptHint: true }));
-+      return results;
-+    }
-+
-     // v0.27.1: image-similarity branch. Bypasses hybridSearch (which is
-     // text-only); embeds the image via embedMultimodal and runs a direct
-     // vector search against the embedding_image column.
 diff --git a/test/ai/e5-preprocess.test.ts b/test/ai/e5-preprocess.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b7090ccf859
+index 00000000..a290ed14
 --- /dev/null
 +++ b/test/ai/e5-preprocess.test.ts
-@@ -0,0 +1,683 @@
+@@ -0,0 +1,582 @@
 +/**
 + * JOSEMAR PATCH (local-only E5 preprocessing proof) — pins the
 + * `query:`/`passage:` prefixing seam for recognized E5 embedding models.
@@ -562,10 +619,6 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 + *     actual HTTP/AI SDK boundary.
 + *   - No real provider / key / network calls: the transport is faked and
 + *     fetch is mocked.
-+ *   - The op-layer enforcement tests are source-contract tests against the
-+ *     patched files (src/core/ops/pages.ts, src/core/ops/search.ts,
-+ *     src/commands/migrate-embeddings.ts, src/commands/embed.ts): they guard
-+ *     the patch's behavioral invariants without requiring a live engine.
 + *
 + * Model representation note: gbrain stores embedding models as
 + * `provider:modelId` (colon-separated; the modelId may itself contain a
@@ -732,10 +785,11 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +
 +  test('batch split / recursive halving: prefix applied EXACTLY ONCE (no double prefix)', async () => {
 +    configureE5();
-+    // Force recursive halving by installing a transport that throws a
-+    // token-limit error on the first call (embedSubBatch halves on
-+    // isTokenLimitError), then succeeds — and asserting the values seen on
-+    // BOTH the failing and succeeding calls are prefixed exactly once.
++    // Force a tiny per-batch token budget so splitByTokenBudget fires and
++    // embedSubBatch recurses. We do this by installing a transport that
++    // throws a token-limit error on the first call (triggering recursive
++    // halving), then succeeds — and asserting the values seen on BOTH the
++    // failing and succeeding calls are prefixed exactly once.
 +    const seen: string[][] = [];
 +    let attempt = 0;
 +    __setEmbedTransportForTests(async ({ values }: any) => {
@@ -764,22 +818,31 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +    }
 +  });
 +
-+  test('repeated embed calls on the same input stay idempotent (no double prefix)', async () => {
-+    // The prefix lives ABOVE the transport, so independent calls on the same
-+    // raw input must each produce exactly one prefix (idempotency across the
-+    // higher-level retry equivalent).
++  test('SDK retry does not re-prefix (prefix lives above the transport)', async () => {
 +    configureE5();
 +    const seen: string[][] = [];
++    let attempt = 0;
 +    __setEmbedTransportForTests(async ({ values }: any) => {
 +      seen.push([...values]);
++      attempt++;
++      if (attempt === 1) {
++        // A transient error (NOT a token-limit error) — the SDK/wrapper
++        // retry path. We assert the retried call sees the SAME already-
++        // prefixed value, not a re-prefixed one.
++        throw new Error('transient network blip');
++      }
 +      return {
 +        embeddings: values.map(() => new Array(E5_DIMS).fill(0.1)),
 +        usage: { tokens: 0 },
 +      } as any;
 +    });
 +
-+    await embed(['retry me']);
-+    await embed(['retry me']);
++    // embedSubBatch does not itself retry non-token errors; it normalizes
++    // and rethrows. So we instead drive a second embed() call (the higher-
++    // level retry equivalent) and assert idempotency of the prefix across
++    // two independent calls on the same input.
++    await embed(['retry me']).catch(() => {});
++    await embed(['retry me']).catch(() => {});
 +    for (const batch of seen) {
 +      for (const v of batch) {
 +        expect(v).toBe('passage: retry me');
@@ -849,7 +912,7 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +describe('E5 preprocessing — embedding signature version', () => {
 +  test('E5 signature carries the e5-query-passage-v1 preprocessing version', () => {
 +    configureE5();
-+    const sig = currentEmbeddingSignature() ?? '';
++    const sig = currentEmbeddingSignature();
 +    // Base shape is `<provider:modelId>:<dims>`; the E5 preprocessing version
 +    // is appended so raw (un-prefixed) and prefixed vectors are incompatible.
 +    expect(sig).toContain('intfloat/multilingual-e5-small');
@@ -859,7 +922,7 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +
 +  test('non-E5 signature is UNCHANGED (no preprocessing version segment)', () => {
 +    configureOpenAI();
-+    const sig = currentEmbeddingSignature() ?? '';
++    const sig = currentEmbeddingSignature();
 +    // Exact pre-patch shape: `<provider:modelId>:<dims>` with no version suffix.
 +    expect(sig).toBe(`${OPENAI_MODEL}:${OPENAI_DIMS}`);
 +    expect(sig).not.toContain('e5-query-passage');
@@ -879,7 +942,7 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +  test('E5 signature with revision: suffix is e5-query-passage-v1@<revision>', () => {
 +    configureE5();
 +    process.env.GBRAIN_EMBEDDING_MODEL_REVISION = E5_REVISION;
-+    const sig = currentEmbeddingSignature() ?? '';
++    const sig = currentEmbeddingSignature();
 +    expect(sig).toContain('intfloat/multilingual-e5-small');
 +    expect(sig).toContain(`${E5_DIMS}`);
 +    expect(sig).toContain(`e5-query-passage-v1@${E5_REVISION}`);
@@ -888,7 +951,7 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +  test('E5 signature without revision falls back to bare preprocessing version', () => {
 +    configureE5();
 +    delete process.env.GBRAIN_EMBEDDING_MODEL_REVISION;
-+    const sig = currentEmbeddingSignature() ?? '';
++    const sig = currentEmbeddingSignature();
 +    expect(sig).toContain('e5-query-passage-v1');
 +    expect(sig).not.toContain('@');
 +  });
@@ -896,9 +959,9 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +  test('revision change causes signature change (stale detection)', () => {
 +    configureE5();
 +    process.env.GBRAIN_EMBEDDING_MODEL_REVISION = E5_REVISION;
-+    const sig1 = currentEmbeddingSignature() ?? '';
++    const sig1 = currentEmbeddingSignature();
 +    process.env.GBRAIN_EMBEDDING_MODEL_REVISION = E5_REVISION_ALT;
-+    const sig2 = currentEmbeddingSignature() ?? '';
++    const sig2 = currentEmbeddingSignature();
 +    expect(sig1).not.toBe(sig2);
 +    expect(sig1).toContain(E5_REVISION);
 +    expect(sig2).toContain(E5_REVISION_ALT);
@@ -907,7 +970,7 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +  test('non-E5 signature is UNCHANGED regardless of revision env', () => {
 +    configureOpenAI();
 +    process.env.GBRAIN_EMBEDDING_MODEL_REVISION = E5_REVISION;
-+    const sig = currentEmbeddingSignature() ?? '';
++    const sig = currentEmbeddingSignature();
 +    expect(sig).toBe(`${OPENAI_MODEL}:${OPENAI_DIMS}`);
 +    expect(sig).not.toContain('e5-query-passage');
 +    expect(sig).not.toContain(E5_REVISION);
@@ -916,7 +979,7 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +  test('empty revision env falls back to bare preprocessing version', () => {
 +    configureE5();
 +    process.env.GBRAIN_EMBEDDING_MODEL_REVISION = '   ';
-+    const sig = currentEmbeddingSignature() ?? '';
++    const sig = currentEmbeddingSignature();
 +    expect(sig).toContain('e5-query-passage-v1');
 +    expect(sig).not.toContain('@');
 +  });
@@ -932,14 +995,14 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +//     image-only / cross_modal image/both queries (which require the
 +//     embedding transport).
 +//
-+// Strategy: these are source-contract tests that inspect the patched source
-+// to prove the enforcement seams are present and correctly structured. They
-+// do NOT spin a real engine (the op handlers require a full BrainEngine +
-+// gateway context); instead they assert the code paths that gate the
-+// embedding transport are in place and ordered correctly. The transport-seam
-+// tests above already prove the transport itself is faked and captured;
-+// these tests prove the OP LAYER never reaches it under the opt-out
-+// conditions.
++// Strategy: these are source-contract tests that inspect the patched
++// operations.ts to prove the enforcement seams are present and correctly
++// structured. They do NOT spin a real engine (the op handlers require a full
++// BrainEngine + gateway context); instead they assert the code paths that
++// gate the embedding transport are in place and ordered correctly. The
++// transport-seam tests above (e5-preprocess.test.ts) already prove the
++// transport itself is faked and captured; these tests prove the OP LAYER
++// never reaches it under the opt-out conditions.
 +
 +describe('JOSEMAR PATCH — runtime opt-in/rollback enforcement (issue #65)', () => {
 +  // We read the patched source directly to prove the enforcement seams are
@@ -947,16 +1010,12 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +  // invariants without requiring a live engine.
 +  const fs = require('fs');
 +  const path = require('path');
-+
-+  // put_page moved from src/core/operations.ts to src/core/ops/pages.ts in
-+  // the upstream v0.46.x tranche-1 refactor; the query op moved to
-+  // src/core/ops/search.ts. Both hunks are rebased onto those files.
++  const opsSrc = fs.readFileSync(
++    path.join(__dirname, '..', '..', 'src', 'core', 'operations.ts'),
++    'utf-8',
++  );
 +
 +  test('put_page forces noEmbed when config embedding_disabled=true', () => {
-+    const opsSrc = fs.readFileSync(
-+      path.join(__dirname, '..', '..', 'src', 'core', 'ops', 'pages.ts'),
-+      'utf-8',
-+    );
 +    // The patch must add a loadConfig() call + embedding_disabled check that
 +    // forces noEmbed when the sentinel is present.
 +    expect(opsSrc).toContain("loadConfig()?.embedding_disabled === true");
@@ -964,10 +1023,6 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +  });
 +
 +  test('put_page noEmbed check precedes the importFromContent call', () => {
-+    const opsSrc = fs.readFileSync(
-+      path.join(__dirname, '..', '..', 'src', 'core', 'ops', 'pages.ts'),
-+      'utf-8',
-+    );
 +    // The noEmbed computation must happen BEFORE importFromContent is called
 +    // (which is where the embedding transport would be reached).
 +    const noEmbedPos = opsSrc.indexOf("const noEmbed = cfgDisabled || !isAvailable('embedding')");
@@ -978,20 +1033,14 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +  });
 +
 +  test('query op honors search.mcp_keyword_only=true for text queries', () => {
-+    const opsSrc = fs.readFileSync(
-+      path.join(__dirname, '..', '..', 'src', 'core', 'ops', 'search.ts'),
-+      'utf-8',
-+    );
 +    // The patch must add a keyword-only check in the query op that routes
 +    // text queries to searchKeyword (no embedding transport call).
 +    expect(opsSrc).toContain("queryKeywordOnly");
 +    expect(opsSrc).toContain("ctx.engine.getConfig('search.mcp_keyword_only')");
-+    // The keyword-only path must call searchKeyword (not hybridSearch). Slice
-+    // from the keyword-only block to the real (4-space) image branch, which
-+    // sits after the block; the block-internal image reject is a single line.
++    // The keyword-only path must call searchKeyword (not hybridSearch).
 +    const kwBlockPos = opsSrc.indexOf("if (queryKeywordOnly) {");
 +    expect(kwBlockPos).toBeGreaterThan(0);
-+    const kwBlockEnd = opsSrc.indexOf("\n    if (imageData) {", kwBlockPos);
++    const kwBlockEnd = opsSrc.indexOf("\n      if (imageData) {", kwBlockPos);
 +    const kwBlock = opsSrc.slice(kwBlockPos, kwBlockEnd > 0 ? kwBlockEnd : kwBlockPos + 1800);
 +    expect(kwBlock).toContain("ctx.engine.searchKeyword(queryText");
 +    // The keyword-only block must NOT call hybridSearch or embedMultimodal.
@@ -1003,10 +1052,6 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +  test('query op rejects image-only queries under keyword-only', () => {
 +    // Under keyword-only, image-only queries must REJECT (they require the
 +    // embedding transport). The patch must throw an OperationError.
-+    const opsSrc = fs.readFileSync(
-+      path.join(__dirname, '..', '..', 'src', 'core', 'ops', 'search.ts'),
-+      'utf-8',
-+    );
 +    const kwBlockPos = opsSrc.indexOf("if (queryKeywordOnly) {");
 +    const kwBlock = opsSrc.slice(kwBlockPos, kwBlockPos + 1800);
 +    expect(kwBlock).toContain("if (imageData) {");
@@ -1020,10 +1065,6 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +    // INSIDE the keyword-only branch (before the keyword fallback), so
 +    // enabled vector cross-modal query (keyword-only false) remains
 +    // available downstream via hybridSearchCached.
-+    const opsSrc = fs.readFileSync(
-+      path.join(__dirname, '..', '..', 'src', 'core', 'ops', 'search.ts'),
-+      'utf-8',
-+    );
 +    const kwBlockPos = opsSrc.indexOf("if (queryKeywordOnly) {");
 +    const kwBlock = opsSrc.slice(kwBlockPos, kwBlockPos + 1200);
 +    expect(kwBlock).toContain("kwCrossModal === 'image' || kwCrossModal === 'both'");
@@ -1035,10 +1076,6 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +    // The keyword-only check must come BEFORE the image-similarity branch
 +    // (which calls embedMultimodal). This proves the embedding transport is
 +    // never reached under keyword-only.
-+    const opsSrc = fs.readFileSync(
-+      path.join(__dirname, '..', '..', 'src', 'core', 'ops', 'search.ts'),
-+      'utf-8',
-+    );
 +    const kwPos = opsSrc.indexOf("const queryKeywordOnly =");
 +    const imageBranchPos = opsSrc.indexOf("if (imageData) {");
 +    expect(kwPos).toBeGreaterThan(0);
@@ -1048,122 +1085,44 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +
 +  test('query op does NOT reject cross_modal image/both when keyword-only is false', () => {
 +    // When keyword-only is false, cross_modal image/both must route through
-+    // hybridSearchCached (enabled vector cross-modal query). The rejection
-+    // lives ONLY inside the keyword-only branch: the downstream code after
-+    // the real (4-space) image branch must NOT contain the cross_modal
-+    // reject.
-+    const opsSrc = fs.readFileSync(
-+      path.join(__dirname, '..', '..', 'src', 'core', 'ops', 'search.ts'),
-+      'utf-8',
-+    );
-+    const kwBlockPos = opsSrc.indexOf("if (queryKeywordOnly) {");
-+    const realImageBranch = opsSrc.indexOf("\n    if (imageData) {", kwBlockPos);
-+    const downstream = opsSrc.slice(realImageBranch);
++    // hybridSearchCached (enabled vector cross-modal query). The erroneous
++    // unconditional downstream rejection has been removed: the downstream
++    // code (after the keyword-only branch returns) must NOT contain a
++    // cross_modal image/both rejection.
++    const kwBlockEnd = opsSrc.indexOf("if (imageData) {", opsSrc.indexOf("if (queryKeywordOnly) {"));
++    const downstream = opsSrc.slice(kwBlockEnd);
 +    // The downstream must NOT contain an unconditional cross_modal reject.
 +    expect(downstream).not.toContain("kwCrossModal === 'image' || kwCrossModal === 'both'");
 +  });
 +
-+  test('persistEmbeddingFileConfig clears the embedding_disabled sentinel on success', () => {
-+    // The migration's file-plane persistence must lift the deferred-setup
-+    // sentinel (`embedding_disabled: true`) when it persists the target
-+    // model + dims, so a later `gbrain embed` / `gbrain import` does not
-+    // refuse via assertEmbeddingEnabled. The clear is on the FILE plane
-+    // (fileCfg) so env-sourced keys are never persisted (round-2 #2).
++  test('migrate-embeddings no-work path probes target provider', () => {
++    // The no-work path must call probeTargetProvider before exiting.
 +    const migSrc = fs.readFileSync(
 +      path.join(__dirname, '..', '..', 'src', 'commands', 'migrate-embeddings.ts'),
 +      'utf-8',
 +    );
-+    expect(migSrc).toContain("fileCfg.embedding_disabled !== undefined");
-+    expect(migSrc).toContain("fileCfg.embedding_disabled = undefined");
-+    const clearPos = migSrc.indexOf("fileCfg.embedding_disabled = undefined");
-+    const clearBlock = migSrc.slice(clearPos, clearPos + 200);
-+    expect(clearBlock).toContain("saveConfig(fileCfg)");
++    const noWorkPos = migSrc.indexOf("if (plan.chunks_to_embed === 0 && !plan.dim_change && plan.from_model === plan.to_model) {");
++    expect(noWorkPos).toBeGreaterThan(0);
++    const noWorkBlock = migSrc.slice(noWorkPos, noWorkPos + 1200);
++    expect(noWorkBlock).toContain("probeTargetProvider(plan.to_model, plan.to_dims)");
++    expect(noWorkBlock).toContain("persistEmbeddingFileConfig(plan.to_model, plan.to_dims)");
++    expect(noWorkBlock).toContain("completeEmbeddingMigration(engine, plan)");
 +  });
 +
-+  test('D2 verified-skip clears the embedding_disabled sentinel (file-plane carve-out)', () => {
-+    // The verified no-work skip
-+    // (ctx.verify.complete && !ctx.inflightOther && ctx.rerankerPlan.action.kind === 'none')
-+    // must lift the deferred-setup sentinel BEFORE its skipped_no_work exit.
-+    // After the operator's disable-embeddings rollback the brain keeps the
-+    // target model/dims + vectors, so the next enable-embeddings run
-+    // converges (D2) and exits before the apply path (persistEmbeddingFileConfig)
-+    // would ever run — without this carve-out the sentinel would stay set and
-+    // every later `gbrain embed` / `gbrain import` would refuse via
-+    // assertEmbeddingEnabled. The carve-out is FILE-plane only
-+    // (loadConfigFileOnly + saveConfig — never env-merged loadConfig), does
-+    // NOT persist the target tuple (no persistEmbeddingFileConfig / probe /
-+    // finalization on the skip path), no config mutation on `--dry-run`:
-+    // a dry-run skip stays read-only. The sentinel is lifted ONLY when it
-+    // is explicitly `true` — an explicit `false` or an absent key is
-+    // preserved.
++  test('migrate-embeddings no-work path exits before probe in dry-run', () => {
++    // In dry-run mode, the no-work path must exit BEFORE any probe / persist
++    // / sentinel clearing / finalization so --dry-run stays side-effect-free.
 +    const migSrc = fs.readFileSync(
 +      path.join(__dirname, '..', '..', 'src', 'commands', 'migrate-embeddings.ts'),
 +      'utf-8',
 +    );
-+    const skipPos = migSrc.indexOf("if (ctx.verify.complete && !ctx.inflightOther && ctx.rerankerPlan.action.kind === 'none') {");
-+    expect(skipPos).toBeGreaterThan(0);
-+    const skipBlock = migSrc.slice(skipPos, skipPos + 1600);
-+    expect(skipBlock).toContain("skipped_no_work");
-+    // (1) dry-run non-mutation: the whole carve-out sits behind a
-+    // `!flags.dryRun` guard, and saveConfig is inside that guard.
-+    expect(skipBlock).toContain("if (!flags.dryRun) {");
-+    expect(skipBlock.indexOf("if (!flags.dryRun) {")).toBeLessThan(skipBlock.indexOf("saveConfig(fileCfg)"));
-+    // (2) explicit-false / absent preservation: only `=== true` is cleared.
-+    expect(skipBlock).toContain("fileCfg?.embedding_disabled === true");
-+    expect(skipBlock).not.toContain("fileCfg?.embedding_disabled !== undefined");
-+    expect(skipBlock).toContain("fileCfg.embedding_disabled = undefined");
-+    expect(skipBlock).toContain("saveConfig(fileCfg)");
-+    expect(skipBlock).toContain("loadConfigFileOnly()");
-+    // (3) operator note: when the sentinel IS lifted, a concise
-+    // operator-facing note is emitted, after the clear and before the
-+    // skipped_no_work result.
-+    const notePos = skipBlock.indexOf('lifted the deferred-setup sentinel embedding_disabled');
-+    expect(notePos).toBeGreaterThan(0);
-+    const clearPos = skipBlock.indexOf("fileCfg.embedding_disabled = undefined");
-+    expect(clearPos).toBeGreaterThan(0);
-+    expect(clearPos).toBeLessThan(notePos);
-+    expect(notePos).toBeLessThan(skipBlock.indexOf("skipped_no_work"));
-+    // The skip stays a pure skip: no tuple persistence, probe, or migration
-+    // finalization inside the D2 branch.
-+    expect(skipBlock).not.toContain("persistEmbeddingFileConfig(");
-+    expect(skipBlock).not.toContain("probeTargetProvider");
-+    expect(skipBlock).not.toContain("completeEmbeddingMigration");
-+  });
-+
-+  test('migrate-embeddings no-work skip is the verified upstream flow (no stale probe hunk)', () => {
-+    // The historical no-work condition
-+    // (plan.chunks_to_embed === 0 && !plan.dim_change && plan.from_model === plan.to_model)
-+    // is subsumed by planMigrationFlow's DB-reality verification (D2). The
-+    // verified skip deliberately stays side-effect-free — the D2 branch must
-+    // NOT call probeTargetProvider(plan.to_model, plan.to_dims) or
-+    // persistEmbeddingFileConfig(plan.to_model, plan.to_dims) — so this test
-+    // pins that the stale no-work hunk is GONE. The probe/tuple-persist bans
-+    // are scoped to the D2 skip branch: upstream's apply path (in
-+    // executeMigrationFlow) legitimately probes the target, so a whole-file
-+    // ban would be un-runnable against the candidate source.
-+    const migSrc = fs.readFileSync(
-+      path.join(__dirname, '..', '..', 'src', 'commands', 'migrate-embeddings.ts'),
-+      'utf-8',
-+    );
-+    expect(migSrc).toContain("ctx.verify.complete");
-+    expect(migSrc).toContain("skipped_no_work");
-+    expect(migSrc).not.toContain("plan.chunks_to_embed === 0");
-+    const skipPos = migSrc.indexOf("if (ctx.verify.complete && !ctx.inflightOther && ctx.rerankerPlan.action.kind === 'none') {");
-+    expect(skipPos).toBeGreaterThan(0);
-+    const skipBlock = migSrc.slice(skipPos, skipPos + 1600);
-+    expect(skipBlock).not.toContain("probeTargetProvider(plan.to_model, plan.to_dims)");
-+    expect(skipBlock).not.toContain("persistEmbeddingFileConfig(plan.to_model, plan.to_dims)");
-+  });
-+
-+  test('migrate-embeddings completion probe uses the shared E5-aware migrationSignature', () => {
-+    // Upstream v0.46.26.0 already uses migrationSignature() (the E5-aware
-+    // shared function) at the final completion-probe countStaleChunks — the
-+    // hunk that fixed this is upstream now, so the patch pins it instead.
-+    const migSrc = fs.readFileSync(
-+      path.join(__dirname, '..', '..', 'src', 'commands', 'migrate-embeddings.ts'),
-+      'utf-8',
-+    );
-+    expect(migSrc).toContain("signature: migrationSignature(plan.to_model, plan.to_dims)");
++    const noWorkPos = migSrc.indexOf("if (plan.chunks_to_embed === 0 && !plan.dim_change && plan.from_model === plan.to_model) {");
++    const noWorkBlock = migSrc.slice(noWorkPos, noWorkPos + 1200);
++    const dryRunExitPos = noWorkBlock.indexOf("if (flags.dryRun)");
++    const probePos = noWorkBlock.indexOf("probeTargetProvider");
++    expect(dryRunExitPos).toBeGreaterThan(0);
++    expect(probePos).toBeGreaterThan(0);
++    expect(dryRunExitPos).toBeLessThan(probePos);
 +  });
 +
 +  test('embed backfill finalizes matching in-flight migration', () => {

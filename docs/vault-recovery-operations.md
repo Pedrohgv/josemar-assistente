@@ -657,7 +657,7 @@ ids are lexically sortable UTC timestamps with a random suffix
    `gbrain doctor --json` through the private native binary with the
    canonical env (`GBRAIN_HOME`, `GBRAIN_BRAIN_REPO`, `GBRAIN_SCHEMA_PACK`
    from the `active-schema-pack` marker, `GBRAIN_SKIP_STARTUP_HOOKS=1`) and
-   waits for exit. Against the pinned v0.42.73.2 doctor schema the report
+   waits for exit. Against the pinned v0.46.26.0 doctor schema the report
    must contain the checks `connection`, `jsonb_integrity`,
    `schema_version`, and `pgvector` **exactly once each** with status `ok`;
    warnings on any other check are allowed, **any** `fail` rejects the

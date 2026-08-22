@@ -6,18 +6,31 @@ This module is NOT a test module. It provides:
     the conformance isolation contract (workspace sync, Telegram/hosted
     provider credentials, and all owned gbrain/vault-recovery jobs disabled),
     non-root ``run_as_hermes`` helpers, baseline/candidate build helpers with
-    strict candidate-ref validation, disposable source-state seeding, and
-    unconditional ``down -v --remove-orphans`` cleanup.
-  - pure helpers for candidate-ref validation, Dockerfile ``GBRAIN_REF``
-    parsing, source-state seeding, synthetic vault initialization, and
-    report writing under ``dump_folder/gbrain-conformance``.
+    strict ref validation (candidate ref + the upgrade-only baseline
+    override), disposable source-state seeding, and unconditional
+    ``down -v --remove-orphans`` cleanup.
+  - pure helpers for ref validation, Dockerfile ``GBRAIN_REF`` parsing,
+    source-state seeding, synthetic vault initialization, and report writing
+    under ``dump_folder/gbrain-conformance``.
 
 Safety model (root AGENTS.md + issue #127):
   - everything runs against a disposable Compose project (unique project
     name, disposable agent-state/credentials mounts, repo ``.env`` bypassed)
   - in-container commands run as the ``hermes`` runtime user, never root
-  - candidate refs are exact 40-hex Git SHAs only, normalized lower-case
-    BEFORE any Docker invocation
+  - candidate refs AND the upgrade-only baseline override
+    (``GBRAIN_CONFORMANCE_BASELINE_REF``) are exact 40-hex Git SHAs only,
+    normalized lower-case BEFORE any Docker invocation; invalid overrides
+    fail closed
+  - the baseline override is optional and read ONLY by upgrade workflows
+    (``up_baseline``/``build_baseline``/``effective_baseline_ref``); core
+    conformance stays bound to the committed Dockerfile pin via
+    ``baseline_gbrain_ref()``
+  - baseline builds with an explicit override also pass a ``GBRAIN_PATCH_FILE``
+    build arg selected from the static legacy mapping (old pin ->
+    ``patches/legacy/`` file, byte-identical to the production patch at
+    immutable pre-upgrade commit ``1fc78e6`` — the patch immediately before
+    the v0.46.25.0 upgrade); patch selection is derived from the validated
+    ref only and is never user-controlled
   - reports contain synthetic command/result metadata only — never
     environment dumps
   - final cleanup is unconditional ``down -v --remove-orphans``
@@ -62,6 +75,126 @@ def normalize_candidate_ref(raw: str) -> str:
             f"commit SHA, got {value!r}"
         )
     return value.lower()
+
+
+# ---------------------------------------------------------------------------
+# Upgrade-only baseline override validation
+# ---------------------------------------------------------------------------
+
+# Optional override for UPGRADE-conformance runs only: when set, the upgrade
+# suites build the BASELINE image at this exact ref (the pre-upgrade gbrain
+# commit) so the real old -> new migration is proven against the Dockerfile
+# pin. Absent means current behavior: baseline == committed Dockerfile pin.
+# Core conformance never reads this override.
+GBRAIN_CONFORMANCE_BASELINE_REF_ENV = "GBRAIN_CONFORMANCE_BASELINE_REF"
+
+
+def normalize_baseline_ref(raw: str) -> str:
+    """Validate an exact 40-hex Git commit SHA for the upgrade baseline
+    override and return it lower-cased.
+
+    Reuses the SAME exact-40-hex validation machinery as candidate refs
+    (``CANDIDATE_REF_RE``) so the override is held to identical strictness.
+    Runs BEFORE any Docker invocation: an invalid override fails closed
+    (``ValueError``) and Docker never sees an unvalidated value.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("baseline override ref must be a non-empty string")
+    value = raw.strip()
+    if not CANDIDATE_REF_RE.fullmatch(value):
+        raise ValueError(
+            "baseline override ref must be an exact 40-character hexadecimal "
+            f"Git commit SHA, got {value!r}"
+        )
+    return value.lower()
+
+
+def baseline_override_active() -> bool:
+    """True when an explicit ``GBRAIN_CONFORMANCE_BASELINE_REF`` override is
+    set (non-empty). Empty/whitespace-only means NO override (absent ->
+    current behavior unchanged). Validation itself happens in
+    ``effective_baseline_ref()``/``normalize_baseline_ref()`` before any
+    Docker invocation."""
+    return bool(os.getenv(GBRAIN_CONFORMANCE_BASELINE_REF_ENV, "").strip())
+
+
+def effective_baseline_ref() -> str:
+    """The EFFECTIVE baseline ref for upgrade workflows.
+
+    Returns the explicit ``GBRAIN_CONFORMANCE_BASELINE_REF`` override when
+    present — validated exact 40-hex, lower-cased, BEFORE any Docker
+    invocation (invalid values fail closed with ``ValueError``) — otherwise
+    the committed Dockerfile ``GBRAIN_REF`` (current behavior, unchanged).
+
+    Core conformance never calls this: it keeps ``baseline_gbrain_ref()``
+    (the Dockerfile pin) for contract/reporting.
+    """
+    if not baseline_override_active():
+        return parse_dockerfile_gbrain_ref()
+    return normalize_baseline_ref(os.getenv(GBRAIN_CONFORMANCE_BASELINE_REF_ENV, ""))
+
+
+# ---------------------------------------------------------------------------
+# Baseline patch selection (historical pins only; never user-controlled)
+# ---------------------------------------------------------------------------
+
+# Canonical CURRENT gbrain patch: the committed Dockerfile default
+# (``ARG GBRAIN_PATCH_FILE=gbrain-inline-worker-gateway.patch``). Production
+# builds and the baseline build for every ref without a legacy mapping use
+# this file, exactly as before the selectable-ARG change.
+GBRAIN_CANONICAL_PATCH_FILE = "gbrain-inline-worker-gateway.patch"
+
+# Static historical mapping: pre-upgrade gbrain pin -> the exact patch bytes
+# that ran in production for that release. Each legacy file is byte-identical
+# to ``git show <pre-upgrade-commit>:patches/gbrain-inline-worker-gateway.patch``
+# — the production patch at the immutable commit immediately before the
+# corresponding upgrade — so a historical BASELINE image is patched exactly as
+# production ran it. The mapping is STATIC: the patch file is derived from
+# the validated baseline ref and is never user-controlled (no env var can
+# select a patch file).
+#
+# Entries:
+#   - ``15b9863d…`` (v0.42.73.2) -> ``legacy/…0.42.73.2.patch``, byte-identical
+#     to ``git show 1fc78e6:patches/gbrain-inline-worker-gateway.patch`` — the
+#     production patch at immutable pre-upgrade commit 1fc78e6, immediately
+#     before the v0.46.25.0 upgrade (not merely the older pin-introduction
+#     commit 4f6a7c6).
+#   - ``055ac6c…`` (v0.46.25.0) -> ``legacy/…0.46.25.0.patch``, byte-identical
+#     to ``git show 6260504:patches/gbrain-inline-worker-gateway.patch`` — the
+#     production patch at immutable pre-upgrade commit 6260504, immediately
+#     before the v0.46.26.0 retarget.
+GBRAIN_LEGACY_PATCH_MAPPING: Mapping[str, str] = {
+    "15b9863d13635d173562a54f55a1d388bfcf546b": (
+        "legacy/gbrain-inline-worker-gateway.0.42.73.2.patch"
+    ),
+    "055ac6c75a116aafdf3d00b47c9db2294612a134": (
+        "legacy/gbrain-inline-worker-gateway.0.46.25.0.patch"
+    ),
+}
+
+
+def resolve_gbrain_patch_file(ref: str) -> str:
+    """Select the patch file (relative to ``patches/``) for a baseline build.
+
+    Derived ONLY from the validated exact 40-hex baseline ref via the static
+    ``GBRAIN_LEGACY_PATCH_MAPPING`` (fail-closed validation with the same
+    machinery as baseline refs, BEFORE any Docker invocation). Never reads
+    the environment, so the patch file cannot be user-controlled.
+
+    - a mapped historical pin -> its legacy patch file, but ONLY when that
+      file actually exists under ``patches/`` (repository-integrity check);
+    - anything else (including a mapped pin whose declared file is missing)
+      -> the canonical CURRENT patch filename; the Docker COPY/git apply then
+      fails loudly if the current patch itself is missing or does not apply.
+      There is no fallback/skip behavior.
+    """
+    normalized = normalize_baseline_ref(ref)
+    selected = GBRAIN_LEGACY_PATCH_MAPPING.get(
+        normalized, GBRAIN_CANONICAL_PATCH_FILE
+    )
+    if not (REPO_ROOT / "patches" / selected).is_file():
+        selected = GBRAIN_CANONICAL_PATCH_FILE
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +466,9 @@ class GbrainConformanceRuntime(ComposeRuntime):
         VAULT_RECOVERY_EXPORT_ENABLED=false)
       - COMPOSE_PROFILES empty (no aux-ml / embeddings sidecars)
       - ``run_as_hermes`` helpers for non-root in-container commands
-      - baseline build with no override; candidate build with an explicit
+      - baseline build/start with no override; the upgrade-only
+        ``GBRAIN_CONFORMANCE_BASELINE_REF`` override is honored ONLY when
+        explicitly set and validated; candidate build with an explicit
         validated build arg; safe same-volume recreate
       - disposable source-state seeding from the real template
       - synthetic vault init committed as hermes
@@ -408,13 +543,73 @@ class GbrainConformanceRuntime(ComposeRuntime):
 
     def baseline_gbrain_ref(self) -> str:
         """The canonical committed ``GBRAIN_REF`` parsed from
-        ``Dockerfile.hermes`` (single default, no override)."""
+        ``Dockerfile.hermes`` (single default, no override). This is the
+        ref for core conformance contract/reporting and NEVER reads the
+        upgrade baseline override."""
         return parse_dockerfile_gbrain_ref()
 
+    def effective_baseline_gbrain_ref(self) -> str:
+        """The effective baseline ref for UPGRADE workflows: the explicit
+        validated ``GBRAIN_CONFORMANCE_BASELINE_REF`` override when present
+        (fail-closed validation happens here, BEFORE any Docker call),
+        otherwise the committed Dockerfile ``GBRAIN_REF`` (unchanged
+        behavior). ``baseline_gbrain_ref()`` stays the Dockerfile pin for
+        core conformance."""
+        return effective_baseline_ref()
+
+    def up_baseline(self, *services: str, timeout: int = 600) -> None:
+        """Build/start the baseline image, passing the validated
+        ``GBRAIN_REF`` AND the selected ``GBRAIN_PATCH_FILE`` build args ONLY
+        for an explicit, validated ``GBRAIN_CONFORMANCE_BASELINE_REF``
+        override.
+
+        Without the override this is exactly ``up()`` (Dockerfile defaults
+        for both ``GBRAIN_REF`` and ``GBRAIN_PATCH_FILE``; current behavior
+        unchanged). With an explicit override the ref is validated BEFORE any
+        Docker invocation (invalid values fail closed), the patch file is
+        derived from the ref via the static legacy mapping (never
+        user-controlled), the image is built with
+        ``--build-arg GBRAIN_REF=<ref> --build-arg GBRAIN_PATCH_FILE=<file>``,
+        then started WITHOUT an implicit rebuild. Candidate build semantics
+        (``build_candidate``) are untouched."""
+        if not baseline_override_active():
+            self.up(*services, timeout=timeout)
+            return
+        ref = normalize_baseline_ref(
+            os.getenv(GBRAIN_CONFORMANCE_BASELINE_REF_ENV, "")
+        )
+        self.build(
+            *services,
+            build_args={
+                "GBRAIN_REF": ref,
+                "GBRAIN_PATCH_FILE": resolve_gbrain_patch_file(ref),
+            },
+            timeout=timeout,
+        )
+        self.start(*services, timeout=timeout)
+
     def build_baseline(self, *services: str, timeout: int = 900) -> None:
-        """Build the baseline image with NO build-arg override: the
-        Dockerfile default ``GBRAIN_REF`` is used."""
-        self.build(*services, timeout=timeout)
+        """Build the baseline image: with the validated ``GBRAIN_REF`` and
+        selected ``GBRAIN_PATCH_FILE`` build args ONLY when an explicit
+        ``GBRAIN_CONFORMANCE_BASELINE_REF`` override is set; otherwise the
+        Dockerfile defaults with NO build-arg override (current behavior
+        unchanged). The override is validated BEFORE any Docker invocation;
+        invalid values fail closed. The patch file is derived from the ref
+        via the static legacy mapping and is never user-controlled."""
+        if not baseline_override_active():
+            self.build(*services, timeout=timeout)
+            return
+        ref = normalize_baseline_ref(
+            os.getenv(GBRAIN_CONFORMANCE_BASELINE_REF_ENV, "")
+        )
+        self.build(
+            *services,
+            build_args={
+                "GBRAIN_REF": ref,
+                "GBRAIN_PATCH_FILE": resolve_gbrain_patch_file(ref),
+            },
+            timeout=timeout,
+        )
 
     def build_candidate(
         self,

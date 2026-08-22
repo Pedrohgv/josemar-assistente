@@ -191,6 +191,56 @@ RUN_DOCKER_TESTS=1 RUN_GBRAIN_AUTOPILOT_EXPERIMENT=1 \
 
 See issue #67 for the autopilot/dream follow-up discussion.
 
+## gbrain Dream Cycle-Start Recovery Conformance (issue #126/#67, #4390)
+
+An opt-in, provider-gated Docker runtime suite that builds the EXACT
+v0.46.26 candidate gbrain commit (`GBRAIN_DREAM_RECOVERY_CANDIDATE_REF`,
+an exact 40-hex SHA validated before any Docker invocation) and proves the
+#4390/v0.46.26 automatic PGLite Dream cycle-start recovery against a
+deterministic loopback Anthropic-compatible mock (the fixture
+`tests/runtime/fixtures/gbrain_dream_mock.py`, fake key only — no
+production provider credentials, no external network):
+
+1. Runs exactly `gbrain dream --phase synthesize --json` as the native
+   binary under the shared TaskNotes lock, with short bounded timings
+   (subagent timeout 10s, well below the inline drain's 30s claim lock;
+   wait timeout 8s; serial PGLite-safe inline handling) and one seeded
+   qualifying transcript.
+2. The mock returns a high-score triage verdict and a valid one-page
+   synthesis JSON but delays the first synthesis call, so the test
+   SIGKILLs the parent right after the real private `dream-inline-*`
+   child has been claimed, then proves the lock is released/reacquirable
+   and no live process remains.
+3. An IMMEDIATE identical rerun is refused with the supported
+   `skipped: cycle_already_running` report (the dead parent's cycle lock
+   is younger than the 60s holder-takeover grace); then, after the
+   stranded row's owner lease (`private_queue_lease_until`, observed via
+   `gbrain jobs get`) lapses — bounded, no `gbrain jobs cancel`, no
+   `jobs retry`, no DB writes — ONE identical rerun automatically
+   reconciles the provably-orphaned private queue at Dream cycle start:
+   the stranded row is cancelled with the machine-readable reason
+   `private_queue_reconciled: cycle startup recovery: orphaned
+   dream-inline private queue` (observable via `gbrain jobs get`), and
+   the same input completes: the page is written and visible through the
+   supported public `gbrain get` surface, and queue state is inspected
+   via `gbrain jobs list/get --json`.
+
+Honest scope: #4390/v0.46.26 incorporates the #4361/#4332 terminal-path
+lifecycle upstream. The gate claims EXACTLY automatic PGLite Dream
+cycle-start recovery of orphaned private child work; it does not claim
+mid-cycle live healing of the interrupted invocation itself. A candidate
+build failure because the canonical local patch no longer applies is an
+upgrade incompatibility to record, not a harness failure.
+
+```bash
+make test-gbrain-dream-recovery GBRAIN_DREAM_RECOVERY_CANDIDATE_REF=<40-hex-v0.46.26-sha>
+```
+
+It is skipped by default (gated on `RUN_DOCKER_TESTS=1` AND
+`RUN_GBRAIN_DREAM_RECOVERY=1` AND a non-empty candidate ref) and never
+runs on ordinary `make test`, `make test-runtime`, or `make verify`.
+Reports land under the gitignored `dump_folder/gbrain-conformance/`.
+
 ## gbrain Conformance (issue #127)
 
 An opt-in, pass/fail Docker runtime suite that mechanically validates the real
@@ -242,7 +292,9 @@ make test-gbrain-upgrade-conformance-embeddings GBRAIN_CONFORMANCE_CANDIDATE_REF
   suite's zero-event Chronicle smoke with the provider-gated event behavior.
 - `test-gbrain-upgrade-conformance` — builds an exact candidate gbrain commit
   SHA against the same disposable volumes and proves logical state survives the
-  old-pin → candidate transition.
+  effective-baseline → candidate transition (baseline = the committed
+  Dockerfile pin, or the validated upgrade-only
+  `GBRAIN_CONFORMANCE_BASELINE_REF` override; see below).
 - `test-gbrain-upgrade-conformance-embeddings` — candidate upgrade with the
   real TEI gate.
 
@@ -255,6 +307,72 @@ tags, short SHAs, URLs, and shell fragments) and normalizes to lower-case
 before any Docker invocation. The baseline image always uses the committed
 Dockerfile default; the candidate is passed only as a test-only
 `--build-arg GBRAIN_REF=<sha>` and never changes the production pin.
+
+### Upgrade baseline override (upgrade-conformance runs only)
+
+`GBRAIN_CONFORMANCE_BASELINE_REF` is an OPTIONAL, upgrade-only override for
+the BASELINE image ref. It exists for one case: when the committed
+`Dockerfile.hermes` `GBRAIN_REF` pin is the POST-upgrade gbrain commit and
+the upgrade suite must prove the real old → new migration (baseline =
+pre-upgrade commit, candidate = the committed pin).
+
+- Absent (the default): behavior is unchanged — the baseline image builds at
+  the committed Dockerfile pin, exactly like core conformance.
+- Set: the two upgrade suites build/start the baseline image with
+  `--build-arg GBRAIN_REF=<ref>` and reject a candidate equal to the
+  effective baseline. The value must be an exact 40-hex Git commit SHA,
+  validated with the same machinery as candidate refs BEFORE any Docker
+  invocation; invalid values fail closed.
+- Provenance: the suite asserts `/opt/gbrain/.git/HEAD` inside the baseline
+  container equals the effective baseline ref, and the report persists
+  `baseline_ref`, `baseline_ref_source` (`override` / `dockerfile`),
+  `dockerfile_gbrain_ref`, and the proven `baseline_source_ref` alongside the
+  candidate source-ref proof — an old-candidate downgrade cannot pass as a
+  migration.
+
+```bash
+make test-gbrain-upgrade-conformance \
+  GBRAIN_CONFORMANCE_CANDIDATE_REF=<new-40-hex> \
+  GBRAIN_CONFORMANCE_BASELINE_REF=<old-40-hex>
+```
+
+Caveats: the override is read ONLY by the two upgrade-conformance suites;
+core/chronicle/embeddings conformance stays bound to the Dockerfile pin and
+never reads it. Do not set it for non-upgrade runs, and never set it equal to
+the candidate ref (the suite rejects that as a no-op).
+
+### Historical baseline patches (legacy mapping)
+
+A baseline image for an OLD pin must be patched exactly as it was when that
+pin was validated — the current patch is rebased on the new source and does
+not apply to the old ref. A static legacy mapping in
+`tests/runtime/gbrain_conformance_support.py` (`GBRAIN_LEGACY_PATCH_MAPPING`)
+pairs the pre-upgrade pin `15b9863d13635d173562a54f55a1d388bfcf546b`
+(gbrain 0.42.73.2) with `patches/legacy/gbrain-inline-worker-gateway.0.42.73.2.patch`,
+which is byte-identical to `git show 1fc78e6:patches/gbrain-inline-worker-gateway.patch`
+— the production patch at immutable pre-upgrade commit `1fc78e6`,
+immediately before the v0.46.25.0 upgrade (not merely the older
+pin-introduction commit `4f6a7c6`).
+
+The v0.46.25 legacy mapping is distinct from that v0.42.73.2 historical
+mapping: the pre-upgrade pin `055ac6c75a116aafdf3d00b47c9db2294612a134`
+(gbrain 0.46.25.0) pairs with
+`patches/legacy/gbrain-inline-worker-gateway.0.46.25.0.patch`, byte-identical
+to `git show 62605045542ba0fcc558312f3adcdfb2771ad80f:patches/gbrain-inline-worker-gateway.patch`
+— the production patch at immutable pre-upgrade commit
+`62605045542ba0fcc558312f3adcdfb2771ad80f`, immediately before the
+v0.46.26.0 upgrade.
+
+- When the baseline override is set, the baseline build passes BOTH validated
+  build args: `--build-arg GBRAIN_REF=<ref> --build-arg GBRAIN_PATCH_FILE=<selected file>`.
+- Patch selection is derived from the validated ref only — it is never
+  user-controlled (no environment variable can select a patch file).
+- Any ref without a legacy mapping (including a mapped ref whose declared
+  file is missing from `patches/`) resolves to the canonical current patch
+  `gbrain-inline-worker-gateway.patch`; the Dockerfile applies the selected
+  file fail-loudly (`test -f` then `git apply`, no fallback/skip).
+- Candidate builds and production builds are untouched: they always apply the
+  canonical current patch via the committed `ARG GBRAIN_PATCH_FILE` default.
 
 ### Reports, cleanup, and TEI cost
 
