@@ -333,6 +333,29 @@ class GbrainSyncStalePassPatchContractTests(unittest.TestCase):
         self.assertIn("succeededPaths.push(`<stale:${pathBySlug.get(slug) ?? slug}>`)", self.region)
         self.assertIn("self-heals through the ordinary success path", self.region)
 
+    def test_unexpected_prep_failure_creates_self_clearing_sentinel(self) -> None:
+        """F2 (merge-blocking finding): an UNEXPECTED stale-pass
+        preparation/enumeration/planning failure (the outer catch) must add
+        a DEDICATED non-skippable sentinel through the existing failure
+        ledger — it hard-blocks the bookmark and self-clears once the pass
+        completes cleanly on a later run. The intentional safe skips
+        (git-history proof unavailable, mass valve, retention) stay
+        DISTINCT: they are not errors and never enter the ledger."""
+        # The outer catch records the dedicated sentinel (never auto-skipped:
+        # `<`-prefixed → non-skippable in the shared gate).
+        self.assertIn("path: `<stale-prep:${sid}>`", self.region)
+        self.assertIn("stale-file pass preparation failed", self.region)
+        self.assertIn("failedFiles.push({", self.region)
+        self.assertIn("stalePrepFailed = true;", self.region)
+        # The pass that RAN to completion (safe skips included) clears any
+        # previous prep sentinel through the ordinary success path.
+        self.assertIn("succeededPaths.push(`<stale-prep:${sid}>`)", self.region)
+        self.assertIn("if (!stalePrepFailed) succeededPaths.push", self.region)
+        # The safe outcomes remain serr-only (no failedFiles entry).
+        self.assertIn("git history proof unavailable", self.region)
+        self.assertIn("mass-delete valve", self.region)
+        self.assertIn("RETAINED, never deleted", self.region)
+
     def test_source_scoped_native_delete(self) -> None:
         self.assertIn("engine.deletePages(batch, { sourceId: sid })", self.region)
         self.assertIn("engine.deletePage(slug, { sourceId: sid })", self.region)
@@ -366,6 +389,45 @@ class GbrainSyncStalePassPatchContractTests(unittest.TestCase):
         self.assertIn("path: `<rename:${to}>`", self.sync)
         self.assertIn("rename source_path follow failed for", self.sync)
         self.assertIn("failedFiles.push({", self.sync)
+
+    def test_rename_follow_failure_integrates_existing_convergence_state(self) -> None:
+        """F1 (merge-blocking finding): the follow failure must feed the
+        EXISTING rename convergence/checkpoint gates — no separate retry
+        machinery. The shared `reconcileFailed` flag is initialized BEFORE
+        the follow and set in its catch (and the later duplicate
+        declaration is removed), so the existing
+        `if (!reconcileFailed) succeededPaths.push(<rename:…>)` /
+        `if (!reconcileFailed) await markCompleted(to)` gates correctly
+        skip on follow failure:
+
+          - `succeededPaths.push(`<rename:${to}>`)` is skipped (the follow
+            does NOT clear its own sentinel via the success path);
+          - `markCompleted(to)` is skipped (the destination is NOT banked —
+            otherwise the next run's resume filter `completed.has(r.to)`
+            would skip the rename, the follow would never retry, and the
+            row would keep the wrong source_path forever);
+          - the non-skippable `<rename:…>` sentinel hard-blocks the
+            bookmark, so the next run replays the destination rename from
+            the same diff and converges/clears through the success path."""
+        # The shared flag is hoisted before the follow block.
+        follow_pos = self.sync.find("if (renameApplied) {")
+        self.assertGreater(follow_pos, 0)
+        decl_pos = self.sync.rfind("let reconcileFailed = false;", 0, follow_pos)
+        self.assertGreater(decl_pos, 0, "reconcileFailed must be initialized before the follow")
+        # The follow catch sets it (in addition to the sentinel).
+        catch_pos = self.sync.find("} catch (followErr) {", follow_pos)
+        self.assertGreater(catch_pos, 0)
+        between = self.sync[catch_pos:catch_pos + 600]
+        self.assertIn("reconcileFailed = true;", between)
+        self.assertIn("path: `<rename:${to}>`", between)
+        # The later duplicate declaration is GONE (the #3056 block now uses
+        # the hoisted flag — the patch removes the old `let` line).
+        self.assertIn("-      let reconcileFailed = false;", self.sync)
+        # The hoisted declaration appears exactly once as an added line.
+        added_decls = self.sync.count("+      let reconcileFailed = false;")
+        self.assertEqual(added_decls, 1)
+        # No separate retry sentinel is invented for the follow.
+        self.assertNotIn("<rename-retry", self.sync)
 
     def test_part2_hunk_line_counts_consistent(self) -> None:
         marker_pos = self.sync.find(PART2_MARKER)

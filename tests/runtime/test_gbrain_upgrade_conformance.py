@@ -27,12 +27,13 @@ Runs the SAME disposable Compose project/volumes through a full upgrade:
     remains in addition to the rerun
   - core post-upgrade writes and reindex idempotency
   - issue #125 dedicated git-move probe enforced as a HARD regression
-    contract (W3): once the probe's setup is established, the moved page
-    must resolve at the new slug and through the unique-token search with
+    contract (W3): once the probe's construction is established
+    (capture/commit/``git mv``/file-existence), the FIRST refresh, the
+    moved page's resolution at the new slug, the unique-token search with
     the old slug no longer serving, and a second identical refresh must
-    not change or break that state — any observed regression FAILS the
-    gate (``inconclusive`` is retained only for genuine unestablished
-    setup conditions, never for observed behavior)
+    all hold — any observed regression FAILS the gate
+    (``inconclusive`` is retained only for genuine construction
+    failures, never for observed behavior)
   - schema-status probe classification on BOTH runtimes (PR #129 re-review):
     the baseline classification is recorded in the baseline phase and the
     candidate classification after the candidate rerun — report-only
@@ -658,13 +659,15 @@ class GbrainUpgradeConformanceRuntimeTests(
 
     def _scenario_issue_125_probe(self) -> None:
         """Issue #125 dedicated git-move probe, enforced as a HARD
-        regression contract (W3): once the probe's setup is established,
-        any observed regression (destination get/search failure, old slug
-        still serving, duplicates/stale state, a second refresh that
-        changes or breaks the fixed state) FAILS the gate. ``inconclusive``
-        is retained only for genuine unestablished setup conditions, and
-        is recorded report-only; observed behavior is never recorded as
-        ``present``/``changed_failure_mode``."""
+        regression contract (W3): once the probe's construction is
+        established (capture/commit/``git mv``/file-existence), any
+        observed regression — including a FAILING FIRST refresh, a
+        destination get/search failure, old slug still serving,
+        duplicates/stale state, or a second refresh that changes or breaks
+        the fixed state — FAILS the gate. ``inconclusive`` is retained only
+        for genuine construction failures, and is recorded report-only;
+        observed behavior is never recorded as ``present``/
+        ``changed_failure_mode``."""
         self._matrix["issue_125_git_move"] = "fail"
         classification = self._probe_issue_125_git_move()
         if classification == "inconclusive":
@@ -680,11 +683,15 @@ class GbrainUpgradeConformanceRuntimeTests(
         """Run the git-move probe on the candidate and enforce the W3 hard
         regression contract for issue #125.
 
-        Setup (capture/commit/``git mv``/file-existence/first refresh)
-        failing returns ``inconclusive`` — the scenario could not be
-        established, so no observation is possible. Once established, the
-        contract is HARD (no historical content-hash assumptions; the
-        public retrieval surfaces alone are authoritative):
+        Setup = the CONSTRUCTION steps only: capture, commit, ``git mv``
+        and destination-file existence. A construction failure returns
+        ``inconclusive`` — the scenario could not be established, so no
+        observation is possible. The FIRST ``josemar-gbrain refresh`` is
+        NOT construction: it is the first behavioral surface, so its
+        failure raises AssertionError (hard fail) like every later
+        regression. Once established, the contract is HARD (no historical
+        content-hash assumptions; the public retrieval surfaces alone are
+        authoritative):
 
           - the new slug get must resolve and the unique body-token search
             must resolve (destination get/search must not fail);
@@ -693,10 +700,11 @@ class GbrainUpgradeConformanceRuntimeTests(
           - a second identical refresh must not change or break the fixed
             state: the re-probe must classify ``fixed`` again.
 
-        Any observed regression raises AssertionError with the raw
-        evidence — it is never recorded as ``changed_failure_mode``.
+        Any observed regression (including a failing first refresh) raises
+        AssertionError with the raw evidence — it is never recorded as
+        ``changed_failure_mode``.
         """
-        # --- setup: unestablished setup conditions => inconclusive ------
+        # --- setup: construction failures => inconclusive ----------------
         try:
             ev = self.runtime.run_as_hermes(
                 "gbrain", "capture", "git-move probe token " + GIT_MOVE_TOKEN,
@@ -732,14 +740,21 @@ class GbrainUpgradeConformanceRuntimeTests(
             self._evidence.append(ev)
             if ev.returncode != 0:
                 return "inconclusive"
-            ev = self.runtime.run_as_hermes(
-                "josemar-gbrain", "refresh", timeout=300, check=False,
-            )
-            if ev.returncode != 0:
-                return "inconclusive"
-            self._evidence.append(ev)
         except Exception:
             return "inconclusive"
+
+        # --- hard contract, first refresh: failure => AssertionError -----
+        refresh_ev = self.runtime.run_as_hermes(
+            "josemar-gbrain", "refresh", timeout=300, check=False,
+        )
+        self._evidence.append(refresh_ev)
+        if refresh_ev.returncode != 0:
+            raise AssertionError(
+                "issue #125 git-move regression (W3 hard contract): the "
+                "FIRST refresh failed after valid construction "
+                f"(rc={refresh_ev.returncode} stdout={refresh_ev.stdout!r} "
+                f"stderr={refresh_ev.stderr!r})"
+            )
 
         # --- hard contract, first probe: regression => AssertionError ---
         new_ev = self.runtime.run_as_hermes(
@@ -1091,8 +1106,9 @@ class GbrainUpgradeConformanceGateStructureTests(unittest.TestCase):
         # second refresh + re-probe must stay fixed.
         self.assertIn('"josemar-gbrain", "refresh", timeout=300, check=False',
                       runtime_class)
-        # Inconclusive is retained ONLY for setup failures (capture/
-        # commit/move/file-existence/first-refresh), never for behavior.
+        # Inconclusive is retained ONLY for construction failures
+        # (capture/commit/move/file-existence), never for behavior —
+        # including the FIRST refresh, whose failure is a hard regression.
         self.assertIn('return "inconclusive"', runtime_class)
         self.assertIn("git mv", runtime_class)
         self.assertIn("GIT_MOVE_TOKEN", runtime_class)
@@ -1374,11 +1390,15 @@ class GbrainIssue125ProbeSetupTests(unittest.TestCase):
         classification, _ = self._probe(steps)
         self.assertEqual(classification, "inconclusive")
 
-    def test_inconclusive_when_refresh_fails(self) -> None:
+    def test_first_refresh_failure_hard_fails(self) -> None:
+        """The FIRST refresh is NOT construction: after capture/commit/
+        ``git mv``/file-existence succeeded, a failing refresh is an
+        OBSERVED REGRESSION and must raise AssertionError — never
+        ``inconclusive``."""
         steps = self._steps_all_ok()
         steps["refresh"] = (1, "")
-        classification, _ = self._probe(steps)
-        self.assertEqual(classification, "inconclusive")
+        with self.assertRaisesRegex(AssertionError, "FIRST refresh failed"):
+            self._probe(steps)
 
     def test_hard_contract_passes_when_fixed(self) -> None:
         """Valid setup + fixed first probe + fixed re-probe after the
@@ -1386,8 +1406,10 @@ class GbrainIssue125ProbeSetupTests(unittest.TestCase):
         inconclusive success)."""
         classification, calls = self._probe(self._steps_all_ok())
         self.assertEqual(classification, "fixed")
-        # 5 setup steps + first probe (3) + second refresh (1) + re-probe
-        # (3): the second refresh postconditions are part of the contract.
+        # 4 construction steps (capture/commit/mv/file) + first refresh (1)
+        # + first probe (3) + second refresh (1) + re-probe (3): the first
+        # refresh and the second-refresh postconditions are part of the
+        # hard contract.
         self.assertEqual(len(calls), 12)
 
     def test_present_signature_hard_fails(self) -> None:

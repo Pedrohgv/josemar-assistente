@@ -1334,7 +1334,7 @@ diff --git a/src/core/write-through.ts b/src/core/write-through.ts
 diff --git a/src/commands/sync.ts b/src/commands/sync.ts
 --- a/src/commands/sync.ts
 +++ b/src/commands/sync.ts
-@@ -1774,6 +1774,31 @@
+@@ -1774,6 +1774,43 @@
          // Destination slug occupied or invalid — treat as add; the reconcile
          // below removes the stale old row once the destination materialized.
        }
@@ -1346,10 +1346,21 @@ diff --git a/src/commands/sync.ts b/src/commands/sync.ts
 +      // would see the renamed row as stale (its recorded path is gone from
 +      // the tree) and delete a LIVE page. The value is the ACTUAL git rename
 +      // destination (repo-relative, forward-slash normalized), scoped to the
-+      // exact (source_id, new slug) live row. A follow failure is
-+      // fail-closed: the rename is not converged — a non-skippable
-+      // `<rename:…>` sentinel blocks the bookmark and disables the stale
-+      // pass for this run, so the next run retries from the same diff.
++      // exact (source_id, new slug) live row.
++      //
++      // The shared reconcile/convergence flag is initialized BEFORE the
++      // follow so a follow failure feeds the SAME gates the #3056 rename
++      // reconcile uses below (succeededPaths clear + markCompleted bank):
++      // a failed follow MUST NOT clear its own `<rename:…>` success and
++      // MUST NOT bank/mark the destination completed — otherwise the next
++      // run's resume filter (`completed.has(r.to)`) would skip the rename
++      // entirely, the follow would never retry, and the row would keep the
++      // wrong source_path forever (the exact bug this patch prevents). The
++      // non-skippable `<rename:…>` sentinel hard-blocks the bookmark, so
++      // the next run replays the destination rename from the same diff and
++      // the follow converges/clears the sentinel through the ordinary
++      // success path.
++      let reconcileFailed = false;
 +      if (renameApplied) {
 +        try {
 +          await engine.executeRaw(
@@ -1357,6 +1368,7 @@ diff --git a/src/commands/sync.ts b/src/commands/sync.ts
 +            [to.replace(/\\/g, '/'), opts.sourceId ?? DEFAULT_SOURCE_ID, newSlug],
 +          );
 +        } catch (followErr) {
++          reconcileFailed = true;
 +          failedFiles.push({
 +            path: `<rename:${to}>`,
 +            error: `rename source_path follow failed for ${to}: ${followErr instanceof Error ? followErr.message : String(followErr)}`,
@@ -1366,7 +1378,17 @@ diff --git a/src/commands/sync.ts b/src/commands/sync.ts
        // Reimport at new path (picks up content changes). Wrapped to match the
        // deletes/adds loops: a malformed renamed file is recorded to failedFiles
        // and skipped, NOT thrown uncaught. importFile still throws on content
-@@ -2277,6 +2302,164 @@
+@@ -1826,7 +1863,8 @@
+       // N attempts, which would advance the bookmark and make a transient
+       // delete outage a permanent duplicate. The sentinel clears through the
+       // ordinary success path once the rename converges on a later run.
+-      let reconcileFailed = false;
++      // (reconcileFailed is hoisted above the source_path follow — see the
++      // JOSEMAR PATCH comment there.)
+       if (!renameApplied && importResult !== undefined) {
+         const destMaterialized = importResult.status === 'imported' ||
+           (importResult.status === 'skipped' && !importResult.error && importResult.slug === newSlug);
+@@ -2277,6 +2315,184 @@
      });
    }
 
@@ -1416,6 +1438,7 @@ diff --git a/src/commands/sync.ts b/src/commands/sync.ts
 +  if (failedFiles.length === 0 && opts.sourceId) {
 +    const sid = opts.sourceId;
 +    const reconcileSyncOpts = opts.strategy ? { strategy: opts.strategy } : undefined;
++    let stalePrepFailed = false;
 +    try {
 +      // #774: scoped syncs store git-root-relative source_paths, so
 +      // relativize the walk to the git root when the scope is a subpath
@@ -1518,14 +1541,33 @@ diff --git a/src/commands/sync.ts b/src/commands/sync.ts
 +        }
 +      }
 +    } catch (e) {
-+      // Pass-level failure (enumeration/planning): fail closed — no rows
-+      // deleted, bookmark not blocked (the import phase succeeded; this is a
-+      // best-effort reconcile). Surface loudly for the operator.
-+      serr(
-+        `[sync] incremental stale-file pass error (no rows deleted): ` +
-+        `${e instanceof Error ? e.message : String(e)}`,
-+      );
++      // Unexpected stale-pass preparation/enumeration/planning failure
++      // (e.g. the rows SELECT or the walk threw): fail closed with a
++      // DEDICATED non-skippable sentinel through the shared failure
++      // ledger — it hard-blocks the bookmark (never auto-skipped) and
++      // self-clears through the ordinary success path once the pass
++      // completes cleanly on a later run. This is deliberately DISTINCT
++      // from the intentional safe outcomes above (git-history proof
++      // unavailable, mass valve, retention), which skip destructively
++      // without erroring.
++      stalePrepFailed = true;
++      const errMsg = `[sync] incremental stale-file pass error (no rows deleted): ` +
++        `${e instanceof Error ? e.message : String(e)}`;
++      serr(errMsg);
++      failedFiles.push({
++        path: `<stale-prep:${sid}>`,
++        error: `stale-file pass preparation failed: ${e instanceof Error ? e.message : String(e)}`,
++      });
 +    }
++    // A pass that RAN to completion — including every safe skip (valve
++    // trip, proof-unavailable, retention) and successful deletes — clears
++    // any previous `<stale-prep:…>` sentinel through the ordinary success
++    // path (the #3056 precedent), so a transient preparation outage never
++    // ages doctor to a permanent FAIL. NOT pushed when the pass itself
++    // failed: the failedFiles entry above is the record for that run, and
++    // clearing it in the same ledger call would delete-then-re-add it
++    // (resetting the attempt streak).
++    if (!stalePrepFailed) succeededPaths.push(`<stale-prep:${sid}>`);
 +  }
 +
    const elapsed = Date.now() - start;

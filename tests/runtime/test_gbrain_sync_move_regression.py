@@ -722,6 +722,8 @@ class GbrainSyncMoveRegressionRuntimeTests(GbrainSyncMoveRegressionTestCase):
             run("never_committed_retained", self._s2_never_committed_retained)
             run("import_failure_preserves_old_no_advance", self._s2_import_failure_blocks_sweep)
             run("delete_failure_blocks_bookmark_no_autoskip", self._s2_delete_failure_blocks_bookmark)
+            run("rename_follow_failure_blocks_and_retries", self._s2_rename_follow_failure_blocks_and_retries)
+            run("unexpected_prep_failure_blocks_and_retries", self._s2_unexpected_prep_failure_blocks_and_retries)
             run("committed_deletion_reconciles", self._s2_committed_deletion)
             run("repeated_refresh_no_duplicate", self._s2_repeated_refresh_no_duplicate)
             run("mass_valve_trips", self._s2_mass_valve)
@@ -744,9 +746,11 @@ class GbrainSyncMoveRegressionRuntimeTests(GbrainSyncMoveRegressionTestCase):
     def _pglite_query(self, sql: str, params: list) -> list[dict]:
         """Run a query against the DISPOSABLE runtime's PGLite via the
         in-container bun + @electric-sql/pglite. SYNTHETIC isolated state
-        only (read-back evidence, plus the W2 delete-failure scenario's
-        synthetic blocker DDL on the disposable brain — dropped in the same
-        scenario); never production data, never the production paths. SQL
+        only (read-back evidence, plus synthetic fault-injection DDL on the
+        disposable brain — the delete-failure trigger, the F1 rename-follow
+        trigger, and the F2 pages.source_path column rename — each
+        dropped/restored in the same scenario); never production data,
+        never the production paths. SQL
         must use $N placeholders for ALL literals so the generated bun code
         contains no single quotes (shell-safe)."""
         import json as _json
@@ -1043,6 +1047,257 @@ class GbrainSyncMoveRegressionRuntimeTests(GbrainSyncMoveRegressionTestCase):
         self.assertEqual(g.returncode, 0, g.stderr)
         self.assertIn("conformance-df-token", g.stdout)
 
+    def _s2_rename_follow_failure_blocks_and_retries(self) -> None:
+        """F1 (merge-blocking finding): a rename source_path follow failure
+        must integrate with the EXISTING rename convergence/checkpoint
+        state — hard-block the bookmark, preserve last_commit, NOT bank the
+        destination, NOT clear its own `<rename:…>` sentinel — and the next
+        run must REPLAY the destination rename, retry the follow, converge
+        and clear the sentinel.
+
+        Fault injection: a synthetic BEFORE UPDATE trigger on pages (the
+        established disposable-PGLite seam, same as the delete-failure
+        scenario) raises ONLY when `source_path` changes — updateSlug
+        (slug only) and the reimport's putPage (COALESCE-preserve leaves
+        source_path unchanged) pass through untouched, so exactly the
+        follow fails.
+
+        Baseline: a normal refresh runs AFTER the capture commit and
+        BEFORE the move + trigger. This pins last_commit AT the capture
+        commit, so the move commit's diff is `capture..move` — the OLD
+        path exists in the baseline tree and git reports a genuine rename
+        (without the baseline, the diff would span capture+move, the old
+        path would never appear in the range, and the sync would see only
+        an add — the follow would never run, which is exactly the failure
+        shape this scenario must not regress into)."""
+        slug = "inbox/f1-page"
+        new_slug = "notes/f1-page"
+        ev = self._w2(
+            "gbrain", "capture", "follow-fail token conformance-ff-token",
+            "--slug", slug, "--json",
+        )
+        self.assertEqual(ev.returncode, 0, ev.stderr)
+        self.assertIs(json.loads(ev.stdout).get("written"), True)
+        self._w2(
+            "sh", "-lc",
+            "cd /opt/data/obsidian && git add " + slug + ".md "
+            "&& git commit -qm 'f1 capture'",
+        )
+        # Baseline: a normal refresh AFTER the capture commit pins
+        # last_commit AT it (the pre-baseline bookmark predates the
+        # capture, so a move without this refresh would hide the old path
+        # from the diff range and the rename — and therefore the follow —
+        # would never run).
+        ev = self._w2("josemar-gbrain", "refresh", timeout=300)
+        self.assertEqual(ev.returncode, 0, "baseline refresh must establish the capture: " + ev.stderr)
+        baseline = self._last_commit()
+        # The move commit then diffs `capture..move` (old path present in
+        # the baseline tree → git reports a genuine rename).
+        self._w2(
+            "sh", "-lc",
+            "cd /opt/data/obsidian && git mv " + slug + ".md " + new_slug + ".md "
+            "&& git commit -qm 'f1 move'",
+        )
+        # Install the fault AFTER the baseline (and the move): the follow
+        # UPDATE is the only source_path-changing write the refresh will
+        # attempt from here on — the baseline refresh's reimport preserves
+        # source_path via COALESCE, so the trigger cannot misfire earlier.
+        self._pglite_query(
+            "CREATE FUNCTION josemar_block_source_path() RETURNS trigger AS $$ "
+            "BEGIN PERFORM 1/0; RETURN NEW; END $$ LANGUAGE plpgsql",
+            [],
+        )
+        self._pglite_query(
+            "CREATE TRIGGER josemar_block_source_path BEFORE UPDATE ON pages "
+            "FOR EACH ROW WHEN (NEW.source_path IS DISTINCT FROM OLD.source_path) "
+            "EXECUTE FUNCTION josemar_block_source_path()",
+            [],
+        )
+        try:
+            before = self._last_commit()
+            self.assertEqual(
+                before, baseline,
+                "the move commit must not be consumed before the faulted refresh",
+            )
+            # First run: the follow fails → non-skippable sentinel →
+            # hard block, last_commit frozen, destination NOT banked.
+            ev = self._w2("josemar-gbrain", "refresh", timeout=300)
+            self.assertNotEqual(ev.returncode, 0, "follow failure must block the refresh")
+            self.assertEqual(
+                self._last_commit(), before,
+                "last_commit must not advance while the follow is blocked",
+            )
+            # The destination must NOT be in the resume checkpoint.
+            rows = self._pglite_query(
+                "SELECT count(*) AS c FROM op_checkpoint_paths WHERE path = $1",
+                [new_slug + ".md"],
+            )
+            self.assertEqual(rows[0]["c"], 0, "destination must not be banked/completed")
+            # The sentinel must be recorded (open) in the failure ledger.
+            ledger = self._w2("cat", "/opt/data/.gbrain/sync-failures.jsonl")
+            self.assertEqual(ledger.returncode, 0, ledger.stderr)
+            self.assertIn("<rename:" + new_slug + ".md>", ledger.stdout)
+        finally:
+            self._pglite_query("DROP TRIGGER IF EXISTS josemar_block_source_path ON pages", [])
+            self._pglite_query("DROP FUNCTION IF EXISTS josemar_block_source_path", [])
+        # Second run: the rename is REPLAYED (not banked), the follow
+        # retries and converges, and the sentinel clears.
+        ev = self._w2("josemar-gbrain", "refresh", timeout=300)
+        self.assertEqual(ev.returncode, 0, ev.stderr)
+        self.assertEqual(self._w2_source_path(new_slug), new_slug + ".md")
+        g = self._w2("gbrain", "get", slug)
+        self.assertNotEqual(g.returncode, 0, "old slug must be swept after convergence")
+        g = self._w2("gbrain", "get", new_slug)
+        self.assertEqual(g.returncode, 0, g.stderr)
+        self.assertIn("conformance-ff-token", g.stdout)
+        ledger = self._w2("cat", "/opt/data/.gbrain/sync-failures.jsonl")
+        self.assertEqual(ledger.returncode, 0, ledger.stderr)
+        self.assertNotIn("<rename:" + new_slug + ".md>", ledger.stdout)
+        self.assertNotEqual(self._last_commit(), before, "bookmark must advance after convergence")
+
+    def _s2_unexpected_prep_failure_blocks_and_retries(self) -> None:
+        """F2 (merge-blocking finding): an UNEXPECTED stale-pass
+        preparation/enumeration/planning failure (the outer catch) must add
+        a dedicated non-skippable `<stale-prep:…>` sentinel through the
+        shared failure ledger, hard-block the bookmark and preserve
+        last_commit; a later clean run retries, converges and clears the
+        sentinel. The intentional safe skips (git-history proof
+        unavailable, mass valve, retention) are NOT errors and never enter
+        the ledger.
+
+        Fault injection: the stale pass's preparation SELECT is broken by
+        temporarily renaming ONLY the `pages.source_path` COLUMN (not the
+        table) — test-only direct PGLite manipulation on the isolated
+        synthetic runtime (there is no viable public fault seam for the
+        preparation step; the exact column is restored in the same
+        scenario, unblocking the exact state). In this M-delta refresh the
+        stale-pass rows SELECT (`SELECT slug, source_path FROM pages ...`,
+        pinned sync.ts:2374-2376) is the ONLY `pages` query of the whole
+        run — there are no renames (no T4 pre-resolve at pinned
+        sync.ts:1733-1747, no updateSlug, no source_path follow), no
+        deletes, and the modified file is silently skipped before any
+        engine query — so the renamed column breaks exactly the outer
+        catch and nothing else, preserving all other table data.
+
+        The DELTA is a committed MODIFY of a tracked markdown file whose
+        worktree parent directory is swapped, after the baseline, to an
+        UNTRACKED SYMLINKED directory pointing outside the repo whose
+        target does NOT contain the file: a baseline refresh pins
+        last_commit at the source commit so the content change diffs as a
+        plain M, and the modified loop's `!existsSync` short-circuit
+        (importOnePath, pinned sync.ts:2049) SILENTLY skips the now
+        unresolvable path — markCompleted + succeededPaths, NO failure
+        entry, NO engine/page query — before the NAV-1 isPathSafe guard
+        (pinned sync.ts:2071, which would RECORD a failure; that is
+        exactly why the file must stay absent from the symlink target).
+        The manifest stays non-empty, the import phase completes green,
+        and ONLY the stale pass's rows SELECT fails on the renamed column
+        — exactly the outer catch.
+
+        A RENAME delta cannot isolate the outer catch: the rename lane's
+        T4 pre-resolve reads `pages` at pinned sync.ts:1733-1747 BEFORE
+        the destination isPathSafe check (pinned sync.ts:1826) and BEFORE
+        the stale-pass outer catch — with the `pages` TABLE renamed, the
+        rename source resolution breaks FIRST (best-effort-swallowed and
+        the rename is marked converged), so the fault never lands in the
+        stale pass and the ordinary phase is not green. The M delta with
+        the file absent from the symlink target is the only shape where
+        the modify loop refuses SILENTLY before any DB access. (A
+        file→symlink rename cannot be used: git never pairs those as
+        renames, so the delta would decompose into delete+add and the
+        fail-closed delete/import loops would record ordinary failures —
+        skipping the pass. The same is true of a malformed-bracket add,
+        which is filtered out of the manifest entirely, making
+        totalChanges 0 and advancing the sync past the commit without
+        ever reaching the stale pass.)"""
+        # Baseline: commit a tracked markdown file under a real `ext/`
+        # dir, then refresh so last_commit pins at the source commit and
+        # the subsequent content change diffs as a plain M.
+        mod_file = "ext/f2-mod.md"
+        ext_dir = "/tmp/f2-extdir"
+        self._w2(
+            "sh", "-lc",
+            "set -eu; mkdir -p /opt/data/obsidian/ext && "
+            "printf 'f2 prep modify probe v1\\n' > /opt/data/obsidian/"
+            + mod_file + "; cd /opt/data/obsidian && git add " + mod_file + " "
+            "&& git commit -qm 'f2 prep modify source'",
+        )
+        ev = self._w2("josemar-gbrain", "refresh", timeout=300)
+        self.assertEqual(
+            ev.returncode, 0,
+            "baseline refresh must establish the modify source: " + ev.stderr,
+        )
+        # The MODIFY: content change committed as a plain M (no renames,
+        # no deletes). Then the WORKTREE `ext/` dir is swapped for a
+        # symlink to an outside dir that does NOT contain the file: the
+        # committed path is now unresolvable, so importOnePath's
+        # `!existsSync` short-circuit silently skips it — markCompleted +
+        # succeededPaths, no failure entry, no pages query (the NAV-1
+        # isPathSafe guard at pinned sync.ts:2071 would record a failure,
+        # which is exactly why the file must stay absent from the target).
+        self._w2(
+            "sh", "-lc",
+            "set -eu; cd /opt/data/obsidian && "
+            "printf 'f2 prep modify probe v2\\n' > " + mod_file + " && "
+            "git add " + mod_file + " && git commit -qm 'f2 prep modify' && "
+            "rm -rf ext && mkdir -p " + ext_dir + " && "
+            "ln -s " + ext_dir + " ext",
+        )
+        # last_commit read-back from the sources table (robust under the
+        # column fault; the public status surface also counts pages).
+        def sources_last_commit() -> str:
+            rows = self._pglite_query(
+                "SELECT last_commit FROM sources WHERE id = $1", ["default"],
+            )
+            return rows[0]["last_commit"] if rows else ""
+
+        before = sources_last_commit()
+        # Install the fault: ONLY the `pages.source_path` column is
+        # renamed, so the stale pass's rows SELECT (the only pages query
+        # in this M-delta refresh) fails with "column source_path does not
+        # exist" — every other column and all table data preserved.
+        self._pglite_query(
+            "ALTER TABLE pages RENAME COLUMN source_path TO source_path_f2_shadow",
+            [],
+        )
+        try:
+            ev = self._w2("josemar-gbrain", "refresh", timeout=300)
+            self.assertNotEqual(ev.returncode, 0, "prep failure must block the refresh")
+            # The exact outer-catch diagnostic must reach the operator
+            # surface (the refresh wrapper embeds the native sync's merged
+            # output in its failure envelope).
+            self.assertIn(
+                "[sync] incremental stale-file pass error (no rows deleted)",
+                ev.stdout + ev.stderr,
+                "the stale-pass outer-catch diagnostic must be surfaced:\n" + ev.stdout + ev.stderr,
+            )
+            self.assertIn(
+                "source_path",
+                ev.stdout + ev.stderr,
+                "the diagnostic must name the renamed column:\n" + ev.stdout + ev.stderr,
+            )
+            self.assertEqual(
+                sources_last_commit(), before,
+                "last_commit must not advance while preparation is broken",
+            )
+            ledger = self._w2("cat", "/opt/data/.gbrain/sync-failures.jsonl")
+            self.assertEqual(ledger.returncode, 0, ledger.stderr)
+            self.assertIn("<stale-prep:default>", ledger.stdout)
+        finally:
+            self._pglite_query(
+                "ALTER TABLE pages RENAME COLUMN source_path_f2_shadow TO source_path",
+                [],
+            )
+        # Remove the fault: the next run retries, converges and clears the
+        # sentinel (the pass runs to completion, so the success path clears
+        # any previous `<stale-prep:…>` row).
+        ev = self._w2("josemar-gbrain", "refresh", timeout=300)
+        self.assertEqual(ev.returncode, 0, ev.stderr)
+        ledger = self._w2("cat", "/opt/data/.gbrain/sync-failures.jsonl")
+        self.assertEqual(ledger.returncode, 0, ledger.stderr)
+        self.assertNotIn("<stale-prep:default>", ledger.stdout)
+        self.assertNotEqual(sources_last_commit(), before, "bookmark must advance after recovery")
+
     def _s2_mass_valve(self) -> None:
         """Part 2: the #2828 mass-delete valve trips on a large same-window
         sweep and NO rows are deleted (and nothing in the refresh path can
@@ -1322,6 +1577,75 @@ class GbrainSyncMoveRegressionGateStructureTests(unittest.TestCase):
         self.assertIn("self.runtime.init_synthetic_vault()", text)
         self.assertIn("self.runtime.cleanup()", text)
         self.assertIn("down -v --remove-orphans", text)
+
+    def test_rename_follow_fault_scenario_is_real_injection(self) -> None:
+        """F1 must be covered by REAL disposable fault injection (a
+        source_path-change trigger on the synthetic PGLite), not structural
+        text-only coverage: the scenario runs a BASELINE refresh after the
+        capture commit (pinning last_commit so the move diffs as a rename),
+        then installs the trigger, asserts the first refresh blocks with
+        the bookmark frozen and the destination NOT banked, drops the
+        trigger, and asserts the retry converges with the sentinel
+        cleared."""
+        text = self._runtime_text()
+        self.assertIn("CREATE TRIGGER josemar_block_source_path BEFORE UPDATE ON pages", text)
+        self.assertIn("WHEN (NEW.source_path IS DISTINCT FROM OLD.source_path)", text)
+        self.assertIn("DROP TRIGGER IF EXISTS josemar_block_source_path ON pages", text)
+        # The baseline refresh must precede the trigger install (and the
+        # move), so the move diff is `capture..move` — the old path exists
+        # in the baseline tree and git reports a genuine rename whose
+        # follow actually runs.
+        self.assertIn("baseline refresh must establish the capture", text)
+        self.assertIn("the move commit must not be consumed before the faulted refresh", text)
+        self.assertIn("last_commit must not advance while the follow is blocked", text)
+        self.assertIn("destination must not be banked/completed", text)
+        self.assertIn("op_checkpoint_paths", text)
+        self.assertIn("<rename:" + '" + new_slug + ".md' + ">", text)
+        # The retry run asserts convergence + sentinel clear.
+        self.assertIn("old slug must be swept after convergence", text)
+        self.assertIn("bookmark must advance after convergence", text)
+
+    def test_unexpected_prep_failure_scenario_is_real_injection(self) -> None:
+        """F2 must be covered by REAL disposable fault injection (a
+        temporary RENAME OF ONLY the `pages.source_path` column breaks the
+        stale-pass preparation SELECT), with the rationale for test-only
+        direct PGLite manipulation documented, the exact column restored,
+        and retry/convergence/sentinel-clear asserted. The delta is a
+        committed MODIFY whose worktree parent is swapped to an outside
+        symlink whose target does NOT contain the file, so the modify
+        loop's existsSync short-circuit silently skips it before any
+        engine/page query. NO claim survives that a rename destination
+        guard occurs before DB access: the rename lane's T4 pre-resolve
+        reads `pages` (pinned sync.ts:1733-1747) before its destination
+        isPathSafe check (pinned sync.ts:1826) and before the stale-pass
+        outer catch, so a rename delta with a broken pages schema could
+        never isolate the outer catch."""
+        text = self._runtime_text()
+        self.assertIn("ALTER TABLE pages RENAME COLUMN source_path TO source_path_f2_shadow", text)
+        self.assertIn("ALTER TABLE pages RENAME COLUMN source_path_f2_shadow TO source_path", text)
+        self.assertIn("no viable", text)
+        self.assertIn("public fault seam", text)
+        # The delta must keep the manifest non-empty (a committed MODIFY
+        # whose worktree path escapes through a symlinked dir, silently
+        # refused by the modify loop's existsSync short-circuit BEFORE any
+        # engine/page query), so the sync reaches the stale pass instead
+        # of the no-syncable-changes early advance — the failure shape
+        # this scenario must not regress into.
+        self.assertIn("ext/f2-mod.md", text)
+        self.assertIn("NAV-1", text)
+        self.assertIn("<stale-prep:default>", text)
+        self.assertIn("prep failure must block the refresh", text)
+        self.assertIn("incremental stale-file pass error (no rows deleted)", text)
+        self.assertIn("last_commit must not advance while preparation is broken", text)
+        self.assertIn("bookmark must advance after recovery", text)
+        # The safe skips stay non-erroring: the mass valve and
+        # proof-unavailable paths never enter the ledger.
+        self.assertIn("mass valve", text)
+        self.assertIn("git-history proof", text)
+        # The invalid table-rename mechanism is gone, and no claim remains
+        # that a rename destination guard occurs before DB access.
+        self.assertNotIn("ALTER TABLE pages RENAME TO pages_f2_shadow", text)
+        self.assertNotIn("refuses the destination BEFORE any DB access", text)
 
     def test_mass_scenario_proves_valve_tripped(self) -> None:
         """The mass-reconcile scenario must PROVE the #2828 valve tripped
