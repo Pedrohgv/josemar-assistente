@@ -37,7 +37,7 @@ RUN curl -fsSL -o bun-linux-x64.zip "https://github.com/oven-sh/bun/releases/dow
 # Stage 3: Install pinned gbrain CLI (deterministic ref, frozen lockfile)
 FROM ${HERMES_BASE_IMAGE} AS gbrain-builder
 
-ARG GBRAIN_REF=055ac6c75a116aafdf3d00b47c9db2294612a134
+ARG GBRAIN_REF=69aea15e8098dd2d7ac1813f8e42865186cd7c2a
 # Patch file selectable via ARG so the upgrade-conformance BASELINE build can
 # apply the HISTORICAL patch for a pre-upgrade pin (old ref ->
 # patches/legacy/gbrain-inline-worker-gateway.0.42.73.2.patch; mapping in

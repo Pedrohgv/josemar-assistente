@@ -1893,7 +1893,7 @@ class GbrainDockerLayoutContractTests(unittest.TestCase):
 
     def test_gbrain_ref_is_pinned_to_the_supported_release(self) -> None:
         self.assertIn(
-            "ARG GBRAIN_REF=055ac6c75a116aafdf3d00b47c9db2294612a134",
+            "ARG GBRAIN_REF=69aea15e8098dd2d7ac1813f8e42865186cd7c2a",
             self.src,
         )
 

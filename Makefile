@@ -119,15 +119,24 @@ test-gbrain-conformance-chronicle:
 	RUN_DOCKER_TESTS=1 RUN_GBRAIN_CHRONICLE_CONFORMANCE=1 \
 	python3 -m unittest tests.runtime.test_gbrain_conformance_chronicle -v
 
-# Dream interruption/retry conformance (issue #126): provider-gated gate that
-# SIGKILLs `gbrain dream --phase synthesize --json` mid-synthesize against a
-# loopback Anthropic-compatible mock (fake key only), then proves the honest
-# v0.46.25.0 mechanism: stranded private dream-inline-* child -> bounded
-# degraded retry (<60s, no hang) -> operator `jobs cancel` -> clean recovery.
-# No automatic <1h self-heal is claimed (upstream grace is hardcoded to 1h;
-# #4361 unmerged).
+# Dream cycle-start recovery conformance (issue #126/#67, #4390): provider-
+# gated gate that builds the EXACT v0.46.26 candidate gbrain commit
+# (GBRAIN_DREAM_RECOVERY_CANDIDATE_REF, exact 40-hex SHA validated before any
+# Docker invocation) and SIGKILLs `gbrain dream --phase synthesize --json`
+# mid-synthesize against a loopback Anthropic-compatible mock (fake key
+# only). The immediate identical rerun observes the dead-holder cycle lock
+# (skipped: cycle_already_running); after the stranded row's owner lease
+# (private_queue_lease_until via jobs get) lapses — bounded, observable,
+# no `jobs cancel`, no `jobs retry` — ONE rerun proves #4390/v0.46.26
+# automatic PGLite Dream cycle-start recovery: the provably-orphaned
+# private dream-inline-* queue is reconciled (private_queue_reconciled:
+# reason on the cancelled row) and the same input/page completes via public
+# get. The claim is exactly automatic cycle-start recovery; mid-cycle live
+# healing is not claimed.
 test-gbrain-dream-recovery:
+	@test -n "$(GBRAIN_DREAM_RECOVERY_CANDIDATE_REF)" || { echo "ERROR: GBRAIN_DREAM_RECOVERY_CANDIDATE_REF is required (exact 40-hex v0.46.26 gbrain commit SHA)" >&2; exit 2; }
 	RUN_DOCKER_TESTS=1 RUN_GBRAIN_DREAM_RECOVERY=1 \
+	GBRAIN_DREAM_RECOVERY_CANDIDATE_REF="$(GBRAIN_DREAM_RECOVERY_CANDIDATE_REF)" \
 	python3 -m unittest tests.runtime.test_gbrain_dream_recovery -v
 
 # Candidate upgrade conformance: builds an exact candidate gbrain commit SHA

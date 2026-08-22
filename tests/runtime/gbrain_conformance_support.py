@@ -145,17 +145,30 @@ def effective_baseline_ref() -> str:
 GBRAIN_CANONICAL_PATCH_FILE = "gbrain-inline-worker-gateway.patch"
 
 # Static historical mapping: pre-upgrade gbrain pin -> the exact patch bytes
-# that ran in production for that release. The legacy file is byte-identical
-# to ``git show 1fc78e6:patches/gbrain-inline-worker-gateway.patch`` — the
-# production patch at immutable pre-upgrade commit 1fc78e6, immediately
-# before the v0.46.25.0 upgrade (not merely the older pin-introduction
-# commit 4f6a7c6) — so a historical BASELINE image is patched exactly as
+# that ran in production for that release. Each legacy file is byte-identical
+# to ``git show <pre-upgrade-commit>:patches/gbrain-inline-worker-gateway.patch``
+# — the production patch at the immutable commit immediately before the
+# corresponding upgrade — so a historical BASELINE image is patched exactly as
 # production ran it. The mapping is STATIC: the patch file is derived from
 # the validated baseline ref and is never user-controlled (no env var can
 # select a patch file).
+#
+# Entries:
+#   - ``15b9863d…`` (v0.42.73.2) -> ``legacy/…0.42.73.2.patch``, byte-identical
+#     to ``git show 1fc78e6:patches/gbrain-inline-worker-gateway.patch`` — the
+#     production patch at immutable pre-upgrade commit 1fc78e6, immediately
+#     before the v0.46.25.0 upgrade (not merely the older pin-introduction
+#     commit 4f6a7c6).
+#   - ``055ac6c…`` (v0.46.25.0) -> ``legacy/…0.46.25.0.patch``, byte-identical
+#     to ``git show 6260504:patches/gbrain-inline-worker-gateway.patch`` — the
+#     production patch at immutable pre-upgrade commit 6260504, immediately
+#     before the v0.46.26.0 retarget.
 GBRAIN_LEGACY_PATCH_MAPPING: Mapping[str, str] = {
     "15b9863d13635d173562a54f55a1d388bfcf546b": (
         "legacy/gbrain-inline-worker-gateway.0.42.73.2.patch"
+    ),
+    "055ac6c75a116aafdf3d00b47c9db2294612a134": (
+        "legacy/gbrain-inline-worker-gateway.0.46.25.0.patch"
     ),
 }
 

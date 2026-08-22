@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Synthetic credential-free Anthropic-compatible mock for the issue #126
-gbrain dream interruption/retry conformance gate.
+"""Synthetic credential-free Anthropic-compatible mock for the issue #126/#67
+gbrain Dream cycle-start recovery conformance gate (#4390).
 
 Serves the Anthropic Messages API over loopback (127.0.0.1 only):
 

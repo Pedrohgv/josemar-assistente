@@ -191,11 +191,13 @@ RUN_DOCKER_TESTS=1 RUN_GBRAIN_AUTOPILOT_EXPERIMENT=1 \
 
 See issue #67 for the autopilot/dream follow-up discussion.
 
-## gbrain Dream Interruption/Retry Conformance (issue #126)
+## gbrain Dream Cycle-Start Recovery Conformance (issue #126/#67, #4390)
 
-An opt-in, provider-gated Docker runtime suite that proves the honest
-v0.46.25.0 dream interruption/retry mechanism against a deterministic
-loopback Anthropic-compatible mock (the fixture
+An opt-in, provider-gated Docker runtime suite that builds the EXACT
+v0.46.26 candidate gbrain commit (`GBRAIN_DREAM_RECOVERY_CANDIDATE_REF`,
+an exact 40-hex SHA validated before any Docker invocation) and proves the
+#4390/v0.46.26 automatic PGLite Dream cycle-start recovery against a
+deterministic loopback Anthropic-compatible mock (the fixture
 `tests/runtime/fixtures/gbrain_dream_mock.py`, fake key only — no
 production provider credentials, no external network):
 
@@ -209,29 +211,35 @@ production provider credentials, no external network):
    SIGKILLs the parent right after the real private `dream-inline-*`
    child has been claimed, then proves the lock is released/reacquirable
    and no live process remains.
-3. An identical rerun (after the stranded child's 300s claim lease and
-   the cycle lock's 60s dead-holder takeover grace elapse) terminates
-   inside a strict bounded wall-time (<60s), reports degraded/no
-   completed page tied to the stranded private work (inspected via
-   `gbrain jobs list/get --json`), and never hangs.
-4. The operator cancels the stranded job with `gbrain jobs cancel <id>`
-   (never `jobs retry`, never DB writes); an identical rerun then
-   completes normally with pages written and a terminal completed
-   outcome.
+3. An IMMEDIATE identical rerun is refused with the supported
+   `skipped: cycle_already_running` report (the dead parent's cycle lock
+   is younger than the 60s holder-takeover grace); then, after the
+   stranded row's owner lease (`private_queue_lease_until`, observed via
+   `gbrain jobs get`) lapses — bounded, no `gbrain jobs cancel`, no
+   `jobs retry`, no DB writes — ONE identical rerun automatically
+   reconciles the provably-orphaned private queue at Dream cycle start:
+   the stranded row is cancelled with the machine-readable reason
+   `private_queue_reconciled: cycle startup recovery: orphaned
+   dream-inline private queue` (observable via `gbrain jobs get`), and
+   the same input completes: the page is written and visible through the
+   supported public `gbrain get` surface, and queue state is inspected
+   via `gbrain jobs list/get --json`.
 
-Honest scope: the gate does NOT claim automatic <1h self-heal — the
-upstream foreign-queue liveness grace is hardcoded to 1h and #4361 is
-unmerged upstream. The established mechanism is bounded retry + operator
-cancel.
+Honest scope: #4390/v0.46.26 incorporates the #4361/#4332 terminal-path
+lifecycle upstream. The gate claims EXACTLY automatic PGLite Dream
+cycle-start recovery of orphaned private child work; it does not claim
+mid-cycle live healing of the interrupted invocation itself. A candidate
+build failure because the canonical local patch no longer applies is an
+upgrade incompatibility to record, not a harness failure.
 
 ```bash
-make test-gbrain-dream-recovery
+make test-gbrain-dream-recovery GBRAIN_DREAM_RECOVERY_CANDIDATE_REF=<40-hex-v0.46.26-sha>
 ```
 
 It is skipped by default (gated on `RUN_DOCKER_TESTS=1` AND
-`RUN_GBRAIN_DREAM_RECOVERY=1`) and never runs on ordinary `make test`,
-`make test-runtime`, or `make verify`. Reports land under the gitignored
-`dump_folder/gbrain-conformance/`.
+`RUN_GBRAIN_DREAM_RECOVERY=1` AND a non-empty candidate ref) and never
+runs on ordinary `make test`, `make test-runtime`, or `make verify`.
+Reports land under the gitignored `dump_folder/gbrain-conformance/`.
 
 ## gbrain Conformance (issue #127)
 
@@ -345,6 +353,15 @@ which is byte-identical to `git show 1fc78e6:patches/gbrain-inline-worker-gatewa
 — the production patch at immutable pre-upgrade commit `1fc78e6`,
 immediately before the v0.46.25.0 upgrade (not merely the older
 pin-introduction commit `4f6a7c6`).
+
+The v0.46.25 legacy mapping is distinct from that v0.42.73.2 historical
+mapping: the pre-upgrade pin `055ac6c75a116aafdf3d00b47c9db2294612a134`
+(gbrain 0.46.25.0) pairs with
+`patches/legacy/gbrain-inline-worker-gateway.0.46.25.0.patch`, byte-identical
+to `git show 62605045542ba0fcc558312f3adcdfb2771ad80f:patches/gbrain-inline-worker-gateway.patch`
+— the production patch at immutable pre-upgrade commit
+`62605045542ba0fcc558312f3adcdfb2771ad80f`, immediately before the
+v0.46.26.0 upgrade.
 
 - When the baseline override is set, the baseline build passes BOTH validated
   build args: `--build-arg GBRAIN_REF=<ref> --build-arg GBRAIN_PATCH_FILE=<selected file>`.

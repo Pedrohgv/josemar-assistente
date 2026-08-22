@@ -172,8 +172,8 @@ Immediate non-negotiables:
 ## Pinned Values
 
 - Bun: `1.3.14`
-- gbrain ref: `055ac6c75a116aafdf3d00b47c9db2294612a134`
-- gbrain version: `0.46.25.0`
+- gbrain ref: `69aea15e8098dd2d7ac1813f8e42865186cd7c2a`
+- gbrain version: `0.46.26.0`
 - Schema pack: `josemar` (state-owned custom pack extending `gbrain-base-v2`; the active schema marker in this deployment)
 
 ## gbrain Upgrade Checklist
@@ -202,7 +202,7 @@ operator MUST verify the following after rebuild and before deploying:
    chronicle commands (`gbrain day`, `gbrain since`,
    `gbrain last-seen`, `gbrain orient`) still exist and behave as
    documented; `gbrain chronicle-backfill` (operator-only) is verified the
-   same way. As of v0.46.25.0, `auto_chronicle` is a registered
+   same way. As of v0.46.26.0, `auto_chronicle` is a registered
    `KNOWN_CONFIG_KEYS` entry, so it no longer requires the `--force` flag that
    the v0.42.57.0 config-key registry bug forced. The chronicle judge token
    limit is now raised through the supported `chronicle.judge_max_tokens=8000`
@@ -270,7 +270,7 @@ operator MUST verify the following after rebuild and before deploying:
    - **Bundled fixture** (`test/ai/e5-preprocess.test.ts`): the patch
      adds its own test file pinning the E5 seams; keep it in sync when
      re-creating the patch.
-   - **Chronicle judge token limit.** As of v0.46.25.0, the chronicle judge
+   - **Chronicle judge token limit.** As of v0.46.26.0, the chronicle judge
      token limit is raised through the supported
      `chronicle.judge_max_tokens=8000` configuration key (set during
      activation) instead of the previous source patch/sed on
@@ -289,7 +289,15 @@ operator MUST verify the following after rebuild and before deploying:
      immediately before the v0.46.25.0 upgrade (not merely the older
      pin-introduction commit `4f6a7c6`): the legacy file is byte-identical
      to `git show 1fc78e6:patches/gbrain-inline-worker-gateway.patch` — do
-     not edit it or add a header. The static ref → patch mapping lives in
+     not edit it or add a header. The v0.46.25 legacy mapping is distinct
+     from that v0.42.73.2 historical mapping: the pre-upgrade pin
+     `055ac6c75a116aafdf3d00b47c9db2294612a134` (gbrain 0.46.25.0) maps to
+     `patches/legacy/gbrain-inline-worker-gateway.0.46.25.0.patch`,
+     byte-identical to
+     `git show 62605045542ba0fcc558312f3adcdfb2771ad80f:patches/gbrain-inline-worker-gateway.patch`
+     — the production patch at immutable pre-upgrade commit
+     `62605045542ba0fcc558312f3adcdfb2771ad80f`, immediately before the
+     v0.46.26.0 upgrade — do not edit it or add a header. The static ref → patch mapping lives in
      `tests/runtime/gbrain_conformance_support.py`
      (`GBRAIN_LEGACY_PATCH_MAPPING`) and is never user-controlled. Any ref
      without a legacy mapping (or a mapped ref whose declared file is missing
@@ -301,7 +309,7 @@ operator MUST verify the following after rebuild and before deploying:
    The patch is documented inline in `Dockerfile.hermes`. Remove individual
    hunks when their corresponding behavior is fixed upstream.
 
-8. **Migrations / activation.** The v0.46.25.0 upgrade introduces database
+8. **Migrations / activation.** The v0.46.26.0 upgrade introduces database
    schema migrations. These MUST be applied by running the activation
    (`josemar-gbrain reindex`) against the rebuilt image before the upgraded
    gbrain is considered ready. Reindex runs `gbrain init`/schema setup, which
@@ -360,17 +368,21 @@ operator MUST verify the following after rebuild and before deploying:
     replace — the recovery/deploy validation (vault-recovery DR drill, deploy
     workflow) and the operator runbook checks above.
 
-## v0.42.73.2 → v0.46.25.0 Migration and Rollback (issue #126)
+## v0.42.73.2 → v0.46.26.0 Migration and Rollback (issue #126)
 
 This upgrade is a state-mutating event, not a binary swap: activation applies
-new PGLite database migrations v126–v135 to the state under
+new PGLite database migrations v126–v136 to the state under
 `$GBRAIN_HOME/.gbrain`. Treat it as a migration with the fail-safe policy
 below.
 
-### Migration surface (v126–v135)
+### Migration surface (v126–v136)
 
-- **v126, v127, v130, v132, v133, v134, v135** — additive/index/check changes
-  (new columns, indexes, and check constraints; no row transformation).
+- **v126, v127, v130, v132, v133, v134, v135** — additive/index/check
+  changes (new columns, indexes, and check constraints; no row
+  transformation).
+- **v136** — additive (nullable metadata columns and indexes; no row
+  transformation). It is introduced by the v0.46.26 retarget and does not
+  change the restore-not-reversion rollback policy below.
 - **v128** — state-transforming: backfills minion timeout values and cancels
   duplicate autopilot-cycle rows.
 - **v129** — Dream verdict columns: rolling back from a v129-applied schema
@@ -395,7 +407,7 @@ below.
    Hermes and server Syncthing before any destructive step (see "Cron
    Pause/Resume for Maintenance Windows" and AGENTS.md rule 5).
 3. **Upgrade** the image and run activation (`josemar-gbrain reindex`) so
-   migrations v126–v135 apply, per the checklist above.
+   migrations v126–v136 apply, per the checklist above.
 4. **Rollback after migrations is a RESTORE, not a reversion.** Restore the
    pre-upgrade recovery generation (vault + `.gbrain`) together with the
    pre-upgrade image/ref. Never downgrade the binary alone against the
@@ -404,31 +416,49 @@ below.
 
 ### Stable-target assessment
 
-v0.46.25.0 includes the v0.46.2 self-heal (#4164/#4110). The #4332/#4361
-terminal-path wave remains unmerged upstream and is NOT claimed by this
-upgrade.
+v0.46.26.0 includes the v0.46.2 self-heal (#4164/#4110). #4390/v0.46.26
+incorporates the #4361/#4332 terminal-path lifecycle: automatic PGLite
+Dream cycle-start recovery of orphaned private child work, proven by the
+Dream recovery gate below against the exact v0.46.26 candidate. The claim
+is exactly that — automatic recovery at the next invocation's cycle
+start; mid-cycle live healing of an interrupted invocation is not
+claimed. v0.46.27 is deliberately excluded: it carries unrelated
+autopilot config, not the Dream recovery lifecycle.
 
 ### Dream conformance evidence
 
-Run `make test-gbrain-dream-recovery` after rebuilding the final image. The
-isolated gate kills a locked `dream --phase synthesize` parent after it creates
-private child work, proves the identical retry is bounded and degraded rather
-than wedged, cancels the stranded child through `gbrain jobs cancel`, then
-proves the identical retry completes. It records the v0.46.25.0 mechanism
-honestly: bounded retry plus supported operator recovery, not a claim of
-automatic self-healing inside the upstream one-hour foreign-queue grace.
+Run `make test-gbrain-dream-recovery GBRAIN_DREAM_RECOVERY_CANDIDATE_REF=<40-hex>`
+against the exact v0.46.26 candidate commit (the ref is validated as an
+exact 40-hex SHA before any Docker invocation). The isolated gate SIGKILLs
+a locked `dream --phase synthesize` parent after it has claimed a private
+`dream-inline-*` child; an immediate identical rerun is refused with the
+supported `skipped: cycle_already_running` report (the dead parent's cycle
+lock is younger than the 60s holder-takeover grace), then — after the
+stranded row's owner lease (`private_queue_lease_until`, observed via
+`gbrain jobs get`) lapses, bounded and without any manual cancellation —
+ONE identical rerun automatically reconciles the provably orphaned queue
+at cycle start: the stranded row is cancelled with the machine-readable
+reason `private_queue_reconciled: cycle startup recovery: orphaned
+dream-inline private queue` (observable via `gbrain jobs get`), and the
+same input and page complete via the public `gbrain get` surface. It
+records #4390/v0.46.26 honestly: automatic PGLite cycle-start recovery
+(incorporating the #4361/#4332 lifecycle), not mid-cycle live healing of
+the interrupted invocation itself.
 
-## v0.46.25.0 Dream Compatibility Contract (issue #126/#67 handoff)
+## v0.46.26.0 Dream Compatibility Contract (issue #126/#67 handoff)
 
 The pinned Dream cycle is governed by explicit config routes and bounded
 defaults. Operators must not assume unvalidated model selection.
 
 ### Routing and config
 
-- Triage route: `models.dream.triage`; synthesis route:
-  `models.dream.synthesize`. Each resolves in order: CLI flag → route key →
-  deprecated key → `models.default` → key-aware tier default → caller
-  fallback; they are independent — do not assume one implies the other.
+- Model selection is config-only: the Dream command has NO `--model` CLI
+  flag. Triage and synthesis route independently:
+  - Synthesis: `models.dream.synthesize` → deprecated key → default →
+    tier → `GBRAIN_MODEL` → key-aware → caller fallback.
+  - Triage: explicit `models.dream.triage` wins; otherwise its verdict →
+    deprecated key → default → utility tier → `GBRAIN_MODEL` → key-aware →
+    caller chain.
 - Do not select a production #67 model: #67 is not validated for this
   deployment, and the #126 Dream gate covers only the Anthropic-compatible
   route.
@@ -459,8 +489,12 @@ produced under a different route/model.
 - `dream.synthesize.inline_concurrency`: optional 1 (PGLite serial) for
   synthesis child work.
 
-This contract does not claim automatic #4361 recovery; rollback remains
-covered by the fail-safe policy in the migration section above.
+The final contract claims exactly automatic PGLite Dream cycle-start
+reconciliation of provably orphaned owned private work at the next invocation:
+no manual cancellation; a bounded, observable owner-lease expiry rather than a
+blind fixed sleep. It does not claim mid-cycle live healing of an interrupted
+invocation. Rollback remains covered by the fail-safe policy in the migration
+section above.
 
 ## Environment Defaults
 

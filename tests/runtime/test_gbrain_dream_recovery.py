@@ -1,10 +1,12 @@
-"""Opt-in provider-gated gbrain dream interruption/retry conformance gate
-(issue #126).
+"""Opt-in provider-gated gbrain Dream cycle-start recovery conformance gate
+(issue #126/#67, #4390).
 
-Runs the REAL pinned gbrain dream synthesize lifecycle (``GBRAIN_REF`` in
-``Dockerfile.hermes``, v0.46.25.0) inside the disposable conformance
-runtime against a deterministic synthetic Anthropic-compatible mock,
-proving the honest v0.46.25.0 interruption/retry mechanism:
+Runs the REAL gbrain Dream synthesize lifecycle at the EXACT v0.46.26
+candidate commit (``GBRAIN_DREAM_RECOVERY_CANDIDATE_REF``, an exact 40-hex
+SHA validated before any Docker invocation; the image is built with
+``--build-arg GBRAIN_REF=<ref>`` against the same disposable conformance
+runtime) with a deterministic synthetic Anthropic-compatible mock, proving
+the v0.46.26 automatic recovery mechanism:
 
   - baseline isolation contract (empty credentials, disabled owned jobs,
     synthetic vault) with the plain Hermes-only runtime (no overlays)
@@ -29,34 +31,41 @@ proving the honest v0.46.25.0 interruption/retry mechanism:
     the real private ``dream-inline-*`` child has been claimed; then the
     test proves the global lock is released/reacquirable and no live
     parent/native process remains
-  - bounded retry: after the stranded child's 300s claim lease (+15s stall
-    grace) and the cycle lock's 60s dead-holder takeover grace elapse, a
-    rerun with identical input terminates inside a strict bounded wall-time
-    (< 60s), reports degraded/no completed page while tied to the stranded
-    private work (the coalesced child in the foreign ``dream-inline-*``
-    queue, requeued to 'waiting' by the retry's own stall sweep), and never
-    hangs; private queue/idempotency state is inspected through the
-    supported ``gbrain jobs list/get --json`` surface
-  - recovery: the operator cancels the stranded job with the supported
-    ``gbrain jobs cancel <id>`` (never ``jobs retry``, never DB writes);
-    an identical rerun then completes normally (pages written, terminal
-    completed outcome)
+  - automatic recovery: an IMMEDIATE identical invocation is refused with
+    the supported ``skipped: cycle_already_running`` report (the dead
+    parent's cycle lock is younger than the 60s holder-takeover grace);
+    then, after the stranded row's owner lease
+    (``private_queue_lease_until``, observed via ``gbrain jobs get``)
+    lapses — bounded, no manual cancellation, no ``jobs retry``, no DB
+    writes — ONE identical rerun automatically reconciles the provably
+    orphaned private queue at Dream cycle start: the stranded row is
+    cancelled with the machine-readable reason
+    ``private_queue_reconciled: cycle startup recovery: orphaned
+    dream-inline private queue`` (observable via ``gbrain jobs get``), and
+    the same input completes: the page is written and visible through the
+    supported public ``gbrain get`` surface; private queue/idempotency
+    state is inspected through the supported ``gbrain jobs list/get
+    --json`` surface
 
-Honest scope: this gate does NOT claim automatic <1h self-heal — the
-upstream foreign-queue liveness grace (``DREAM_INLINE_LIVE_GRACE_MS``) is
-hardcoded to 1h and the #4361 terminal-path wave is unmerged upstream. The
-established mechanism is bounded retry + operator cancel, exactly what
-this gate asserts.
+Honest scope: #4390/v0.46.26 incorporates the #4361/#4332 terminal-path
+lifecycle upstream. This gate claims EXACTLY automatic PGLite Dream
+cycle-start recovery of orphaned private child work at the next
+invocation's cycle start; it does not claim mid-cycle live healing of the
+interrupted invocation itself. A candidate build failure because the
+canonical local patch no longer applies is an upgrade incompatibility to
+record, not a harness failure.
 
 Runtime execution is gated strictly on ``RUN_DOCKER_TESTS=1`` AND
-``RUN_GBRAIN_DREAM_RECOVERY=1`` and skips when the docker CLI is absent.
-Fast host-side gate/mock/safety structure tests in this module always run
-and need no Docker.
+``RUN_GBRAIN_DREAM_RECOVERY=1`` AND a non-empty
+``GBRAIN_DREAM_RECOVERY_CANDIDATE_REF`` and skips when the docker CLI is
+absent. Fast host-side gate/mock/safety structure tests in this module
+always run and need no Docker.
 """
 
 from __future__ import annotations
 
 import base64
+import datetime
 import hashlib
 import json
 import os
@@ -72,6 +81,7 @@ from .gbrain_conformance_support import (
     CommandEvidence,
     GbrainConformanceRuntime,
     conformance_report_dir,
+    normalize_candidate_ref,
     write_report,
 )
 from .helpers import REPO_ROOT, docker_available
@@ -110,24 +120,28 @@ DREAM_SYNTH_MODEL = "claude-dream-synth-test"
 
 # Short bounded timings (issue #126 gate). DREAM_SUBAGENT_TIMEOUT_MS (10s)
 # is well below the inline drain's 30s claim lock (INLINE_LOCK_MS) and the
-# per-child wait (8s) bounds the retry's wait on the stranded child, so a
-# killed run can never wedge the rerun: it degrades inside
-# DREAM_RETRY_WALL_CLOCK_LIMIT_S (60s) instead of hanging.
+# per-child wait (8s) bounds each run's wait on a child, so a killed run can
+# never wedge the automatic recovery rerun: it reconciles and completes
+# inside DREAM_RETRY_WALL_CLOCK_LIMIT_S (60s) instead of hanging.
 DREAM_SUBAGENT_TIMEOUT_MS = 10000
 DREAM_SUBAGENT_WAIT_TIMEOUT_MS = 8000
 DREAM_SYNTH_DELAY_MS = 30000  # mock delay for the FIRST synthesis call (kill window)
 DREAM_RETRY_WALL_CLOCK_LIMIT_S = 60
 
-# The retry must run AFTER the stranded child's claim lease expires. The
-# subagent handler's default lock lease is 300s (HANDLER_DEFAULT_LOCK_DURATION_MS
-# long-lane default), plus the 15s stall-reclaim grace: a retry inside that
-# window would dead-letter the stranded row (handleTimeouts -> 'dead',
-# SYNTH_ALL_CHILDREN_DEAD) instead of leaving it operator-cancellable. This
-# single wait (5m20s from the interrupted run's launch) covers BOTH the 300s
-# child lease + 15s stall grace AND the pinned cycle lock's 60s dead-holder
-# takeover grace (HOLDER_TAKEOVER_GRACE_MS). The retry INVOCATION itself must
-# still finish inside DREAM_RETRY_WALL_CLOCK_LIMIT_S.
-DREAM_STRANDED_RETRY_WAIT_S = 320
+# v0.46.26 automatic cycle-start recovery (issue #4390): the owner lease of
+# an inline PGLite dream-inline-* queue is DEFAULT_PRIVATE_QUEUE_LEASE_MS
+# (600s) from claim and is the queue-orphan criterion — the stranded row's
+# private_queue_lease_until (observed via the supported `gbrain jobs get`
+# surface) must lapse before the cycle-start recovery classifies the queue
+# provably orphaned. This constant bounds that observable wait (fails
+# loudly if the lease never lapses); it is NOT a blind 300/320s sleep.
+DREAM_OWNER_LEASE_EXPIRY_WAIT_S = 720
+
+# The EXACT v0.46.26 candidate commit the gate builds (issue #4390): the
+# image is built with --build-arg GBRAIN_REF=<ref> against the same
+# disposable conformance runtime. The ref must be an exact 40-hex SHA,
+# validated before any Docker invocation (never branches/tags).
+GBRAIN_DREAM_RECOVERY_CANDIDATE_REF_ENV = "GBRAIN_DREAM_RECOVERY_CANDIDATE_REF"
 
 # The deterministic synthetic corpus: exactly one qualifying transcript.
 DREAM_CORPUS_DIR = "/opt/data/transcripts-dream"
@@ -135,17 +149,18 @@ DREAM_TRANSCRIPT_PATH = DREAM_CORPUS_DIR + "/2026-08-20-session.txt"
 DREAM_TRANSCRIPT_CONTENT = (
     "# Conversation Session 2026-08-20\n"
     "\n"
-    "Alice and Bob discussed the bounded retry design for the dream synthesis "
-    "gate. Alice articulated a durable thesis: an interrupted inline synthesis "
-    "run must strand its private child work visibly, degrade honestly on retry, "
-    "and recover through an explicit operator cancel instead of pretending to "
-    "self-heal. Bob noted the upstream grace window is hardcoded to one hour, "
-    "so the honest contract is bounded retry plus cancel, never a silent "
-    "automatic recovery claim.\n"
+    "Alice and Bob discussed the automatic cycle-start recovery design for the "
+    "dream synthesis gate. Alice articulated a durable thesis: an interrupted "
+    "inline synthesis run strands its private child work, and the next identical "
+    "invocation must reconcile the orphaned private queue at cycle start and "
+    "complete the same input instead of waiting out a lease or asking the "
+    "operator to cancel. Bob noted the upstream lifecycle now incorporates the "
+    "terminal-path wave, so the honest contract is automatic cycle-start "
+    "reconciliation, never a silent mid-cycle claim.\n"
     "\n"
     "Reflection: the durable signal here is the distinction between visible "
-    "stranding and silent loss - a knowledge brain should never hide the work "
-    "it failed to finish.\n"
+    "stranding and automatic reconciliation - a knowledge brain should recover "
+    "the work it failed to finish.\n"
 )
 
 # Vault-side dream allow-list (filing-rules ladder rung 2: the engine-
@@ -196,6 +211,15 @@ def _dream_page_slug() -> str:
     return "wiki/originals/dream-recovery-" + _dream_transcript_hash6()
 
 
+def _parse_utc_ms(value: object) -> float:
+    """Parse a jobs JSON UTC timestamp (``2026-08-22T01:37:23.216Z``) to
+    epoch milliseconds — the observable lease-expiry wait compares it
+    against the host clock (same host as the container)."""
+    text = str(value).strip()
+    dt = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    return dt.timestamp() * 1000
+
+
 # The deterministic one-page synthesis JSON the mock returns (after its
 # first-call delay). Valid under the pinned oneshot contract: slug obeys the
 # allow-list + task shape + hash suffix, body carries a wikilink
@@ -210,11 +234,11 @@ DREAM_PAGE_JSON = {
             "body": (
                 "# Dream Recovery Synthesis\n"
                 "\n"
-                "Deterministic one-page synthesis output for the issue #126 "
-                "dream interruption/retry gate.\n"
+                "Deterministic one-page synthesis output for the issue #126/#67 "
+                "dream cycle-start recovery gate.\n"
                 "\n"
-                "Key reflection: bounded retry plus an explicit operator "
-                "cancel recovers stranded dream-inline child work.\n"
+                "Key reflection: automatic cycle-start reconciliation recovers "
+                "stranded dream-inline child work.\n"
                 "\n"
                 "See [[notes/welcome]] for the synthetic vault baseline.\n"
             ),
@@ -260,21 +284,29 @@ DREAM_RECOVERY_MATRIX = {
     "lock_released": "core",
     "no_live_process": "core",
     "jobs_state_stranded": "operator_only",
-    "retry_degraded_bounded": "provider_gated",
-    "retry_no_new_llm_calls": "provider_gated",
-    "cancel_operator": "operator_only",
-    "recover_normal_completion": "provider_gated",
+    "recovery_immediate_refused": "provider_gated",
+    "recovery_private_queue_reconciled": "provider_gated",
+    "recover_automatic_completion": "provider_gated",
     "page_written": "core",
     "mock_called": "provider_gated",
 }
 
 
+def _dream_recovery_candidate_ref() -> str:
+    """The EXACT v0.46.26 candidate ref (exact 40-hex Git SHA), validated
+    before any Docker invocation; invalid/empty values fail closed."""
+    return normalize_candidate_ref(
+        os.getenv(GBRAIN_DREAM_RECOVERY_CANDIDATE_REF_ENV, "")
+    )
+
+
 def _dream_recovery_enabled() -> bool:
     """Strict gate: RUN_DOCKER_TESTS=1 AND RUN_GBRAIN_DREAM_RECOVERY=1 AND a
-    docker CLI is available."""
+    candidate ref is set AND a docker CLI is available."""
     return (
         os.getenv("RUN_DOCKER_TESTS") == "1"
         and os.getenv("RUN_GBRAIN_DREAM_RECOVERY") == "1"
+        and bool(os.getenv(GBRAIN_DREAM_RECOVERY_CANDIDATE_REF_ENV, "").strip())
         and docker_available()
     )
 
@@ -284,15 +316,15 @@ def _dream_recovery_enabled() -> bool:
     "set RUN_DOCKER_TESTS=1 and RUN_GBRAIN_DREAM_RECOVERY=1 with a docker CLI",
 )
 class GbrainDreamRecoveryTestCase(unittest.TestCase):
-    """Shared base setup for the provider-gated dream interruption/retry
+    """Shared base setup for the provider-gated Dream cycle-start recovery
     conformance suite.
 
-    Builds/starts the baseline Hermes-only runtime against a disposable
-    Compose project (no overlays), seeds the real template source state
-    BEFORE start, waits for the hermes-writable surface, asserts the
-    isolation safety contract (empty credentials, disabled owned jobs),
-    initializes the synthetic vault as the hermes runtime user, runs
-    minimal core activation (``josemar-gbrain reindex``), and
+    Builds/starts the EXACT v0.46.26 candidate Hermes-only runtime against
+    a disposable Compose project (no overlays), seeds the real template
+    source state BEFORE start, waits for the hermes-writable surface,
+    asserts the isolation safety contract (empty credentials, disabled
+    owned jobs), initializes the synthetic vault as the hermes runtime
+    user, runs minimal core activation (``josemar-gbrain reindex``), and
     unconditionally tears the project down with ``down -v --remove-orphans``.
     """
 
@@ -309,8 +341,14 @@ class GbrainDreamRecoveryTestCase(unittest.TestCase):
         # Pre-start source state seeding: real template .sync-manifest +
         # canonical josemar schema pack into the disposable source-agent-state.
         self.runtime.seed_source_state()
-        # Baseline Hermes-only build/start (no candidate ref, no sidecars).
-        self.runtime.up("hermes", timeout=900)
+        # EXACT v0.46.26 candidate build (--build-arg GBRAIN_REF=<ref> against
+        # the same disposable conformance runtime), then start WITHOUT an
+        # implicit rebuild. A build failure because the canonical local patch
+        # no longer applies is an upgrade incompatibility to record, not a
+        # harness failure.
+        self._candidate_ref = _dream_recovery_candidate_ref()
+        self.runtime.build_candidate(self._candidate_ref, "hermes", timeout=900)
+        self.runtime.start("hermes", timeout=900)
         # Wait for the exact hermes-writable surface before any exec probe.
         self.runtime.wait_until_hermes_writable(timeout=120)
         # Safety checks: empty credentials (incl. the provider override env)
@@ -666,6 +704,7 @@ class GbrainDreamRecoveryTestCase(unittest.TestCase):
         never the process or runtime environment."""
         metadata = {
             "baseline_ref": self.runtime.baseline_gbrain_ref(),
+            "candidate_ref": self._candidate_ref,
             "gbrain_version": self._gbrain_version,
             "matrix": self._matrix,
         }
@@ -678,11 +717,13 @@ class GbrainDreamRecoveryTestCase(unittest.TestCase):
 
 
 class GbrainDreamRecoveryRuntimeTests(GbrainDreamRecoveryTestCase):
-    """Provider-gated dream interruption/retry lifecycle (Docker-gated via
+    """Provider-gated Dream cycle-start recovery lifecycle (Docker-gated via
     the base class): SIGKILL mid-synthesize -> stranded private child ->
-    bounded degraded retry -> operator cancel -> normal completion."""
+    immediate identical rerun is refused with ``cycle_already_running``; after
+    bounded owner-lease expiry, one rerun reconciles the orphaned queue
+    (``private_queue_reconciled:``) and completes the same input/page."""
 
-    def test_dream_interruption_retry_recovery_gate(self) -> None:
+    def test_dream_interruption_automatic_recovery_gate(self) -> None:
         try:
             self._scenario_dream_config()
             self._seed_dream_state()
@@ -690,10 +731,7 @@ class GbrainDreamRecoveryRuntimeTests(GbrainDreamRecoveryTestCase):
             try:
                 self._scenario_mock_health()
                 stranded_id, stranded_key = self._scenario_interrupt()
-                self._scenario_bounded_retry(stranded_id, stranded_key)
-                self._scenario_operator_cancel_recovery(
-                    stranded_id, stranded_key
-                )
+                self._scenario_automatic_recovery(stranded_id, stranded_key)
                 self._scenario_mock_evidence()
             finally:
                 self._stop_mock()
@@ -724,7 +762,6 @@ class GbrainDreamRecoveryRuntimeTests(GbrainDreamRecoveryTestCase):
         self._matrix["lock_released"] = "fail"
         self._matrix["no_live_process"] = "fail"
         self._matrix["jobs_state_stranded"] = "fail"
-        self._run1_started = time.monotonic()
         self._launch_dream_background("/opt/data/dream-run-1.log")
         self._wait_for_synthesis_claim(timeout=90)
         kill_ev = self._sigkill_dream_parent()
@@ -755,28 +792,71 @@ class GbrainDreamRecoveryRuntimeTests(GbrainDreamRecoveryTestCase):
         self._matrix["jobs_state_stranded"] = "pass"
         return int(row["id"]), str(row["idempotency_key"])
 
-    def _scenario_bounded_retry(self, stranded_id: int, stranded_key: str) -> None:
-        """Rerun with identical transcript/source inputs (after the stranded
-        child's 300s claim lease + stall grace and the cycle lock's 60s
-        takeover grace elapse). Must terminate inside the strict bounded
-        wall-time (< 60s), report degraded/no completed page while tied to
-        the stranded private work (the coalesced child in the foreign
-        dream-inline-* queue, requeued to 'waiting' by the retry's own
-        stall sweep), and never hang; the private queue/idempotency state
-        must be unchanged and no new LLM call may happen (triage verdict
-        cached, submission coalesced)."""
-        self._matrix["retry_degraded_bounded"] = "fail"
-        self._matrix["retry_no_new_llm_calls"] = "fail"
-        # The retry must run after the stranded child's 300s claim lease
-        # (+15s stall grace) and the cycle lock's 60s takeover grace, so its
-        # own sweeps requeue the stranded row to 'waiting' (operator-
-        # cancellable) instead of dead-lettering it; the retry invocation
-        # itself is what must finish inside the bounded window.
-        elapsed_since_launch = time.monotonic() - self._run1_started
-        remaining_wait = DREAM_STRANDED_RETRY_WAIT_S - elapsed_since_launch
-        if remaining_wait > 0:
-            time.sleep(remaining_wait)
-        triage_before, synth_before = self._count_mock_calls()
+    def _scenario_automatic_recovery(
+        self, stranded_id: int, stranded_key: str
+    ) -> None:
+        """Prove the v0.46.26 automatic cycle-start recovery (issue #4390):
+
+        1. The immediate identical rerun is REFUSED with a supported
+           ``skipped: cycle_already_running`` report: the dead parent's
+           cycle lock is younger than the 60s holder-takeover grace
+           (``HOLDER_TAKEOVER_GRACE_MS``) — observable dead-holder lock
+           evidence, no state change.
+        2. The stranded row's owner lease (``private_queue_lease_until``
+           via the supported ``gbrain jobs get`` surface) is the
+           queue-orphan criterion; the gate polls it (bounded by
+           ``DREAM_OWNER_LEASE_EXPIRY_WAIT_S``) instead of any manual
+           cancellation or ``jobs retry``.
+        3. ONE identical rerun then automatically reconciles the provably
+           orphaned private queue at Dream cycle start: the stranded row is
+           cancelled with the machine-readable reason family
+           ``private_queue_reconciled: cycle startup recovery: orphaned
+           dream-inline private queue`` — observable via ``gbrain jobs
+           get`` — and the same input completes: the page is written and
+           visible through the supported public ``gbrain get`` surface."""
+        self._matrix["recovery_immediate_refused"] = "fail"
+        self._matrix["recovery_private_queue_reconciled"] = "fail"
+        self._matrix["recover_automatic_completion"] = "fail"
+        self._matrix["page_written"] = "fail"
+
+        # 1. Immediate identical rerun: dead-holder cycle lock too young.
+        ev = self._run_dream_native(
+            "dream", "--phase", "synthesize", "--json", timeout=90
+        )
+        self.assertEqual(ev.returncode, 0, ev.stderr)
+        self._evidence.append(ev)
+        immediate = json.loads(ev.stdout)
+        self.assertEqual(
+            immediate.get("status"), "skipped",
+            "the immediate rerun must be refused while the dead parent's "
+            "cycle lock is younger than the holder-takeover grace",
+        )
+        self.assertEqual(immediate.get("reason"), "cycle_already_running")
+        self._matrix["recovery_immediate_refused"] = "pass"
+
+        # 2. Observable bounded wait: poll the stranded row's owner lease
+        # (private_queue_lease_until) until it lapses — the queue-orphan
+        # criterion. Never a blind 300/320s sleep, never manual cancel.
+        got = self._jobs_get(stranded_id)
+        lease_until_ms = _parse_utc_ms(got.get("private_queue_lease_until"))
+        deadline = time.monotonic() + DREAM_OWNER_LEASE_EXPIRY_WAIT_S
+        while (
+            time.monotonic() < deadline
+            and time.time() * 1000 < lease_until_ms
+        ):
+            time.sleep(10)
+            self._jobs_get(stranded_id)
+        self.assertGreaterEqual(
+            time.time() * 1000,
+            lease_until_ms,
+            "the stranded row's owner lease must lapse inside the bounded "
+            f"wait ({DREAM_OWNER_LEASE_EXPIRY_WAIT_S}s)",
+        )
+
+        # 3. The single recovery rerun: dead-holder cycle lock auto-taken
+        # over, cycle-start recovery reconciles the orphaned queue, a fresh
+        # child completes the same input inside the strict bounded
+        # wall-time.
         start = time.monotonic()
         ev = self._run_dream_native(
             "dream", "--phase", "synthesize", "--json", timeout=90
@@ -786,76 +866,9 @@ class GbrainDreamRecoveryRuntimeTests(GbrainDreamRecoveryTestCase):
         self.assertLess(
             elapsed,
             DREAM_RETRY_WALL_CLOCK_LIMIT_S,
-            f"bounded retry must finish inside "
+            f"automatic recovery must finish inside "
             f"{DREAM_RETRY_WALL_CLOCK_LIMIT_S}s, took {elapsed:.1f}s",
         )
-        self._evidence.append(ev)
-        report = json.loads(ev.stdout)
-        phase = report["phases"][0]
-        self.assertEqual(phase["status"], "ok")
-        details = phase["details"]
-        self.assertEqual(details["transcripts_processed"], 1)
-        self.assertEqual(details["pages_written"], 0)
-        self.assertEqual(details["children_submitted"], 1)
-        outcomes = details["child_outcomes"]
-        self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0]["jobId"], stranded_id)
-        self.assertEqual(
-            outcomes[0]["status"], "timeout",
-            "the retry must degrade on the stranded child, never hang or "
-            "pretend completion",
-        )
-        self.assertEqual(details["triage"]["cache_hits"], 1)
-        # No new LLM calls on the retry: triage verdict cached, submission
-        # coalesced onto the stranded row.
-        triage_after, synth_after = self._count_mock_calls()
-        self.assertEqual(triage_after, triage_before)
-        self.assertEqual(synth_after, synth_before)
-        self._matrix["retry_no_new_llm_calls"] = "pass"
-        # Private queue/idempotency state: the SAME single row with the
-        # same key, still stranded in its dream-inline-* queue. The retry's
-        # own inline-drain stall sweep requeued it to 'waiting' (its 30s
-        # claim lease lapsed with the dead parent) — visible stranding,
-        # never a fresh row and never a completed outcome.
-        jobs = self._jobs_list()
-        subagent_rows = [j for j in jobs if j.get("name") == "subagent"]
-        self.assertEqual(len(subagent_rows), 1)
-        row = subagent_rows[0]
-        self.assertEqual(row["id"], stranded_id)
-        self.assertEqual(row["status"], "waiting")
-        self.assertEqual(row["idempotency_key"], stranded_key)
-        self.assertTrue(str(row["queue"]).startswith("dream-inline-"))
-        self.assertGreaterEqual(int(row.get("stalled_counter", 0)), 1)
-        got = self._jobs_get(stranded_id)
-        self.assertEqual(got["status"], "waiting")
-        self.assertEqual(got["timeout_ms"], DREAM_SUBAGENT_TIMEOUT_MS)
-        self.assertTrue(str(got["queue"]).startswith("dream-inline-"))
-        self._matrix["retry_degraded_bounded"] = "pass"
-
-    def _scenario_operator_cancel_recovery(
-        self, stranded_id: int, stranded_key: str
-    ) -> None:
-        """Recover through the supported ``gbrain jobs cancel <id>`` (never
-        ``jobs retry``, never DB writes); rerun the identical input and
-        assert normal completion — pages written and a terminal completed
-        outcome on a FRESH row that reuses the same idempotency key."""
-        self._matrix["cancel_operator"] = "fail"
-        self._matrix["recover_normal_completion"] = "fail"
-        self._matrix["page_written"] = "fail"
-        cancel_ev = self._run_native_under_lock(
-            "jobs", "cancel", str(stranded_id), timeout=60
-        )
-        self.assertEqual(cancel_ev.returncode, 0, cancel_ev.stderr)
-        self.assertIn(f"Job #{stranded_id} cancelled.", cancel_ev.stdout)
-        self._evidence.append(cancel_ev)
-        got = self._jobs_get(stranded_id)
-        self.assertEqual(got["status"], "cancelled")
-        self._matrix["cancel_operator"] = "pass"
-
-        ev = self._run_dream_native(
-            "dream", "--phase", "synthesize", "--json", timeout=90
-        )
-        self.assertEqual(ev.returncode, 0, ev.stderr)
         self._evidence.append(ev)
         report = json.loads(ev.stdout)
         phase = report["phases"][0]
@@ -868,32 +881,51 @@ class GbrainDreamRecoveryRuntimeTests(GbrainDreamRecoveryTestCase):
         self.assertEqual(len(outcomes), 1)
         self.assertEqual(
             outcomes[0]["status"], "completed",
-            "after the operator cancel the rerun must complete normally",
+            "after automatic cycle-start reconciliation the rerun must "
+            "complete the same input normally",
         )
         self.assertEqual(details["triage"]["cache_hits"], 1)
-        self._matrix["recover_normal_completion"] = "pass"
+        self._matrix["recover_automatic_completion"] = "pass"
 
-        # Fresh row in a fresh dream-inline-* queue, same idempotency key
-        # (the cancelled row freed it), terminal completed outcome.
+        # 4. Observable recovery reason via the supported jobs get surface:
+        # the stranded row was cancelled by the cycle-start recovery with
+        # the machine-readable private_queue_reconciled reason family.
+        got = self._jobs_get(stranded_id)
+        self.assertEqual(got["status"], "cancelled")
+        self.assertTrue(
+            str(got.get("error_text") or "").startswith(
+                "private_queue_reconciled: cycle startup recovery:"
+            ),
+            f"recovery reason missing: {got.get('error_text')!r}",
+        )
+        self._matrix["recovery_private_queue_reconciled"] = "pass"
+
+        # 5. Private queue state: no live/waiting rows remain; the input is
+        # completed under the SAME idempotency key on a fresh row.
         jobs = self._jobs_list()
         subagent_rows = [j for j in jobs if j.get("name") == "subagent"]
-        by_id = {int(j["id"]): j for j in subagent_rows}
-        self.assertIn(stranded_id, by_id)
-        self.assertEqual(by_id[stranded_id]["status"], "cancelled")
-        fresh = [j for j in subagent_rows if int(j["id"]) != stranded_id]
-        self.assertEqual(len(fresh), 1, "exactly one fresh synthesis row")
-        row = fresh[0]
-        self.assertEqual(row["status"], "completed")
-        self.assertEqual(row["idempotency_key"], stranded_key)
-        self.assertTrue(str(row["queue"]).startswith("dream-inline-"))
-        fresh_id = int(row["id"])
-        got_fresh = self._jobs_get(fresh_id)
-        self.assertEqual(got_fresh["status"], "completed")
-        self.assertTrue(str(got_fresh["queue"]).startswith("dream-inline-"))
-        self.assertIsNotNone(got_fresh["finished_at"])
+        self.assertTrue(subagent_rows, "at least one subagent row remains")
+        for row in subagent_rows:
+            self.assertNotIn(
+                row["status"], ("active", "waiting"),
+                f"no row may stay active/waiting after automatic recovery: "
+                f"#{row['id']} status={row['status']}",
+            )
+        completed = [r for r in subagent_rows if r.get("status") == "completed"]
+        self.assertTrue(completed, "the input must complete on the queue")
+        self.assertTrue(
+            any(r.get("idempotency_key") == stranded_key for r in completed),
+            "the completed row must reuse the same idempotency key",
+        )
+        completed_row = completed[0]
+        got_completed = self._jobs_get(int(completed_row["id"]))
+        self.assertEqual(got_completed["status"], "completed")
+        self.assertTrue(str(got_completed["queue"]).startswith("dream-inline-"))
+        self.assertIsNotNone(got_completed["finished_at"])
 
-        # The synthesized page is written and visible through the supported
-        # public read surface (plus the vault markdown reverse-write).
+        # 6. The synthesized page is written and visible through the
+        # supported public read surface (plus the vault markdown
+        # reverse-write).
         get_ev = self.runtime.run_as_hermes(
             "gbrain", "get", _dream_page_slug(), timeout=60
         )
@@ -904,16 +936,17 @@ class GbrainDreamRecoveryRuntimeTests(GbrainDreamRecoveryTestCase):
 
     def _scenario_mock_evidence(self) -> None:
         """The judge + subagent must have called the in-container mock
-        through the real LLM path: exactly ONE triage request (cached on
-        both reruns) and exactly TWO synthesis requests (the delayed one
-        that was killed, then the instant one after cancel)."""
+        through the real LLM path: exactly ONE triage request (verdict
+        cached on the recovery rerun) and exactly TWO synthesis requests
+        (the delayed one that was killed, then the instant one from the
+        automatically recovered rerun)."""
         self._matrix["mock_called"] = "fail"
         triage, synthesis = self._count_mock_calls()
         self.assertEqual(triage, 1, "the triage judge must be called exactly once")
         self.assertEqual(
             synthesis, 2,
             "the synthesis subagent must be called twice: the killed run "
-            "and the recovery run",
+            "and the automatic-recovery run",
         )
         self._matrix["mock_called"] = "pass"
 
@@ -959,36 +992,99 @@ class GbrainDreamRecoveryGateStructureTests(unittest.TestCase):
 
     def test_gate_requires_run_docker_tests(self) -> None:
         with mock.patch.dict(
-            os.environ, {"RUN_DOCKER_TESTS": "", "RUN_GBRAIN_DREAM_RECOVERY": "1"}
+            os.environ,
+            {
+                "RUN_DOCKER_TESTS": "",
+                "RUN_GBRAIN_DREAM_RECOVERY": "1",
+                GBRAIN_DREAM_RECOVERY_CANDIDATE_REF_ENV: "0" * 40,
+            },
+            clear=True,
         ):
             with self._docker_available_patch(True):
                 self.assertFalse(_dream_recovery_enabled())
 
     def test_gate_requires_run_gbrain_dream_recovery(self) -> None:
         with mock.patch.dict(
-            os.environ, {"RUN_DOCKER_TESTS": "1", "RUN_GBRAIN_DREAM_RECOVERY": ""}
+            os.environ,
+            {
+                "RUN_DOCKER_TESTS": "1",
+                "RUN_GBRAIN_DREAM_RECOVERY": "",
+                GBRAIN_DREAM_RECOVERY_CANDIDATE_REF_ENV: "0" * 40,
+            },
+            clear=True,
+        ):
+            with self._docker_available_patch(True):
+                self.assertFalse(_dream_recovery_enabled())
+
+    def test_gate_requires_candidate_ref(self) -> None:
+        """The gate must require the exact v0.46.26 candidate ref: without
+        it the suite cannot prove the version it claims. ``clear=True`` so a
+        candidate ref inherited from the invoking Make target is actually
+        removed inside this subtest (and restored afterwards)."""
+        with mock.patch.dict(
+            os.environ,
+            {"RUN_DOCKER_TESTS": "1", "RUN_GBRAIN_DREAM_RECOVERY": "1"},
+            clear=True,
         ):
             with self._docker_available_patch(True):
                 self.assertFalse(_dream_recovery_enabled())
 
     def test_gate_requires_docker(self) -> None:
         with mock.patch.dict(
-            os.environ, {"RUN_DOCKER_TESTS": "1", "RUN_GBRAIN_DREAM_RECOVERY": "1"}
+            os.environ,
+            {
+                "RUN_DOCKER_TESTS": "1",
+                "RUN_GBRAIN_DREAM_RECOVERY": "1",
+                GBRAIN_DREAM_RECOVERY_CANDIDATE_REF_ENV: "0" * 40,
+            },
+            clear=True,
         ):
             with self._docker_available_patch(False):
                 self.assertFalse(_dream_recovery_enabled())
 
     def test_gate_enabled_when_all_conditions_met(self) -> None:
         with mock.patch.dict(
-            os.environ, {"RUN_DOCKER_TESTS": "1", "RUN_GBRAIN_DREAM_RECOVERY": "1"}
+            os.environ,
+            {
+                "RUN_DOCKER_TESTS": "1",
+                "RUN_GBRAIN_DREAM_RECOVERY": "1",
+                GBRAIN_DREAM_RECOVERY_CANDIDATE_REF_ENV: "0" * 40,
+            },
+            clear=True,
         ):
             with self._docker_available_patch(True):
                 self.assertTrue(_dream_recovery_enabled())
 
-    def test_runtime_class_is_gated_on_both_env_vars(self) -> None:
+    def test_candidate_ref_is_validated_fail_closed(self) -> None:
+        """The candidate ref must be validated as an exact 40-hex SHA
+        (reusing the conformance support machinery) BEFORE any Docker
+        invocation; empty and malformed values fail closed."""
+        with mock.patch.dict(
+            os.environ,
+            {GBRAIN_DREAM_RECOVERY_CANDIDATE_REF_ENV: ""},
+            clear=True,
+        ):
+            with self.assertRaises(ValueError):
+                _dream_recovery_candidate_ref()
+        with mock.patch.dict(
+            os.environ,
+            {GBRAIN_DREAM_RECOVERY_CANDIDATE_REF_ENV: "not-a-sha"},
+            clear=True,
+        ):
+            with self.assertRaises(ValueError):
+                _dream_recovery_candidate_ref()
+        with mock.patch.dict(
+            os.environ,
+            {GBRAIN_DREAM_RECOVERY_CANDIDATE_REF_ENV: "A" * 40},
+            clear=True,
+        ):
+            self.assertEqual(_dream_recovery_candidate_ref(), "a" * 40)
+
+    def test_runtime_class_is_gated_on_all_conditions(self) -> None:
         text = self._module_text()
         self.assertIn("RUN_DOCKER_TESTS", text)
         self.assertIn("RUN_GBRAIN_DREAM_RECOVERY", text)
+        self.assertIn(GBRAIN_DREAM_RECOVERY_CANDIDATE_REF_ENV, text)
         self.assertIn("skipUnless", text)
         self.assertIn(
             '"set RUN_DOCKER_TESTS=1 and RUN_GBRAIN_DREAM_RECOVERY=1 with a docker CLI"',
@@ -1057,11 +1153,11 @@ class GbrainDreamRecoveryGateStructureTests(unittest.TestCase):
         self.assertNotIn("pglite-engine", runtime_class)
         self.assertNotIn("postgres-engine", runtime_class)
 
-    # --- explicit bounded retry/cancel path -------------------------------
+    # --- automatic recovery path (no lease wait, no cancel) ---------------
 
     def test_bounded_subagent_timings_below_inline_lock(self) -> None:
         """The subagent timeout (10s) must be well below the inline drain's
-        30s claim lock, and the wait timeout (~8s) must bound the retry."""
+        30s claim lock, and the wait timeout (~8s) must bound the runs."""
         self.assertLess(DREAM_SUBAGENT_TIMEOUT_MS, 30000)
         self.assertLess(DREAM_SUBAGENT_WAIT_TIMEOUT_MS, DREAM_SUBAGENT_TIMEOUT_MS)
         runtime_class = self._runtime_class_text()
@@ -1074,36 +1170,80 @@ class GbrainDreamRecoveryGateStructureTests(unittest.TestCase):
         self.assertIn(str(DREAM_SUBAGENT_WAIT_TIMEOUT_MS), module_text)
         self.assertIn("dream.synthesize.inline_concurrency", module_text)
 
-    def test_explicit_bounded_retry_and_operator_cancel(self) -> None:
-        """The gate must assert a strict bounded wall-time on the retry and
-        recover through ``jobs cancel`` — never ``jobs retry``."""
+    def test_automatic_recovery_no_cancel_no_lease_wait(self) -> None:
+        """The gate must prove #4390/v0.46.26 automatic cycle-start
+        recovery: the immediate rerun observes the dead-holder cycle lock
+        (``cycle_already_running``), the recovery reason comes from the
+        supported ``jobs get`` surface (``private_queue_reconciled:``
+        reason family), and NEVER ``jobs cancel`` / ``jobs retry`` / a
+        blind 300/320s lease-wait constant."""
         runtime_class = self._runtime_class_text()
+        module_text = self._module_text()
         self.assertIn("DREAM_RETRY_WALL_CLOCK_LIMIT_S", runtime_class)
         self.assertIn(
             "assertLess(\n            elapsed,\n            DREAM_RETRY_WALL_CLOCK_LIMIT_S",
             runtime_class,
         )
-        self.assertIn('"jobs", "cancel"', runtime_class)
+        self.assertIn("cycle_already_running", runtime_class)
+        self.assertIn("private_queue_reconciled", runtime_class)
+        self.assertIn("private_queue_lease_until", runtime_class)
+        self.assertIn("_jobs_get", runtime_class)
+        self.assertNotIn("DREAM_STRANDED_RETRY_WAIT_S", runtime_class)
+        self.assertNotIn("remaining_wait", runtime_class)
+        self.assertNotIn('"jobs", "cancel"', runtime_class)
         self.assertNotIn('"jobs", "retry"', runtime_class)
-        self.assertNotIn("jobs cancel", "")
-        # The retry must degrade on the stranded child and never claim
-        # automatic self-heal.
-        self.assertIn('"timeout"', runtime_class)
-        self.assertNotIn("self-heal", runtime_class.lower().split("honest")[0])
+        # The gate must never claim mid-cycle live healing.
+        self.assertNotIn("mid-cycle live healing", module_text.split("Honest")[0])
 
-    def test_retry_wall_clock_limit_constant(self) -> None:
+    def test_owner_lease_wait_is_bounded_and_observable(self) -> None:
+        """The wait before the recovery rerun is the observable owner-lease
+        expiry (``private_queue_lease_until`` via jobs get), bounded by
+        ``DREAM_OWNER_LEASE_EXPIRY_WAIT_S`` — never a blind 300/320s
+        constant and never a lease unbounded wait."""
+        self.assertGreaterEqual(DREAM_OWNER_LEASE_EXPIRY_WAIT_S, 600)
+        self.assertLess(DREAM_OWNER_LEASE_EXPIRY_WAIT_S, 900)
+        runtime_class = self._runtime_class_text()
+        self.assertIn("DREAM_OWNER_LEASE_EXPIRY_WAIT_S", runtime_class)
+        self.assertIn("private_queue_lease_until", runtime_class)
+        self.assertIn("_parse_utc_ms", runtime_class)
+
+    def test_recovery_wall_clock_limit_constant(self) -> None:
         self.assertEqual(DREAM_RETRY_WALL_CLOCK_LIMIT_S, 60)
         self.assertLess(DREAM_RETRY_WALL_CLOCK_LIMIT_S, 60 * 60)
-        # The retry waits out the stranded child's 300s claim lease (+15s
-        # stall grace) and the cycle lock's 60s takeover grace before the
-        # bounded rerun; the rerun itself must still land inside the 60s
-        # wall-clock bound.
-        self.assertEqual(DREAM_STRANDED_RETRY_WAIT_S, 320)
-        self.assertGreater(DREAM_STRANDED_RETRY_WAIT_S, 300 + 15)
-        self.assertGreater(DREAM_STRANDED_RETRY_WAIT_S, 60)
+        # The recovery rerun itself (after the observable lease-expiry wait)
+        # must land inside the 60s wall-clock bound.
         self.assertIn(
-            "DREAM_STRANDED_RETRY_WAIT_S", self._runtime_class_text()
+            "DREAM_RETRY_WALL_CLOCK_LIMIT_S", self._runtime_class_text()
         )
+
+    # --- exact v0.46.26 candidate build -----------------------------------
+
+    def test_exact_candidate_build(self) -> None:
+        """The runtime must build the EXACT v0.46.26 candidate commit
+        (--build-arg GBRAIN_REF=<ref>) and start WITHOUT an implicit
+        rebuild; the ref is validated as an exact 40-hex SHA before any
+        Docker invocation."""
+        runtime_class = self._runtime_class_text()
+        module_text = self._module_text()
+        self.assertIn("build_candidate", runtime_class)
+        self.assertIn('self.runtime.start("hermes", timeout=900)', runtime_class)
+        self.assertIn("normalize_candidate_ref", module_text)
+        self.assertIn(GBRAIN_DREAM_RECOVERY_CANDIDATE_REF_ENV, module_text)
+        self.assertIn("40-hex", module_text)
+        self.assertIn("GBRAIN_REF=<ref>", module_text)
+
+    def test_claim_surface_is_v04626_automatic_recovery(self) -> None:
+        """Every claim surface must name the exact v0.46.26 candidate and
+        #4390 (incorporating the #4361/#4332 lifecycle) and claim exactly
+        automatic PGLite Dream cycle-start recovery."""
+        module_text = self._module_text()
+        self.assertIn("v0.46.26", module_text)
+        self.assertIn("#4390", module_text)
+        self.assertIn("#4361", module_text)
+        self.assertIn("#4332", module_text)
+        self.assertIn("cycle-start", module_text)
+        self.assertIn("private_queue_reconciled", module_text)
+        self.assertIn("gbrain jobs cancel", module_text)
 
     # --- deterministic transcript / page contract -------------------------
 
@@ -1238,10 +1378,9 @@ class GbrainDreamRecoveryGateStructureTests(unittest.TestCase):
                 "lock_released",
                 "no_live_process",
                 "jobs_state_stranded",
-                "retry_degraded_bounded",
-                "retry_no_new_llm_calls",
-                "cancel_operator",
-                "recover_normal_completion",
+                "recovery_immediate_refused",
+                "recovery_private_queue_reconciled",
+                "recover_automatic_completion",
                 "page_written",
                 "mock_called",
             },

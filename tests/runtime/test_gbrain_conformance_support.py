@@ -122,7 +122,7 @@ class BaselineOverrideTests(unittest.TestCase):
                     normalize_baseline_ref(bad)
 
     def test_effective_baseline_rejects_invalid_override_fail_closed(self) -> None:
-        for ref in ("main", "abc123", "v0.46.25.0", "g" + "a" * 39, "a" * 41):
+        for ref in ("main", "abc123", "v0.46.26.0", "g" + "a" * 39, "a" * 41):
             with self.subTest(ref=ref):
                 with mock.patch.dict(
                     os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: ref}
@@ -226,6 +226,26 @@ class BaselineOverrideTests(unittest.TestCase):
         )
         start_mock.assert_called_once_with("hermes", timeout=600)
 
+    def test_up_baseline_with_override_for_v04625_pin_selects_legacy_patch(self) -> None:
+        """Requirement 3: the v0.46.25.0 historical pin (the pre-v0.46.26.0
+        production ref) resolves to its exact captured legacy patch file."""
+        runtime = GbrainConformanceRuntime()
+        with mock.patch.dict(
+            os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: LEGACY_V04625_REF}
+        ):
+            with mock.patch.object(runtime, "build") as build_mock:
+                with mock.patch.object(runtime, "start") as start_mock:
+                    runtime.up_baseline("hermes")
+        build_mock.assert_called_once_with(
+            "hermes",
+            build_args={
+                "GBRAIN_REF": LEGACY_V04625_REF,
+                "GBRAIN_PATCH_FILE": LEGACY_V04625_PATCH_REL,
+            },
+            timeout=600,
+        )
+        start_mock.assert_called_once_with("hermes", timeout=600)
+
     def test_build_baseline_invalid_override_fails_closed_before_docker(self) -> None:
         runtime = GbrainConformanceRuntime()
         with mock.patch.dict(os.environ, {GBRAIN_CONFORMANCE_BASELINE_REF_ENV: "main"}):
@@ -309,11 +329,17 @@ class DockerfileGbrainRefParserTests(unittest.TestCase):
             parse_gbrain_ref_text("ARG HERMES_BASE_IMAGE=foo\n")
 
 
-# The pre-upgrade gbrain pin whose historical patch is preserved under
-# patches/legacy/ (v0.42.73.2; the production patch captured at immutable
-# commit 1fc78e6, immediately before the v0.46.25.0 upgrade).
+# The pre-upgrade gbrain pins whose historical patches are preserved under
+# patches/legacy/:
+#   - LEGACY_OLD_REF (v0.42.73.2): production patch captured at immutable
+#     commit 1fc78e6, immediately before the v0.46.25.0 upgrade.
+#   - LEGACY_V04625_REF (v0.46.25.0): production patch captured at immutable
+#     commit 6260504, immediately before the v0.46.26.0 retarget.
 LEGACY_OLD_REF = "15b9863d13635d173562a54f55a1d388bfcf546b"
 LEGACY_PATCH_REL = "legacy/gbrain-inline-worker-gateway.0.42.73.2.patch"
+LEGACY_V04625_REF = "055ac6c75a116aafdf3d00b47c9db2294612a134"
+LEGACY_V04625_PATCH_REL = "legacy/gbrain-inline-worker-gateway.0.46.25.0.patch"
+LEGACY_V04625_COMMIT = "62605045542ba0fcc558312f3adcdfb2771ad80f"
 
 
 class LegacyPatchMappingTests(unittest.TestCase):
@@ -322,18 +348,32 @@ class LegacyPatchMappingTests(unittest.TestCase):
     mapping is static — patch selection is derived from the validated ref and
     is never user-controlled."""
 
-    def test_mapping_contains_only_the_old_pin_with_its_legacy_path(self) -> None:
+    def test_mapping_contains_only_the_known_historical_pins(self) -> None:
         self.assertEqual(
             GBRAIN_LEGACY_PATCH_MAPPING,
-            {LEGACY_OLD_REF: LEGACY_PATCH_REL},
+            {
+                LEGACY_OLD_REF: LEGACY_PATCH_REL,
+                LEGACY_V04625_REF: LEGACY_V04625_PATCH_REL,
+            },
         )
 
     def test_known_old_ref_resolves_to_legacy_patch(self) -> None:
         self.assertEqual(resolve_gbrain_patch_file(LEGACY_OLD_REF), LEGACY_PATCH_REL)
 
+    def test_known_v04625_ref_resolves_to_legacy_patch(self) -> None:
+        self.assertEqual(
+            resolve_gbrain_patch_file(LEGACY_V04625_REF), LEGACY_V04625_PATCH_REL
+        )
+
     def test_known_old_ref_uppercase_normalized_before_lookup(self) -> None:
         self.assertEqual(
             resolve_gbrain_patch_file(LEGACY_OLD_REF.upper()), LEGACY_PATCH_REL
+        )
+
+    def test_known_v04625_ref_uppercase_normalized_before_lookup(self) -> None:
+        self.assertEqual(
+            resolve_gbrain_patch_file(LEGACY_V04625_REF.upper()),
+            LEGACY_V04625_PATCH_REL,
         )
 
     def test_unknown_ref_resolves_to_canonical_current_patch(self) -> None:
@@ -349,16 +389,25 @@ class LegacyPatchMappingTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     resolve_gbrain_patch_file(ref)
 
-    def test_legacy_patch_file_exists_under_patches(self) -> None:
-        path = REPO_ROOT / "patches" / LEGACY_PATCH_REL
-        self.assertTrue(path.is_file(), "legacy patch file missing under patches/")
+    def test_legacy_patch_files_exist_under_patches(self) -> None:
+        for rel in (LEGACY_PATCH_REL, LEGACY_V04625_PATCH_REL):
+            with self.subTest(rel=rel):
+                path = REPO_ROOT / "patches" / rel
+                self.assertTrue(path.is_file(), f"legacy patch file missing under patches/")
 
-    def test_legacy_patch_is_distinguishable_from_current_patch_bytes(self) -> None:
-        legacy = (REPO_ROOT / "patches" / LEGACY_PATCH_REL).read_bytes()
+    def test_legacy_patches_are_distinguishable_from_each_other_and_current(self) -> None:
+        """Each legacy file must differ from the current canonical patch and
+        from the other legacy file (they are distinct release snapshots)."""
         current = (REPO_ROOT / "patches" / GBRAIN_CANONICAL_PATCH_FILE).read_bytes()
-        self.assertNotEqual(legacy, current)
+        files = [
+            (REPO_ROOT / "patches" / LEGACY_PATCH_REL).read_bytes(),
+            (REPO_ROOT / "patches" / LEGACY_V04625_PATCH_REL).read_bytes(),
+        ]
+        self.assertNotEqual(files[0], files[1])
+        for legacy in files:
+            self.assertNotEqual(legacy, current)
 
-    def test_legacy_patch_is_exact_bytes_of_validated_historical_commit(self) -> None:
+    def test_legacy_v042_patch_is_exact_bytes_of_validated_historical_commit(self) -> None:
         """Requirement 2: byte-identical to
         ``git show 1fc78e6:patches/gbrain-inline-worker-gateway.patch`` — the
         production patch at immutable pre-upgrade commit 1fc78e6, immediately
@@ -377,6 +426,29 @@ class LegacyPatchMappingTests(unittest.TestCase):
         )
         self.assertEqual(
             (REPO_ROOT / "patches" / LEGACY_PATCH_REL).read_bytes(), proc.stdout
+        )
+
+    def test_legacy_v04625_patch_is_exact_bytes_of_validated_historical_commit(self) -> None:
+        """Requirement 2: byte-identical to
+        ``git show 6260504:patches/gbrain-inline-worker-gateway.patch`` — the
+        production patch at immutable pre-upgrade commit 6260504, immediately
+        before the v0.46.26.0 retarget — no added header that could change
+        apply behavior. The pin itself (055ac6c…) is the upstream gbrain ref,
+        not a commit in this repository; the byte identity is verified against
+        the immutable local commit that carried that production patch."""
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "show",
+                f"{LEGACY_V04625_COMMIT}:patches/gbrain-inline-worker-gateway.patch",
+            ],
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual(
+            (REPO_ROOT / "patches" / LEGACY_V04625_PATCH_REL).read_bytes(), proc.stdout
         )
 
 

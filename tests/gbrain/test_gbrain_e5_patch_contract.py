@@ -1,14 +1,14 @@
 """Source-contract tests for the stored gbrain E5 preprocessing patch.
 
 These tests inspect `patches/gbrain-inline-worker-gateway.patch` (no Docker, no
-gbrain binary required) and pin the v0.46.25.0-rebased contents. The patch is
+gbrain binary required) and pin the v0.46.26.0-rebased contents. The patch is
 rebased onto the upstream tranche-1 refactor, so:
 
   - put_page lives in `src/core/ops/pages.ts` (NOT the pre-refactor
     `src/core/operations.ts`),
   - the `query` op lives in `src/core/ops/search.ts`,
   - the migrate-embeddings completion-probe fix (bare -> shared
-    `migrationSignature()`) is UPSTREAM in v0.46.25.0, so the patch no longer
+    `migrationSignature()`) is UPSTREAM in v0.46.26.0, so the patch no longer
     carries that hunk; the fixture pins it against real source instead,
   - the old no-work migration hunk (`plan.chunks_to_embed === 0 && ...` with
     probe/persist/finalize) is GONE, subsumed by the candidate's
@@ -395,7 +395,7 @@ class GbrainGenericProviderKeyBridgeContractTests(unittest.TestCase):
 
 
 class GbrainChronicleQueueRegistrationContractTests(unittest.TestCase):
-    """chronicle_extract queue registration (v0.46.25.0 rebase).
+    """chronicle_extract queue registration (v0.46.26.0 rebase).
 
     chronicle_extract is LLM-backed; without gateway refresh it silently
     returned no_events when the worker's gateway singleton was unconfigured.
@@ -450,7 +450,7 @@ class GbrainNoEmbedKeywordOnlyEnforcementContractTests(unittest.TestCase):
         self.patch = _read(PATCH_PATH)
 
     def test_patch_no_stale_prerefactor_paths(self) -> None:
-        """The v0.46.25.0 rebase moved the hunks; the pre-refactor
+        """The v0.46.26.0 rebase moved the hunks; the pre-refactor
         operations.ts must not be patched."""
         self.assertNotIn("a/src/core/operations.ts", self.patch)
 
@@ -767,7 +767,7 @@ class GbrainNoWorkMigrationHunkAbsentContractTests(unittest.TestCase):
     (ctx.verify.complete / skipped_no_work): the verified skip stays
     side-effect-free apart from the issue #65 sentinel carve-out (a pure
     FILE-plane clear — no probe, no tuple persistence, no finalization). The
-    v0.46.25.0-rebased patch only carries the file-plane embedding_disabled
+    v0.46.26.0-rebased patch only carries the file-plane embedding_disabled
     clear in migrate-embeddings.ts (apply path + D2 verified-skip carve-out)
     and must not reintroduce the probe/persist/finalize no-work hunk.
     """
@@ -808,7 +808,7 @@ class GbrainEmbedBackfillFinalizationContractTests(unittest.TestCase):
     stale backfill via the SAME E5-aware migrationSignature() used by the
     migration planner.
 
-    Upstream v0.46.25.0 already uses migrationSignature() at the native
+    Upstream v0.46.26.0 already uses migrationSignature() at the native
     completion probe in migrate-embeddings.ts, so the patch pins that as
     upstream (via the fixture) instead of carrying a stale hunk.
     """
@@ -881,7 +881,7 @@ class GbrainEmbedBackfillFinalizationContractTests(unittest.TestCase):
         self.assertNotIn("} catch (", hook_block)
 
     def test_patch_completion_probe_is_upstream_not_patched(self) -> None:
-        """v0.46.25.0 upstream already uses the shared E5-aware
+        """v0.46.26.0 upstream already uses the shared E5-aware
         migrationSignature() at the migrate-embeddings completion probe; the
         patch must not carry a hunk for it (no added line, and no bare
         signature either). The fixture pins the upstream probe against real
@@ -894,7 +894,7 @@ class GbrainEmbedBackfillFinalizationContractTests(unittest.TestCase):
             "migrate-embeddings completion probe uses the shared E5-aware migrationSignature",
             test_body,
         )
-        self.assertIn("Upstream v0.46.25.0 already uses migrationSignature()", test_body)
+        self.assertIn("Upstream v0.46.26.0 already uses migrationSignature()", test_body)
         self.assertIn('toContain("signature: migrationSignature(plan.to_model, plan.to_dims)")', test_body)
 
 

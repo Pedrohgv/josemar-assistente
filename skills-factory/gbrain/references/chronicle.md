@@ -130,7 +130,7 @@ chronicle_extract --params '{"slug":"<meeting-slug>","sourceId":"default"}'
 crons paused. Normal agents must NOT invoke `gbrain jobs` or
 `gbrain chronicle-backfill`; they are not part of the agent-facing surface.
 
-Auto-emission (on every new `put_page` of an eligible page) requires `auto_chronicle=true` (operator config). As of v0.46.25.0, `auto_chronicle` is a registered config key and no longer requires the `--force` flag that the v0.42.57.0 config-key registry bug forced.
+Auto-emission (on every new `put_page` of an eligible page) requires `auto_chronicle=true` (operator config). As of v0.46.26.0, `auto_chronicle` is a registered config key and no longer requires the `--force` flag that the v0.42.57.0 config-key registry bug forced.
 
 ## Where Events Are Stored
 

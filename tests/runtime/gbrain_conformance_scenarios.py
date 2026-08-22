@@ -40,7 +40,7 @@ from .gbrain_conformance_support import CommandEvidence, GbrainConformanceRuntim
 
 # The pinned gbrain version the canonical GBRAIN_REF builds (docs/gbrain-
 # operations.md "Pinned Values"). Asserted as the status --json runtime fact.
-PINNED_GBRAIN_VERSION = "0.46.25.0"
+PINNED_GBRAIN_VERSION = "0.46.26.0"
 
 # Fixed deployment wrapper paths (Dockerfile.hermes + issue #110 adapter).
 PUBLIC_GBRAIN = "/usr/local/bin/gbrain"
