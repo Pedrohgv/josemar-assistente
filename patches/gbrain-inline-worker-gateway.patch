@@ -1215,3 +1215,361 @@ index 0000000000000000000000000000000000000000..81d86e57e6542432f0e238242f5f0b70
 +    expect(embedSrc).toContain("if (opts.stale && opts.includeNullSignature === true && !opts.dryRun && result.failures === 0)");
 +  });
 +});
+
+diff --git a/src/core/ops/pages.ts b/src/core/ops/pages.ts
+--- a/src/core/ops/pages.ts
++++ b/src/core/ops/pages.ts
+@@ -447,6 +459,86 @@
+       writeThrough = { written: false, skipped: 'dry_run' };
+     }
+
++    // JOSEMAR PATCH (issue #125, part 1): stamp the vault-relative
++    // `source_path` on a put_page/capture write-through row so the existing
++    // #3479/#3942 sync reconciliation resolves the row after a later rename
++    // (committed unchanged `git mv`). Upstream leaves `source_path` NULL for
++    // DB-born rows; sync's rename/stale lookups locate rows POSITIVELY by
++    // `source_path`, so a NULL row is never found and the old slug survives
++    // forever — the recorded #3570 open gap. Narrow, upstream-compatible
++    // invariants:
++    //   - fires ONLY after a successful ATOMIC CONTAINED write-through
++    //     (`written === true` with a real path — the tmp+rename and
++    //     containment guarantees live inside writePageThrough itself);
++    //     disabled / skipped / failed writes never stamp, so capture flows
++    //     without a real write-through vault path get no fabricated identity;
++    //   - stamps ONLY a LIVE row whose source_path is currently NULL: the
++    //     pre-check AND the UPDATE predicate both require `source_path IS
++    //     NULL`, so a non-NULL identity is never overwritten (and a
++    //     concurrent stamp cannot clobber — the guarded UPDATE is atomic);
++    //   - the value is the owning-source-relative path of the ACTUAL written
++    //     file, computed with the SAME `resolvePageWriteTarget` the
++    //     write-through used and refused when unrepresentable (absolute /
++    //     `..` escape / non-markdown), forward-slash normalized to match what
++    //     `gbrain sync` stores for file-backed rows;
++    //   - scoped to the exact (source_id, slug) live row — never a bare-slug
++    //     write;
++    //   - if the metadata update fails, the file/page are RETAINED,
++    //     source_path stays NULL, and the failure is surfaced through the
++    //     established write-through result contract (`sourcePathError`) plus
++    //     a warning — identity is never silently claimed.
++    if (writeThrough?.written === true && writeThrough.path) {
++      try {
++        const { relative, resolve, isAbsolute } = await import('path');
++        const { resolvePageWriteTarget } = await import('../write-through.ts');
++        const stampSourceId = ctx.sourceId ?? 'default';
++        const row = await ctx.engine.executeRaw<{ source_path: string | null }>(
++          `SELECT source_path FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL LIMIT 1`,
++          [stampSourceId, result.slug],
++        );
++        if (row.length > 0 && row[0].source_path == null) {
++          const target = await resolvePageWriteTarget(ctx.engine, result.slug, stampSourceId);
++          if (target.ok) {
++            const rel = relative(resolve(target.writeRoot), resolve(writeThrough.path));
++            const unsafe =
++              !rel || isAbsolute(rel) ||
++              rel.split(/[\\/]/).some((segment) => segment === '..') ||
++              !rel.toLowerCase().endsWith('.md');
++            if (!unsafe) {
++              const relPath = rel.replace(/\\/g, '/');
++              await ctx.engine.executeRaw(
++                `UPDATE pages SET source_path = $1 WHERE source_id = $2 AND slug = $3 AND deleted_at IS NULL AND source_path IS NULL`,
++                [relPath, stampSourceId, result.slug],
++              );
++              const after = await ctx.engine.executeRaw<{ source_path: string | null }>(
++                `SELECT source_path FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL LIMIT 1`,
++                [stampSourceId, result.slug],
++              );
++              if (after.length === 0 || after[0].source_path == null) {
++                // Metadata update failed (or was concurrently refused): retain
++                // file/page, leave source_path NULL, surface through the
++                // write-through result contract.
++                const errMsg =
++                  `source_path stamp failed for ${result.slug}: row still has no source_path after update`;
++                ctx.logger.warn(`[put_page] ${errMsg}`);
++                writeThrough.sourcePathError = errMsg;
++              }
++            } else {
++              const errMsg =
++                `source_path stamp refused for ${result.slug}: write-through path ${writeThrough.path} is not a representable source-relative markdown path`;
++              ctx.logger.warn(`[put_page] ${errMsg}`);
++              writeThrough.sourcePathError = errMsg;
++            }
++          }
++        }
++      } catch (e) {
++        const errMsg =
++          `[put_page] source_path stamp failed for ${result.slug}: ${e instanceof Error ? e.message : String(e)}`;
++        ctx.logger.warn(errMsg);
++        writeThrough.sourcePathError = errMsg;
++      }
++    }
++
+     // Auto-link post-hook: runs AFTER importFromContent (which is its own
+     // transaction). Runs even on status='skipped' so reconciliation catches drift
+     // between the page text and the links table. Failures are non-blocking.
+
+
+diff --git a/src/core/write-through.ts b/src/core/write-through.ts
+--- a/src/core/write-through.ts
++++ b/src/core/write-through.ts
+@@ -89,6 +89,17 @@
+   skipped?: 'disabled_by_config' | 'no_repo_configured' | 'repo_not_found' | 'source_repo_belongs_to_other_source' | 'page_not_found_after_write' | 'path_escapes_source_root' | 'case_insensitive_collision';
+   /** Set when the render/write/rename itself threw (EACCES, ENOTDIR, disk full). */
+   error?: string;
++  /**
++   * JOSEMAR PATCH (issue #125, part 1): set when the file was written
++   * (`written: true`) but the row's `source_path` identity could NOT be
++   * established (metadata update failed or the written path is not a
++   * representable source-relative markdown path). The file/page are
++   * retained and `source_path` stays NULL — identity is never silently
++   * claimed. Callers may surface this to the operator; a missing/absent
++   * field means the stamp succeeded or was correctly skipped (row already
++   * had a non-NULL identity, or no write happened).
++   */
++  sourcePathError?: string;
+ }
+
+ export interface WritePageThroughOpts {
+
+
+diff --git a/src/commands/sync.ts b/src/commands/sync.ts
+--- a/src/commands/sync.ts
++++ b/src/commands/sync.ts
+@@ -1774,6 +1774,43 @@
+         // Destination slug occupied or invalid — treat as add; the reconcile
+         // below removes the stale old row once the destination materialized.
+       }
++      // JOSEMAR PATCH (issue #125, part 2): when the cheap rename applied,
++      // the row's identity (source_path) must follow the file — updateSlug
++      // renames the slug but leaves source_path pointing at the OLD path.
++      // Without this, any source_path-based reconcile (the incremental
++      // stale-file pass, and the full-sync reconcile on a later --full run)
++      // would see the renamed row as stale (its recorded path is gone from
++      // the tree) and delete a LIVE page. The value is the ACTUAL git rename
++      // destination (repo-relative, forward-slash normalized), scoped to the
++      // exact (source_id, new slug) live row.
++      //
++      // The shared reconcile/convergence flag is initialized BEFORE the
++      // follow so a follow failure feeds the SAME gates the #3056 rename
++      // reconcile uses below (succeededPaths clear + markCompleted bank):
++      // a failed follow MUST NOT clear its own `<rename:…>` success and
++      // MUST NOT bank/mark the destination completed — otherwise the next
++      // run's resume filter (`completed.has(r.to)`) would skip the rename
++      // entirely, the follow would never retry, and the row would keep the
++      // wrong source_path forever (the exact bug this patch prevents). The
++      // non-skippable `<rename:…>` sentinel hard-blocks the bookmark, so
++      // the next run replays the destination rename from the same diff and
++      // the follow converges/clears the sentinel through the ordinary
++      // success path.
++      let reconcileFailed = false;
++      if (renameApplied) {
++        try {
++          await engine.executeRaw(
++            `UPDATE pages SET source_path = $1 WHERE source_id = $2 AND slug = $3 AND deleted_at IS NULL`,
++            [to.replace(/\\/g, '/'), opts.sourceId ?? DEFAULT_SOURCE_ID, newSlug],
++          );
++        } catch (followErr) {
++          reconcileFailed = true;
++          failedFiles.push({
++            path: `<rename:${to}>`,
++            error: `rename source_path follow failed for ${to}: ${followErr instanceof Error ? followErr.message : String(followErr)}`,
++          });
++        }
++      }
+       // Reimport at new path (picks up content changes). Wrapped to match the
+       // deletes/adds loops: a malformed renamed file is recorded to failedFiles
+       // and skipped, NOT thrown uncaught. importFile still throws on content
+@@ -1826,7 +1863,8 @@
+       // N attempts, which would advance the bookmark and make a transient
+       // delete outage a permanent duplicate. The sentinel clears through the
+       // ordinary success path once the rename converges on a later run.
+-      let reconcileFailed = false;
++      // (reconcileFailed is hoisted above the source_path follow — see the
++      // JOSEMAR PATCH comment there.)
+       if (!renameApplied && importResult !== undefined) {
+         const destMaterialized = importResult.status === 'imported' ||
+           (importResult.status === 'skipped' && !importResult.error && importResult.slug === newSlug);
+@@ -2277,6 +2315,184 @@
+     });
+   }
+
++  // JOSEMAR PATCH (issue #125, part 2): fail-closed incremental stale-file
++  // pass. The incremental delta is an ENDPOINT-TREE diff (last_commit..pin),
++  // so a file that was added and then `git mv`'d (or removed) INSIDE one sync
++  // window never appears in the delta — its row (source_path-stamped by the
++  // part-1 write-through identity) is orphaned forever: the old slug stays
++  // live and duplicates the new one. The full-sync reconcile machinery
++  // (planReconcileDeletes + #2426 ever-committed proof + #2828 mass-delete
++  // valve) already decides exactly which file-backed rows are genuinely
++  // stale; this pass reuses it verbatim (same normalization, scope/strategy/
++  // malformed/path-confinement predicates, and valve — no alternate
++  // algorithm) on incremental runs.
++  //
++  // SAFETY (fail-closed, mirrors the full-sync #1433 posture and is
++  // deliberately STRICTER on delete failures):
++  //   1. Runs ONLY when the whole add/modify/rename/delete phase succeeded
++  //      (failedFiles empty — any import/rename/delete/postcondition failure
++  //      skips the pass entirely) and ONLY source-scoped (opts.sourceId).
++  //   2. Rows: source-scoped LIVE rows with a NON-NULL source_path only —
++  //      NULL identity (DB-only capture/put_page without write-through) is
++  //      never swept.
++  //   3. planReconcileDeletes: same normalized membership, isSyncable/
++  //      malformed-poisoned eligibility, scope-prefix confinement, and the
++  //      #2828 mass-delete valve. When the valve trips, the pass is skipped
++  //      (no rows deleted); the GBRAIN_ALLOW_MASS_RECONCILE escape hatch
++  //      stays env-only — nothing in this patch or the Josemar refresh path
++  //      can set it.
++  //   4. listEverCommittedPaths MUST succeed: a stale path is deleted ONLY
++  //      when it is proven ever committed AND absent from the current
++  //      syncable tree. If git history proof is unavailable, the destructive
++  //      pass is skipped. Never-committed (DB-only write-through) rows are
++  //      RETAINED, never deleted.
++  //   5. No hash/same-content/path-slug-guess delete authority: deletion is
++  //      by the row's OWN slug from its recorded source_path — no
++  //      resolveSlugForPath fallback, no content comparison. A falsy/empty
++  //      source_path is explicitly RETAINED (fail-closed): no identity
++  //      proof, no delete authority.
++  //   6. A delete failure creates a non-skippable `<stale:…>` SENTINEL in
++  //      the failure ledger (the #3056 `<rename:…>` precedent): it hard-
++  //      blocks the bookmark checkpoint even under --skip-failed and can
++  //      never be auto-skipped by the chronic-failure valve. Once the
++  //      delete converges on a later run, the sentinel clears through the
++  //      ordinary success path (succeededPaths) exactly like `<rename:…>` —
++  //      a transient delete outage never ages doctor to a permanent FAIL.
++  if (failedFiles.length === 0 && opts.sourceId) {
++    const sid = opts.sourceId;
++    const reconcileSyncOpts = opts.strategy ? { strategy: opts.strategy } : undefined;
++    let stalePrepFailed = false;
++    try {
++      // #774: scoped syncs store git-root-relative source_paths, so
++      // relativize the walk to the git root when the scope is a subpath
++      // (mirrors performFullSync's slugRoot handling).
++      const stalePassRoot = syncScopeRoot !== gitContextRoot ? gitContextRoot : syncScopeRoot;
++      const currentFiles = collectSyncableFiles(syncScopeRoot, {
++        strategy: opts.strategy ?? 'markdown',
++        includeGitignored: opts.includeGitignored,
++      }).map(abs => relative(stalePassRoot, abs));
++      const rows = await engine.executeRaw<{ slug: string; source_path: string | null }>(
++        `SELECT slug, source_path FROM pages WHERE source_id = $1 AND source_path IS NOT NULL AND deleted_at IS NULL`,
++        [sid],
++      );
++      // #774: scoped syncs are authoritative only for their scope.
++      const scopePrefix = stalePassRoot !== syncScopeRoot ? relative(gitContextRoot, syncScopeRoot) + '/' : '';
++      const reconcileEligible = (p: string): boolean =>
++        isSyncable(p, reconcileSyncOpts) ||
++        (unsyncableReason(p, reconcileSyncOpts) === 'malformed-path' && isPoisonedPath(p));
++      const plan = planReconcileDeletes(
++        rows,
++        currentFiles,
++        p => (scopePrefix === '' || p.startsWith(scopePrefix)) && reconcileEligible(p),
++      );
++      if (plan.staleSlugs.length > 0 && plan.massDelete && !massReconcileAllowed()) {
++        serr(
++          `\n  WARNING: incremental stale-file pass refused to delete ${plan.staleSlugs.length} of ` +
++          `${plan.reconcilableCount} file-backed page(s) for source '${sid}' ` +
++          `(> ${Math.round(MASS_RECONCILE_RATIO * 100)}% of them).\n` +
++          `  This is the #2828 mass-delete valve: a sweep this large almost always means a\n` +
++          `  path-comparison bug or the wrong repo path — NOT a genuine bulk deletion.\n` +
++          `  No pages were deleted. Nothing in the refresh path can bypass this valve.`,
++        );
++      } else if (plan.staleSlugs.length > 0) {
++        const everCommitted = listEverCommittedPaths(gitContextRoot);
++        if (everCommitted === null) {
++          serr(
++            `[sync] incremental stale-file pass skipped: git history proof unavailable ` +
++            `(listEverCommittedPaths failed); no rows deleted.`,
++          );
++        } else {
++          const pathBySlug = new Map(rows.map(r => [r.slug, r.source_path]));
++          const deletable: string[] = [];
++          const retained: string[] = [];
++          for (const slug of plan.staleSlugs) {
++            const sp = pathBySlug.get(slug);
++            // Fail-closed: a falsy/empty source_path is explicitly RETAINED —
++            // no recorded identity proof means no delete authority (the
++            // ever-committed check can only authorize a sweep for a real
++            // path). Only a non-empty path that was ever committed AND is
++            // absent from the current tree may flow to deletion.
++            if (!sp || !everCommitted.has(sp.replace(/\\/g, '/'))) retained.push(slug);
++            else deletable.push(slug);
++          }
++          if (retained.length > 0) {
++            serr(
++              `  Kept ${retained.length} page(s) whose markdown was never committed to git ` +
++              `(or whose source_path is empty — DB-only write-through — not deleting). ` +
++              `Commit + push them so the next sync sees them as file-backed.`,
++            );
++          }
++          for (let i = 0; i < deletable.length; i += DELETE_BATCH_SIZE) {
++            const batch = deletable.slice(i, i + DELETE_BATCH_SIZE);
++            try {
++              const deleted = await engine.deletePages(batch, { sourceId: sid });
++              for (const s of deleted) {
++                pagesAffected.push(s);
++                deletedSlugs.add(s);
++                // #3056 precedent: a delete that SUCCEEDS here clears any
++                // `<stale:…>` sentinel a previous failing run recorded — the
++                // ledger row self-heals through the ordinary success path so a
++                // transient delete outage never ages doctor to a permanent FAIL.
++                succeededPaths.push(`<stale:${pathBySlug.get(s) ?? s}>`);
++              }
++              if (deleted.length > 0) {
++                serr(
++                  `[sync] incremental stale-file pass reconciled ${deleted.length} stale page(s) ` +
++                  `whose source file was removed (${batch.length === 1 ? batch[0] : `${batch.length} paths`}).`,
++                );
++              }
++            } catch (err) {
++              // Fail-closed: per-slug fallback for a batch blip; ANY
++              // unrecoverable per-slug failure becomes a non-skippable
++              // sentinel that hard-blocks the bookmark (never auto-skippable).
++              for (const slug of batch) {
++                try {
++                  await engine.deletePage(slug, { sourceId: sid });
++                  pagesAffected.push(slug);
++                  deletedSlugs.add(slug);
++                  succeededPaths.push(`<stale:${pathBySlug.get(slug) ?? slug}>`);
++                } catch (perSlugErr) {
++                  const sp = pathBySlug.get(slug) ?? slug;
++                  failedFiles.push({
++                    path: `<stale:${sp}>`,
++                    error: `stale-file delete failed for ${slug}: ${perSlugErr instanceof Error ? perSlugErr.message : String(perSlugErr)} (batch error: ${err instanceof Error ? err.message : String(err)})`,
++                  });
++                }
++              }
++            }
++          }
++        }
++      }
++    } catch (e) {
++      // Unexpected stale-pass preparation/enumeration/planning failure
++      // (e.g. the rows SELECT or the walk threw): fail closed with a
++      // DEDICATED non-skippable sentinel through the shared failure
++      // ledger — it hard-blocks the bookmark (never auto-skipped) and
++      // self-clears through the ordinary success path once the pass
++      // completes cleanly on a later run. This is deliberately DISTINCT
++      // from the intentional safe outcomes above (git-history proof
++      // unavailable, mass valve, retention), which skip destructively
++      // without erroring.
++      stalePrepFailed = true;
++      const errMsg = `[sync] incremental stale-file pass error (no rows deleted): ` +
++        `${e instanceof Error ? e.message : String(e)}`;
++      serr(errMsg);
++      failedFiles.push({
++        path: `<stale-prep:${sid}>`,
++        error: `stale-file pass preparation failed: ${e instanceof Error ? e.message : String(e)}`,
++      });
++    }
++    // A pass that RAN to completion — including every safe skip (valve
++    // trip, proof-unavailable, retention) and successful deletes — clears
++    // any previous `<stale-prep:…>` sentinel through the ordinary success
++    // path (the #3056 precedent), so a transient preparation outage never
++    // ages doctor to a permanent FAIL. NOT pushed when the pass itself
++    // failed: the failedFiles entry above is the record for that run, and
++    // clearing it in the same ledger call would delete-then-re-add it
++    // (resetting the attempt streak).
++    if (!stalePrepFailed) succeededPaths.push(`<stale-prep:${sid}>`);
++  }
++
+   const elapsed = Date.now() - start;
+
+   // issue #1939 — gate the bookmark through the shared failure ledger.

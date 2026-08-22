@@ -5,6 +5,7 @@
 	test-mnemosyne-retrieval-synthetic-regression test-mnemosyne-retrieval-activation test-mnemosyne-retrieval-activation-evidence \
 	test-mnemosyne-retrieval-activation-reviewed \
 	test-gbrain-conformance test-gbrain-conformance-embeddings test-gbrain-conformance-chronicle \
+	test-gbrain-sync-move-regression \
 	test-gbrain-dream-recovery \
 	test-gbrain-upgrade-conformance test-gbrain-upgrade-conformance-embeddings
 
@@ -101,6 +102,15 @@ test-mnemosyne-retrieval-activation-reviewed:
 test-gbrain-conformance:
 	RUN_DOCKER_TESTS=1 RUN_GBRAIN_CONFORMANCE=1 \
 	python3 -m unittest tests.runtime.test_gbrain_conformance -v
+
+# Issue #125 W1: committed unchanged git-mv characterization against the
+# current pinned gbrain. Runs both sync-originated and capture-originated
+# paths through normal josemar-gbrain refresh. Raw runtime evidence is written
+# only under dump_folder/gbrain-conformance/; it intentionally fails until the
+# regression is fixed.
+test-gbrain-sync-move-regression:
+	RUN_DOCKER_TESTS=1 RUN_GBRAIN_SYNC_MOVE_REGRESSION=1 \
+	python3 -m unittest tests.runtime.test_gbrain_sync_move_regression -v
 
 # Real TEI/E5 embeddings gate: adds the docker-compose.embeddings.yml overlay
 # and validates the real embedding lifecycle. A cold model download is

@@ -306,6 +306,49 @@ operator MUST verify the following after rebuild and before deploying:
      upgrade repeats this pattern, capture the old pin's patch from its own
      validated commit into a new `patches/legacy/<file>` and add a mapping
      entry.
+   - **Committed vault rename reconciliation (issue #125).** Upstream
+     gbrain's delta-driven rename reconciliation can only positively locate
+     stale rename rows by `source_path`, but capture/`put_page` rows are
+     created with `source_path = NULL`. A capture-originated page that is
+     committed and then moved (`git mv`, content unchanged) inside one sync
+     window therefore never reaches the normal rename/delete reconciliation,
+     leaving the old slug live alongside the destination. Two cooperating
+     hunks fix this locally:
+     - **Write-through file identity** (`src/core/ops/pages.ts`,
+       `src/core/write-through.ts`): after a successful write-through for a
+       live page whose `source_path` is NULL, the exact owning-source-relative
+       markdown target is stamped as that row's `source_path`. The stamp runs
+       only after the file write succeeds, never overwrites a non-NULL
+       `source_path`, and is derived from the vetted write target; a failure
+       leaves `source_path` NULL and is surfaced through the write-through
+       result envelope (`sourcePathError`) rather than silently claimed.
+     - **Incremental stale-file reconciliation**
+       (`src/commands/sync.ts`): a cheap-rename follow updates the renamed
+       row's `source_path` to the actual git rename destination (a follow
+       failure is a non-skippable `<rename:…>` sentinel), and a fail-closed
+       stale pass runs only after the whole add/modify/rename/delete phase
+       succeeded. The pass reuses the full-sync `planReconcileDeletes`
+       machinery (same normalization, scope/strategy/malformed-path/
+       path-confinement rules and the #2828 mass-delete valve) to delete only
+       source-scoped live rows with non-NULL `source_path` whose recorded
+       path is proven ever-committed and now absent from the current tree;
+       NULL-identity and never-committed rows are never swept, and a delete
+       failure is a non-skippable `<stale:…>` sentinel that blocks bookmark
+       advancement. Nothing in the refresh path can set
+       `GBRAIN_ALLOW_MASS_RECONCILE=1`.
+     Behavior: ordinary `josemar-gbrain refresh` automatically reconciles
+     committed moves for both sync-originated and capture-originated pages —
+     no operator workflow, manual recapture, or reindex-as-fix workaround is
+     required. Upstream status: no post-pin fix matching this defect was
+     found (#3570 is related follow-up around the #3479 rename sentinels,
+     not a ready fix); do not bump the gbrain pin to chase unrelated upstream
+     changes.
+     **Removal criteria:** re-evaluate these hunks on the next gbrain
+     upgrade, and remove them only when upstream contains equivalent behavior
+     proven by the hard #125 regression — the focused gate
+     `make test-gbrain-sync-move-regression` against the current pin plus the
+     promoted #125 hard assertion in the upgrade-conformance suite for
+     candidate pins.
    The patch is documented inline in `Dockerfile.hermes`. Remove individual
    hunks when their corresponding behavior is fixed upstream.
 
@@ -599,6 +642,16 @@ vault files changed since the stored `last_commit` bookmark), plus stale
 content extraction and link extraction. It does **not** run init, schema
 install, or schema sync. `reindex` remains the only full activation/rebuild
 path (init, config, full sync, content/link extraction, schema setup).
+
+Committed vault renames (`git mv`, content unchanged) are reconciled
+automatically by this refresh path for both plain sync-originated files and
+capture/write-through-originated pages — the destination resolves, the stale
+old slug disappears, and a second refresh is idempotent. No manual recapture or
+reindex recovery is needed. This relies on the issue #125 compatibility hunks
+in the local patch; see "gbrain Upgrade Checklist" → "Local patch" for the
+hunk boundaries and the removal criteria (re-evaluate on the next gbrain
+upgrade; remove only when upstream proves equivalent behavior via the hard
+#125 regression).
 
 Refresh acquires `/opt/data/.locks/tasknotes.lock` nonblockingly through the
 repo-owned lock runner. If a task operation is active, the cron logs a skip and

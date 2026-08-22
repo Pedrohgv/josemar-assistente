@@ -96,6 +96,11 @@ RUN git clone https://github.com/garrytan/gbrain.git /opt/gbrain \
 #    f. Bundled fixture (test/ai/e5-preprocess.test.ts). The patch adds its
 #       own test file pinning the E5 seams; keep it in sync with the seams
 #       above when re-creating the patch.
+#    g. Committed vault rename reconciliation (src/core/ops/pages.ts,
+#       src/core/write-through.ts, src/commands/sync.ts). Establishes vetted
+#       write-through file identity and fail-closed incremental stale-file
+#       reconciliation; re-evaluate against the hard #125 regression on every
+#       gbrain upgrade before removing it.
 #    Note: chronicle judge maxTokens is no longer patched in source. Upstream
 #    v0.42 exposes `chronicle.judge_max_tokens` (default 4000); Josemar sets it
 #    to 8000 in the reindex flow (scripts/josemar-gbrain) so reasoning models

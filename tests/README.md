@@ -393,6 +393,38 @@ not fail permanently solely because a known issue is open. When the owning bug
 is fixed, the fixing PR converts the corresponding probe to a hard regression
 assertion.
 
+### Sync-move regression characterization (issue #125 W1)
+
+The dedicated W1 gate is an explicit Docker test against the current pinned
+gbrain. It uses the existing disposable Docker/PGLite conformance harness and
+canonical template/schema seeding, runs every command as the `hermes` runtime
+user, and uses only public `gbrain` probes plus normal operator
+`josemar-gbrain refresh` reconciliation.
+
+It hard-asserts the repaired behavior for both committed, unchanged `git mv`
+paths: Case A (`sync-originated`) creates and indexes a committed vault file
+through refresh before moving it; Case B (`capture-originated`) creates the
+page through public `gbrain capture` before moving it. It records the source
+ref/version, pre/post commits, `git diff --name-status -M` rename
+classification, file hashes/existence, both refresh envelopes, old/new public
+`get`, unique-token `search`, second-refresh probes, and supported metadata.
+Raw runtime evidence is written only to the gitignored
+`dump_folder/gbrain-conformance/gbrain-sync-move-regression.json`; no transient
+evidence is tracked.
+
+```bash
+make test-gbrain-sync-move-regression
+```
+
+The gate is skipped by default and requires `RUN_DOCKER_TESTS=1` plus
+`RUN_GBRAIN_SYNC_MOVE_REGRESSION=1` (the Make target supplies both). It
+hard-asserts the repaired behavior for both cases: while #125 was open it
+failed with the full raw evidence path and the specific failure signature in
+the assertion output, and it turns green unchanged once the owning fix — the
+#125 compatibility hunks in
+`patches/gbrain-inline-worker-gateway.patch` — is present in the built
+image.
+
 ### Operation coverage and the Chronicle gates
 
 Every operation documented as supported in `skills-factory/gbrain/SKILL.md`
