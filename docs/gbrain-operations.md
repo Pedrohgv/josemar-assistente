@@ -33,9 +33,11 @@ The Josemar gbrain integration is intentionally minimal:
   native gbrain command — fresh `init --pglite --no-embedding` + keyword-only
   only when BOTH `config.json` and `brain.pglite` are absent, schema-only
   `init --migrate-only` only when the existing state is healthy — then config,
-  full sync, content/link extraction, and schema setup) and `refresh`
-  (incremental reconciliation of manual Obsidian/Syncthing edits via
-  `gbrain sync --no-embed`, stale extraction, and link extraction, without
+  full sync, content/link extraction, and schema setup; inherited database
+  redirects and `GBRAIN_DATABASE_URL` dotenv declarations at the fixed native
+  cwd fail closed too)
+  and `refresh` (incremental reconciliation of manual Obsidian/Syncthing edits
+  via `gbrain sync --no-embed`, stale extraction, and link extraction, without
   init/schema work). Neither is used from chat.
 - **Keyword-only native gbrain search by default.** FRESH first activation
   (no existing state) configures `search.mcp_keyword_only=true` and
@@ -110,8 +112,8 @@ additional operations.
 
 The PR #132 fail-closed reindex preflight (fresh only when BOTH canonical
 artifacts are absent; healthy-existing shape requirements; terminal failures
-for partial/malformed/Postgres/env-override state) is additionally hard-
-enforced without Docker by the fast contract suites
+for partial/malformed/Postgres/database-env state at the fixed native cwd) is
+additionally hard-enforced without Docker by the fast contract suites
 `tests.gbrain.test_gbrain_wrapper_contract` and
 `tests.gbrain.test_gbrain_manual_refresh_reindex_lock`, which run on ordinary
 `make test` (see `tests/README.md` → "Fast Tests").
@@ -156,6 +158,17 @@ cannot corrupt notes when a caller merges stderr into stdin (`2>&1`). This is
 defense in depth, not generic stderr filtering: `put --stdin` remains
 forbidden, public agent-facing calls use `gbrain`, and TaskNotes uses the
 private native launcher only under its transaction-level lock.
+
+**Native dotenv safety boundary (PR #132).** The private native launcher
+pins the native cwd and the database environment for EVERY native command it
+starts — including every native command reached by reindex. It fixes the cwd
+to `/opt/gbrain` fail-closed (`cd /opt/gbrain || exit 1`; a failing cd exits
+before Bun can resolve a caller-cwd `src/cli.ts`), unsets
+`GBRAIN_DATABASE_URL` and `DATABASE_URL` (the pin honors a truthy
+`GBRAIN_DATABASE_URL` unconditionally), and invokes the fixed Bun with
+`run --no-env-file src/cli.ts` so Bun cannot auto-load any dotenv file. The
+native cwd is `/opt/gbrain` — NOT the operator's shell cwd — and neither Bun
+nor the reindex preflight ever reads the operator's cwd.
 
 Immediate non-negotiables:
 
@@ -387,9 +400,10 @@ operator MUST verify the following after rebuild and before deploying:
    `init --pglite --no-embedding` runs only when BOTH canonical artifacts
    (`config.json` and `brain.pglite`) are absent. Partial/malformed/
    non-regular/symlinked state, config without PGLite, PGLite without config,
-   alternate topology, Postgres engine/URL, and an effective
-   `GBRAIN_DATABASE_URL` / `DATABASE_URL` override all fail closed terminally
-   before native gbrain activity with no fresh fallback.
+   alternate topology, Postgres engine/URL, an inherited `GBRAIN_DATABASE_URL`
+   / effective `DATABASE_URL`, and a `GBRAIN_DATABASE_URL` declaration in any
+   Bun default dotenv file at the fixed native cwd (`/opt/gbrain`) all fail
+   closed terminally before native gbrain activity with no fresh fallback.
    Skipping activation leaves the database on an older schema and may cause
    runtime errors or silent behavior changes.
    See "Safe Initial Production Activation" below for the activation
@@ -652,15 +666,21 @@ overrides are supported in this deployment.
      malformed/non-regular/symlinked `config.json` or `brain.pglite`, a
      `config.json` without a PGLite directory, a `brain.pglite` without a
      `config.json`, alternate topology, a Postgres engine or persisted
-     `database_url`, and an effective `GBRAIN_DATABASE_URL` / `DATABASE_URL`
-     override all terminate reindex with a structured failure envelope; there
-     is no fresh-initialization fallback over existing state. The
-     `DATABASE_URL` exception mirrors native semantics exactly: it is ignored
-     only when it equals a parsed `DATABASE_URL` assignment in one of the
-     fixed cwd dotenv files (`.env`, `.env.local`, `.env.development`,
-     `.env.production`, `.env.test`). Diagnostics never echo database URLs or
-     credentials, and the override is resolved by unsetting/aligning it —
-     never by bypassing the preflight.
+     `database_url`, and any database redirect at the FIXED NATIVE cwd
+     boundary all terminate reindex with a structured failure envelope; there
+     is no fresh-initialization fallback over existing state. The database
+     boundary mirrors the native launcher (see "Issue #110: Safe gbrain
+     Adapter" → "Native dotenv safety boundary"): the preflight fails closed
+     on an inherited `GBRAIN_DATABASE_URL`, on a `GBRAIN_DATABASE_URL`
+     declaration in any possible Bun default dotenv file at the fixed native
+     cwd (`/opt/gbrain`), and on an effective inherited `DATABASE_URL` that
+     is NOT matched by a `DATABASE_URL` assignment in one of the pin's five
+     dotenv files (`.env`, `.env.local`, `.env.development`,
+     `.env.production`, `.env.test`) at that same fixed native cwd. The
+     native cwd is `/opt/gbrain` — not the operator shell cwd — and neither
+     Bun nor the preflight reads the operator's cwd. Diagnostics are static
+     strings that never echo database URLs or credentials; the failure
+     message names the offending surface and the preflight is terminal.
    If any step fails, the reindex returns a failure envelope.
 
 4. **Verify gbrain is ready:**
@@ -698,9 +718,10 @@ When the Obsidian vault is swapped or materially changed:
    configured search mode; it never fresh-initializes over existing state
    (issue #124). A fresh `init --pglite --no-embedding` + keyword-only setup
    happens only when NEITHER `config.json` NOR `brain.pglite` exists.
-   Partial/malformed/symlinked state, a Postgres engine or URL, and effective
-   `GBRAIN_DATABASE_URL` / `DATABASE_URL` overrides fail closed instead — see
-   "Safe Initial Production Activation" for the full healthy-state
+   Partial/malformed/symlinked state, a Postgres engine or URL, inherited
+   database redirects, and `GBRAIN_DATABASE_URL` declarations in Bun default
+   dotenv files at the fixed native cwd (`/opt/gbrain`) fail closed instead —
+   see "Safe Initial Production Activation" for the full healthy-state
    requirements.
 
 4. **Verify gbrain is ready:**
@@ -1106,12 +1127,14 @@ workflow: set the env, run reindex.
   PGLite state: symlinked/non-regular/malformed `config.json`, symlinked or
   non-directory `brain.pglite`, config without PGLite or PGLite without
   config, a non-`pglite` engine, a `database_path` not resolving to
-  `$GBRAIN_HOME/.gbrain/brain.pglite`, a persisted `database_url`, and
-  effective `GBRAIN_DATABASE_URL` / `DATABASE_URL` overrides. All codes are
-  terminal with no fresh fallback; the diagnostics are static strings that
-  never echo config content, database URLs, or credentials. Resolve the
-  underlying state problem (or unset/align the env override) and re-run
-  reindex.
+  `$GBRAIN_HOME/.gbrain/brain.pglite`, a persisted `database_url`, an
+  inherited `GBRAIN_DATABASE_URL`, a `GBRAIN_DATABASE_URL` declaration in any
+  Bun default dotenv file at the fixed native cwd (`/opt/gbrain`), and an
+  effective `DATABASE_URL` not matched by the pin's five dotenv files at that
+  same native cwd. All codes are terminal with no fresh fallback; the
+  diagnostics are static strings that never echo config content, database
+  URLs, or credentials — the failure message names the offending surface.
+  Resolve the cause it names and re-run reindex.
 - **Embeddings warning from `gbrain doctor`** — Expected in the base
   (keyword-only) deploy. Text queries are keyword-only, image/cross-modal
   queries are rejected, and `put`/`capture` do not embed. Embeddings are opt-in

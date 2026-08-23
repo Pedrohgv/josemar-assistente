@@ -88,10 +88,10 @@ def _extract_state_branches(body: str) -> tuple[str, str]:
 
 def _extract_preflight_python(src: str) -> str:
     """Extract the body of the embedded state-preflight Python heredoc
-    (issue #132 Findings 1-2), anchored on the fixed-interpreter invocation
-    with the two canonical artifact paths."""
+    (issue #132), anchored on the fixed-interpreter invocation with the two
+    canonical artifact paths and the fixed native gbrain cwd."""
     match = re.search(
-        r'"\$PYTHON_BIN" -I - "\$GBRAIN_CONFIG_PATH" "\$GBRAIN_PGLITE_PATH" <<\'PY\'\n(.*?)\nPY',
+        r'"\$PYTHON_BIN" -I - "\$GBRAIN_CONFIG_PATH" "\$GBRAIN_PGLITE_PATH" "\$GBRAIN_NATIVE_CWD" <<\'PY\'\n(.*?)\nPY',
         src, re.DOTALL,
     )
     assert match is not None, "Could not find the preflight Python heredoc"
@@ -507,15 +507,25 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
 
     def test_preflight_invocation_uses_fixed_isolated_interpreter(self) -> None:
         self.assertIn(
-            '"$PYTHON_BIN" -I - "$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH"',
+            '"$PYTHON_BIN" -I - "$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" '
+            '"$GBRAIN_NATIVE_CWD"',
             self.body,
         )
+
+    def test_native_cwd_passed_to_preflight(self) -> None:
+        """The preflight must receive the fixed native gbrain cwd as an
+        argument (the launcher's /opt/gbrain dotenv boundary), not derive it
+        from the wrapper caller's cwd."""
+        self.assertIn('config_path, pglite_path, native_cwd = sys.argv[1:4]',
+                      self.preflight)
 
     def test_preflight_after_lock_before_native_commands_and_init(self) -> None:
         """The preflight must run after lock acquisition and before the
         custom schema-pack native validation, schema pack install, both init
         branches, the state classification, and the sync."""
-        preflight_pos = self.body.find('"$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH"')
+        preflight_pos = self.body.find(
+            '"$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" "$GBRAIN_NATIVE_CWD"'
+        )
         lock_pos = self.body.find("acquire_tasknotes_lock reindex")
         install_pos = self.body.find("install_source_pack")
         validate_pos = self.body.find("validate_installed_pack")
@@ -607,15 +617,12 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
         self.assertIn("os.path.realpath(pglite_path)", self.preflight)
         self.assertIn("gbrain_state_config_database_path_invalid", self.preflight)
 
-    def test_preflight_rejects_gbrain_database_url_env(self) -> None:
-        self.assertIn('os.environ.get("GBRAIN_DATABASE_URL")', self.preflight)
-        self.assertIn("gbrain_state_gbrain_database_url_env", self.preflight)
-
     def test_preflight_rejects_effective_database_url(self) -> None:
-        """A truthy DATABASE_URL not matched by the cwd dotenv union is
-        effective (Postgres) and must fail closed."""
+        """A truthy DATABASE_URL not matched by the fixed-native-cwd dotenv
+        union is effective (Postgres) and must fail closed."""
         self.assertIn('os.environ.get("DATABASE_URL")', self.preflight)
-        self.assertIn("not in dotenv_values_for_key(\"DATABASE_URL\")", self.preflight)
+        self.assertIn('not in dotenv_values_for_key("DATABASE_URL", DOTENV_FILES)',
+                      self.preflight)
         self.assertIn("gbrain_state_database_url_effective", self.preflight)
 
     def test_dotenv_heuristic_uses_exact_pinned_files(self) -> None:
@@ -623,11 +630,12 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
                      ".env.production", ".env.test"):
             self.assertIn(name, self.preflight)
 
-    def test_dotenv_heuristic_uses_inherited_cwd(self) -> None:
-        """The helper must evaluate os.getcwd() in the wrapper process tree
-        (the lock runner preserves cwd)."""
-        self.assertIn("os.getcwd()", self.preflight)
-        self.assertIn("os.path.join(CWD, name)", self.preflight)
+    def test_dotenv_heuristic_uses_fixed_native_cwd(self) -> None:
+        """The #427 DATABASE_URL matching must read gbrain's five dotenv
+        files from the FIXED native cwd (the launcher's /opt/gbrain), never
+        the wrapper caller's cwd."""
+        self.assertIn("os.path.join(native_cwd, name)", self.preflight)
+        self.assertNotIn("os.getcwd()", self.preflight)
 
     def test_dotenv_heuristic_mirrors_pinned_parser(self) -> None:
         """Exact dotenvValuesForKey mirror: LF-only split (content.split
@@ -636,7 +644,7 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
         strip, skip blank/#, the pinned regex, case-sensitive key, trimmed
         value, whole-value quote removal else truncate at the first ' #' AND
         trim the remainder, ignore empties, union values."""
-        self.assertIn('content.split("\\n")', self.preflight)
+        self.assertIn('fh.read().split("\\n")', self.preflight)
         self.assertIn('newline=""', self.preflight)
         self.assertNotIn("splitlines", self.preflight)
         self.assertIn(r'^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$', self.preflight)
@@ -647,7 +655,31 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
         self.assertIn("value[:comment].strip()", self.preflight)
         self.assertIn('if value == "":', self.preflight)
         self.assertIn("values.append(value)", self.preflight)
-        self.assertIn("for name in DOTENV_FILES:", self.preflight)
+        self.assertIn("for name in filenames:", self.preflight)
+
+    def test_preflight_scans_bun_dotenv_surfaces_for_gbrain_database_url(self) -> None:
+        """Every possible Bun default dotenv suffix surface in the FIXED
+        native cwd must be scanned for a GBRAIN_DATABASE_URL declaration."""
+        for name in (".env", ".env.local", ".env.development", ".env.development.local",
+                     ".env.production", ".env.production.local",
+                     ".env.test", ".env.test.local"):
+            self.assertIn(name, self.preflight)
+        self.assertIn('declares_key("GBRAIN_DATABASE_URL"', self.preflight)
+        self.assertIn("gbrain_state_gbrain_database_url_dotenv", self.preflight)
+
+    def test_preflight_scan_rejects_any_syntactic_declaration(self) -> None:
+        """The Bun dotenv scan rejects ANY syntactic declaration (even empty
+        or quoted/expanded values — no Bun expansion reimplementation), and
+        diagnostics never echo values."""
+        self.assertIn("def declares_key(key, filenames):", self.preflight)
+        self.assertIn("m.group(1) == key", self.preflight)
+        self.assertNotIn("f\"", self.preflight)
+        self.assertNotIn(".format(", self.preflight)
+
+    def test_preflight_rejects_gbrain_database_url_env(self) -> None:
+        """The direct inherited GBRAIN_DATABASE_URL rejection remains."""
+        self.assertIn('os.environ.get("GBRAIN_DATABASE_URL")', self.preflight)
+        self.assertIn("gbrain_state_gbrain_database_url_env", self.preflight)
 
     def test_preflight_output_parsed_by_exact_patterns_only(self) -> None:
         """The dispatch accepts ONLY the two exact status envelopes; the old
@@ -694,7 +726,9 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
     def test_preflight_region_has_no_embedding_repair_calls(self) -> None:
         """The preflight must never attempt an embedding repair (no embed,
         no migrate embeddings, no enable-embeddings invocation)."""
-        preflight_pos = self.body.find('"$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH"')
+        preflight_pos = self.body.find(
+            '"$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" "$GBRAIN_NATIVE_CWD"'
+        )
         class_pos = self.body.find('if [ "$preflight_state" = "existing" ]')
         region = self.body[preflight_pos:class_pos]
         for op in ('"$GBRAIN_BIN" embed', "embed --stale", "embed-backfill",
@@ -2232,6 +2266,22 @@ class GbrainDockerLayoutContractTests(unittest.TestCase):
         self.assertIn("cd /opt/gbrain", wrapper_line)
         self.assertIn("src/cli.ts", wrapper_line)
 
+    def test_native_wrapper_cd_is_fail_closed(self) -> None:
+        """Issue #132 Gate 1: the fixed-cwd activation must be fail-closed
+        (`cd /opt/gbrain || exit 1` before unset/exec) — a failing cd must
+        never let Bun resolve a caller-cwd src/cli.ts."""
+        match = re.search(r"printf.*?/opt/josemar/libexec/gbrain-native", self.src, re.DOTALL)
+        self.assertIsNotNone(match, "Could not find native wrapper creation in Dockerfile")
+        assert match is not None
+        wrapper_line = match.group(0)
+        self.assertIn("'cd /opt/gbrain || exit 1'", wrapper_line)
+        # The fail-closed cd must precede the unset and the bun invocation.
+        cd_pos = wrapper_line.find("cd /opt/gbrain || exit 1")
+        unset_pos = wrapper_line.find("unset GBRAIN_DATABASE_URL")
+        exec_pos = wrapper_line.find("GBRAIN_SKIP_STARTUP_HOOKS=1 exec")
+        self.assertLess(cd_pos, unset_pos, "fail-closed cd must precede the unset")
+        self.assertLess(cd_pos, exec_pos, "fail-closed cd must precede the bun exec")
+
     def test_native_wrapper_enforces_skip_startup_hooks(self) -> None:
         """Issue #112: the private launcher itself must enforce
         GBRAIN_SKIP_STARTUP_HOOKS=1 as an inline assignment before exec, so
@@ -2252,6 +2302,35 @@ class GbrainDockerLayoutContractTests(unittest.TestCase):
             wrapper_line.find("src/cli.ts"),
             "the assignment must apply to the bun CLI invocation",
         )
+
+    def test_native_wrapper_unsets_database_env(self) -> None:
+        """Issue #132 third iteration: the launcher must unset BOTH
+        GBRAIN_DATABASE_URL and DATABASE_URL after cd'ing into the fixed
+        native cwd, before the bun invocation (the pin honors truthy
+        GBRAIN_DATABASE_URL unconditionally)."""
+        match = re.search(r"printf.*?/opt/josemar/libexec/gbrain-native", self.src, re.DOTALL)
+        self.assertIsNotNone(match, "Could not find native wrapper creation in Dockerfile")
+        assert match is not None
+        wrapper_line = match.group(0)
+        self.assertIn("unset GBRAIN_DATABASE_URL DATABASE_URL", wrapper_line)
+        # The unset must run after the cd (fixed native cwd) and before exec.
+        self.assertLess(
+            wrapper_line.find("unset GBRAIN_DATABASE_URL"),
+            wrapper_line.find("GBRAIN_SKIP_STARTUP_HOOKS=1 exec"),
+            "the database env unset must precede the bun invocation",
+        )
+
+    def test_native_wrapper_disables_bun_dotenv(self) -> None:
+        """Issue #132 third iteration: the launcher must invoke the fixed Bun
+        with run --no-env-file so Bun cannot auto-load a dotenv file from the
+        fixed native cwd."""
+        match = re.search(r"printf.*?/opt/josemar/libexec/gbrain-native", self.src, re.DOTALL)
+        self.assertIsNotNone(match, "Could not find native wrapper creation in Dockerfile")
+        assert match is not None
+        wrapper_line = match.group(0)
+        self.assertIn("bun run --no-env-file src/cli.ts", wrapper_line)
+        self.assertNotIn("bun run src/cli.ts", wrapper_line,
+                         "--no-env-file must not be droppable by a stale shape")
 
     def test_no_native_wrapper_at_public_path(self) -> None:
         """The public /usr/local/bin/gbrain must never be the native wrapper:
@@ -2864,14 +2943,25 @@ class GbrainHomeSemanticsContractTests(unittest.TestCase):
     def test_schema_install_dir_under_state_dir(self) -> None:
         self.assertIn('SCHEMA_INSTALL_DIR="${GBRAIN_STATE_DIR}/schema-packs"', self.src)
 
+    def test_native_cwd_is_fixed(self) -> None:
+        """The native gbrain cwd must be a fixed constant (/opt/gbrain),
+        never env-overridable: it is the dotenv boundary of the native
+        launcher (Bun auto-load surface and the pin's own dotenv parsing)."""
+        self.assertIn('GBRAIN_NATIVE_CWD="/opt/gbrain"', self.src)
+        self.assertNotIn("${GBRAIN_NATIVE_CWD:-", self.src)
+
 
 class GbrainNativeLauncherBehaviorTests(unittest.TestCase):
-    """Issue #112: the private native launcher must enforce
-    GBRAIN_SKIP_STARTUP_HOOKS=1 itself, regardless of caller environment.
+    """Issue #112 + #132 third iteration: the private native launcher must
+    enforce GBRAIN_SKIP_STARTUP_HOOKS=1 itself, regardless of caller
+    environment, UNSET both database env vars (GBRAIN_DATABASE_URL /
+    DATABASE_URL — the pin honors truthy GBRAIN_DATABASE_URL
+    unconditionally), and invoke the fixed Bun with `run --no-env-file
+    src/cli.ts` so Bun cannot auto-load dotenv from the fixed native cwd.
 
     The launcher command is materialized exactly as Dockerfile.hermes writes
     it (image paths substituted for local fakes) and executed under hostile
-    caller env values; the fake CLI must always observe the enforced value.
+    caller env values; the fake CLI must always observe the enforced values.
     """
 
     def setUp(self) -> None:
@@ -2884,39 +2974,60 @@ class GbrainNativeLauncherBehaviorTests(unittest.TestCase):
     def _launcher_command(self) -> str:
         dockerfile = _read(DOCKERFILE_PATH)
         match = re.search(
-            r"printf '%s\\n' '#!/bin/sh' '([^']*)' > /opt/josemar/libexec/gbrain-native",
+            r"printf '%s\\n' '#!/bin/sh' (.*?) > /opt/josemar/libexec/gbrain-native",
             dockerfile,
+            re.DOTALL,
         )
         self.assertIsNotNone(
             match, "Could not extract the native launcher line from Dockerfile.hermes"
         )
         assert match is not None
-        return match.group(1)
+        parts = re.findall(r"'([^']*)'", match.group(1))
+        self.assertTrue(parts, "launcher must be built from quoted shell lines")
+        return "\n".join(parts)
 
     def _fake_chain(self) -> tuple[Path, Path]:
-        """One fake gbrain tree: a `bun` stand-in that execs a fake
-        src/cli.ts which logs the enforced env value."""
+        """One fake gbrain tree: a `bun` stand-in that logs its invocation and
+        resolves the script argument RELATIVE TO ITS CWD (modeling `bun run`
+        reality) by exec'ing ./src/cli.ts, which logs the enforced env values
+        (startup-hook skip, whether the database env vars survived the
+        launcher unset) and the full argv."""
         gbrain_dir = self.tmp / "gbrain"
         (gbrain_dir / "src").mkdir(parents=True, exist_ok=True)
         cli = gbrain_dir / "src" / "cli.ts"
         cli.write_text(
             "#!/bin/sh\n"
-            f"printf 'GBRAIN_SKIP_STARTUP_HOOKS=%s\\n' "
-            f"\"${{GBRAIN_SKIP_STARTUP_HOOKS:-}}\" > \"{self.cli_env_log}\"\n",
+            "{\n"
+            f"  printf 'GBRAIN_SKIP_STARTUP_HOOKS=%s\\n' \"${{GBRAIN_SKIP_STARTUP_HOOKS:-}}\"\n"
+            "  printf 'GBRAIN_DATABASE_URL=%s\\n' \"${GBRAIN_DATABASE_URL-unset}\"\n"
+            "  printf 'DATABASE_URL=%s\\n' \"${DATABASE_URL-unset}\"\n"
+            "  printf 'ARGS=%s\\n' \"$*\"\n"
+            f"}} > \"{self.cli_env_log}\"\n",
             encoding="utf-8",
         )
         cli.chmod(0o755)
         fake_bun = self.tmp / "bun"
-        fake_bun.write_text(f"#!/bin/sh\nexec \"{cli}\" \"$@\"\n", encoding="utf-8")
+        fake_bun.write_text(
+            f"#!/bin/sh\n"
+            f"printf 'bun-invoked\\n' >> \"{self.bun_log}\"\n"
+            f"exec ./src/cli.ts \"$@\"\n",
+            encoding="utf-8",
+        )
         fake_bun.chmod(0o755)
         return gbrain_dir, fake_bun
 
     def _run_launcher(
-        self, caller_value: str | None, gbrain_dir: Path, fake_bun: Path
+        self,
+        caller_value: str | None,
+        gbrain_dir: Path,
+        fake_bun: Path,
+        hostile_db_env: bool = False,
+        target_dir: Path | None = None,
+        cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = (
             self._launcher_command()
-            .replace("/opt/gbrain", str(gbrain_dir))
+            .replace("/opt/gbrain", str(target_dir if target_dir is not None else gbrain_dir))
             .replace("/usr/local/bin/bun", str(fake_bun))
         )
         env = os.environ.copy()
@@ -2924,6 +3035,12 @@ class GbrainNativeLauncherBehaviorTests(unittest.TestCase):
             env.pop("GBRAIN_SKIP_STARTUP_HOOKS", None)
         else:
             env["GBRAIN_SKIP_STARTUP_HOOKS"] = caller_value
+        if hostile_db_env:
+            env["GBRAIN_DATABASE_URL"] = "postgres://hostile"
+            env["DATABASE_URL"] = "postgres://hostile"
+        else:
+            env.pop("GBRAIN_DATABASE_URL", None)
+            env.pop("DATABASE_URL", None)
         return subprocess.run(
             ["/bin/sh", "-c", command, "sh", "status"],
             capture_output=True,
@@ -2931,6 +3048,7 @@ class GbrainNativeLauncherBehaviorTests(unittest.TestCase):
             check=False,
             timeout=15,
             env=env,
+            cwd=str(cwd) if cwd is not None else None,
         )
 
     def test_launcher_enforces_skip_startup_hooks_for_any_caller_env(self) -> None:
@@ -2938,13 +3056,74 @@ class GbrainNativeLauncherBehaviorTests(unittest.TestCase):
         for index, (value, label) in enumerate(cases):
             with self.subTest(caller=label):
                 self.cli_env_log = self.tmp / f"cli-env-{index}.log"
+                self.bun_log = self.tmp / f"bun-env-{index}.log"
                 gbrain_dir, fake_bun = self._fake_chain()
                 result = self._run_launcher(value, gbrain_dir, fake_bun)
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(self.bun_log.exists(), "bun must have run")
+                lines = self.cli_env_log.read_text(encoding="utf-8").splitlines()
                 self.assertEqual(
-                    self.cli_env_log.read_text(encoding="utf-8").strip(),
+                    lines[0],
                     "GBRAIN_SKIP_STARTUP_HOOKS=1",
+                    "the launcher must enforce the startup-hook skip",
                 )
+
+    def test_launcher_unsets_database_env_and_disables_bun_dotenv(self) -> None:
+        """Issue #132 third iteration: for ANY hostile caller environment the
+        launcher must unset both database env vars (the pin honors truthy
+        GBRAIN_DATABASE_URL unconditionally) and invoke the fixed Bun with
+        `run --no-env-file src/cli.ts` (no Bun dotenv auto-load)."""
+        cases = [("0", "caller sets 0"), ("", "caller sets empty"), (None, "caller unsets")]
+        for index, (value, label) in enumerate(cases):
+            with self.subTest(caller=label):
+                self.cli_env_log = self.tmp / f"cli-db-{index}.log"
+                self.bun_log = self.tmp / f"bun-db-{index}.log"
+                gbrain_dir, fake_bun = self._fake_chain()
+                result = self._run_launcher(
+                    value, gbrain_dir, fake_bun, hostile_db_env=True
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                lines = self.cli_env_log.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(lines[0], "GBRAIN_SKIP_STARTUP_HOOKS=1")
+                self.assertEqual(lines[1], "GBRAIN_DATABASE_URL=unset",
+                                 "GBRAIN_DATABASE_URL must be unset by the launcher")
+                self.assertEqual(lines[2], "DATABASE_URL=unset",
+                                 "DATABASE_URL must be unset by the launcher")
+                self.assertIn("run --no-env-file src/cli.ts", lines[3],
+                              "the launcher must invoke bun with --no-env-file")
+
+    def test_launcher_fails_closed_when_fixed_native_cwd_absent(self) -> None:
+        """Issue #132 Gate 1: with the fixed native cwd ABSENT the launcher
+        must exit nonzero BEFORE exec'ing bun — the fake Bun/CLI are never
+        invoked, and a caller-cwd `src/cli.ts` sentinel cannot execute (a
+        standalone `cd` without `|| exit 1` would fall through and let bun
+        resolve the caller-cwd script)."""
+        caller_dir = self.tmp / "caller-cwd"
+        caller_dir.mkdir()
+        sentinel = caller_dir / "src"
+        sentinel.mkdir()
+        sentinel_cli = sentinel / "cli.ts"
+        sentinel_cli.write_text(
+            f"#!/bin/sh\ntouch {self.tmp / 'sentinel-ran'}\n", encoding="utf-8"
+        )
+        sentinel_cli.chmod(0o755)
+        self.cli_env_log = self.tmp / "cli-absent.log"
+        self.bun_log = self.tmp / "bun-absent.log"
+        gbrain_dir, fake_bun = self._fake_chain()
+        result = self._run_launcher(
+            None,
+            gbrain_dir,
+            fake_bun,
+            target_dir=self.tmp / "missing-native-cwd",
+            cwd=caller_dir,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.bun_log.exists(), "fake Bun must never be invoked")
+        self.assertFalse(self.cli_env_log.exists(), "fake CLI must never be invoked")
+        self.assertFalse(
+            (self.tmp / "sentinel-ran").exists(),
+            "a caller-cwd src/cli.ts sentinel must never execute",
+        )
 
 
 if __name__ == "__main__":

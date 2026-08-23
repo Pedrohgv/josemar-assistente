@@ -40,26 +40,42 @@ The `verify` target runs fast tests plus compose validation:
 make verify
 ```
 
-### gbrain reindex state preflight fast gates (PR #132)
+### gbrain reindex state preflight and native launcher fast gates (PR #132)
 
-The fail-closed reindex state preflight (see
-`docs/gbrain-operations.md` → "Safe Initial Production Activation") is
-enforced without Docker by two fast contract suites that run on ordinary
-`make test`:
+The fail-closed reindex state preflight and the native launcher dotenv
+boundary (see `docs/gbrain-operations.md` → "Safe Initial Production
+Activation" and → "Issue #110: Safe gbrain Adapter") are enforced without
+Docker by two fast contract suites that run on ordinary `make test`:
 
 - `tests.gbrain.test_gbrain_manual_refresh_reindex_lock` — preflight
-  semantics: fresh only when BOTH canonical artifacts (`config.json` and
-  `brain.pglite`) are absent; healthy existing state (regular JSON config,
-  engine exactly `pglite`, canonical `database_path`, no persisted
-  `database_url`, non-symlink PGLite directory) runs migrate-only; every
-  partial/malformed/Postgres/env-override case fails closed with a structured
-  nonzero envelope and no native gbrain activity.
-- `tests.gbrain.test_gbrain_wrapper_contract` — wrapper wiring: the preflight
-  runs under the shared lock with the fixed isolated interpreter and before
-  any native command; init selection is driven exclusively by the validated
-  preflight state (`fresh` / `existing`), never reclassified; the
-  `DATABASE_URL` exception matches the pinned cwd-dotenv parser exactly
-  (`.env`, `.env.local`, `.env.development`, `.env.production`, `.env.test`).
+  semantics, executed against the real (fixture-patched) wrapper: fresh only
+  when BOTH canonical artifacts (`config.json` and `brain.pglite`) are
+  absent; healthy existing state (regular JSON config, engine exactly
+  `pglite`, canonical `database_path`, no persisted `database_url`,
+  non-symlink PGLite directory) runs migrate-only; every
+  partial/malformed/Postgres case fails closed with a structured nonzero
+  envelope and zero native gbrain activity. Database redirects are judged at
+  the FIXED NATIVE cwd (`/opt/gbrain`), never the caller's cwd: the
+  executable zero-native regression
+  (`test_native_cwd_dotenv_declaring_gbrain_database_url_fails_closed`)
+  plants a `GBRAIN_DATABASE_URL` declaration in each possible Bun default
+  dotenv file of the fixed native cwd and asserts structured nonzero, zero
+  native calls, and untouched config/PGLite.
+- `tests.gbrain.test_gbrain_wrapper_contract` — wrapper wiring plus the
+  materialized native launcher: the preflight runs under the shared lock
+  with the fixed isolated interpreter and before any native command; init
+  selection is driven exclusively by the validated preflight state
+  (`fresh` / `existing`), never reclassified; the `DATABASE_URL` exception
+  matches the pinned fixed-native-cwd parser exactly (`.env`, `.env.local`,
+  `.env.development`, `.env.production`, `.env.test`). The launcher
+  regressions execute the actual launcher line from `Dockerfile.hermes`:
+  the fail-closed missing-cwd regression
+  (`test_launcher_fails_closed_when_fixed_native_cwd_absent`) proves a
+  missing native cwd exits nonzero before Bun/CLI and a caller-cwd
+  `src/cli.ts` sentinel never executes;
+  `test_launcher_unsets_database_env_and_disables_bun_dotenv` proves both
+  database env vars are unset and `bun run --no-env-file src/cli.ts` is
+  used for any hostile caller environment.
 
 These are unit/contract tests — no Docker, no gbrain binary.
 

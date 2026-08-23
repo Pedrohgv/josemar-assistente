@@ -88,6 +88,11 @@ GBRAIN_SCHEMA_SOURCE_ROOT="/opt/data/.gbrain/schema-packs"
 # to a decoy; both are lock/binary security boundaries, so they are
 # constants. Tests substitute these literals in a fixture copy.
 GBRAIN_BIN="/opt/josemar/libexec/gbrain-native"
+# Fixed native gbrain working directory: the launcher cds to /opt/gbrain, so
+# the native process's Bun dotenv auto-load surface and the pin's own dotenv
+# parsing are anchored there — never the wrapper caller's cwd. Constant:
+# never env-overridable (it is a dotenv/location boundary).
+GBRAIN_NATIVE_CWD="/opt/gbrain"
 GBRAIN_TASKNOTES_LOCK="/opt/data/.locks/tasknotes.lock"
 GBRAIN_STATE_DIR="${GBRAIN_HOME}/.gbrain"
 # Canonical gbrain file-plane config: its existence as a regular file is the
@@ -531,50 +536,61 @@ do_reindex() {
     # (JSON object, engine exactly pglite, database_path resolving to the
     # canonical PGLite path, no database_url) + non-symlink DIRECTORY
     # brain.pglite; fresh = both artifacts absent; everything else is a
-    # structured nonzero error, and GBRAIN_DATABASE_URL / effective
-    # DATABASE_URL (per the exact cwd-dotenv heuristic) fail closed too.
-    preflight_output=$("$PYTHON_BIN" -I - "$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" <<'PY'
+    # structured nonzero error. Database env is enforced at the fixed native
+    # cwd boundary (GBRAIN_NATIVE_CWD): direct inherited GBRAIN_DATABASE_URL,
+    # any Bun default dotenv declaration of GBRAIN_DATABASE_URL there, and an
+    # effective inherited DATABASE_URL (per the exact #427 heuristic against
+    # the five dotenv files in that fixed cwd) all fail closed.
+    preflight_output=$("$PYTHON_BIN" -I - "$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" "$GBRAIN_NATIVE_CWD" <<'PY'
 import json, os, re, sys
 
-config_path, pglite_path = sys.argv[1], sys.argv[2]
+config_path, pglite_path, native_cwd = sys.argv[1:4]
 
 def fail(code, message):
     print(json.dumps({"status": "error", "error": code, "message": message}, ensure_ascii=False))
     raise SystemExit
 
 # Upstream loadConfig precedence (garrytan/gbrain@69aea15e): a truthy
-# GBRAIN_DATABASE_URL selects Postgres unconditionally; DATABASE_URL selects
-# Postgres only when truthy and NOT matched by a DATABASE_URL assignment in
-# the fixed cwd dotenv set. Both must be neutral for reindex to proceed.
+# GBRAIN_DATABASE_URL selects Postgres unconditionally. The launcher unsets
+# the inherited var, but the preflight still fails closed on it so the
+# operator cannot silently run keyword-only PGLite with Postgres intent.
 if os.environ.get("GBRAIN_DATABASE_URL"):
     fail("gbrain_state_gbrain_database_url_env",
          "GBRAIN_DATABASE_URL is set; the native CLI would select Postgres. Unset it and retry reindex.")
 
+# The pin's #427 dotenv set (DATABASE_URL matching) and Bun's default dotenv
+# surfaces (GBRAIN_DATABASE_URL declaration scan), both in the FIXED native
+# cwd (/opt/gbrain) — the wrapper caller's cwd is never consulted.
 DOTENV_FILES = (".env", ".env.local", ".env.development", ".env.production", ".env.test")
-CWD = os.getcwd()
+BUN_DOTENV_FILES = (".env", ".env.local", ".env.development", ".env.development.local",
+                    ".env.production", ".env.production.local",
+                    ".env.test", ".env.test.local")
+DOTENV_RE = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 
-def dotenv_values_for_key(key):
+def read_lines(name):
+    # newline="" disables universal-newline translation so a lone CR
+    # survives read() and the LF-only split below is genuine.
+    with open(os.path.join(native_cwd, name), encoding="utf-8", newline="") as fh:
+        return fh.read().split("\n")
+
+def dotenv_values_for_key(key, filenames):
     # Exact mirror of the pin's dotenvValuesForKey: fixed file names in the
-    # inherited child cwd, unreadable/missing files skipped, lines split on
-    # LF ONLY (content.split("\\n"); a lone CR is not a line separator),
-    # then stripped, blank/# skipped, pinned regex, case-sensitive key,
-    # trimmed value, whole-value matching quote removal, else truncate at the
-    # first " #" AND trim the remainder (upstream .trim()), empties ignored,
-    # union of all values.
+    # fixed native cwd, unreadable/missing files skipped, lines split on
+    # LF ONLY (a lone CR is not a line separator), then stripped, blank/#
+    # skipped, pinned regex, case-sensitive key, trimmed value, whole-value
+    # matching quote removal, else truncate at the first " #" AND trim the
+    # remainder (upstream .trim()), empties ignored, union of all values.
     values = []
-    for name in DOTENV_FILES:
+    for name in filenames:
         try:
-            # newline="" disables universal-newline translation so a lone CR
-            # survives read() and the LF-only split below is genuine.
-            with open(os.path.join(CWD, name), encoding="utf-8", newline="") as fh:
-                content = fh.read()
+            lines = read_lines(name)
         except OSError:
             continue
-        for line in content.split("\n"):
+        for line in lines:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            m = re.match(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
+            m = DOTENV_RE.match(line)
             if not m:
                 continue
             if m.group(1) != key:
@@ -591,10 +607,33 @@ def dotenv_values_for_key(key):
             values.append(value)
     return values
 
+def declares_key(key, filenames):
+    # Any syntactic declaration (even empty or quoted/expanded) counts; no
+    # Bun expansion reimplementation, and no value is ever echoed.
+    for name in filenames:
+        try:
+            lines = read_lines(name)
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            m = DOTENV_RE.match(line)
+            if m and m.group(1) == key:
+                return True
+    return False
+
+if declares_key("GBRAIN_DATABASE_URL", BUN_DOTENV_FILES):
+    fail("gbrain_state_gbrain_database_url_dotenv",
+         "A Bun default dotenv file in the fixed native gbrain cwd declares GBRAIN_DATABASE_URL; the operator intends Postgres. Remove the declaration and retry reindex.")
+
+# DATABASE_URL selects Postgres only when truthy and NOT matched by a
+# DATABASE_URL assignment in the pin's five dotenv files (fixed native cwd).
 database_url_env = os.environ.get("DATABASE_URL") or ""
-if database_url_env and database_url_env not in dotenv_values_for_key("DATABASE_URL"):
+if database_url_env and database_url_env not in dotenv_values_for_key("DATABASE_URL", DOTENV_FILES):
     fail("gbrain_state_database_url_effective",
-         "DATABASE_URL is set and not matched by a cwd dotenv assignment; the native CLI would select Postgres. Unset it or align the dotenv assignment and retry reindex.")
+         "DATABASE_URL is set and not matched by a dotenv assignment in the fixed native gbrain cwd; the native CLI would select Postgres. Unset it or align the dotenv assignment and retry reindex.")
 
 # Artifact topology: config.json must be a regular non-symlink file and
 # brain.pglite a non-symlink DIRECTORY; fresh only when BOTH are absent.

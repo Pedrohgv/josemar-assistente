@@ -36,6 +36,10 @@ def patched_wrapper(tmp: Path, fake_gbrain: Path, lock_path: Path) -> Path:
     patched = (
         src.replace('GBRAIN_BIN="/opt/josemar/libexec/gbrain-native"', f'GBRAIN_BIN="{fake_gbrain}"')
         .replace(
+            'GBRAIN_NATIVE_CWD="/opt/gbrain"',
+            f'GBRAIN_NATIVE_CWD="{tmp / "native-cwd"}"',
+        )
+        .replace(
             'GBRAIN_TASKNOTES_LOCK="/opt/data/.locks/tasknotes.lock"',
             f'GBRAIN_TASKNOTES_LOCK="{lock_path}"',
         )
@@ -463,8 +467,8 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
     resolving to the canonical PGLite path, no database_url) + non-symlink
     DIRECTORY brain.pglite; fresh = both artifacts absent; everything else is
     a structured nonzero error with ZERO native gbrain calls. GBRAIN_DATABASE_URL
-    and an effective DATABASE_URL (per the exact cwd-dotenv heuristic) fail
-    closed too.
+    and an effective DATABASE_URL (per the exact fixed-native-cwd dotenv
+    heuristic) fail closed too.
 
     These tests run the patched real wrapper against a scripted fake gbrain
     and assert the recorded native argv (FakeGbrain.calls) plus exit codes.
@@ -493,9 +497,7 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
         env.update(extra)
         return env
 
-    def run_reindex(
-        self, fake: FakeGbrain, cwd: Path | None = None, **env_extra
-    ) -> subprocess.CompletedProcess[str]:
+    def run_reindex(self, fake: FakeGbrain, **env_extra) -> subprocess.CompletedProcess[str]:
         wrapper = patched_wrapper(self.tmp, fake.script, self.lock_path)
         return subprocess.run(
             [str(wrapper), "reindex"],
@@ -504,7 +506,7 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
             check=False,
             timeout=30,
             env=self.env(**env_extra),
-            cwd=str(cwd or self.tmp),
+            cwd=str(self.tmp),
         )
 
     def _write_config(self, payload: dict) -> None:
@@ -520,15 +522,16 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
             "database_path": str(self.pglite_path),
         })
 
-    def _dotenv_fixture(self, files: dict[str, str]) -> Path:
-        """Write the given dotenv files into a dedicated cwd directory and
-        return it (the wrapper's preflight reads them from the inherited
-        cwd)."""
-        dotenv_dir = self.tmp / "dotenv"
-        dotenv_dir.mkdir(exist_ok=True)
+    def _native_dotenv_fixture(self, files: dict[str, str]) -> Path:
+        """Write the given dotenv files into the FIXED native gbrain cwd
+        (patched from /opt/gbrain) — the only dotenv surface the native
+        launcher and the preflight consult; the subprocess caller cwd is
+        never used for dotenv."""
+        native_cwd = self.tmp / "native-cwd"
+        native_cwd.mkdir(exist_ok=True)
         for name, content in files.items():
-            (dotenv_dir / name).write_text(content, encoding="utf-8")
-        return dotenv_dir
+            (native_cwd / name).write_text(content, encoding="utf-8")
+        return native_cwd
 
     def test_genuinely_fresh_state_runs_fresh_init_only(self) -> None:
         """(1) No config and no PGLite artifact: the fresh vector
@@ -772,43 +775,43 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
         self.assertEqual(fake.calls(), [], "no native gbrain call may run")
 
     def test_effective_database_url_fails_closed(self) -> None:
-        """(10) A truthy DATABASE_URL not matched by any cwd dotenv
-        assignment is effective (Postgres) and fails closed with no native
-        calls."""
+        """(10) A truthy DATABASE_URL not matched by any fixed native cwd
+        dotenv assignment is effective (Postgres) and fails closed with no
+        native calls."""
         fake = FakeGbrain(self.tmp)
         result = self.run_reindex(fake, DATABASE_URL="postgres://env-only")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("gbrain_state_database_url_effective", result.stdout)
         self.assertEqual(fake.calls(), [], "no native gbrain call may run")
 
-    def test_cwd_dotenv_matched_database_url_accepted_for_healthy_state(self) -> None:
-        """(11) Faithful heuristic: a DATABASE_URL equal to a DATABASE_URL
-        assignment in a fixed dotenv file of the INHERITED CWD is ignored by
-        loadConfig, so a healthy existing state may proceed to migrate-only."""
+    def test_native_cwd_dotenv_matched_database_url_accepted_for_healthy_state(self) -> None:
+        """(11) Faithful #427 heuristic at the FIXED native cwd: a DATABASE_URL
+        equal to a DATABASE_URL assignment in a dotenv file of the fixed
+        native gbrain cwd (/opt/gbrain) is ignored by loadConfig, so a
+        healthy existing state proceeds to migrate-only. The subprocess
+        caller cwd is deliberately different and must NOT matter."""
         self._make_healthy_state()
-        dotenv_dir = self.tmp / "dotenv"
-        dotenv_dir.mkdir()
-        (dotenv_dir / ".env").write_text(
-            "DATABASE_URL=postgres://matched\n", encoding="utf-8"
-        )
+        self._native_dotenv_fixture({
+            ".env": "DATABASE_URL=postgres://matched\n",
+        })
         fake = FakeGbrain(self.tmp)
-        result = self.run_reindex(fake, cwd=dotenv_dir, DATABASE_URL="postgres://matched")
+        result = self.run_reindex(fake, DATABASE_URL="postgres://matched")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('"success": true', result.stdout)
         calls = fake.calls()
         self.assertIn("init --migrate-only", calls)
         self.assertNotIn("init --pglite", " ".join(calls))
 
-    def test_cwd_dotenv_mismatched_database_url_fails_closed(self) -> None:
+    def test_native_cwd_dotenv_mismatched_database_url_fails_closed(self) -> None:
         """(10b) The heuristic is value equality, not file presence: a
-        DATABASE_URL different from the cwd dotenv value is still effective
-        and fails closed with no native calls."""
+        DATABASE_URL different from the fixed-native-cwd dotenv value is
+        still effective and fails closed with no native calls."""
         self._make_healthy_state()
-        dotenv_dir = self._dotenv_fixture({
+        self._native_dotenv_fixture({
             ".env": "DATABASE_URL=postgres://file-value\n",
         })
         fake = FakeGbrain(self.tmp)
-        result = self.run_reindex(fake, cwd=dotenv_dir, DATABASE_URL="postgres://env-value")
+        result = self.run_reindex(fake, DATABASE_URL="postgres://env-value")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("gbrain_state_database_url_effective", result.stdout)
         self.assertEqual(fake.calls(), [], "no native gbrain call may run")
@@ -820,11 +823,11 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
         the whole blob is one assignment whose value cannot match the env
         DATABASE_URL (splitlines would have split at the CR and matched)."""
         self._make_healthy_state()
-        dotenv_dir = self._dotenv_fixture({
+        self._native_dotenv_fixture({
             ".env": "DATABASE_URL=postgres://a\rpostgres://b",
         })
         fake = FakeGbrain(self.tmp)
-        result = self.run_reindex(fake, cwd=dotenv_dir, DATABASE_URL="postgres://a")
+        result = self.run_reindex(fake, DATABASE_URL="postgres://a")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("gbrain_state_database_url_effective", result.stdout)
         self.assertEqual(fake.calls(), [],
@@ -836,11 +839,11 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
         trailing spaces and the env DATABASE_URL is accepted on healthy
         state."""
         self._make_healthy_state()
-        dotenv_dir = self._dotenv_fixture({
+        self._native_dotenv_fixture({
             ".env": "DATABASE_URL=postgres://v  # note\n",
         })
         fake = FakeGbrain(self.tmp)
-        result = self.run_reindex(fake, cwd=dotenv_dir, DATABASE_URL="postgres://v")
+        result = self.run_reindex(fake, DATABASE_URL="postgres://v")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('"success": true', result.stdout)
         calls = fake.calls()
@@ -851,11 +854,11 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
         """A whole-value quoted assignment matches the env DATABASE_URL on
         healthy state (quote removal, no comment stripping inside quotes)."""
         self._make_healthy_state()
-        dotenv_dir = self._dotenv_fixture({
+        self._native_dotenv_fixture({
             ".env": "DATABASE_URL='postgres://q'\n",
         })
         fake = FakeGbrain(self.tmp)
-        result = self.run_reindex(fake, cwd=dotenv_dir, DATABASE_URL="postgres://q")
+        result = self.run_reindex(fake, DATABASE_URL="postgres://q")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = fake.calls()
         self.assertIn("init --migrate-only", calls)
@@ -865,11 +868,11 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
         """An `export DATABASE_URL=...` assignment matches the env value on
         healthy state."""
         self._make_healthy_state()
-        dotenv_dir = self._dotenv_fixture({
+        self._native_dotenv_fixture({
             ".env": "export DATABASE_URL=postgres://e\n",
         })
         fake = FakeGbrain(self.tmp)
-        result = self.run_reindex(fake, cwd=dotenv_dir, DATABASE_URL="postgres://e")
+        result = self.run_reindex(fake, DATABASE_URL="postgres://e")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = fake.calls()
         self.assertIn("init --migrate-only", calls)
@@ -879,11 +882,11 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
         """Empty assignments are ignored: the union stays empty, so an env
         DATABASE_URL is effective and refuses before native calls."""
         self._make_healthy_state()
-        dotenv_dir = self._dotenv_fixture({
+        self._native_dotenv_fixture({
             ".env": "DATABASE_URL=\nDATABASE_URL=   \n",
         })
         fake = FakeGbrain(self.tmp)
-        result = self.run_reindex(fake, cwd=dotenv_dir, DATABASE_URL="postgres://env")
+        result = self.run_reindex(fake, DATABASE_URL="postgres://env")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("gbrain_state_database_url_effective", result.stdout)
         self.assertEqual(fake.calls(), [], "no native gbrain call may run")
@@ -894,7 +897,7 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
         different values, so the env DATABASE_URL is accepted on healthy
         state."""
         self._make_healthy_state()
-        dotenv_dir = self._dotenv_fixture({
+        self._native_dotenv_fixture({
             ".env": "DATABASE_URL=postgres://one\n",
             ".env.local": "DATABASE_URL=postgres://two\n",
             ".env.development": "DATABASE_URL=postgres://three\n",
@@ -902,11 +905,42 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
             ".env.test": "DATABASE_URL=postgres://five\n",
         })
         fake = FakeGbrain(self.tmp)
-        result = self.run_reindex(fake, cwd=dotenv_dir, DATABASE_URL="postgres://four")
+        result = self.run_reindex(fake, DATABASE_URL="postgres://four")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = fake.calls()
         self.assertIn("init --migrate-only", calls)
         self.assertNotIn("init --pglite", " ".join(calls))
+
+    # --- fixed native cwd Bun dotenv surface (issue #132 third iteration) ---
+
+    def test_native_cwd_dotenv_declaring_gbrain_database_url_fails_closed(self) -> None:
+        """A GBRAIN_DATABASE_URL declaration in ANY possible Bun default
+        dotenv file of the FIXED native cwd fails closed: structured nonzero,
+        zero fake native calls, no fresh init, config/PGLite untouched. The
+        parent env carries NO GBRAIN_DATABASE_URL — the declaration alone is
+        fatal (the launcher would unset the inherited var, but the operator's
+        Postgres intent must surface, not silently run keyword-only PGLite)."""
+        surfaces = (".env", ".env.local", ".env.development", ".env.development.local",
+                    ".env.production", ".env.production.local",
+                    ".env.test", ".env.test.local")
+        for name in surfaces:
+            with self.subTest(dotenv_file=name):
+                self._make_healthy_state()
+                native_cwd = self._native_dotenv_fixture({
+                    name: "GBRAIN_DATABASE_URL=postgres://external/something\n",
+                })
+                before = self.config_path.read_bytes()
+                fake = FakeGbrain(self.tmp)
+                result = self.run_reindex(fake)
+                self.assertNotEqual(result.returncode, 0,
+                                    result.stdout + result.stderr)
+                self.assertIn("gbrain_state_gbrain_database_url_dotenv", result.stdout)
+                self.assertNotIn('"success": true', result.stdout)
+                self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+                self.assertEqual(self.config_path.read_bytes(), before,
+                                 "config must be untouched")
+                self.assertTrue(self.pglite_path.is_dir(), "PGLite dir must be untouched")
+                (native_cwd / name).unlink()
 
     # --- trusted classification (issue #132 Gate 1) ---
 
