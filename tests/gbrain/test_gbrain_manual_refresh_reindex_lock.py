@@ -29,9 +29,23 @@ WRAPPER = REPO_ROOT / "scripts" / "josemar-gbrain"
 RUNNER = REPO_ROOT / "scripts" / "tasknotes_lock_run.py"
 
 
-def patched_wrapper(tmp: Path, fake_gbrain: Path, lock_path: Path) -> Path:
+def patched_wrapper(
+    tmp: Path,
+    fake_gbrain: Path,
+    lock_path: Path,
+    preflight_patch: tuple[str, str] | None = None,
+) -> Path:
     """Fixture copy of the production wrapper with the fixed production
-    literals substituted for local equivalents (no production env seam)."""
+    literals substituted for local equivalents (no production env seam).
+
+    Optional `preflight_patch` is a TEST-ONLY deterministic (exact_source,
+    replacement) injection applied to the fixture copy's embedded preflight
+    Python AFTER the literal substitutions — it lets a test force a specific
+    preflight behavior (e.g. make root_mode raise a non-ENOENT OSError) that
+    a normal tempdir cannot reliably reproduce (child-stat EACCES/EIO cannot
+    be forced portably, and root CI makes chmod unreliable). It never
+    touches the production wrapper.
+    """
     src = WRAPPER.read_text(encoding="utf-8")
     patched = (
         src.replace('GBRAIN_BIN="/opt/josemar/libexec/gbrain-native"', f'GBRAIN_BIN="{fake_gbrain}"')
@@ -61,6 +75,10 @@ def patched_wrapper(tmp: Path, fake_gbrain: Path, lock_path: Path) -> Path:
             f'TASKNOTES_LOCK_RUNNER="{RUNNER}"',
         )
     )
+    if preflight_patch is not None:
+        needle, replacement = preflight_patch
+        assert needle in patched, "preflight patch needle not found in fixture copy"
+        patched = patched.replace(needle, replacement)
     script = tmp / "josemar-gbrain"
     script.write_text(patched, encoding="utf-8")
     script.chmod(0o755)
@@ -1043,6 +1061,57 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
         self.assertTrue(parent.is_symlink(), "parent symlink must be untouched")
         self.assertFalse((external_parent / ".gbrain").exists(),
                          "no root may be created under the symlinked parent")
+
+    def test_leaf_stat_failure_fails_closed_with_zero_native_calls(self) -> None:
+        """A non-ENOENT leaf inspection failure (here: a PermissionError)
+        must fail closed BEFORE any native call: nonzero, the exact
+        structured gbrain_state_leaf_stat_failed error, no init of either
+        branch, and the healthy config/PGLite artifacts byte-identical and
+        untouched.
+
+        The injection is a deterministic source patch on the FIXTURE COPY
+        (patched_wrapper's preflight_patch replaces root_mode's stat
+        expression with `raise PermissionError(...)`) because a normal
+        tempdir cannot reliably produce child-stat EACCES/EIO under root,
+        and chmod-based denial is unreliable in root CI. The production
+        wrapper is never modified and no production env/test hook exists.
+        """
+        self._make_healthy_state()
+        before = self.config_path.read_bytes()
+        pglite_before = list(self.pglite_path.iterdir())
+        fake = FakeGbrain(self.tmp)
+        wrapper = patched_wrapper(
+            self.tmp,
+            fake.script,
+            self.lock_path,
+            preflight_patch=(
+                "return os.stat(name, dir_fd=root_fd, follow_symlinks=False).st_mode",
+                "raise PermissionError(\"injected leaf-stat failure\")",
+            ),
+        )
+        result = subprocess.run(
+            [str(wrapper), "reindex"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+            env=self.env(),
+            cwd=str(self.tmp),
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_leaf_stat_failed", result.stdout)
+        self.assertNotIn('"success": true', result.stdout)
+        calls = fake.calls()
+        self.assertEqual(calls, [], "no native gbrain call may run")
+        joined = " ".join(calls)
+        self.assertNotIn("init --pglite --no-embedding", joined,
+                         "a leaf-stat failure must never trigger fresh init")
+        self.assertNotIn("init --migrate-only", joined,
+                         "a leaf-stat failure must never trigger migrate-only")
+        self.assertEqual(self.config_path.read_bytes(), before,
+                         "healthy config must remain byte-identical")
+        self.assertEqual(list(self.pglite_path.iterdir()), pglite_before,
+                         "PGLite directory must be unchanged")
 
     # --- trusted classification (issue #132 Gate 1) ---
 

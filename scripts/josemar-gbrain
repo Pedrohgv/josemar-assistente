@@ -687,11 +687,17 @@ try:
 
     def root_mode(name):
         # No-follow stat relative to the validated root fd: a symlink (even
-        # dangling) reports as a symlink, never as its target.
+        # dangling) reports as a symlink, never as its target. ONLY a
+        # genuinely absent leaf (ENOENT) classifies as missing; ANY other
+        # inspection failure (EACCES, EIO, ESTALE, ...) is a structured
+        # static error and must never be converted into a fresh state.
         try:
             return os.stat(name, dir_fd=root_fd, follow_symlinks=False).st_mode
-        except OSError:
+        except FileNotFoundError:
             return 0
+        except OSError:
+            fail("gbrain_state_leaf_stat_failed",
+                 "Could not inspect a state leaf under the gbrain state root; refusing reindex.")
 
     # Artifact topology: config.json must be a regular non-symlink file and
     # brain.pglite a non-symlink DIRECTORY; fresh only when BOTH are absent.

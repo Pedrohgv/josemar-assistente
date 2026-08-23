@@ -758,11 +758,33 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
         self.assertIn("if root_fd is not None:", tail)
         self.assertIn("if parent_fd is not None:", tail)
 
+    def test_root_mode_exception_order_enoent_only_absent(self) -> None:
+        """root_mode must return mode 0 ONLY for FileNotFoundError (ENOENT);
+        the generic OSError handler must follow it and must NOT map to
+        absent — it fails closed with gbrain_state_leaf_stat_failed."""
+        self.assertIn("except FileNotFoundError:", self.preflight)
+        self.assertIn("gbrain_state_leaf_stat_failed", self.preflight)
+        enoent_pos = self.preflight.find("except FileNotFoundError:")
+        return0_pos = self.preflight.find("return 0", enoent_pos)
+        oserror_pos = self.preflight.find("except OSError:", return0_pos)
+        self.assertGreater(return0_pos, -1, "ENOENT must return mode 0")
+        self.assertGreater(oserror_pos, -1,
+                           "a generic OSError handler must exist after ENOENT")
+        self.assertLess(enoent_pos, return0_pos,
+                        "FileNotFoundError must be handled before its return 0")
+        self.assertLess(return0_pos, oserror_pos,
+                        "the generic OSError handler must come AFTER the ENOENT return 0")
+
+    def test_no_oserror_to_absent_conversion_remains(self) -> None:
+        """The old `except OSError: return 0` (any inspection error =>
+        absent, possibly fresh) conversion must be gone from the preflight."""
+        self.assertNotIn("except OSError:\n            return 0", self.preflight)
+
     def test_preflight_root_errors_are_static_and_leak_free(self) -> None:
-        """Root error messages are static (no path/exception echo) and the
-        preflight keeps its no-f-string/no-format diagnostic discipline."""
+        """Root/leaf error messages are static (no path/exception echo) and
+        the preflight keeps its no-f-string/no-format diagnostic discipline."""
         for code in ("gbrain_state_parent_invalid", "gbrain_state_root_invalid",
-                     "gbrain_state_root_create_failed"):
+                     "gbrain_state_root_create_failed", "gbrain_state_leaf_stat_failed"):
             pos = self.preflight.find(code)
             self.assertGreater(pos, -1, f"missing root error code {code}")
         self.assertNotIn("f\"", self.preflight)

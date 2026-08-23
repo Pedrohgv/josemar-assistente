@@ -1153,6 +1153,14 @@ workflow: set the env, run reindex.
   - `gbrain_state_root_create_failed` — the absent state root could not be
     created or reopened after creation. Ensure the parent is writable by the
     Hermes runtime user, then re-run reindex.
+  Leaf inspection:
+  - `gbrain_state_leaf_stat_failed` — a canonical state leaf (`config.json`
+    or `brain.pglite`) under the validated root could not be inspected
+    (e.g. EACCES, EIO, ESTALE). Only genuine proven absence (ENOENT) permits
+    fresh state; any other inspection failure is terminal with no fresh
+    fallback. Restore the Hermes runtime user's ability to inspect the
+    canonical local state (resolve the filesystem issue), then re-run
+    reindex.
   The remaining surfaces are: symlinked/non-regular/malformed `config.json`,
   symlinked or non-directory `brain.pglite`, config without PGLite or PGLite
   without config, a non-`pglite` engine, a `database_path` not resolving to
