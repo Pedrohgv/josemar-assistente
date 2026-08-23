@@ -307,15 +307,20 @@ class ManualRefreshReindexLockBehaviorTests(unittest.TestCase):
     def test_fresh_install_creates_lock_file_safely(self) -> None:
         """Fresh deployment: no locks dir and no lock file exist before
         reindex; the wrapper must create them safely (regular file, not a
-        symlink) and complete activation."""
+        symlink) and complete activation. The fixed state parent exists; the
+        .gbrain root is created fail-closed by the preflight."""
         self.lock_path.unlink()
         self.lock_path.parent.rmdir()
+        (self.tmp / "state").mkdir()
         result = self.run_wrapper("reindex", GBRAIN_SCHEMA_PACK="gbrain-base")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('"success": true', result.stdout)
         self.assertTrue(self.lock_path.is_file(), "lock file must be created")
         self.assertFalse(self.lock_path.is_symlink(), "lock file must be regular")
         self.assertTrue(self.fake.calls(), "gbrain must run after lock creation")
+        root = self.tmp / "state" / ".gbrain"
+        self.assertTrue(root.is_dir(), "state root must be created by the preflight")
+        self.assertFalse(root.is_symlink(), "state root must be a real directory")
         # The runtime schema-pack marker must be persisted for the adapter.
         marker = self.tmp / "state" / ".gbrain" / "active-schema-pack"
         self.assertEqual(marker.read_text(encoding="utf-8").strip(), "gbrain-base")
@@ -534,13 +539,19 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
         return native_cwd
 
     def test_genuinely_fresh_state_runs_fresh_init_only(self) -> None:
-        """(1) No config and no PGLite artifact: the fresh vector
-        `init --pglite --no-embedding` plus the fresh-only keyword write run;
-        migrate-only must not."""
+        """(1) No config and no PGLite artifact (fixed parent present, root
+        absent): the preflight creates the root as a real non-symlink
+        directory, the fresh vector `init --pglite --no-embedding` plus the
+        fresh-only keyword write run; migrate-only must not."""
+        (self.tmp / "state").mkdir()
         fake = FakeGbrain(self.tmp)
         result = self.run_reindex(fake)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('"success": true', result.stdout)
+        self.assertTrue(self.state_dir.is_dir(),
+                        "fresh root must be created as a real directory")
+        self.assertFalse(self.state_dir.is_symlink(),
+                         "fresh root must not be a symlink")
         calls = fake.calls()
         self.assertIn("init --pglite --no-embedding", calls)
         self.assertIn("config set search.mcp_keyword_only true", calls)
@@ -941,6 +952,97 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
                                  "config must be untouched")
                 self.assertTrue(self.pglite_path.is_dir(), "PGLite dir must be untouched")
                 (native_cwd / name).unlink()
+
+    # --- state root establishment (issue #132 fourth iteration) ---
+
+    def test_symlinked_root_to_external_healthy_state_fails_closed(self) -> None:
+        """Exact regression: <state-parent>/.gbrain is a SYMLINK to an
+        external healthy-looking directory whose config.json declares the
+        LEXICAL canonical database_path (self.pglite_path) and which holds a
+        brain.pglite directory. The old leaf-only classifier would accept it
+        and run migrate-only against the external dir; the no-follow root
+        open must fail with the structured root error, zero native calls, and
+        the symlink + external artifacts untouched."""
+        (self.tmp / "state").mkdir()
+        external = self.tmp / "external-root"
+        external.mkdir()
+        (external / "brain.pglite").mkdir()
+        external_config = external / "config.json"
+        external_config.write_text(json.dumps({
+            "engine": "pglite",
+            "database_path": str(self.pglite_path),  # lexical canonical root
+        }), encoding="utf-8")
+        external_bytes = external_config.read_bytes()
+        self.state_dir.symlink_to(external)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_root_invalid", result.stdout)
+        self.assertNotIn('"success": true', result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+        self.assertTrue(self.state_dir.is_symlink(), "root symlink must be untouched")
+        self.assertEqual(external_config.read_bytes(), external_bytes,
+                         "external config bytes must be untouched")
+        self.assertTrue((external / "brain.pglite").is_dir(),
+                        "external PGLite dir must be untouched")
+
+    def test_symlinked_root_to_empty_external_dir_fails_closed(self) -> None:
+        """A symlinked root pointing at an empty external directory must not
+        trigger fresh init: structured root error, zero calls, target
+        unchanged."""
+        (self.tmp / "state").mkdir()
+        external = self.tmp / "external-empty"
+        external.mkdir()
+        self.state_dir.symlink_to(external)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_root_invalid", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+        self.assertTrue(self.state_dir.is_symlink())
+        self.assertEqual(list(external.iterdir()), [],
+                         "external target must stay untouched (no fresh init)")
+
+    def test_dangling_symlinked_root_fails_closed(self) -> None:
+        """A dangling .gbrain symlink fails closed with zero calls and stays
+        untouched."""
+        (self.tmp / "state").mkdir()
+        self.state_dir.symlink_to(self.tmp / "missing-root-target")
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_root_invalid", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+        self.assertTrue(self.state_dir.is_symlink(), "dangling symlink untouched")
+
+    def test_regular_file_root_fails_closed(self) -> None:
+        """A regular file at the .gbrain path fails closed with zero calls
+        and stays untouched."""
+        (self.tmp / "state").mkdir()
+        self.state_dir.write_text("not-a-dir", encoding="utf-8")
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_root_invalid", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+        self.assertEqual(self.state_dir.read_text(encoding="utf-8"), "not-a-dir",
+                         "regular-file root must be untouched")
+
+    def test_symlinked_parent_fails_closed_before_root_creation(self) -> None:
+        """A symlinked fixed parent fails closed before any root creation or
+        native call."""
+        external_parent = self.tmp / "external-parent"
+        external_parent.mkdir()
+        parent = self.tmp / "state"
+        parent.symlink_to(external_parent)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_parent_invalid", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+        self.assertTrue(parent.is_symlink(), "parent symlink must be untouched")
+        self.assertFalse((external_parent / ".gbrain").exists(),
+                         "no root may be created under the symlinked parent")
 
     # --- trusted classification (issue #132 Gate 1) ---
 

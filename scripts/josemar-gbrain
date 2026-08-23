@@ -520,7 +520,10 @@ do_reindex() {
     acquire_tasknotes_lock reindex || {
         return 1
     }
-    mkdir -p "$GBRAIN_STATE_DIR"
+    # NOTE: no shell mkdir -p here — the state root (.gbrain) is established
+    # fail-closed INSIDE the lock-held preflight below (no-follow parent open,
+    # no-follow root open/create), so a symlinked .gbrain ancestor can never
+    # be followed or pre-created (issue #132 fourth iteration).
     # Mark the vault repo as a git safe.directory before any native gbrain
     # operation that may inspect the repo. The command is idempotent and
     # best-effort; run this wrapper as the Hermes runtime user so the global
@@ -532,19 +535,25 @@ do_reindex() {
     # and BEFORE ANY native gbrain invocation, including the custom
     # schema-pack native validation below. Pure Python/shell: no gbrain
     # access, no config writes, no new sentinel, and no config content echoed
-    # in diagnostics. Healthy existing = regular non-symlink config.json
-    # (JSON object, engine exactly pglite, database_path resolving to the
-    # canonical PGLite path, no database_url) + non-symlink DIRECTORY
-    # brain.pglite; fresh = both artifacts absent; everything else is a
-    # structured nonzero error. Database env is enforced at the fixed native
-    # cwd boundary (GBRAIN_NATIVE_CWD): direct inherited GBRAIN_DATABASE_URL,
-    # any Bun default dotenv declaration of GBRAIN_DATABASE_URL there, and an
+    # in diagnostics. The state ROOT (.gbrain) is established fail-closed
+    # relative to the fixed parent (GBRAIN_HOME) with O_NOFOLLOW directory
+    # opens: a symlinked parent/root/leaf can never redirect the classifier.
+    # Healthy existing = regular non-symlink config.json (JSON object, engine
+    # exactly pglite, database_path resolving to the canonical PGLite path,
+    # no database_url) + non-symlink DIRECTORY brain.pglite; fresh = both
+    # artifacts absent; everything else is a structured nonzero error.
+    # Database env is enforced at the fixed native cwd boundary
+    # (GBRAIN_NATIVE_CWD): direct inherited GBRAIN_DATABASE_URL, any Bun
+    # default dotenv declaration of GBRAIN_DATABASE_URL there, and an
     # effective inherited DATABASE_URL (per the exact #427 heuristic against
     # the five dotenv files in that fixed cwd) all fail closed.
-    preflight_output=$("$PYTHON_BIN" -I - "$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" "$GBRAIN_NATIVE_CWD" <<'PY'
-import json, os, re, sys
+    preflight_output=$("$PYTHON_BIN" -I - "$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" "$GBRAIN_NATIVE_CWD" "$GBRAIN_HOME" <<'PY'
+import json, os, re, stat, sys
 
-config_path, pglite_path, native_cwd = sys.argv[1:4]
+config_path, pglite_path, native_cwd, parent_path = sys.argv[1:5]
+root_leaf = ".gbrain"
+config_leaf = os.path.basename(config_path)
+pglite_leaf = os.path.basename(pglite_path)
 
 def fail(code, message):
     print(json.dumps({"status": "error", "error": code, "message": message}, ensure_ascii=False))
@@ -635,47 +644,112 @@ if database_url_env and database_url_env not in dotenv_values_for_key("DATABASE_
     fail("gbrain_state_database_url_effective",
          "DATABASE_URL is set and not matched by a dotenv assignment in the fixed native gbrain cwd; the native CLI would select Postgres. Unset it or align the dotenv assignment and retry reindex.")
 
-# Artifact topology: config.json must be a regular non-symlink file and
-# brain.pglite a non-symlink DIRECTORY; fresh only when BOTH are absent.
-if os.path.islink(config_path):
-    fail("gbrain_state_config_symlink", "Config path is a symlink; refusing reindex without clobbering it.")
-config_exists = os.path.exists(config_path)
-if config_exists and not os.path.isfile(config_path):
-    fail("gbrain_state_config_not_regular", "Config path exists but is not a regular file; refusing reindex.")
-if os.path.islink(pglite_path):
-    fail("gbrain_state_pglite_symlink", "PGLite data path is a symlink; refusing reindex without clobbering it.")
-pglite_exists = os.path.exists(pglite_path)
-if not config_exists and pglite_exists:
-    fail("gbrain_state_pglite_without_config", "PGLite data exists but config.json is missing; refusing reindex over existing state.")
-if config_exists and not pglite_exists:
-    fail("gbrain_state_config_without_pglite", "Config.json exists but the PGLite data directory is missing; refusing reindex.")
-if pglite_exists and not os.path.isdir(pglite_path):
-    fail("gbrain_state_pglite_not_directory", "PGLite data path exists but is not a directory; refusing reindex.")
-
-if not config_exists:
-    print(json.dumps({"status": "fresh"}, ensure_ascii=False))
-    raise SystemExit
-
-# Existing file plane must be the exact healthy pglite shape; diagnostics
-# are static strings and never echo config content.
+# --- State root establishment and artifact topology (all root-relative and
+# no-follow; the root fd stays open through classification so an ancestor or
+# leaf swap cannot redirect the classifier). Root-specific errors are above
+# the exact leaf error codes, which are preserved.
+parent_fd = None
+root_fd = None
 try:
-    with open(config_path, encoding="utf-8") as fh:
-        cfg = json.load(fh)
-except (OSError, ValueError):
-    fail("gbrain_state_config_malformed", "Config.json cannot be read or parsed as JSON; refusing reindex.")
-if not isinstance(cfg, dict):
-    fail("gbrain_state_config_malformed", "Config.json is not a JSON object; refusing reindex.")
-if "database_url" in cfg:
-    fail("gbrain_state_config_database_url_persisted", "Config.json persists database_url; refusing reindex over a Postgres config.")
-if cfg.get("engine") != "pglite":
-    fail("gbrain_state_config_engine_invalid", "Config engine is not exactly pglite; refusing reindex.")
-database_path = cfg.get("database_path")
-if not isinstance(database_path, str) or not database_path:
-    fail("gbrain_state_config_database_path_invalid", "Config database_path is missing or not a string; refusing reindex.")
-if os.path.realpath(database_path) != os.path.realpath(pglite_path):
-    fail("gbrain_state_config_database_path_invalid", "Config database_path does not resolve to the canonical PGLite path; refusing reindex.")
+    open_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        open_flags |= os.O_CLOEXEC
 
-print(json.dumps({"status": "existing"}, ensure_ascii=False))
+    # Fixed state parent (GBRAIN_HOME): must be a real directory; missing,
+    # symlinked, non-directory, or inaccessible all fail statically (no path
+    # or exception echo).
+    try:
+        parent_fd = os.open(parent_path, open_flags)
+    except OSError:
+        fail("gbrain_state_parent_invalid",
+             "The fixed gbrain state parent cannot be opened safely; refusing reindex.")
+
+    # State root (.gbrain): open no-follow; absent => create with umask
+    # semantics via dir_fd, then immediately reopen no-follow; any existing
+    # symlink (incl. dangling), regular file, non-directory, or inaccessible
+    # root fails statically. Never follow, delete, repair, or migrate it.
+    try:
+        root_fd = os.open(root_leaf, open_flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        try:
+            os.mkdir(root_leaf, 0o777, dir_fd=parent_fd)
+        except OSError:
+            fail("gbrain_state_root_create_failed",
+                 "Could not create the gbrain state root safely; refusing reindex.")
+        try:
+            root_fd = os.open(root_leaf, open_flags, dir_fd=parent_fd)
+        except OSError:
+            fail("gbrain_state_root_create_failed",
+                 "The gbrain state root could not be reopened after creation; refusing reindex.")
+    except OSError:
+        fail("gbrain_state_root_invalid",
+             "The gbrain state root exists but is not a safe real directory; refusing reindex.")
+
+    def root_mode(name):
+        # No-follow stat relative to the validated root fd: a symlink (even
+        # dangling) reports as a symlink, never as its target.
+        try:
+            return os.stat(name, dir_fd=root_fd, follow_symlinks=False).st_mode
+        except OSError:
+            return 0
+
+    # Artifact topology: config.json must be a regular non-symlink file and
+    # brain.pglite a non-symlink DIRECTORY; fresh only when BOTH are absent.
+    config_mode = root_mode(config_leaf)
+    pglite_mode = root_mode(pglite_leaf)
+
+    if stat.S_ISLNK(config_mode):
+        fail("gbrain_state_config_symlink", "Config path is a symlink; refusing reindex without clobbering it.")
+    config_exists = config_mode != 0
+    if config_exists and not stat.S_ISREG(config_mode):
+        fail("gbrain_state_config_not_regular", "Config path exists but is not a regular file; refusing reindex.")
+    if stat.S_ISLNK(pglite_mode):
+        fail("gbrain_state_pglite_symlink", "PGLite data path is a symlink; refusing reindex without clobbering it.")
+    pglite_exists = pglite_mode != 0
+    if not config_exists and pglite_exists:
+        fail("gbrain_state_pglite_without_config", "PGLite data exists but config.json is missing; refusing reindex over existing state.")
+    if config_exists and not pglite_exists:
+        fail("gbrain_state_config_without_pglite", "Config.json exists but the PGLite data directory is missing; refusing reindex.")
+    if pglite_exists and not stat.S_ISDIR(pglite_mode):
+        fail("gbrain_state_pglite_not_directory", "PGLite data path exists but is not a directory; refusing reindex.")
+
+    if not config_exists:
+        print(json.dumps({"status": "fresh"}, ensure_ascii=False))
+        raise SystemExit
+
+    # Existing file plane must be the exact healthy pglite shape; the config
+    # is read root-relative with O_NOFOLLOW, and diagnostics are static
+    # strings that never echo config content.
+    try:
+        cfg_fd = os.open(config_leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+        with os.fdopen(cfg_fd, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        fail("gbrain_state_config_malformed", "Config.json cannot be read or parsed as JSON; refusing reindex.")
+    if not isinstance(cfg, dict):
+        fail("gbrain_state_config_malformed", "Config.json is not a JSON object; refusing reindex.")
+    if "database_url" in cfg:
+        fail("gbrain_state_config_database_url_persisted", "Config.json persists database_url; refusing reindex over a Postgres config.")
+    if cfg.get("engine") != "pglite":
+        fail("gbrain_state_config_engine_invalid", "Config engine is not exactly pglite; refusing reindex.")
+    database_path = cfg.get("database_path")
+    if not isinstance(database_path, str) or not database_path:
+        fail("gbrain_state_config_database_path_invalid", "Config database_path is missing or not a string; refusing reindex.")
+    if os.path.realpath(database_path) != os.path.realpath(pglite_path):
+        fail("gbrain_state_config_database_path_invalid", "Config database_path does not resolve to the canonical PGLite path; refusing reindex.")
+
+    print(json.dumps({"status": "existing"}, ensure_ascii=False))
+finally:
+    if root_fd is not None:
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
+    if parent_fd is not None:
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
 PY
 ) || {
         emit_json '{"success": false, "action": "reindex", "error": "gbrain_state_preflight_failed", "message": "Could not run the reindex state preflight."}'

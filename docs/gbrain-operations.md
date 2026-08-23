@@ -389,11 +389,12 @@ operator MUST verify the following after rebuild and before deploying:
    (`josemar-gbrain reindex`) against the rebuilt image before the upgraded
    gbrain is considered ready. Reindex is state-aware (issue #124 + PR #132): a
    fail-closed state preflight runs under the shared lock BEFORE any native
-   gbrain command. On healthy existing state — a regular non-symlink JSON
-   `config.json` whose engine is exactly `pglite`, whose `database_path`
-   resolves to `$GBRAIN_HOME/.gbrain/brain.pglite`, and which persists no
-   `database_url`, plus an actual non-symlink PGLite directory — it runs the
-   schema-only `gbrain init --migrate-only` (no `--no-embedding`, no
+   gbrain command. On healthy existing state — `$GBRAIN_HOME/.gbrain` itself a
+   real, non-symlink directory; a regular non-symlink JSON `config.json` whose
+   engine is exactly `pglite`, whose `database_path` resolves to
+   `$GBRAIN_HOME/.gbrain/brain.pglite`, and which persists no `database_url`;
+   plus an actual non-symlink PGLite directory — it runs the schema-only
+   `gbrain init --migrate-only` (no `--no-embedding`, no
    `search.mcp_keyword_only` rewrite), which applies pending migrations to the
    PGLite database under `$GBRAIN_HOME/.gbrain` and preserves the existing
    search mode (fresh is the only keyword-only initialization path). Fresh
@@ -637,11 +638,21 @@ overrides are supported in this deployment.
    command (pure Python/shell: no gbrain access, no config writes, and
    diagnostics never echo config content) and classifies the state as `fresh`
    or `existing`; any other outcome terminates with a structured failure
-   envelope and no fresh fallback:
+   envelope and no fresh fallback. The state root `$GBRAIN_HOME/.gbrain` is
+   established inside this preflight with no-follow parent/root directory
+   validation (no shell `mkdir -p`): a symlinked (including dangling),
+   non-directory, or inaccessible parent/root is never followed, repaired,
+   replaced, or deleted. This protects the classifier and prevents accidental
+   clobbering; it is not a hostile same-UID security boundary — native
+   commands resolve paths later under the cooperative lock.
    - **Fresh first activation** — permitted only when NEITHER
      `$GBRAIN_HOME/.gbrain/config.json` NOR `$GBRAIN_HOME/.gbrain/brain.pglite`
-     exists. It validates and installs the schema source pack (if a custom
-     pack is selected), runs `gbrain init --pglite --no-embedding`, configures
+     exists. An absent state root (`$GBRAIN_HOME/.gbrain`) is created here —
+     only on this genuine fresh path — under the lock via the no-follow
+     parent/root validation (a creation failure is
+     `gbrain_state_root_create_failed`). It validates and installs the schema
+     source pack (if a custom pack is selected), runs
+     `gbrain init --pglite --no-embedding`, configures
      `search.mcp_keyword_only=true` (keyword-only default), configures
      `sync.repo_path`, `link_resolution.global_basename`, and
      `chronicle.judge_max_tokens`, runs a full sync with `--no-embed`, runs
@@ -652,19 +663,23 @@ overrides are supported in this deployment.
      marks the vault repo as a git `safe.directory`. Fresh is the ONLY
      keyword-only initialization path.
    - **Later reindex (existing initialized state)** — permitted only when the
-     preflight verifies a HEALTHY PGLite state: `config.json` is a regular
-     non-symlink JSON object whose engine is exactly `pglite`, whose
-     `database_path` resolves to `$GBRAIN_HOME/.gbrain/brain.pglite`, and
-     which persists no `database_url`; and `brain.pglite` is an actual
-     non-symlink PGLite directory. It runs ONLY the schema-only
+     preflight verifies a HEALTHY PGLite state: `$GBRAIN_HOME/.gbrain` itself
+     is a real, non-symlink directory; `config.json` is a regular non-symlink
+     JSON object whose engine is exactly `pglite`, whose `database_path`
+     resolves to `$GBRAIN_HOME/.gbrain/brain.pglite`, and which persists no
+     `database_url`; and `brain.pglite` is an actual non-symlink PGLite
+     directory. It runs ONLY the schema-only
      `gbrain init --migrate-only` (applies pending migrations; NO
      `--no-embedding`, NO `search.mcp_keyword_only` rewrite — the existing
      search mode and provider config are preserved), then the same
      reconciliation as above: full `sync --no-embed`, stale content
      extraction, link extraction, and (custom pack only) schema sync.
-   - **Anything else fails closed BEFORE native gbrain activity** — partial/
-     malformed/non-regular/symlinked `config.json` or `brain.pglite`, a
-     `config.json` without a PGLite directory, a `brain.pglite` without a
+   - **Anything else fails closed BEFORE native gbrain activity** — a
+     missing/symlinked/non-directory/inaccessible state parent
+     (`gbrain_state_parent_invalid`), a symlinked (including dangling),
+     regular-file, or non-directory state root (`gbrain_state_root_invalid`),
+     partial/malformed/non-regular/symlinked `config.json` or `brain.pglite`,
+     a `config.json` without a PGLite directory, a `brain.pglite` without a
      `config.json`, alternate topology, a Postgres engine or persisted
      `database_url`, and any database redirect at the FIXED NATIVE cwd
      boundary all terminate reindex with a structured failure envelope; there
@@ -1124,9 +1139,23 @@ workflow: set the env, run reindex.
   `schema validate`. Check `pack.yaml` syntax and structure.
 - **`gbrain_state_*` reindex preflight failures (PR #132)** — The reindex
   state preflight refuses native gbrain activity over anything but a healthy
-  PGLite state: symlinked/non-regular/malformed `config.json`, symlinked or
-  non-directory `brain.pglite`, config without PGLite or PGLite without
-  config, a non-`pglite` engine, a `database_path` not resolving to
+  PGLite state. State root/establishment codes:
+  - `gbrain_state_parent_invalid` — the fixed state parent
+    (`$GBRAIN_HOME` = `/opt/data`) is missing, a symlink, a non-directory, or
+    inaccessible, so it cannot be opened safely. Fix or recreate the
+    canonical local parent as a real directory owned by the Hermes runtime
+    user, then re-run reindex.
+  - `gbrain_state_root_invalid` — `$GBRAIN_HOME/.gbrain` exists but is not a
+    safe real directory (a symlink, including a dangling one; a regular file;
+    a non-directory; or inaccessible). Fix or recreate the canonical local
+    root manually as a real directory — never delete through a symlink and
+    never point reindex at a replacement path — then re-run reindex.
+  - `gbrain_state_root_create_failed` — the absent state root could not be
+    created or reopened after creation. Ensure the parent is writable by the
+    Hermes runtime user, then re-run reindex.
+  The remaining surfaces are: symlinked/non-regular/malformed `config.json`,
+  symlinked or non-directory `brain.pglite`, config without PGLite or PGLite
+  without config, a non-`pglite` engine, a `database_path` not resolving to
   `$GBRAIN_HOME/.gbrain/brain.pglite`, a persisted `database_url`, an
   inherited `GBRAIN_DATABASE_URL`, a `GBRAIN_DATABASE_URL` declaration in any
   Bun default dotenv file at the fixed native cwd (`/opt/gbrain`), and an

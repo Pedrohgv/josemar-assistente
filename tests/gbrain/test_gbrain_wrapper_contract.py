@@ -89,9 +89,10 @@ def _extract_state_branches(body: str) -> tuple[str, str]:
 def _extract_preflight_python(src: str) -> str:
     """Extract the body of the embedded state-preflight Python heredoc
     (issue #132), anchored on the fixed-interpreter invocation with the two
-    canonical artifact paths and the fixed native gbrain cwd."""
+    canonical artifact paths, the fixed native gbrain cwd, and the fixed
+    state parent."""
     match = re.search(
-        r'"\$PYTHON_BIN" -I - "\$GBRAIN_CONFIG_PATH" "\$GBRAIN_PGLITE_PATH" "\$GBRAIN_NATIVE_CWD" <<\'PY\'\n(.*?)\nPY',
+        r'"\$PYTHON_BIN" -I - "\$GBRAIN_CONFIG_PATH" "\$GBRAIN_PGLITE_PATH" "\$GBRAIN_NATIVE_CWD" "\$GBRAIN_HOME" <<\'PY\'\n(.*?)\nPY',
         src, re.DOTALL,
     )
     assert match is not None, "Could not find the preflight Python heredoc"
@@ -436,9 +437,12 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         self.assertIn('runtime_gbrain_home="$GBRAIN_HOME"', body)
         self.assertNotIn('runtime_gbrain_home="${GBRAIN_HOME:-', body)
 
-    def test_reindex_creates_state_dir(self) -> None:
+    def test_reindex_has_no_shell_mkdir_p(self) -> None:
+        """The state root must NOT be pre-created by a shell `mkdir -p`
+        (that would follow a symlinked .gbrain ancestor): root establishment
+        happens fail-closed inside the lock-held preflight."""
         body = _extract_function(self.src, "do_reindex")
-        self.assertIn('mkdir -p "$GBRAIN_STATE_DIR"', body)
+        self.assertNotIn('mkdir -p "$GBRAIN_STATE_DIR"', body)
 
     def test_reindex_does_not_invoke_embedding_operations(self) -> None:
         """reindex must not invoke enable-embeddings, migrate embeddings,
@@ -508,7 +512,7 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
     def test_preflight_invocation_uses_fixed_isolated_interpreter(self) -> None:
         self.assertIn(
             '"$PYTHON_BIN" -I - "$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" '
-            '"$GBRAIN_NATIVE_CWD"',
+            '"$GBRAIN_NATIVE_CWD" "$GBRAIN_HOME"',
             self.body,
         )
 
@@ -516,7 +520,7 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
         """The preflight must receive the fixed native gbrain cwd as an
         argument (the launcher's /opt/gbrain dotenv boundary), not derive it
         from the wrapper caller's cwd."""
-        self.assertIn('config_path, pglite_path, native_cwd = sys.argv[1:4]',
+        self.assertIn('config_path, pglite_path, native_cwd, parent_path = sys.argv[1:5]',
                       self.preflight)
 
     def test_preflight_after_lock_before_native_commands_and_init(self) -> None:
@@ -524,7 +528,7 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
         custom schema-pack native validation, schema pack install, both init
         branches, the state classification, and the sync."""
         preflight_pos = self.body.find(
-            '"$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" "$GBRAIN_NATIVE_CWD"'
+            '"$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" "$GBRAIN_NATIVE_CWD" "$GBRAIN_HOME"'
         )
         lock_pos = self.body.find("acquire_tasknotes_lock reindex")
         install_pos = self.body.find("install_source_pack")
@@ -564,15 +568,15 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
         self.assertIn("init --migrate-only", existing)
 
     def test_preflight_rejects_symlinked_config(self) -> None:
-        self.assertIn("os.path.islink(config_path)", self.preflight)
+        self.assertIn("stat.S_ISLNK(config_mode)", self.preflight)
         self.assertIn("gbrain_state_config_symlink", self.preflight)
 
     def test_preflight_rejects_nonregular_config(self) -> None:
-        self.assertIn("os.path.isfile(config_path)", self.preflight)
+        self.assertIn("stat.S_ISREG(config_mode)", self.preflight)
         self.assertIn("gbrain_state_config_not_regular", self.preflight)
 
     def test_preflight_rejects_symlinked_pglite(self) -> None:
-        self.assertIn("os.path.islink(pglite_path)", self.preflight)
+        self.assertIn("stat.S_ISLNK(pglite_mode)", self.preflight)
         self.assertIn("gbrain_state_pglite_symlink", self.preflight)
 
     def test_preflight_rejects_pglite_without_config(self) -> None:
@@ -587,7 +591,7 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
     def test_preflight_requires_pglite_directory(self) -> None:
         """brain.pglite must be a non-symlink DIRECTORY; a regular file at
         the path fails closed."""
-        self.assertIn("os.path.isdir(pglite_path)", self.preflight)
+        self.assertIn("stat.S_ISDIR(pglite_mode)", self.preflight)
         self.assertIn("gbrain_state_pglite_not_directory", self.preflight)
 
     def test_preflight_rejects_malformed_config(self) -> None:
@@ -681,6 +685,89 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
         self.assertIn('os.environ.get("GBRAIN_DATABASE_URL")', self.preflight)
         self.assertIn("gbrain_state_gbrain_database_url_env", self.preflight)
 
+    # --- state root establishment (issue #132 fourth iteration) ---
+
+    def test_preflight_receives_fixed_state_parent(self) -> None:
+        """The preflight must receive the fixed GBRAIN_HOME as the state
+        parent for no-follow root establishment (no shell mkdir -p precedes
+        it)."""
+        self.assertIn(
+            'config_path, pglite_path, native_cwd, parent_path = sys.argv[1:5]',
+            self.preflight,
+        )
+        self.assertNotIn('mkdir -p "$GBRAIN_STATE_DIR"', self.body)
+
+    def test_preflight_opens_parent_no_follow_directory(self) -> None:
+        """The fixed state parent must be opened with O_DIRECTORY|O_NOFOLLOW
+        (+O_CLOEXEC when available); missing/symlinked/non-directory/
+        inaccessible parents fail statically with gbrain_state_parent_invalid
+        (no path or exception echo)."""
+        self.assertIn("os.O_DIRECTORY", self.preflight)
+        self.assertIn("os.O_NOFOLLOW", self.preflight)
+        self.assertIn("hasattr(os, \"O_CLOEXEC\")", self.preflight)
+        self.assertIn("os.open(parent_path, open_flags)", self.preflight)
+        self.assertIn("gbrain_state_parent_invalid", self.preflight)
+
+    def test_preflight_establishes_root_no_follow_and_creates_absent(self) -> None:
+        """The .gbrain root must be opened O_DIRECTORY|O_NOFOLLOW relative to
+        the parent fd; absent roots are created with umask semantics via
+        dir_fd and immediately reopened no-follow (races fail closed)."""
+        self.assertIn('os.mkdir(root_leaf, 0o777, dir_fd=parent_fd)', self.preflight)
+        self.assertIn('os.open(root_leaf, open_flags, dir_fd=parent_fd)', self.preflight)
+        self.assertIn("gbrain_state_root_create_failed", self.preflight)
+        self.assertIn("gbrain_state_root_invalid", self.preflight)
+
+    def test_preflight_rejects_bad_roots_without_repair(self) -> None:
+        """Existing symlink (incl. dangling), regular file, non-directory, or
+        inaccessible root must static-fail — never followed, deleted,
+        repaired, or migrated."""
+        self.assertIn("except FileNotFoundError:", self.preflight)
+        self.assertIn("except OSError:", self.preflight)
+        self.assertNotIn("os.remove(root_leaf", self.preflight)
+        self.assertNotIn("os.unlink(root_leaf", self.preflight)
+        self.assertNotIn("os.rename(root_leaf", self.preflight)
+        self.assertNotIn("os.replace(root_leaf", self.preflight)
+
+    def test_preflight_validates_leaves_root_relative_no_follow(self) -> None:
+        """config.json and brain.pglite must be classified with no-follow
+        stats relative to the validated root fd, so an ancestor/leaf swap
+        cannot redirect the classifier."""
+        self.assertIn("dir_fd=root_fd", self.preflight)
+        self.assertIn("follow_symlinks=False", self.preflight)
+        self.assertIn("stat.S_ISLNK(config_mode)", self.preflight)
+        self.assertIn("stat.S_ISREG(config_mode)", self.preflight)
+        self.assertIn("stat.S_ISLNK(pglite_mode)", self.preflight)
+        self.assertIn("stat.S_ISDIR(pglite_mode)", self.preflight)
+
+    def test_preflight_reads_config_root_relative_no_follow(self) -> None:
+        """The existing-config read must go through the validated root fd
+        with O_NOFOLLOW."""
+        self.assertIn(
+            'os.open(config_leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)',
+            self.preflight,
+        )
+
+    def test_preflight_closes_fds_in_finally(self) -> None:
+        """Both fds must be closed in a finally block on every exit path."""
+        self.assertIn("finally:", self.preflight)
+        self.assertIn("os.close(root_fd)", self.preflight)
+        self.assertIn("os.close(parent_fd)", self.preflight)
+        finally_pos = self.preflight.find("finally:")
+        self.assertGreater(finally_pos, -1)
+        tail = self.preflight[finally_pos:]
+        self.assertIn("if root_fd is not None:", tail)
+        self.assertIn("if parent_fd is not None:", tail)
+
+    def test_preflight_root_errors_are_static_and_leak_free(self) -> None:
+        """Root error messages are static (no path/exception echo) and the
+        preflight keeps its no-f-string/no-format diagnostic discipline."""
+        for code in ("gbrain_state_parent_invalid", "gbrain_state_root_invalid",
+                     "gbrain_state_root_create_failed"):
+            pos = self.preflight.find(code)
+            self.assertGreater(pos, -1, f"missing root error code {code}")
+        self.assertNotIn("f\"", self.preflight)
+        self.assertNotIn(".format(", self.preflight)
+
     def test_preflight_output_parsed_by_exact_patterns_only(self) -> None:
         """The dispatch accepts ONLY the two exact status envelopes; the old
         substring-glob form must be gone so arbitrary output cannot smuggle
@@ -727,7 +814,7 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
         """The preflight must never attempt an embedding repair (no embed,
         no migrate embeddings, no enable-embeddings invocation)."""
         preflight_pos = self.body.find(
-            '"$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" "$GBRAIN_NATIVE_CWD"'
+            '"$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" "$GBRAIN_NATIVE_CWD" "$GBRAIN_HOME"'
         )
         class_pos = self.body.find('if [ "$preflight_state" = "existing" ]')
         region = self.body[preflight_pos:class_pos]
