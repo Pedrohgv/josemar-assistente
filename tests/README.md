@@ -40,6 +40,29 @@ The `verify` target runs fast tests plus compose validation:
 make verify
 ```
 
+### gbrain reindex state preflight fast gates (PR #132)
+
+The fail-closed reindex state preflight (see
+`docs/gbrain-operations.md` → "Safe Initial Production Activation") is
+enforced without Docker by two fast contract suites that run on ordinary
+`make test`:
+
+- `tests.gbrain.test_gbrain_manual_refresh_reindex_lock` — preflight
+  semantics: fresh only when BOTH canonical artifacts (`config.json` and
+  `brain.pglite`) are absent; healthy existing state (regular JSON config,
+  engine exactly `pglite`, canonical `database_path`, no persisted
+  `database_url`, non-symlink PGLite directory) runs migrate-only; every
+  partial/malformed/Postgres/env-override case fails closed with a structured
+  nonzero envelope and no native gbrain activity.
+- `tests.gbrain.test_gbrain_wrapper_contract` — wrapper wiring: the preflight
+  runs under the shared lock with the fixed isolated interpreter and before
+  any native command; init selection is driven exclusively by the validated
+  preflight state (`fresh` / `existing`), never reclassified; the
+  `DATABASE_URL` exception matches the pinned cwd-dotenv parser exactly
+  (`.env`, `.env.local`, `.env.development`, `.env.production`, `.env.test`).
+
+These are unit/contract tests — no Docker, no gbrain binary.
+
 ## Runtime Docker Tests
 
 Runtime tests are skipped unless explicitly enabled:
@@ -381,6 +404,16 @@ v0.46.26.0 upgrade.
 - Reports are written under the gitignored `dump_folder/gbrain-conformance/`
   and contain synthetic command/result metadata only (argv, rc, stdout,
   stderr, elapsed) — never environment dumps.
+- Persisted config evidence is narrow-only (PR #132): when the suites
+  need the file-plane config (`/opt/data/.gbrain/config.json`), they read it
+  through an in-container parser on the pinned runtime `python3` that emits
+  exactly the explicitly necessary non-secret fields (`embedding_disabled`,
+  `embedding_model`, `embedding_dimensions`) as a minimal JSON object — never
+  whole `config.json` stdout. Structure tests
+  (`test_no_raw_config_capture_in_evidence`,
+  `test_config_read_helpers_route_through_narrow_extract`,
+  `test_config_extract_emits_only_necessary_fields`) enforce that no raw
+  config capture exists in either embeddings suite.
 - Final cleanup is unconditional `docker compose down -v --remove-orphans` for
   the disposable project.
 - The embeddings gates download the E5/TEI model on first run and are
@@ -398,7 +431,13 @@ Issue #124 is NOT a probe anymore: it is a hard preservation regression. The
 former report-only reindex probe and its workaround path were converted into a
 hard gate — the reindex classification must be exactly `fixed` in the
 embeddings and upgrade-embeddings suites (see the "Operation-level coverage
-index" below), and the suite fails on any other outcome. The only remaining
+index" below), and the suite fails on any other outcome. The `fixed`
+classification covers semantic-mode preservation: search mode, embedding
+config, completion marker, corpus coverage, and semantic retrieval
+(`issue124_proof`, `reindex_mode_preserved`, `reindex_config_preserved`,
+`reindex_marker_preserved`, `reindex_coverage_preserved`,
+`reindex_semantic_retrieval`) are all hard-asserted — the tests enforce the
+semantic-preservation `fixed` gate (PR #132). The only remaining
 report-only classifications are `schema-status` and the #125 upgrade probe.
 
 ### Sync-move regression characterization (issue #125 W1)

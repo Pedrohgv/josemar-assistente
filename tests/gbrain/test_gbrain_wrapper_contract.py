@@ -52,16 +52,18 @@ def _extract_function(src: str, name: str) -> str:
 
 
 def _extract_state_branches(body: str) -> tuple[str, str]:
-    """Split do_reindex's state-classification if/else (issue #124) into
-    (existing_config_block, missing_config_block).
+    """Split do_reindex's init-selection if/else into
+    (existing_block, fresh_block). The choice is driven EXCLUSIVELY by the
+    validated preflight state variable (issue #132 Gate 1).
 
-    The block is located by its opener ``if [ -f "$GBRAIN_CONFIG_PATH" ]; then``
-    and bounded by balancing ``if ...; then`` / ``fi`` depth (each branch
-    contains one nested ``if echo "$init_output" ...; then ... fi`` guard), so
-    assertions scope to the exact branch instead of the whole function.
+    The block is located by its opener
+    ``if [ "$preflight_state" = "existing" ]; then`` and bounded by balancing
+    ``if ...; then`` / ``fi`` depth (each branch contains one nested
+    ``if echo "$init_output" ...; then ... fi`` guard), so assertions scope
+    to the exact branch instead of the whole function.
     """
-    opener = re.search(r'if \[ -f "\$GBRAIN_CONFIG_PATH" \]; then', body)
-    assert opener is not None, "state-classification if/else block not found"
+    opener = re.search(r'if \[ "\$preflight_state" = "existing" \]; then', body)
+    assert opener is not None, "init-selection if/else block not found"
     lines = body[opener.start():].splitlines()
     depth = 0
     else_line = None
@@ -78,10 +80,22 @@ def _extract_state_branches(body: str) -> tuple[str, str]:
                 close_line = index
                 break
     assert else_line is not None and close_line is not None, \
-        "could not bound the state-classification block"
+        "could not bound the init-selection block"
     existing = "\n".join(lines[1:else_line])
     fresh = "\n".join(lines[else_line + 1:close_line])
     return existing, fresh
+
+
+def _extract_preflight_python(src: str) -> str:
+    """Extract the body of the embedded state-preflight Python heredoc
+    (issue #132 Findings 1-2), anchored on the fixed-interpreter invocation
+    with the two canonical artifact paths."""
+    match = re.search(
+        r'"\$PYTHON_BIN" -I - "\$GBRAIN_CONFIG_PATH" "\$GBRAIN_PGLITE_PATH" <<\'PY\'\n(.*?)\nPY',
+        src, re.DOTALL,
+    )
+    assert match is not None, "Could not find the preflight Python heredoc"
+    return match.group(1)
 
 
 class GbrainSchemaSourcePackContractTests(unittest.TestCase):
@@ -154,15 +168,15 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.src = _read(WRAPPER_PATH)
 
-    def test_reindex_classifies_state_via_canonical_config_json(self) -> None:
-        """State classification must use the canonical
-        $GBRAIN_HOME/.gbrain/config.json regular file surface, derived from
-        the existing state-dir variable — no new sentinel/state store and no
-        direct config JSON edits."""
+    def test_reindex_selects_init_from_validated_preflight_state(self) -> None:
+        """Init selection must come ONLY from the validated preflight state
+        variable (fresh|existing); the old `[ -f config.json ]` filesystem
+        reclassification must be gone from do_reindex."""
         self.assertIn('GBRAIN_CONFIG_PATH="${GBRAIN_STATE_DIR}/config.json"', self.src)
         body = _extract_function(self.src, "do_reindex")
-        self.assertIn('if [ -f "$GBRAIN_CONFIG_PATH" ]; then', body)
+        self.assertIn('if [ "$preflight_state" = "existing" ]; then', body)
         self.assertIn("else", body)
+        self.assertNotIn('[ -f "$GBRAIN_CONFIG_PATH" ]', body)
 
     def test_reindex_fresh_branch_uses_pglite_no_embedding_init(self) -> None:
         """Missing config.json => fresh activation: init --pglite
@@ -332,7 +346,7 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         before any sync work (issue #124): current ordering is preserved."""
         body = _extract_function(self.src, "do_reindex")
         lock_pos = body.find("acquire_tasknotes_lock reindex")
-        class_pos = body.find('if [ -f "$GBRAIN_CONFIG_PATH" ]')
+        class_pos = body.find('if [ "$preflight_state" = "existing" ]')
         sync_pos = body.find("run_sync_extract_links")
         self.assertGreater(lock_pos, -1)
         self.assertGreater(class_pos, -1)
@@ -471,13 +485,19 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
 
 
 class GbrainReindexStateGuardContractTests(unittest.TestCase):
-    """Issue #124 gate-1 remediation: fresh init may run ONLY when BOTH the
-    canonical config.json and the canonical brain.pglite surface are absent
-    and neither is a symlink. Every violation fails closed before native init
-    with a structured nonzero error and no fresh fallback."""
+    """Issue #132 Findings 1-2: a fail-closed state preflight runs under the
+    shared lock BEFORE any native gbrain invocation (including the custom
+    schema-pack native validation). Healthy existing = regular non-symlink
+    config.json (JSON object, engine exactly pglite, database_path resolving
+    to the canonical PGLite path, no database_url) + non-symlink DIRECTORY
+    brain.pglite; fresh = both artifacts absent; everything else is a
+    structured nonzero error. GBRAIN_DATABASE_URL and an effective
+    DATABASE_URL (per the exact cwd-dotenv heuristic) fail closed too."""
 
     def setUp(self) -> None:
         self.src = _read(WRAPPER_PATH)
+        self.body = _extract_function(self.src, "do_reindex")
+        self.preflight = _extract_preflight_python(self.src)
 
     def test_pglite_path_constant_derived_from_state_dir(self) -> None:
         """The canonical PGLite artifact path must be derived from the
@@ -485,102 +505,201 @@ class GbrainReindexStateGuardContractTests(unittest.TestCase):
         sentinel store."""
         self.assertIn('GBRAIN_PGLITE_PATH="${GBRAIN_STATE_DIR}/brain.pglite"', self.src)
 
-    def test_guard_rejects_symlinked_config(self) -> None:
-        body = _extract_function(self.src, "do_reindex")
-        self.assertIn('[ -L "$GBRAIN_CONFIG_PATH" ]', body)
-        self.assertIn("gbrain_state_config_symlink", body)
-
-    def test_guard_rejects_nonregular_config_entry(self) -> None:
-        """Any existing config entry that is not a regular file (e.g. a
-        directory) must fail closed."""
-        body = _extract_function(self.src, "do_reindex")
-        self.assertIn('[ -e "$GBRAIN_CONFIG_PATH" ] && [ ! -f "$GBRAIN_CONFIG_PATH" ]', body)
-        self.assertIn("gbrain_state_config_not_regular", body)
-
-    def test_guard_rejects_symlinked_pglite(self) -> None:
-        body = _extract_function(self.src, "do_reindex")
-        self.assertIn('[ -L "$GBRAIN_PGLITE_PATH" ]', body)
-        self.assertIn("gbrain_state_pglite_symlink", body)
-
-    def test_guard_rejects_pglite_without_config(self) -> None:
-        """Config absent but brain.pglite present in any form must fail
-        closed: fresh init may never run over existing state."""
-        body = _extract_function(self.src, "do_reindex")
+    def test_preflight_invocation_uses_fixed_isolated_interpreter(self) -> None:
         self.assertIn(
-            '[ ! -e "$GBRAIN_CONFIG_PATH" ] && [ -e "$GBRAIN_PGLITE_PATH" ]', body
+            '"$PYTHON_BIN" -I - "$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH"',
+            self.body,
         )
-        self.assertIn("gbrain_state_pglite_without_config", body)
 
-    def test_guard_failures_are_structured_and_return_nonzero(self) -> None:
-        """Each guard violation must emit a structured success:false reindex
-        error and return 1 from do_reindex (no native init, no fallback)."""
-        body = _extract_function(self.src, "do_reindex")
-        for tag in (
-            "gbrain_state_config_symlink",
-            "gbrain_state_config_not_regular",
-            "gbrain_state_pglite_symlink",
-            "gbrain_state_pglite_without_config",
+    def test_preflight_after_lock_before_native_commands_and_init(self) -> None:
+        """The preflight must run after lock acquisition and before the
+        custom schema-pack native validation, schema pack install, both init
+        branches, the state classification, and the sync."""
+        preflight_pos = self.body.find('"$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH"')
+        lock_pos = self.body.find("acquire_tasknotes_lock reindex")
+        install_pos = self.body.find("install_source_pack")
+        validate_pos = self.body.find("validate_installed_pack")
+        fresh_pos = self.body.find("init --pglite")
+        migrate_pos = self.body.find("init --migrate-only")
+        class_pos = self.body.find('if [ "$preflight_state" = "existing" ]')
+        sync_pos = self.body.find("run_sync_extract_links")
+        self.assertGreater(preflight_pos, -1, "preflight invocation must exist")
+        self.assertLess(lock_pos, preflight_pos, "preflight must run under the lock")
+        self.assertLess(preflight_pos, install_pos,
+                        "preflight must precede schema pack install")
+        self.assertLess(preflight_pos, validate_pos,
+                        "preflight must precede the native schema-pack validation")
+        for pos, name in (
+            (fresh_pos, "fresh init"),
+            (migrate_pos, "migrate-only init"),
+            (class_pos, "state classification"),
+            (sync_pos, "sync"),
         ):
-            pos = body.find(tag)
-            self.assertGreater(pos, -1, f"missing guard error tag {tag}")
-            line_start = body.rfind("\n", 0, pos) + 1
-            line_end = body.find("\n", pos)
-            line = body[line_start:line_end if line_end != -1 else len(body)]
-            self.assertIn('"success": false', line, f"{tag} must be structured")
-            after = body[pos:pos + 250]
-            self.assertIn("return 1", after, f"{tag} must return nonzero")
-
-    def test_guard_precedes_both_init_paths_and_classification(self) -> None:
-        """The guard must run before the fresh --pglite init, the existing
-        --migrate-only init, the state classification, and the sync."""
-        body = _extract_function(self.src, "do_reindex")
-        guard_pos = body.find('if [ -L "$GBRAIN_CONFIG_PATH" ]')
-        self.assertGreater(guard_pos, -1, "state guard must exist")
-        for needle, name in (
-            ("init --pglite", "fresh init"),
-            ("init --migrate-only", "migrate-only init"),
-            ('if [ -f "$GBRAIN_CONFIG_PATH" ]', "state classification"),
-            ("run_sync_extract_links", "sync"),
-        ):
-            pos = body.find(needle)
             self.assertGreater(pos, -1, f"missing {name}")
-            self.assertLess(guard_pos, pos, f"state guard must precede {name}")
+            self.assertLess(preflight_pos, pos, f"preflight must precede {name}")
 
-    def test_guard_after_lock_and_schema_install(self) -> None:
-        """The guard runs under the already-acquired lock and after schema
-        pack validation/install, immediately before the state classification."""
-        body = _extract_function(self.src, "do_reindex")
-        lock_pos = body.find("acquire_tasknotes_lock reindex")
-        install_pos = body.find("install_source_pack")
-        guard_pos = body.find('if [ -L "$GBRAIN_CONFIG_PATH" ]')
-        class_pos = body.find('if [ -f "$GBRAIN_CONFIG_PATH" ]')
-        self.assertLess(lock_pos, guard_pos, "guard must run under the lock")
-        self.assertLess(install_pos, guard_pos,
-                        "schema pack install must precede the guard")
-        self.assertLess(guard_pos, class_pos,
-                        "guard must precede the state classification")
+    def test_preflight_fresh_status_kept_for_absent_artifacts(self) -> None:
+        """Both artifacts absent must yield the fresh status; the fresh
+        branch keeps the pglite init and the keyword-only write."""
+        self.assertIn('"status": "fresh"', self.preflight)
+        _, fresh = _extract_state_branches(self.body)
+        self.assertIn("init --pglite --no-embedding", fresh)
+        self.assertIn("config set search.mcp_keyword_only true", fresh)
 
-    def test_existing_branch_does_not_require_pglite(self) -> None:
-        """The existing-config branch keys on the regular config only and
-        must not gate on brain.pglite existence."""
-        body = _extract_function(self.src, "do_reindex")
-        existing, _ = _extract_state_branches(body)
-        self.assertNotIn("GBRAIN_PGLITE_PATH", existing)
+    def test_preflight_existing_status_kept_for_healthy_state(self) -> None:
+        """Healthy existing must yield the existing status consumed by the
+        migrate-only branch."""
+        self.assertIn('"status": "existing"', self.preflight)
+        existing, _ = _extract_state_branches(self.body)
+        self.assertIn("init --migrate-only", existing)
 
-    def test_guard_block_has_no_embedding_repair_calls(self) -> None:
-        """The guard block must never attempt an embedding repair (no embed,
+    def test_preflight_rejects_symlinked_config(self) -> None:
+        self.assertIn("os.path.islink(config_path)", self.preflight)
+        self.assertIn("gbrain_state_config_symlink", self.preflight)
+
+    def test_preflight_rejects_nonregular_config(self) -> None:
+        self.assertIn("os.path.isfile(config_path)", self.preflight)
+        self.assertIn("gbrain_state_config_not_regular", self.preflight)
+
+    def test_preflight_rejects_symlinked_pglite(self) -> None:
+        self.assertIn("os.path.islink(pglite_path)", self.preflight)
+        self.assertIn("gbrain_state_pglite_symlink", self.preflight)
+
+    def test_preflight_rejects_pglite_without_config(self) -> None:
+        self.assertIn("gbrain_state_pglite_without_config", self.preflight)
+
+    def test_preflight_rejects_config_without_pglite(self) -> None:
+        """Healthy existing REQUIRES the PGLite directory: config without
+        brain.pglite must fail closed (the stale claim that existing state
+        does not need brain.pglite is gone)."""
+        self.assertIn("gbrain_state_config_without_pglite", self.preflight)
+
+    def test_preflight_requires_pglite_directory(self) -> None:
+        """brain.pglite must be a non-symlink DIRECTORY; a regular file at
+        the path fails closed."""
+        self.assertIn("os.path.isdir(pglite_path)", self.preflight)
+        self.assertIn("gbrain_state_pglite_not_directory", self.preflight)
+
+    def test_preflight_rejects_malformed_config(self) -> None:
+        self.assertIn("json.load(fh)", self.preflight)
+        self.assertIn("gbrain_state_config_malformed", self.preflight)
+
+    def test_preflight_requires_json_object_config(self) -> None:
+        self.assertIn("isinstance(cfg, dict)", self.preflight)
+
+    def test_preflight_rejects_persisted_database_url(self) -> None:
+        self.assertIn('"database_url" in cfg', self.preflight)
+        self.assertIn("gbrain_state_config_database_url_persisted", self.preflight)
+
+    def test_preflight_requires_exact_pglite_engine(self) -> None:
+        """engine must be exactly 'pglite': engine-less historical shapes and
+        any other engine (e.g. postgres) fail closed."""
+        self.assertIn('cfg.get("engine") != "pglite"', self.preflight)
+        self.assertIn("gbrain_state_config_engine_invalid", self.preflight)
+
+    def test_preflight_requires_string_database_path(self) -> None:
+        self.assertIn("isinstance(database_path, str)", self.preflight)
+        self.assertIn("gbrain_state_config_database_path_invalid", self.preflight)
+
+    def test_preflight_requires_canonical_database_path(self) -> None:
+        """database_path must resolve to the fixed canonical PGLite path."""
+        self.assertIn("os.path.realpath(database_path)", self.preflight)
+        self.assertIn("os.path.realpath(pglite_path)", self.preflight)
+        self.assertIn("gbrain_state_config_database_path_invalid", self.preflight)
+
+    def test_preflight_rejects_gbrain_database_url_env(self) -> None:
+        self.assertIn('os.environ.get("GBRAIN_DATABASE_URL")', self.preflight)
+        self.assertIn("gbrain_state_gbrain_database_url_env", self.preflight)
+
+    def test_preflight_rejects_effective_database_url(self) -> None:
+        """A truthy DATABASE_URL not matched by the cwd dotenv union is
+        effective (Postgres) and must fail closed."""
+        self.assertIn('os.environ.get("DATABASE_URL")', self.preflight)
+        self.assertIn("not in dotenv_values_for_key(\"DATABASE_URL\")", self.preflight)
+        self.assertIn("gbrain_state_database_url_effective", self.preflight)
+
+    def test_dotenv_heuristic_uses_exact_pinned_files(self) -> None:
+        for name in (".env", ".env.local", ".env.development",
+                     ".env.production", ".env.test"):
+            self.assertIn(name, self.preflight)
+
+    def test_dotenv_heuristic_uses_inherited_cwd(self) -> None:
+        """The helper must evaluate os.getcwd() in the wrapper process tree
+        (the lock runner preserves cwd)."""
+        self.assertIn("os.getcwd()", self.preflight)
+        self.assertIn("os.path.join(CWD, name)", self.preflight)
+
+    def test_dotenv_heuristic_mirrors_pinned_parser(self) -> None:
+        """Exact dotenvValuesForKey mirror: LF-only split (content.split
+        ('\\n') — a lone CR is not a separator; the file is opened with
+        newline='' so universal-newline translation cannot pre-split CRs),
+        strip, skip blank/#, the pinned regex, case-sensitive key, trimmed
+        value, whole-value quote removal else truncate at the first ' #' AND
+        trim the remainder, ignore empties, union values."""
+        self.assertIn('content.split("\\n")', self.preflight)
+        self.assertIn('newline=""', self.preflight)
+        self.assertNotIn("splitlines", self.preflight)
+        self.assertIn(r'^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$', self.preflight)
+        self.assertIn("m.group(1) != key", self.preflight)
+        self.assertIn("value[0] == value[-1]", self.preflight)
+        self.assertIn('value[0] in ("\'", \'"\')', self.preflight)
+        self.assertIn('value.find(" #")', self.preflight)
+        self.assertIn("value[:comment].strip()", self.preflight)
+        self.assertIn('if value == "":', self.preflight)
+        self.assertIn("values.append(value)", self.preflight)
+        self.assertIn("for name in DOTENV_FILES:", self.preflight)
+
+    def test_preflight_output_parsed_by_exact_patterns_only(self) -> None:
+        """The dispatch accepts ONLY the two exact status envelopes; the old
+        substring-glob form must be gone so arbitrary output cannot smuggle
+        a status substring through."""
+        self.assertIn('case "$preflight_output" in', self.body)
+        self.assertIn("'{\"status\": \"fresh\"}')", self.body)
+        self.assertIn("'{\"status\": \"existing\"}')", self.body)
+        self.assertNotIn("*'\"status\": \"fresh\"'*", self.body)
+        self.assertNotIn("*'\"status\": \"existing\"'*", self.body)
+
+    def test_preflight_state_variable_bound_only_to_two_literals(self) -> None:
+        """preflight_state is assigned ONLY the literals fresh/existing, so
+        init selection can never observe arbitrary preflight output."""
+        assignments = re.findall(r'preflight_state="([^"]*)"', self.body)
+        self.assertEqual(assignments, ["fresh", "existing"])
+
+    def test_init_selection_uses_validated_state_only_no_reclassification(self) -> None:
+        """The init choice is driven only by the validated preflight state
+        variable: no later filesystem reclassification (e.g.
+        `[ -f "$GBRAIN_CONFIG_PATH" ]`) remains in do_reindex."""
+        self.assertIn('if [ "$preflight_state" = "existing" ]; then', self.body)
+        self.assertNotIn('[ -f "$GBRAIN_CONFIG_PATH" ]', self.body)
+
+    def test_preflight_errors_are_structured_nonzero(self) -> None:
+        """The preflight emits status:error JSON and the shell dispatch
+        converts it to a structured success:false reindex error and returns
+        1 from do_reindex."""
+        self.assertIn('"status": "error"', self.preflight)
+        dispatch_pos = self.body.find('"status": "fresh"')
+        self.assertGreater(dispatch_pos, -1, "status dispatch must exist")
+        tail = self.body[dispatch_pos:]
+        self.assertIn('"success": False', tail)
+        self.assertIn('"action": "reindex"', tail)
+        self.assertIn("return 1", tail)
+
+    def test_preflight_echoes_no_config_content(self) -> None:
+        """Diagnostics must never echo config content: messages are built
+        from static literals only (no f-strings / format interpolation)."""
+        self.assertNotIn("f\"", self.preflight)
+        self.assertNotIn("f'", self.preflight)
+        self.assertNotIn(".format(", self.preflight)
+
+    def test_preflight_region_has_no_embedding_repair_calls(self) -> None:
+        """The preflight must never attempt an embedding repair (no embed,
         no migrate embeddings, no enable-embeddings invocation)."""
-        body = _extract_function(self.src, "do_reindex")
-        guard_start = body.find('if [ -L "$GBRAIN_CONFIG_PATH" ]')
-        last_guard = body.find("gbrain_state_pglite_without_config")
-        guard_end = body.find("\n    fi\n", last_guard)
-        self.assertGreater(guard_start, -1)
-        self.assertGreater(last_guard, -1)
-        self.assertGreater(guard_end, -1, "could not bound the guard block")
-        guard_block = body[guard_start:guard_end]
+        preflight_pos = self.body.find('"$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH"')
+        class_pos = self.body.find('if [ "$preflight_state" = "existing" ]')
+        region = self.body[preflight_pos:class_pos]
         for op in ('"$GBRAIN_BIN" embed', "embed --stale", "embed-backfill",
                    "enable-embeddings", "migrate embeddings"):
-            self.assertNotIn(op, guard_block)
+            self.assertNotIn(op, region)
 
 
 class GbrainRefreshContractTests(unittest.TestCase):

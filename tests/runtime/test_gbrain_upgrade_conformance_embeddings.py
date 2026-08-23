@@ -51,7 +51,13 @@ The JSON report
 (``dump_folder/gbrain-conformance/gbrain-upgrade-conformance-embeddings.json``)
 carries the baseline/candidate refs, baseline/candidate gbrain versions, the
 embedding model config, the #124 classification, and the operation result
-matrix — command/result metadata only, never environment dumps.
+matrix — command/result metadata only, never environment dumps. Persisted
+config evidence is narrow-only (PR #132 Finding 3): the file-plane config
+(``/opt/data/.gbrain/config.json``) is read through an in-container parser on
+the pinned runtime ``python3`` that emits exactly the explicitly necessary
+non-secret fields (``embedding_disabled``, ``embedding_model``,
+``embedding_dimensions``) as a minimal JSON object — never whole config.json
+stdout.
 """
 
 from __future__ import annotations
@@ -101,6 +107,24 @@ GBRAIN_SNAPSHOT_ENV = (
     "GBRAIN_SCHEMA_PACK=josemar GBRAIN_SKIP_STARTUP_HOOKS=1 "
     "HOME=/opt/data XDG_CONFIG_HOME=/opt/data/.config"
 )
+
+# The gbrain file-plane config (``/opt/data/.gbrain/config.json``) is read
+# ONLY through this narrow in-container parser (PR #132 Finding 3): the
+# pinned runtime ``python3`` (the same interpreter the wrapper's runtime
+# helpers and ``assert_owned_jobs_disabled`` use) loads the config and emits
+# a minimal JSON object with exactly the explicitly necessary non-secret
+# fields — the ``embedding_disabled`` sentinel plus the
+# ``embedding_model``/``embedding_dimensions`` the wrapper's migration
+# persists. Persisted conformance CommandEvidence must never carry whole
+# config.json stdout (raw config may hold unrelated or secret-adjacent keys):
+# the evidence for a config read is this command's narrow stdout only. The
+# config path arrives as ``argv[1]`` so the parser never embeds it.
+GBRAIN_CONFIG_EXTRACT_SCRIPT = """import json, sys
+
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+keys = ("embedding_disabled", "embedding_model", "embedding_dimensions")
+print(json.dumps({k: data[k] for k in keys if k in data}))
+"""
 
 # Issue #124 reindex classification values produced by the pure classifier.
 # The runtime REQUIRES exactly ``fixed`` (hard preservation gate): semantic
@@ -358,11 +382,29 @@ class GbrainUpgradeEmbeddingConformanceTestCase(unittest.TestCase):
 
     # --- observable helpers ----------------------------------------------
 
+    def _extract_gbrain_config(self) -> CommandEvidence:
+        """Run the narrow in-container config parser (PR #132 Finding 3): the
+        pinned runtime ``python3`` emits ONLY the explicitly necessary
+        non-secret fields (``embedding_disabled``, ``embedding_model``,
+        ``embedding_dimensions`` when present) as a minimal JSON object. The
+        persisted evidence for a config read is this narrow stdout, never
+        whole ``config.json``."""
+        return self.runtime.run_as_hermes(
+            "python3",
+            "-c",
+            GBRAIN_CONFIG_EXTRACT_SCRIPT,
+            "/opt/data/.gbrain/config.json",
+            timeout=60,
+        )
+
     def _read_gbrain_config(self) -> dict:
-        """Read the gbrain file-plane config (``/opt/data/.gbrain/config.json``)
-        as hermes. This is the same file plane the operator wrapper reads for
-        the ``embedding_disabled`` sentinel."""
-        ev = self.runtime.run_as_hermes("cat", "/opt/data/.gbrain/config.json")
+        """Read the gbrain file-plane config as hermes through the narrow
+        in-container parser (PR #132 Finding 3). Returns a dict with ONLY the
+        explicitly necessary non-secret fields (``embedding_disabled``,
+        ``embedding_model``, ``embedding_dimensions`` when present) — never
+        the whole config. This is the same file plane the operator wrapper
+        reads for the ``embedding_disabled`` sentinel."""
+        ev = self._extract_gbrain_config()
         self.assertEqual(ev.returncode, 0, ev.stderr)
         self._evidence.append(ev)
         return json.loads(ev.stdout)
@@ -396,7 +438,7 @@ class GbrainUpgradeEmbeddingConformanceTestCase(unittest.TestCase):
         if ev.returncode == 0 and ev.stdout.strip() in ("true", "false"):
             keyword_only = ev.stdout.strip() == "true"
         cfg: dict | None = None
-        ev = self.runtime.run_as_hermes("cat", "/opt/data/.gbrain/config.json", timeout=60)
+        ev = self._extract_gbrain_config()
         self._evidence.append(ev)
         if ev.returncode == 0:
             try:
@@ -1242,6 +1284,54 @@ class GbrainUpgradeEmbeddingConformanceGateStructureTests(unittest.TestCase):
             ),
             "changed_failure_mode",
         )
+
+    # --- PR #132 Finding 3: narrow config evidence -------------------------
+
+    def test_no_raw_config_capture_in_evidence(self) -> None:
+        """Persisted conformance evidence must never carry whole
+        ``/opt/data/.gbrain/config.json`` stdout (PR #132 Finding 3): the
+        config path may only appear as the argv of the narrow in-container
+        parser, never behind a raw ``cat``."""
+        runtime_class = self._runtime_class_text()
+        self.assertIn('"/opt/data/.gbrain/config.json"', runtime_class)
+        self.assertNotIn('"cat", "/opt/data/.gbrain/config.json"', runtime_class)
+        self.assertNotIn("cat /opt/data/.gbrain/config.json", runtime_class)
+
+    def test_config_read_helpers_route_through_narrow_extract(self) -> None:
+        """Every helper that reads the file-plane config must run the narrow
+        in-container parser (pinned runtime ``python3``, minimal JSON object)
+        and persist only that evidence."""
+        runtime_class = self._runtime_class_text()
+        extract = runtime_class.split("def _extract_gbrain_config", 1)[1]
+        extract = extract.split("def _read_gbrain_config", 1)[0]
+        self.assertIn("run_as_hermes(", extract)
+        self.assertIn('"python3"', extract)
+        self.assertIn('"-c"', extract)
+        self.assertIn("GBRAIN_CONFIG_EXTRACT_SCRIPT", extract)
+        self.assertIn('"/opt/data/.gbrain/config.json"', extract)
+        self.assertNotIn('"cat"', extract)
+        for start, end in (
+            ("_read_gbrain_config", "_embedding_coverage"),
+            ("_snapshot_search_mode", "_write_report"),
+        ):
+            body = runtime_class.split(f"def {start}", 1)[1].split(f"def {end}", 1)[0]
+            self.assertIn("self._extract_gbrain_config()", body)
+            self.assertNotIn('"cat", "/opt/data/.gbrain/config.json"', body)
+
+    def test_config_extract_emits_only_necessary_fields(self) -> None:
+        """The in-container parser emits a minimal JSON object built from an
+        explicit allowlist of the necessary non-secret fields only — never
+        the whole config."""
+        script = self._module_text().split('GBRAIN_CONFIG_EXTRACT_SCRIPT = """', 1)[1]
+        script = script.split('"""', 1)[0]
+        for key in ("embedding_disabled", "embedding_model", "embedding_dimensions"):
+            self.assertIn(key, script)
+        # The output object is built exclusively from the allowlist tuple.
+        self.assertIn("{k: data[k] for k in keys if k in data}", script)
+        # No whole-config dump may exist anywhere in the parser.
+        self.assertNotIn("json.dumps(data)", script)
+        self.assertNotIn("json.dump(data", script)
+        self.assertNotIn("print(data", script)
 
 
 if __name__ == "__main__":

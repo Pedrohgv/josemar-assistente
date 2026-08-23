@@ -28,13 +28,15 @@ The Josemar gbrain integration is intentionally minimal:
   and is the required interface for TaskNotes task-file mutations.
 - `scripts/josemar-gbrain` (installed at `/usr/local/bin/josemar-gbrain`) is
   retained only as an operator maintenance convenience. It exposes two
-  operator-only subcommands: `reindex` (state-aware activation: fresh
-  `init --pglite --no-embedding` + keyword-only only when no state exists,
-  schema-only `init --migrate-only` on initialized state — then config, full
-  sync, content/link extraction, and schema setup) and `refresh` (incremental
-  reconciliation of manual Obsidian/Syncthing edits via `gbrain sync --no-embed`,
-  stale extraction, and link extraction, without init/schema work). Neither is
-  used from chat.
+  operator-only subcommands: `reindex` (state-aware activation, issue #124 +
+  PR #132: a fail-closed state preflight runs under the shared lock BEFORE any
+  native gbrain command — fresh `init --pglite --no-embedding` + keyword-only
+  only when BOTH `config.json` and `brain.pglite` are absent, schema-only
+  `init --migrate-only` only when the existing state is healthy — then config,
+  full sync, content/link extraction, and schema setup) and `refresh`
+  (incremental reconciliation of manual Obsidian/Syncthing edits via
+  `gbrain sync --no-embed`, stale extraction, and link extraction, without
+  init/schema work). Neither is used from chat.
 - **Keyword-only native gbrain search by default.** FRESH first activation
   (no existing state) configures `search.mcp_keyword_only=true` and
   initializes with `--no-embedding`, so search uses
@@ -45,7 +47,8 @@ The Josemar gbrain integration is intentionally minimal:
   "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval" below); the base deploy
   remains keyword-only. Later reindexes on existing initialized state NEVER
   rewrite `search.mcp_keyword_only` or pass `--no-embedding` — the existing
-  search mode and provider config are preserved (issue #124 hard gate).
+  search mode and provider config are preserved (issue #124 hard gate); fresh
+  activation is the ONLY keyword-only initialization path (PR #132).
   `GBRAIN_SKIP_STARTUP_HOOKS=1` is exported by the
   operator wrapper to prevent gbrain's detached update-check network call
   during reindex.
@@ -84,7 +87,7 @@ scenario names.
 | `put --stdin` | public `gbrain` (rejected) | core | deep (asserts rejection) | — |
 | `timeline`, `day`/`day --week`, `since`, `last-seen`, `on-this-day`, `orient`, `ontology` | public `gbrain` | core + chronicle | core zero-event smoke; chronicle provider-gated deep event behavior | — |
 | `search` (semantic/hybrid), `query --no-expand` | public `gbrain` | embeddings | deep | — |
-| `reindex` | operator (`josemar-gbrain`) | core + embeddings | deep; hard #124 preservation gate | #124 hard gate: classification required exactly `fixed` |
+| `reindex` | operator (`josemar-gbrain`) | core + embeddings | deep; hard #124 preservation gate; PR #132 fail-closed state preflight exercised through the same scenario | #124 hard gate: classification required exactly `fixed` |
 | `refresh` | operator (`josemar-gbrain`) | core | deep | — |
 | `embed-backfill`, `enable-embeddings`, `disable-embeddings` | operator (`josemar-gbrain`) | embeddings | deep | — |
 | `refresh-embeddings` | operator (`josemar-gbrain`; sole chat-allowed maintenance command) | embeddings | deep | — |
@@ -104,6 +107,14 @@ other `jobs` forms, `chronicle-backfill`) stay unsupported/unowned unless
 adopted. The upgrade gates (`RUN_GBRAIN_UPGRADE_CONFORMANCE`) re-run the
 applicable core/embeddings scenarios against a candidate pin; they own no
 additional operations.
+
+The PR #132 fail-closed reindex preflight (fresh only when BOTH canonical
+artifacts are absent; healthy-existing shape requirements; terminal failures
+for partial/malformed/Postgres/env-override state) is additionally hard-
+enforced without Docker by the fast contract suites
+`tests.gbrain.test_gbrain_wrapper_contract` and
+`tests.gbrain.test_gbrain_manual_refresh_reindex_lock`, which run on ordinary
+`make test` (see `tests/README.md` → "Fast Tests").
 
 ## Issue #110: Safe gbrain Adapter — Access Non-Negotiables
 
@@ -363,12 +374,22 @@ operator MUST verify the following after rebuild and before deploying:
 8. **Migrations / activation.** The v0.46.26.0 upgrade introduces database
    schema migrations. These MUST be applied by running the activation
    (`josemar-gbrain reindex`) against the rebuilt image before the upgraded
-   gbrain is considered ready. Reindex is state-aware (issue #124): on the
-   existing initialized state it runs the schema-only `gbrain init --migrate-only`
-   (no `--no-embedding`, no `search.mcp_keyword_only` rewrite), which applies
-   pending migrations to the PGLite database under `$GBRAIN_HOME/.gbrain`;
-   fresh `init --pglite --no-embedding` runs only when no state exists.
-   Partial/damaged state fails closed terminally instead of fresh-initializing.
+   gbrain is considered ready. Reindex is state-aware (issue #124 + PR #132): a
+   fail-closed state preflight runs under the shared lock BEFORE any native
+   gbrain command. On healthy existing state — a regular non-symlink JSON
+   `config.json` whose engine is exactly `pglite`, whose `database_path`
+   resolves to `$GBRAIN_HOME/.gbrain/brain.pglite`, and which persists no
+   `database_url`, plus an actual non-symlink PGLite directory — it runs the
+   schema-only `gbrain init --migrate-only` (no `--no-embedding`, no
+   `search.mcp_keyword_only` rewrite), which applies pending migrations to the
+   PGLite database under `$GBRAIN_HOME/.gbrain` and preserves the existing
+   search mode (fresh is the only keyword-only initialization path). Fresh
+   `init --pglite --no-embedding` runs only when BOTH canonical artifacts
+   (`config.json` and `brain.pglite`) are absent. Partial/malformed/
+   non-regular/symlinked state, config without PGLite, PGLite without config,
+   alternate topology, Postgres engine/URL, and an effective
+   `GBRAIN_DATABASE_URL` / `DATABASE_URL` override all fail closed terminally
+   before native gbrain activity with no fresh fallback.
    Skipping activation leaves the database on an older schema and may cause
    runtime errors or silent behavior changes.
    See "Safe Initial Production Activation" below for the activation
@@ -410,10 +431,17 @@ operator MUST verify the following after rebuild and before deploying:
 
 12. **Probe reporting.** Review the JSON reports under
     `dump_folder/gbrain-conformance/`. Issue #124 is a HARD gate, not a probe:
-    the candidate reindex classification must be exactly `fixed` or the
+    the candidate reindex classification must be exactly `fixed` — including
+    the semantic-preservation classifications (`reindex_mode_preserved`,
+    `reindex_semantic_retrieval`, `issue124_proof`, `reindex_config_preserved`,
+    `reindex_marker_preserved`, `reindex_coverage_preserved`) — or the
     upgrade-embeddings suite already failed. The remaining report-only probe
     classifications (`#125`, `schema-status`) are summarized in the
-    dependency-upgrade PR/issue.
+    dependency-upgrade PR/issue. Embedding conformance evidence never carries
+    whole config content (PR #132): persisted config reads are a narrow
+    allowlisted projection (`embedding_disabled`, `embedding_model`,
+    `embedding_dimensions`) emitted by an in-container parser, and the
+    suite's structure tests enforce that no raw `config.json` capture exists.
 
 13. **Then change the pin.** Only after the required core (and embedding, when
     deployed, and Chronicle, when timeline/Chronicle behavior matters) candidate
@@ -590,8 +618,12 @@ overrides are supported in this deployment.
    ```bash
    docker compose exec hermes su -s /bin/sh hermes -c '/usr/local/bin/josemar-gbrain reindex'
    ```
-   Reindex is state-aware (issue #124) and distinguishes first activation from
-   later reindexes:
+   Reindex is state-aware (issue #124 + PR #132). A fail-closed state preflight
+   runs under the shared TaskNotes/gbrain lock BEFORE any native gbrain
+   command (pure Python/shell: no gbrain access, no config writes, and
+   diagnostics never echo config content) and classifies the state as `fresh`
+   or `existing`; any other outcome terminates with a structured failure
+   envelope and no fresh fallback:
    - **Fresh first activation** — permitted only when NEITHER
      `$GBRAIN_HOME/.gbrain/config.json` NOR `$GBRAIN_HOME/.gbrain/brain.pglite`
      exists. It validates and installs the schema source pack (if a custom
@@ -603,17 +635,32 @@ overrides are supported in this deployment.
      (`extract links --source db`) to populate the wikilink/backlink graph,
      runs native `gbrain schema sync --apply` (only when a custom schema pack
      is in use) to backfill page.type for rows matching pack prefixes, and
-     marks the vault repo as a git `safe.directory`.
-   - **Later reindex (existing initialized state)** — runs ONLY the schema-only
+     marks the vault repo as a git `safe.directory`. Fresh is the ONLY
+     keyword-only initialization path.
+   - **Later reindex (existing initialized state)** — permitted only when the
+     preflight verifies a HEALTHY PGLite state: `config.json` is a regular
+     non-symlink JSON object whose engine is exactly `pglite`, whose
+     `database_path` resolves to `$GBRAIN_HOME/.gbrain/brain.pglite`, and
+     which persists no `database_url`; and `brain.pglite` is an actual
+     non-symlink PGLite directory. It runs ONLY the schema-only
      `gbrain init --migrate-only` (applies pending migrations; NO
      `--no-embedding`, NO `search.mcp_keyword_only` rewrite — the existing
      search mode and provider config are preserved), then the same
      reconciliation as above: full `sync --no-embed`, stale content
      extraction, link extraction, and (custom pack only) schema sync.
-   - **Partial/damaged state fails closed** — a symlinked or non-regular
-     `config.json`, a symlinked `brain.pglite`, or a `brain.pglite` without a
-     `config.json` terminates reindex with a structured failure envelope;
-     there is no fresh-initialization fallback over existing state.
+   - **Anything else fails closed BEFORE native gbrain activity** — partial/
+     malformed/non-regular/symlinked `config.json` or `brain.pglite`, a
+     `config.json` without a PGLite directory, a `brain.pglite` without a
+     `config.json`, alternate topology, a Postgres engine or persisted
+     `database_url`, and an effective `GBRAIN_DATABASE_URL` / `DATABASE_URL`
+     override all terminate reindex with a structured failure envelope; there
+     is no fresh-initialization fallback over existing state. The
+     `DATABASE_URL` exception mirrors native semantics exactly: it is ignored
+     only when it equals a parsed `DATABASE_URL` assignment in one of the
+     fixed cwd dotenv files (`.env`, `.env.local`, `.env.development`,
+     `.env.production`, `.env.test`). Diagnostics never echo database URLs or
+     credentials, and the override is resolved by unsetting/aligning it —
+     never by bypassing the preflight.
    If any step fails, the reindex returns a failure envelope.
 
 4. **Verify gbrain is ready:**
@@ -645,11 +692,16 @@ When the Obsidian vault is swapped or materially changed:
    ```bash
    docker compose exec hermes su -s /bin/sh hermes -c '/usr/local/bin/josemar-gbrain reindex'
    ```
-   On the existing initialized state this runs the schema-only
-   `init --migrate-only` and preserves the configured search mode; it never
-   fresh-initializes over existing state (issue #124). A fresh
-   `init --pglite --no-embedding` + keyword-only setup happens only when no
-   `config.json`/`brain.pglite` state exists.
+   The fail-closed state preflight (PR #132) classifies the state under
+   the shared lock before any native gbrain command. On healthy existing
+   state this runs the schema-only `init --migrate-only` and preserves the
+   configured search mode; it never fresh-initializes over existing state
+   (issue #124). A fresh `init --pglite --no-embedding` + keyword-only setup
+   happens only when NEITHER `config.json` NOR `brain.pglite` exists.
+   Partial/malformed/symlinked state, a Postgres engine or URL, and effective
+   `GBRAIN_DATABASE_URL` / `DATABASE_URL` overrides fail closed instead — see
+   "Safe Initial Production Activation" for the full healthy-state
+   requirements.
 
 4. **Verify gbrain is ready:**
    ```bash
@@ -1049,6 +1101,17 @@ workflow: set the env, run reindex.
   the source root are allowed.
 - **`schema_validate_failed`** — The installed pack failed native gbrain
   `schema validate`. Check `pack.yaml` syntax and structure.
+- **`gbrain_state_*` reindex preflight failures (PR #132)** — The reindex
+  state preflight refuses native gbrain activity over anything but a healthy
+  PGLite state: symlinked/non-regular/malformed `config.json`, symlinked or
+  non-directory `brain.pglite`, config without PGLite or PGLite without
+  config, a non-`pglite` engine, a `database_path` not resolving to
+  `$GBRAIN_HOME/.gbrain/brain.pglite`, a persisted `database_url`, and
+  effective `GBRAIN_DATABASE_URL` / `DATABASE_URL` overrides. All codes are
+  terminal with no fresh fallback; the diagnostics are static strings that
+  never echo config content, database URLs, or credentials. Resolve the
+  underlying state problem (or unset/align the env override) and re-run
+  reindex.
 - **Embeddings warning from `gbrain doctor`** — Expected in the base
   (keyword-only) deploy. Text queries are keyword-only, image/cross-modal
   queries are rejected, and `put`/`capture` do not embed. Embeddings are opt-in
