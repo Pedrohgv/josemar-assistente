@@ -3,8 +3,13 @@
 # native gbrain CLI.
 #
 # Subcommands:
-#   reindex - operator-only initial activation: init, config, sync, extract,
-#             extract links, schema sync (if custom pack), git safe.directory.
+#   reindex - operator-only activation, state-aware (issue #124, issue #132):
+#             fail-closed state preflight under the shared lock BEFORE any
+#             native gbrain command (topology/file-plane/dotenv health); fresh
+#             activation when both canonical artifacts are absent (init
+#             --pglite --no-embedding + keyword-only), migrate-only init when
+#             healthy existing; then config, sync, extract, extract links,
+#             schema sync (if custom pack), git safe.directory.
 #   refresh - recurring lightweight reconciliation for manual Obsidian edits:
 #             sync, extract stale content, extract links. No init/schema work.
 #   embed-backfill - operator-only one-shot embedding backfill (issue #65).
@@ -83,8 +88,21 @@ GBRAIN_SCHEMA_SOURCE_ROOT="/opt/data/.gbrain/schema-packs"
 # to a decoy; both are lock/binary security boundaries, so they are
 # constants. Tests substitute these literals in a fixture copy.
 GBRAIN_BIN="/opt/josemar/libexec/gbrain-native"
+# Fixed native gbrain working directory: the launcher cds to /opt/gbrain, so
+# the native process's Bun dotenv auto-load surface and the pin's own dotenv
+# parsing are anchored there — never the wrapper caller's cwd. Constant:
+# never env-overridable (it is a dotenv/location boundary).
+GBRAIN_NATIVE_CWD="/opt/gbrain"
 GBRAIN_TASKNOTES_LOCK="/opt/data/.locks/tasknotes.lock"
 GBRAIN_STATE_DIR="${GBRAIN_HOME}/.gbrain"
+# Canonical gbrain file-plane config: its existence as a regular file is the
+# initialized-state surface for state-aware reindex (issue #124). Derived from
+# the existing state-dir variable; no separate sentinel/state store.
+GBRAIN_CONFIG_PATH="${GBRAIN_STATE_DIR}/config.json"
+# Canonical PGLite data artifact (gbrainPath('brain.pglite')). Fresh init may
+# run ONLY when BOTH canonical surfaces are absent and neither is a symlink
+# (issue #124 gate-1 remediation).
+GBRAIN_PGLITE_PATH="${GBRAIN_STATE_DIR}/brain.pglite"
 GBRAIN_SCHEMA_PACK_MARKER="${GBRAIN_STATE_DIR}/active-schema-pack"
 
 # Fixed interpreter/tool paths: no PATH resolution for anything that touches
@@ -502,12 +520,280 @@ do_reindex() {
     acquire_tasknotes_lock reindex || {
         return 1
     }
-    mkdir -p "$GBRAIN_STATE_DIR"
+    # NOTE: no shell mkdir -p here — the state root (.gbrain) is established
+    # fail-closed INSIDE the lock-held preflight below (no-follow parent open,
+    # no-follow root open/create), so a symlinked .gbrain ancestor can never
+    # be followed or pre-created (issue #132 fourth iteration).
     # Mark the vault repo as a git safe.directory before any native gbrain
     # operation that may inspect the repo. The command is idempotent and
     # best-effort; run this wrapper as the Hermes runtime user so the global
     # git config lands with the same ownership as chat/runtime commands.
     mark_brain_repo_safe_directory
+
+    # --- State preflight (issue #132 Findings 1-2): fail-closed topology,
+    # file-plane, and database env health check. Runs UNDER the shared lock
+    # and BEFORE ANY native gbrain invocation, including the custom
+    # schema-pack native validation below. Pure Python/shell: no gbrain
+    # access, no config writes, no new sentinel, and no config content echoed
+    # in diagnostics. The state ROOT (.gbrain) is established fail-closed
+    # relative to the fixed parent (GBRAIN_HOME) with O_NOFOLLOW directory
+    # opens: a symlinked parent/root/leaf can never redirect the classifier.
+    # Healthy existing = regular non-symlink config.json (JSON object, engine
+    # exactly pglite, database_path resolving to the canonical PGLite path,
+    # no database_url) + non-symlink DIRECTORY brain.pglite; fresh = both
+    # artifacts absent; everything else is a structured nonzero error.
+    # Database env is enforced at the fixed native cwd boundary
+    # (GBRAIN_NATIVE_CWD): direct inherited GBRAIN_DATABASE_URL, any Bun
+    # default dotenv declaration of GBRAIN_DATABASE_URL there, and an
+    # effective inherited DATABASE_URL (per the exact #427 heuristic against
+    # the five dotenv files in that fixed cwd) all fail closed.
+    preflight_output=$("$PYTHON_BIN" -I - "$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" "$GBRAIN_NATIVE_CWD" "$GBRAIN_HOME" <<'PY'
+import json, os, re, stat, sys
+
+config_path, pglite_path, native_cwd, parent_path = sys.argv[1:5]
+root_leaf = ".gbrain"
+config_leaf = os.path.basename(config_path)
+pglite_leaf = os.path.basename(pglite_path)
+
+def fail(code, message):
+    print(json.dumps({"status": "error", "error": code, "message": message}, ensure_ascii=False))
+    raise SystemExit
+
+# Upstream loadConfig precedence (garrytan/gbrain@69aea15e): a truthy
+# GBRAIN_DATABASE_URL selects Postgres unconditionally. The launcher unsets
+# the inherited var, but the preflight still fails closed on it so the
+# operator cannot silently run keyword-only PGLite with Postgres intent.
+if os.environ.get("GBRAIN_DATABASE_URL"):
+    fail("gbrain_state_gbrain_database_url_env",
+         "GBRAIN_DATABASE_URL is set; the native CLI would select Postgres. Unset it and retry reindex.")
+
+# The pin's #427 dotenv set (DATABASE_URL matching) and Bun's default dotenv
+# surfaces (GBRAIN_DATABASE_URL declaration scan), both in the FIXED native
+# cwd (/opt/gbrain) — the wrapper caller's cwd is never consulted.
+DOTENV_FILES = (".env", ".env.local", ".env.development", ".env.production", ".env.test")
+BUN_DOTENV_FILES = (".env", ".env.local", ".env.development", ".env.development.local",
+                    ".env.production", ".env.production.local",
+                    ".env.test", ".env.test.local")
+DOTENV_RE = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+
+def read_lines(name):
+    # newline="" disables universal-newline translation so a lone CR
+    # survives read() and the LF-only split below is genuine.
+    with open(os.path.join(native_cwd, name), encoding="utf-8", newline="") as fh:
+        return fh.read().split("\n")
+
+def dotenv_values_for_key(key, filenames):
+    # Exact mirror of the pin's dotenvValuesForKey: fixed file names in the
+    # fixed native cwd, unreadable/missing files skipped, lines split on
+    # LF ONLY (a lone CR is not a line separator), then stripped, blank/#
+    # skipped, pinned regex, case-sensitive key, trimmed value, whole-value
+    # matching quote removal, else truncate at the first " #" AND trim the
+    # remainder (upstream .trim()), empties ignored, union of all values.
+    values = []
+    for name in filenames:
+        try:
+            lines = read_lines(name)
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            m = DOTENV_RE.match(line)
+            if not m:
+                continue
+            if m.group(1) != key:
+                continue
+            value = m.group(2).strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            else:
+                comment = value.find(" #")
+                if comment != -1:
+                    value = value[:comment].strip()
+            if value == "":
+                continue
+            values.append(value)
+    return values
+
+def declares_key(key, filenames):
+    # Any syntactic declaration (even empty or quoted/expanded) counts; no
+    # Bun expansion reimplementation, and no value is ever echoed.
+    for name in filenames:
+        try:
+            lines = read_lines(name)
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            m = DOTENV_RE.match(line)
+            if m and m.group(1) == key:
+                return True
+    return False
+
+if declares_key("GBRAIN_DATABASE_URL", BUN_DOTENV_FILES):
+    fail("gbrain_state_gbrain_database_url_dotenv",
+         "A Bun default dotenv file in the fixed native gbrain cwd declares GBRAIN_DATABASE_URL; the operator intends Postgres. Remove the declaration and retry reindex.")
+
+# DATABASE_URL selects Postgres only when truthy and NOT matched by a
+# DATABASE_URL assignment in the pin's five dotenv files (fixed native cwd).
+database_url_env = os.environ.get("DATABASE_URL") or ""
+if database_url_env and database_url_env not in dotenv_values_for_key("DATABASE_URL", DOTENV_FILES):
+    fail("gbrain_state_database_url_effective",
+         "DATABASE_URL is set and not matched by a dotenv assignment in the fixed native gbrain cwd; the native CLI would select Postgres. Unset it or align the dotenv assignment and retry reindex.")
+
+# --- State root establishment and artifact topology (all root-relative and
+# no-follow; the root fd stays open through classification so an ancestor or
+# leaf swap cannot redirect the classifier). Root-specific errors are above
+# the exact leaf error codes, which are preserved.
+parent_fd = None
+root_fd = None
+try:
+    open_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        open_flags |= os.O_CLOEXEC
+
+    # Fixed state parent (GBRAIN_HOME): must be a real directory; missing,
+    # symlinked, non-directory, or inaccessible all fail statically (no path
+    # or exception echo).
+    try:
+        parent_fd = os.open(parent_path, open_flags)
+    except OSError:
+        fail("gbrain_state_parent_invalid",
+             "The fixed gbrain state parent cannot be opened safely; refusing reindex.")
+
+    # State root (.gbrain): open no-follow; absent => create with umask
+    # semantics via dir_fd, then immediately reopen no-follow; any existing
+    # symlink (incl. dangling), regular file, non-directory, or inaccessible
+    # root fails statically. Never follow, delete, repair, or migrate it.
+    try:
+        root_fd = os.open(root_leaf, open_flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        try:
+            os.mkdir(root_leaf, 0o777, dir_fd=parent_fd)
+        except OSError:
+            fail("gbrain_state_root_create_failed",
+                 "Could not create the gbrain state root safely; refusing reindex.")
+        try:
+            root_fd = os.open(root_leaf, open_flags, dir_fd=parent_fd)
+        except OSError:
+            fail("gbrain_state_root_create_failed",
+                 "The gbrain state root could not be reopened after creation; refusing reindex.")
+    except OSError:
+        fail("gbrain_state_root_invalid",
+             "The gbrain state root exists but is not a safe real directory; refusing reindex.")
+
+    def root_mode(name):
+        # No-follow stat relative to the validated root fd: a symlink (even
+        # dangling) reports as a symlink, never as its target. ONLY a
+        # genuinely absent leaf (ENOENT) classifies as missing; ANY other
+        # inspection failure (EACCES, EIO, ESTALE, ...) is a structured
+        # static error and must never be converted into a fresh state.
+        try:
+            return os.stat(name, dir_fd=root_fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return 0
+        except OSError:
+            fail("gbrain_state_leaf_stat_failed",
+                 "Could not inspect a state leaf under the gbrain state root; refusing reindex.")
+
+    # Artifact topology: config.json must be a regular non-symlink file and
+    # brain.pglite a non-symlink DIRECTORY; fresh only when BOTH are absent.
+    config_mode = root_mode(config_leaf)
+    pglite_mode = root_mode(pglite_leaf)
+
+    if stat.S_ISLNK(config_mode):
+        fail("gbrain_state_config_symlink", "Config path is a symlink; refusing reindex without clobbering it.")
+    config_exists = config_mode != 0
+    if config_exists and not stat.S_ISREG(config_mode):
+        fail("gbrain_state_config_not_regular", "Config path exists but is not a regular file; refusing reindex.")
+    if stat.S_ISLNK(pglite_mode):
+        fail("gbrain_state_pglite_symlink", "PGLite data path is a symlink; refusing reindex without clobbering it.")
+    pglite_exists = pglite_mode != 0
+    if not config_exists and pglite_exists:
+        fail("gbrain_state_pglite_without_config", "PGLite data exists but config.json is missing; refusing reindex over existing state.")
+    if config_exists and not pglite_exists:
+        fail("gbrain_state_config_without_pglite", "Config.json exists but the PGLite data directory is missing; refusing reindex.")
+    if pglite_exists and not stat.S_ISDIR(pglite_mode):
+        fail("gbrain_state_pglite_not_directory", "PGLite data path exists but is not a directory; refusing reindex.")
+
+    if not config_exists:
+        print(json.dumps({"status": "fresh"}, ensure_ascii=False))
+        raise SystemExit
+
+    # Existing file plane must be the exact healthy pglite shape; the config
+    # is read root-relative with O_NOFOLLOW, and diagnostics are static
+    # strings that never echo config content.
+    try:
+        cfg_fd = os.open(config_leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+        with os.fdopen(cfg_fd, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        fail("gbrain_state_config_malformed", "Config.json cannot be read or parsed as JSON; refusing reindex.")
+    if not isinstance(cfg, dict):
+        fail("gbrain_state_config_malformed", "Config.json is not a JSON object; refusing reindex.")
+    if "database_url" in cfg:
+        fail("gbrain_state_config_database_url_persisted", "Config.json persists database_url; refusing reindex over a Postgres config.")
+    if cfg.get("engine") != "pglite":
+        fail("gbrain_state_config_engine_invalid", "Config engine is not exactly pglite; refusing reindex.")
+    database_path = cfg.get("database_path")
+    if not isinstance(database_path, str) or not database_path:
+        fail("gbrain_state_config_database_path_invalid", "Config database_path is missing or not a string; refusing reindex.")
+    if os.path.realpath(database_path) != os.path.realpath(pglite_path):
+        fail("gbrain_state_config_database_path_invalid", "Config database_path does not resolve to the canonical PGLite path; refusing reindex.")
+
+    print(json.dumps({"status": "existing"}, ensure_ascii=False))
+finally:
+    if root_fd is not None:
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
+    if parent_fd is not None:
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
+PY
+) || {
+        emit_json '{"success": false, "action": "reindex", "error": "gbrain_state_preflight_failed", "message": "Could not run the reindex state preflight."}'
+        return 1
+    }
+    # Parse the preflight output by EXACT match only: the state variable is
+    # bound to exactly 'fresh' or 'existing'; ANY other output (garbage,
+    # embedded/partial status substrings, or surprises from a future change)
+    # fails through the structured preflight envelope. Init is chosen from
+    # this variable only — no filesystem reclassification happens later.
+    case "$preflight_output" in
+        '{"status": "fresh"}')
+            preflight_state="fresh"
+            ;;
+        '{"status": "existing"}')
+            preflight_state="existing"
+            ;;
+        *)
+            emit_json "$("$PYTHON_BIN" -I - "$preflight_output" <<'PY'
+import json, sys
+try:
+    r = json.loads(sys.argv[1])
+    code = r["error"]
+    message = r["message"]
+except Exception:
+    code = "gbrain_state_preflight_failed"
+    message = "State preflight returned an unparseable result."
+print(json.dumps({
+    "success": False,
+    "action": "reindex",
+    "error": code,
+    "message": message,
+}, ensure_ascii=False))
+PY
+)"
+            return 1
+            ;;
+    esac
 
     # --- Schema source pack install (BEFORE init/sync/extract so gbrain
     # resolves the correct active pack during those operations) ---
@@ -543,9 +829,19 @@ PY
         fi
     fi
 
-    # --- Native init: PGLite, no embedding ---
-    init_output=$("$GBRAIN_BIN" init --pglite --no-embedding 2>&1) || {
-        emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
+    # --- Init selection: driven EXCLUSIVELY by the validated preflight
+    # state variable (fresh|existing). No filesystem reclassification
+    # happens here — the preflight is the single authority. Existing => run
+    # ONLY `init --migrate-only` (loads the existing config, runs schema
+    # init; no saveConfig, no fresh provider setup) — failure is structured,
+    # nonzero, and terminal with no fresh fallback. Fresh (both artifacts
+    # absent per the preflight) => full PGLite init without embedding, then
+    # keyword-only mode. No config writes and no new sentinel store here.
+    if [ "$preflight_state" = "existing" ]; then
+        # --- Healthy existing: migrate-only init only; the existing search
+        # mode and provider config are preserved. ---
+        init_output=$("$GBRAIN_BIN" init --migrate-only 2>&1) || {
+            emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -555,10 +851,10 @@ print(json.dumps({
 }, ensure_ascii=False))
 PY
 )"
-        return 1
-    }
-    if echo "$init_output" | grep -iE "\b(error|fatal|blocked|aborted|panic)\b" | grep -viE "no embedding|embedding disabled|warn|error_|_error|errors_|migration" >/dev/null 2>&1; then
-        emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
+            return 1
+        }
+        if echo "$init_output" | grep -iE "\b(error|fatal|blocked|aborted|panic)\b" | grep -viE "no embedding|embedding disabled|warn|error_|_error|errors_|migration" >/dev/null 2>&1; then
+            emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
 import json, sys
 out = sys.argv[1]
 print(json.dumps({
@@ -568,7 +864,53 @@ print(json.dumps({
 }, ensure_ascii=False))
 PY
 )"
-        return 1
+            return 1
+        fi
+    else
+        # --- Fresh: PGLite init, no embedding, then keyword-only search
+        # mode. ---
+        init_output=$("$GBRAIN_BIN" init --pglite --no-embedding 2>&1) || {
+            emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_init_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            return 1
+        }
+        if echo "$init_output" | grep -iE "\b(error|fatal|blocked|aborted|panic)\b" | grep -viE "no embedding|embedding disabled|warn|error_|_error|errors_|migration" >/dev/null 2>&1; then
+            emit_json "$("$PYTHON_BIN" -I - "$init_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_init_blocked",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            return 1
+        fi
+
+        # Fresh activation pins keyword-only search mode (semantic mode is
+        # enabled only by an explicit later operator action, issue #65).
+        config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
+            emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "error": "gbrain_config_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+            return 1
+        }
     fi
 
     config_output=$("$GBRAIN_BIN" config set sync.repo_path "$GBRAIN_BRAIN_REPO" 2>&1) || {
@@ -586,20 +928,6 @@ PY
     }
 
     config_output=$("$GBRAIN_BIN" config set link_resolution.global_basename true 2>&1) || {
-        emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
-import json, sys
-out = sys.argv[1]
-print(json.dumps({
-    "success": False,
-    "error": "gbrain_config_failed",
-    "message": out[:4000],
-}, ensure_ascii=False))
-PY
-)"
-        return 1
-    }
-
-    config_output=$("$GBRAIN_BIN" config set search.mcp_keyword_only true 2>&1) || {
         emit_json "$("$PYTHON_BIN" -I - "$config_output" <<'PY'
 import json, sys
 out = sys.argv[1]

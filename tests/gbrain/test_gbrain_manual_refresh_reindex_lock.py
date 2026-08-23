@@ -15,6 +15,7 @@ locking substrate (no Docker, no gbrain needed).
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import subprocess
 import sys
@@ -28,12 +29,30 @@ WRAPPER = REPO_ROOT / "scripts" / "josemar-gbrain"
 RUNNER = REPO_ROOT / "scripts" / "tasknotes_lock_run.py"
 
 
-def patched_wrapper(tmp: Path, fake_gbrain: Path, lock_path: Path) -> Path:
+def patched_wrapper(
+    tmp: Path,
+    fake_gbrain: Path,
+    lock_path: Path,
+    preflight_patch: tuple[str, str] | None = None,
+) -> Path:
     """Fixture copy of the production wrapper with the fixed production
-    literals substituted for local equivalents (no production env seam)."""
+    literals substituted for local equivalents (no production env seam).
+
+    Optional `preflight_patch` is a TEST-ONLY deterministic (exact_source,
+    replacement) injection applied to the fixture copy's embedded preflight
+    Python AFTER the literal substitutions — it lets a test force a specific
+    preflight behavior (e.g. make root_mode raise a non-ENOENT OSError) that
+    a normal tempdir cannot reliably reproduce (child-stat EACCES/EIO cannot
+    be forced portably, and root CI makes chmod unreliable). It never
+    touches the production wrapper.
+    """
     src = WRAPPER.read_text(encoding="utf-8")
     patched = (
         src.replace('GBRAIN_BIN="/opt/josemar/libexec/gbrain-native"', f'GBRAIN_BIN="{fake_gbrain}"')
+        .replace(
+            'GBRAIN_NATIVE_CWD="/opt/gbrain"',
+            f'GBRAIN_NATIVE_CWD="{tmp / "native-cwd"}"',
+        )
         .replace(
             'GBRAIN_TASKNOTES_LOCK="/opt/data/.locks/tasknotes.lock"',
             f'GBRAIN_TASKNOTES_LOCK="{lock_path}"',
@@ -56,6 +75,10 @@ def patched_wrapper(tmp: Path, fake_gbrain: Path, lock_path: Path) -> Path:
             f'TASKNOTES_LOCK_RUNNER="{RUNNER}"',
         )
     )
+    if preflight_patch is not None:
+        needle, replacement = preflight_patch
+        assert needle in patched, "preflight patch needle not found in fixture copy"
+        patched = patched.replace(needle, replacement)
     script = tmp / "josemar-gbrain"
     script.write_text(patched, encoding="utf-8")
     script.chmod(0o755)
@@ -64,18 +87,38 @@ def patched_wrapper(tmp: Path, fake_gbrain: Path, lock_path: Path) -> Path:
 
 class FakeGbrain:
     """A fake `gbrain` binary that logs every invocation and the enforced
-    startup-hook env value."""
+    startup-hook env value. Optional `fail_patterns` cause any invocation
+    whose full command line contains the pattern to exit nonzero with a
+    stderr note, so failure paths (e.g. a failing `init --migrate-only`) can
+    be exercised. Optional `on_schema_validate` is a shell snippet executed
+    when `$1` is `schema` (e.g. the native schema-pack validation that runs
+    between the reindex preflight and the init choice), letting a test
+    mutate the filesystem at that exact instant."""
 
-    def __init__(self, tmp: Path):
+    def __init__(
+        self,
+        tmp: Path,
+        fail_patterns: list[str] | None = None,
+        on_schema_validate: str | None = None,
+    ):
         self.log = tmp / "gbrain-calls.log"
         self.env_log = tmp / "gbrain-env.log"
         self.script = tmp / "gbrain"
+        fail_guards = "\n".join(
+            f'case "$*" in\n  *{pat}*) echo "scripted-failure: {pat}" >&2; exit 5 ;;\nesac'
+            for pat in (fail_patterns or [])
+        )
+        if fail_guards:
+            fail_guards += "\n"
+        schema_arm = ""
+        if on_schema_validate:
+            schema_arm = f"  schema) {on_schema_validate} ;;\n"
         self.script.write_text(
             f"""#!/bin/sh
 echo "$*" >> "{self.log}"
 printf 'GBRAIN_SKIP_STARTUP_HOOKS=%s\\n' "${{GBRAIN_SKIP_STARTUP_HOOKS:-}}" >> "{self.env_log}"
-case "$1" in
-  config) echo "ok" ;;
+{fail_guards}case "$1" in
+{schema_arm}  config) echo "ok" ;;
   sync) echo '{{"status":"ok"}}' ;;
   extract) echo '{{"status":"ok"}}' ;;
   *) echo '{{"status":"ok"}}' ;;
@@ -282,15 +325,20 @@ class ManualRefreshReindexLockBehaviorTests(unittest.TestCase):
     def test_fresh_install_creates_lock_file_safely(self) -> None:
         """Fresh deployment: no locks dir and no lock file exist before
         reindex; the wrapper must create them safely (regular file, not a
-        symlink) and complete activation."""
+        symlink) and complete activation. The fixed state parent exists; the
+        .gbrain root is created fail-closed by the preflight."""
         self.lock_path.unlink()
         self.lock_path.parent.rmdir()
+        (self.tmp / "state").mkdir()
         result = self.run_wrapper("reindex", GBRAIN_SCHEMA_PACK="gbrain-base")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('"success": true', result.stdout)
         self.assertTrue(self.lock_path.is_file(), "lock file must be created")
         self.assertFalse(self.lock_path.is_symlink(), "lock file must be regular")
         self.assertTrue(self.fake.calls(), "gbrain must run after lock creation")
+        root = self.tmp / "state" / ".gbrain"
+        self.assertTrue(root.is_dir(), "state root must be created by the preflight")
+        self.assertFalse(root.is_symlink(), "state root must be a real directory")
         # The runtime schema-pack marker must be persisted for the adapter.
         marker = self.tmp / "state" / ".gbrain" / "active-schema-pack"
         self.assertEqual(marker.read_text(encoding="utf-8").strip(), "gbrain-base")
@@ -432,6 +480,666 @@ class ManualRefreshReindexLockBehaviorTests(unittest.TestCase):
         self.assertFalse(
             marker.exists(),
             "sitecustomize must not execute in the isolated pre-lock helpers",
+        )
+
+
+class ReindexStateAwareBehaviorTests(unittest.TestCase):
+    """Issue #132 Findings 1-2: a fail-closed preflight runs under the shared
+    lock BEFORE any native gbrain invocation. Healthy existing = regular
+    non-symlink config.json (JSON object, engine exactly pglite, database_path
+    resolving to the canonical PGLite path, no database_url) + non-symlink
+    DIRECTORY brain.pglite; fresh = both artifacts absent; everything else is
+    a structured nonzero error with ZERO native gbrain calls. GBRAIN_DATABASE_URL
+    and an effective DATABASE_URL (per the exact fixed-native-cwd dotenv
+    heuristic) fail closed too.
+
+    These tests run the patched real wrapper against a scripted fake gbrain
+    and assert the recorded native argv (FakeGbrain.calls) plus exit codes.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="gbrain-state-aware-")
+        self.tmp = Path(self._tmp.name)
+        self.lock_path = self.tmp / "locks" / "tasknotes.lock"
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock_path.touch()
+        self.state_dir = self.tmp / "state" / ".gbrain"
+        self.config_path = self.state_dir / "config.json"
+        self.pglite_path = self.state_dir / "brain.pglite"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def env(self, **extra) -> dict:
+        env = os.environ.copy()
+        # Deterministic database env: the preflight must never see a stray
+        # caller value; tests opt in explicitly via extra.
+        env.pop("GBRAIN_DATABASE_URL", None)
+        env.pop("DATABASE_URL", None)
+        env.update({"HOME": str(self.tmp), "GBRAIN_SCHEMA_PACK": "gbrain-base"})
+        env.update(extra)
+        return env
+
+    def run_reindex(self, fake: FakeGbrain, **env_extra) -> subprocess.CompletedProcess[str]:
+        wrapper = patched_wrapper(self.tmp, fake.script, self.lock_path)
+        return subprocess.run(
+            [str(wrapper), "reindex"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+            env=self.env(**env_extra),
+            cwd=str(self.tmp),
+        )
+
+    def _write_config(self, payload: dict) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _make_healthy_state(self) -> None:
+        """Canonical healthy existing state: regular config.json with the
+        exact pglite file-plane shape plus the brain.pglite DIRECTORY."""
+        self.pglite_path.mkdir(parents=True, exist_ok=True)
+        self._write_config({
+            "engine": "pglite",
+            "database_path": str(self.pglite_path),
+        })
+
+    def _native_dotenv_fixture(self, files: dict[str, str]) -> Path:
+        """Write the given dotenv files into the FIXED native gbrain cwd
+        (patched from /opt/gbrain) — the only dotenv surface the native
+        launcher and the preflight consult; the subprocess caller cwd is
+        never used for dotenv."""
+        native_cwd = self.tmp / "native-cwd"
+        native_cwd.mkdir(exist_ok=True)
+        for name, content in files.items():
+            (native_cwd / name).write_text(content, encoding="utf-8")
+        return native_cwd
+
+    def test_genuinely_fresh_state_runs_fresh_init_only(self) -> None:
+        """(1) No config and no PGLite artifact (fixed parent present, root
+        absent): the preflight creates the root as a real non-symlink
+        directory, the fresh vector `init --pglite --no-embedding` plus the
+        fresh-only keyword write run; migrate-only must not."""
+        (self.tmp / "state").mkdir()
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"success": true', result.stdout)
+        self.assertTrue(self.state_dir.is_dir(),
+                        "fresh root must be created as a real directory")
+        self.assertFalse(self.state_dir.is_symlink(),
+                         "fresh root must not be a symlink")
+        calls = fake.calls()
+        self.assertIn("init --pglite --no-embedding", calls)
+        self.assertIn("config set search.mcp_keyword_only true", calls)
+        self.assertNotIn("init --migrate-only", calls)
+
+    def test_healthy_existing_state_runs_migrate_only_only(self) -> None:
+        """(2) Healthy canonical existing PGLite state: only
+        `init --migrate-only` runs; no fresh init and no keyword write."""
+        self._make_healthy_state()
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"success": true', result.stdout)
+        calls = fake.calls()
+        self.assertIn("init --migrate-only", calls)
+        joined = " ".join(calls)
+        self.assertNotIn("init --pglite", joined,
+                         "no fresh init may run for an existing config")
+        self.assertNotIn("--no-embedding", joined,
+                         "no-embedding must never be passed to migrate-only")
+        self.assertFalse(
+            any(c.startswith("config set search.mcp_keyword_only") for c in calls),
+            "the existing-config branch must not write keyword mode",
+        )
+
+    def test_corrupt_config_fails_closed_with_no_native_calls(self) -> None:
+        """(5) A corrupt regular config (with the PGLite directory present)
+        fails closed before any native call; bytes are left unchanged."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.pglite_path.mkdir(exist_ok=True)
+        original = b"not-json-{corrupt"
+        self.config_path.write_bytes(original)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_malformed", result.stdout)
+        self.assertNotIn('"success": true', result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+        self.assertEqual(self.config_path.read_bytes(), original,
+                         "corrupt config bytes must be left unchanged")
+
+    def test_config_absent_with_pglite_dir_fails_closed_before_init(self) -> None:
+        """(4) Config absent but a brain.pglite artifact exists (canonical
+        directory form): structured nonzero error before any init, artifact
+        untouched."""
+        self.pglite_path.mkdir(parents=True, exist_ok=True)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_pglite_without_config", result.stdout)
+        self.assertNotIn('"success": true', result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+        self.assertTrue(self.pglite_path.is_dir(), "artifact must not be clobbered")
+
+    def test_config_absent_with_pglite_file_fails_closed(self) -> None:
+        """(4) brain.pglite existing in any form (here: a plain file) with
+        no config must also fail closed."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.pglite_path.write_text("stray", encoding="utf-8")
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_pglite_without_config", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+
+    def test_config_without_pglite_fails_closed_with_no_native_calls(self) -> None:
+        """(3) Regular config but no brain.pglite: healthy existing requires
+        the PGLite directory, so reindex fails closed with no native calls."""
+        self._write_config({"engine": "pglite",
+                            "database_path": str(self.pglite_path)})
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_without_pglite", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+
+    def test_pglite_regular_file_with_config_fails_closed(self) -> None:
+        """brain.pglite must be a DIRECTORY: a regular file at the path with
+        a config present fails closed."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text("{}", encoding="utf-8")
+        self.pglite_path.write_text("stray", encoding="utf-8")
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_pglite_not_directory", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+
+    def test_directory_config_fails_closed_without_clobber(self) -> None:
+        """(12) A directory at the config path is a non-regular existing
+        entry: fail closed before init and never clobber it."""
+        self.config_path.mkdir(parents=True, exist_ok=True)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_not_regular", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+        self.assertTrue(self.config_path.is_dir(), "directory must not be clobbered")
+
+    def test_symlinked_config_fails_closed_without_clobber(self) -> None:
+        """(4) A config symlink to a real target fails closed; the symlink
+        and its decoy target stay untouched."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        decoy = self.tmp / "decoy-config"
+        decoy.write_text("precious\n", encoding="utf-8")
+        self.config_path.symlink_to(decoy)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_symlink", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+        self.assertTrue(self.config_path.is_symlink(), "symlink must not be clobbered")
+        self.assertEqual(decoy.read_text(encoding="utf-8").strip(), "precious",
+                         "decoy target must be untouched")
+
+    def test_dangling_symlinked_config_fails_closed(self) -> None:
+        """(4) A dangling config symlink also fails closed (no init)."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path.symlink_to(self.tmp / "missing-config-target")
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_symlink", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+
+    def test_symlinked_pglite_fails_closed_without_clobber(self) -> None:
+        """(5) A brain.pglite symlink fails closed even with a regular
+        config present; the symlink and its target stay untouched."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text("{}", encoding="utf-8")
+        decoy = self.tmp / "decoy-pglite"
+        decoy.mkdir()
+        self.pglite_path.symlink_to(decoy)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_pglite_symlink", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+        self.assertTrue(self.pglite_path.is_symlink(), "symlink must not be clobbered")
+
+    def test_dangling_symlinked_pglite_fails_closed(self) -> None:
+        """(5) A dangling brain.pglite symlink also fails closed (no init)."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text("{}", encoding="utf-8")
+        self.pglite_path.symlink_to(self.tmp / "missing-pglite-target")
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_pglite_symlink", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native init may run")
+
+    def test_migrate_only_failure_is_terminal_no_fresh_fallback(self) -> None:
+        """(13) A failing `init --migrate-only` on a healthy existing state
+        returns nonzero with the structured init error and must NOT fall
+        back to fresh init."""
+        self._make_healthy_state()
+        fake = FakeGbrain(self.tmp, fail_patterns=["init --migrate-only"])
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_init_failed", result.stdout)
+        calls = fake.calls()
+        self.assertIn("init --migrate-only", calls)
+        self.assertNotIn("init --pglite", " ".join(calls),
+                         "no fresh-init fallback after a migrate-only failure")
+
+    def test_persisted_engine_postgres_fails_closed(self) -> None:
+        """(6) A persisted non-pglite engine (postgres) fails closed with no
+        native calls."""
+        self.pglite_path.mkdir(parents=True, exist_ok=True)
+        self._write_config({"engine": "postgres",
+                            "database_path": str(self.pglite_path)})
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_engine_invalid", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+
+    def test_engine_less_config_fails_closed(self) -> None:
+        """Engine-less historical config shapes are not permitted: missing
+        engine fails closed with no native calls."""
+        self.pglite_path.mkdir(parents=True, exist_ok=True)
+        self._write_config({"database_path": str(self.pglite_path)})
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_engine_invalid", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+
+    def test_persisted_database_url_fails_closed(self) -> None:
+        """(7) A persisted database_url in config.json fails closed with no
+        native calls."""
+        self.pglite_path.mkdir(parents=True, exist_ok=True)
+        self._write_config({"engine": "pglite",
+                            "database_path": str(self.pglite_path),
+                            "database_url": "postgres://persisted"})
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_database_url_persisted", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+
+    def test_noncanonical_database_path_fails_closed(self) -> None:
+        """(8) A database_path not resolving to the canonical PGLite path
+        fails closed with no native calls."""
+        self.pglite_path.mkdir(parents=True, exist_ok=True)
+        self._write_config({"engine": "pglite",
+                            "database_path": str(self.tmp / "elsewhere")})
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_database_path_invalid", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+
+    def test_missing_database_path_fails_closed(self) -> None:
+        """(8b) A config without database_path fails closed with no native
+        calls."""
+        self.pglite_path.mkdir(parents=True, exist_ok=True)
+        self._write_config({"engine": "pglite"})
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_config_database_path_invalid", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+
+    def test_gbrain_database_url_env_fails_closed(self) -> None:
+        """(9) A truthy GBRAIN_DATABASE_URL fails closed before any native
+        call (the native CLI would select Postgres), even on fresh state."""
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake, GBRAIN_DATABASE_URL="postgres://env")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_gbrain_database_url_env", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+
+    def test_effective_database_url_fails_closed(self) -> None:
+        """(10) A truthy DATABASE_URL not matched by any fixed native cwd
+        dotenv assignment is effective (Postgres) and fails closed with no
+        native calls."""
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake, DATABASE_URL="postgres://env-only")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_database_url_effective", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+
+    def test_native_cwd_dotenv_matched_database_url_accepted_for_healthy_state(self) -> None:
+        """(11) Faithful #427 heuristic at the FIXED native cwd: a DATABASE_URL
+        equal to a DATABASE_URL assignment in a dotenv file of the fixed
+        native gbrain cwd (/opt/gbrain) is ignored by loadConfig, so a
+        healthy existing state proceeds to migrate-only. The subprocess
+        caller cwd is deliberately different and must NOT matter."""
+        self._make_healthy_state()
+        self._native_dotenv_fixture({
+            ".env": "DATABASE_URL=postgres://matched\n",
+        })
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake, DATABASE_URL="postgres://matched")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"success": true', result.stdout)
+        calls = fake.calls()
+        self.assertIn("init --migrate-only", calls)
+        self.assertNotIn("init --pglite", " ".join(calls))
+
+    def test_native_cwd_dotenv_mismatched_database_url_fails_closed(self) -> None:
+        """(10b) The heuristic is value equality, not file presence: a
+        DATABASE_URL different from the fixed-native-cwd dotenv value is
+        still effective and fails closed with no native calls."""
+        self._make_healthy_state()
+        self._native_dotenv_fixture({
+            ".env": "DATABASE_URL=postgres://file-value\n",
+        })
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake, DATABASE_URL="postgres://env-value")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_database_url_effective", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+
+    # --- exact pinned dotenv parser semantics (issue #132 Gate 1) ---
+
+    def test_dotenv_lf_only_lone_cr_is_not_a_line_separator(self) -> None:
+        """LF-only semantics: a lone CR (no LF) is NOT a line separator, so
+        the whole blob is one assignment whose value cannot match the env
+        DATABASE_URL (splitlines would have split at the CR and matched)."""
+        self._make_healthy_state()
+        self._native_dotenv_fixture({
+            ".env": "DATABASE_URL=postgres://a\rpostgres://b",
+        })
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake, DATABASE_URL="postgres://a")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_database_url_effective", result.stdout)
+        self.assertEqual(fake.calls(), [],
+                         "effective DATABASE_URL must refuse before native calls")
+
+    def test_dotenv_inline_comment_truncation_trims_remainder(self) -> None:
+        """Multiple spaces before an inline comment: the remainder after the
+        first ' #' is truncated AND trimmed, so the matched value has no
+        trailing spaces and the env DATABASE_URL is accepted on healthy
+        state."""
+        self._make_healthy_state()
+        self._native_dotenv_fixture({
+            ".env": "DATABASE_URL=postgres://v  # note\n",
+        })
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake, DATABASE_URL="postgres://v")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"success": true', result.stdout)
+        calls = fake.calls()
+        self.assertIn("init --migrate-only", calls)
+        self.assertNotIn("init --pglite", " ".join(calls))
+
+    def test_dotenv_quoted_value_whole_quote_removal(self) -> None:
+        """A whole-value quoted assignment matches the env DATABASE_URL on
+        healthy state (quote removal, no comment stripping inside quotes)."""
+        self._make_healthy_state()
+        self._native_dotenv_fixture({
+            ".env": "DATABASE_URL='postgres://q'\n",
+        })
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake, DATABASE_URL="postgres://q")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = fake.calls()
+        self.assertIn("init --migrate-only", calls)
+        self.assertNotIn("init --pglite", " ".join(calls))
+
+    def test_dotenv_export_prefix_matched(self) -> None:
+        """An `export DATABASE_URL=...` assignment matches the env value on
+        healthy state."""
+        self._make_healthy_state()
+        self._native_dotenv_fixture({
+            ".env": "export DATABASE_URL=postgres://e\n",
+        })
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake, DATABASE_URL="postgres://e")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = fake.calls()
+        self.assertIn("init --migrate-only", calls)
+        self.assertNotIn("init --pglite", " ".join(calls))
+
+    def test_dotenv_empty_assignment_ignored(self) -> None:
+        """Empty assignments are ignored: the union stays empty, so an env
+        DATABASE_URL is effective and refuses before native calls."""
+        self._make_healthy_state()
+        self._native_dotenv_fixture({
+            ".env": "DATABASE_URL=\nDATABASE_URL=   \n",
+        })
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake, DATABASE_URL="postgres://env")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_database_url_effective", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+
+    def test_dotenv_all_five_files_union_matched(self) -> None:
+        """All five fixed dotenv files are parsed and their values unioned: a
+        value from .env.production matches even when the other files hold
+        different values, so the env DATABASE_URL is accepted on healthy
+        state."""
+        self._make_healthy_state()
+        self._native_dotenv_fixture({
+            ".env": "DATABASE_URL=postgres://one\n",
+            ".env.local": "DATABASE_URL=postgres://two\n",
+            ".env.development": "DATABASE_URL=postgres://three\n",
+            ".env.production": "DATABASE_URL=postgres://four\n",
+            ".env.test": "DATABASE_URL=postgres://five\n",
+        })
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake, DATABASE_URL="postgres://four")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = fake.calls()
+        self.assertIn("init --migrate-only", calls)
+        self.assertNotIn("init --pglite", " ".join(calls))
+
+    # --- fixed native cwd Bun dotenv surface (issue #132 third iteration) ---
+
+    def test_native_cwd_dotenv_declaring_gbrain_database_url_fails_closed(self) -> None:
+        """A GBRAIN_DATABASE_URL declaration in ANY possible Bun default
+        dotenv file of the FIXED native cwd fails closed: structured nonzero,
+        zero fake native calls, no fresh init, config/PGLite untouched. The
+        parent env carries NO GBRAIN_DATABASE_URL — the declaration alone is
+        fatal (the launcher would unset the inherited var, but the operator's
+        Postgres intent must surface, not silently run keyword-only PGLite)."""
+        surfaces = (".env", ".env.local", ".env.development", ".env.development.local",
+                    ".env.production", ".env.production.local",
+                    ".env.test", ".env.test.local")
+        for name in surfaces:
+            with self.subTest(dotenv_file=name):
+                self._make_healthy_state()
+                native_cwd = self._native_dotenv_fixture({
+                    name: "GBRAIN_DATABASE_URL=postgres://external/something\n",
+                })
+                before = self.config_path.read_bytes()
+                fake = FakeGbrain(self.tmp)
+                result = self.run_reindex(fake)
+                self.assertNotEqual(result.returncode, 0,
+                                    result.stdout + result.stderr)
+                self.assertIn("gbrain_state_gbrain_database_url_dotenv", result.stdout)
+                self.assertNotIn('"success": true', result.stdout)
+                self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+                self.assertEqual(self.config_path.read_bytes(), before,
+                                 "config must be untouched")
+                self.assertTrue(self.pglite_path.is_dir(), "PGLite dir must be untouched")
+                (native_cwd / name).unlink()
+
+    # --- state root establishment (issue #132 fourth iteration) ---
+
+    def test_symlinked_root_to_external_healthy_state_fails_closed(self) -> None:
+        """Exact regression: <state-parent>/.gbrain is a SYMLINK to an
+        external healthy-looking directory whose config.json declares the
+        LEXICAL canonical database_path (self.pglite_path) and which holds a
+        brain.pglite directory. The old leaf-only classifier would accept it
+        and run migrate-only against the external dir; the no-follow root
+        open must fail with the structured root error, zero native calls, and
+        the symlink + external artifacts untouched."""
+        (self.tmp / "state").mkdir()
+        external = self.tmp / "external-root"
+        external.mkdir()
+        (external / "brain.pglite").mkdir()
+        external_config = external / "config.json"
+        external_config.write_text(json.dumps({
+            "engine": "pglite",
+            "database_path": str(self.pglite_path),  # lexical canonical root
+        }), encoding="utf-8")
+        external_bytes = external_config.read_bytes()
+        self.state_dir.symlink_to(external)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_root_invalid", result.stdout)
+        self.assertNotIn('"success": true', result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+        self.assertTrue(self.state_dir.is_symlink(), "root symlink must be untouched")
+        self.assertEqual(external_config.read_bytes(), external_bytes,
+                         "external config bytes must be untouched")
+        self.assertTrue((external / "brain.pglite").is_dir(),
+                        "external PGLite dir must be untouched")
+
+    def test_symlinked_root_to_empty_external_dir_fails_closed(self) -> None:
+        """A symlinked root pointing at an empty external directory must not
+        trigger fresh init: structured root error, zero calls, target
+        unchanged."""
+        (self.tmp / "state").mkdir()
+        external = self.tmp / "external-empty"
+        external.mkdir()
+        self.state_dir.symlink_to(external)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_root_invalid", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+        self.assertTrue(self.state_dir.is_symlink())
+        self.assertEqual(list(external.iterdir()), [],
+                         "external target must stay untouched (no fresh init)")
+
+    def test_dangling_symlinked_root_fails_closed(self) -> None:
+        """A dangling .gbrain symlink fails closed with zero calls and stays
+        untouched."""
+        (self.tmp / "state").mkdir()
+        self.state_dir.symlink_to(self.tmp / "missing-root-target")
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_root_invalid", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+        self.assertTrue(self.state_dir.is_symlink(), "dangling symlink untouched")
+
+    def test_regular_file_root_fails_closed(self) -> None:
+        """A regular file at the .gbrain path fails closed with zero calls
+        and stays untouched."""
+        (self.tmp / "state").mkdir()
+        self.state_dir.write_text("not-a-dir", encoding="utf-8")
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_root_invalid", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+        self.assertEqual(self.state_dir.read_text(encoding="utf-8"), "not-a-dir",
+                         "regular-file root must be untouched")
+
+    def test_symlinked_parent_fails_closed_before_root_creation(self) -> None:
+        """A symlinked fixed parent fails closed before any root creation or
+        native call."""
+        external_parent = self.tmp / "external-parent"
+        external_parent.mkdir()
+        parent = self.tmp / "state"
+        parent.symlink_to(external_parent)
+        fake = FakeGbrain(self.tmp)
+        result = self.run_reindex(fake)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_parent_invalid", result.stdout)
+        self.assertEqual(fake.calls(), [], "no native gbrain call may run")
+        self.assertTrue(parent.is_symlink(), "parent symlink must be untouched")
+        self.assertFalse((external_parent / ".gbrain").exists(),
+                         "no root may be created under the symlinked parent")
+
+    def test_leaf_stat_failure_fails_closed_with_zero_native_calls(self) -> None:
+        """A non-ENOENT leaf inspection failure (here: a PermissionError)
+        must fail closed BEFORE any native call: nonzero, the exact
+        structured gbrain_state_leaf_stat_failed error, no init of either
+        branch, and the healthy config/PGLite artifacts byte-identical and
+        untouched.
+
+        The injection is a deterministic source patch on the FIXTURE COPY
+        (patched_wrapper's preflight_patch replaces root_mode's stat
+        expression with `raise PermissionError(...)`) because a normal
+        tempdir cannot reliably produce child-stat EACCES/EIO under root,
+        and chmod-based denial is unreliable in root CI. The production
+        wrapper is never modified and no production env/test hook exists.
+        """
+        self._make_healthy_state()
+        before = self.config_path.read_bytes()
+        pglite_before = list(self.pglite_path.iterdir())
+        fake = FakeGbrain(self.tmp)
+        wrapper = patched_wrapper(
+            self.tmp,
+            fake.script,
+            self.lock_path,
+            preflight_patch=(
+                "return os.stat(name, dir_fd=root_fd, follow_symlinks=False).st_mode",
+                "raise PermissionError(\"injected leaf-stat failure\")",
+            ),
+        )
+        result = subprocess.run(
+            [str(wrapper), "reindex"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+            env=self.env(),
+            cwd=str(self.tmp),
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("gbrain_state_leaf_stat_failed", result.stdout)
+        self.assertNotIn('"success": true', result.stdout)
+        calls = fake.calls()
+        self.assertEqual(calls, [], "no native gbrain call may run")
+        joined = " ".join(calls)
+        self.assertNotIn("init --pglite --no-embedding", joined,
+                         "a leaf-stat failure must never trigger fresh init")
+        self.assertNotIn("init --migrate-only", joined,
+                         "a leaf-stat failure must never trigger migrate-only")
+        self.assertEqual(self.config_path.read_bytes(), before,
+                         "healthy config must remain byte-identical")
+        self.assertEqual(list(self.pglite_path.iterdir()), pglite_before,
+                         "PGLite directory must be unchanged")
+
+    # --- trusted classification (issue #132 Gate 1) ---
+
+    def test_init_selection_exclusively_from_validated_preflight_state(self) -> None:
+        """The validated preflight state variable alone selects the init
+        vector: with a custom schema pack, the native `schema validate` runs
+        BETWEEN the preflight and the init choice; the fake gbrain deletes
+        config.json at that instant. A filesystem reclassification would now
+        see a missing config and choose FRESH; the validated variable must
+        still choose EXISTING (migrate-only)."""
+        self._make_healthy_state()
+        pack_dir = self.tmp / "state" / ".gbrain" / "schema-packs" / "custom"
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        (pack_dir / "pack.yaml").write_text("name: custom\n", encoding="utf-8")
+        fake = FakeGbrain(self.tmp, on_schema_validate=f"rm -f {self.config_path}")
+        result = self.run_reindex(fake, GBRAIN_SCHEMA_PACK="custom")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("schema validate custom", fake.calls())
+        self.assertFalse(self.config_path.exists(),
+                         "the schema-validate hook must have removed config.json")
+        calls = fake.calls()
+        self.assertIn("init --migrate-only", calls,
+                      "init must be chosen from the validated preflight state")
+        self.assertNotIn("init --pglite", " ".join(calls),
+                         "a filesystem reclassification must not switch to fresh")
+        self.assertFalse(
+            any(c.startswith("config set search.mcp_keyword_only") for c in calls),
+            "the existing branch must not write keyword mode",
         )
 
 

@@ -51,6 +51,54 @@ def _extract_function(src: str, name: str) -> str:
     return src[body_start:match.start()]
 
 
+def _extract_state_branches(body: str) -> tuple[str, str]:
+    """Split do_reindex's init-selection if/else into
+    (existing_block, fresh_block). The choice is driven EXCLUSIVELY by the
+    validated preflight state variable (issue #132 Gate 1).
+
+    The block is located by its opener
+    ``if [ "$preflight_state" = "existing" ]; then`` and bounded by balancing
+    ``if ...; then`` / ``fi`` depth (each branch contains one nested
+    ``if echo "$init_output" ...; then ... fi`` guard), so assertions scope
+    to the exact branch instead of the whole function.
+    """
+    opener = re.search(r'if \[ "\$preflight_state" = "existing" \]; then', body)
+    assert opener is not None, "init-selection if/else block not found"
+    lines = body[opener.start():].splitlines()
+    depth = 0
+    else_line = None
+    close_line = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("if ") and stripped.endswith("; then"):
+            depth += 1
+        elif stripped == "else" and depth == 1:
+            else_line = index
+        elif stripped == "fi":
+            depth -= 1
+            if depth == 0:
+                close_line = index
+                break
+    assert else_line is not None and close_line is not None, \
+        "could not bound the init-selection block"
+    existing = "\n".join(lines[1:else_line])
+    fresh = "\n".join(lines[else_line + 1:close_line])
+    return existing, fresh
+
+
+def _extract_preflight_python(src: str) -> str:
+    """Extract the body of the embedded state-preflight Python heredoc
+    (issue #132), anchored on the fixed-interpreter invocation with the two
+    canonical artifact paths, the fixed native gbrain cwd, and the fixed
+    state parent."""
+    match = re.search(
+        r'"\$PYTHON_BIN" -I - "\$GBRAIN_CONFIG_PATH" "\$GBRAIN_PGLITE_PATH" "\$GBRAIN_NATIVE_CWD" "\$GBRAIN_HOME" <<\'PY\'\n(.*?)\nPY',
+        src, re.DOTALL,
+    )
+    assert match is not None, "Could not find the preflight Python heredoc"
+    return match.group(1)
+
+
 class GbrainSchemaSourcePackContractTests(unittest.TestCase):
     """Schema source pack install contract tests."""
 
@@ -109,14 +157,89 @@ class GbrainSchemaSourcePackContractTests(unittest.TestCase):
 
 
 class GbrainReindexActivationContractTests(unittest.TestCase):
-    """reindex performs initial activation via the native gbrain CLI."""
+    """reindex is state-aware activation via the native gbrain CLI (issue #124).
+
+    The canonical $GBRAIN_HOME/.gbrain/config.json regular file classifies
+    the state: an existing config means initialized (only `init --migrate-only`,
+    terminal on failure, no fresh fallback); a missing config means fresh
+    (`init --pglite --no-embedding` + keyword-only). Schema pack validation/
+    install precedes either init path; all other steps stay unchanged.
+    """
 
     def setUp(self) -> None:
         self.src = _read(WRAPPER_PATH)
 
-    def test_reindex_performs_init(self) -> None:
+    def test_reindex_selects_init_from_validated_preflight_state(self) -> None:
+        """Init selection must come ONLY from the validated preflight state
+        variable (fresh|existing); the old `[ -f config.json ]` filesystem
+        reclassification must be gone from do_reindex."""
+        self.assertIn('GBRAIN_CONFIG_PATH="${GBRAIN_STATE_DIR}/config.json"', self.src)
         body = _extract_function(self.src, "do_reindex")
-        self.assertIn("init --pglite --no-embedding", body)
+        self.assertIn('if [ "$preflight_state" = "existing" ]; then', body)
+        self.assertIn("else", body)
+        self.assertNotIn('[ -f "$GBRAIN_CONFIG_PATH" ]', body)
+
+    def test_reindex_fresh_branch_uses_pglite_no_embedding_init(self) -> None:
+        """Missing config.json => fresh activation: init --pglite
+        --no-embedding."""
+        body = _extract_function(self.src, "do_reindex")
+        _, fresh = _extract_state_branches(body)
+        self.assertIn("init --pglite --no-embedding", fresh)
+
+    def test_reindex_existing_branch_uses_migrate_only_init(self) -> None:
+        """Existing config.json => initialized: ONLY init --migrate-only."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, _ = _extract_state_branches(body)
+        self.assertIn("init --migrate-only", existing)
+
+    def test_reindex_existing_branch_omits_no_embedding(self) -> None:
+        """init --migrate-only must not receive --no-embedding: it loads the
+        existing config and runs schema init only."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, _ = _extract_state_branches(body)
+        self.assertNotIn("--no-embedding", existing)
+
+    def test_reindex_fresh_and_existing_init_are_separate_branches(self) -> None:
+        """The fresh init must never appear in the existing-config branch and
+        vice versa: the branches are exclusive by construction."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, fresh = _extract_state_branches(body)
+        self.assertNotIn("init --pglite", existing)
+        self.assertNotIn("init --migrate-only", fresh)
+
+    def test_reindex_existing_branch_does_not_set_keyword_only(self) -> None:
+        """The existing-config branch must not write search.mcp_keyword_only:
+        initialized state keeps its current search mode."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, _ = _extract_state_branches(body)
+        self.assertNotIn("search.mcp_keyword_only", existing)
+
+    def test_reindex_fresh_branch_sets_keyword_only(self) -> None:
+        """Only the fresh branch pins keyword-only search mode."""
+        body = _extract_function(self.src, "do_reindex")
+        _, fresh = _extract_state_branches(body)
+        self.assertIn("config set search.mcp_keyword_only true", fresh)
+
+    def test_reindex_existing_init_failure_is_terminal_without_fallback(self) -> None:
+        """A failed --migrate-only init must be a structured nonzero error and
+        terminal: the existing branch returns 1 with no fresh-init fallback."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, _ = _extract_state_branches(body)
+        self.assertIn("gbrain_init_failed", existing)
+        # The failure JSON is Python-generated (json.dumps), so the source
+        # contains the Python literal `False` which serializes to JSON `false`.
+        self.assertIn('"success": False', existing)
+        self.assertIn("return 1", existing)
+        self.assertNotIn("init --pglite", existing)
+
+    def test_reindex_init_failures_structured_in_both_branches(self) -> None:
+        """Both init branches must surface structured gbrain_init_failed /
+        gbrain_init_blocked errors."""
+        body = _extract_function(self.src, "do_reindex")
+        existing, fresh = _extract_state_branches(body)
+        for block in (existing, fresh):
+            self.assertIn("gbrain_init_failed", block)
+            self.assertIn("gbrain_init_blocked", block)
 
     def test_reindex_configures_repo_path(self) -> None:
         body = _extract_function(self.src, "do_reindex")
@@ -126,10 +249,6 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
     def test_reindex_configures_global_basename(self) -> None:
         body = _extract_function(self.src, "do_reindex")
         self.assertIn("config set link_resolution.global_basename true", body)
-
-    def test_reindex_configures_keyword_only(self) -> None:
-        body = _extract_function(self.src, "do_reindex")
-        self.assertIn("config set search.mcp_keyword_only true", body)
 
     def test_reindex_configures_chronicle_judge_token_budget(self) -> None:
         """Chronicle uses the supported upstream config rather than a source patch."""
@@ -173,18 +292,25 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         self.assertIn("gbrain_extract_links_failed", body)
 
     def test_reindex_does_not_pass_schema_pack_flag(self) -> None:
-        match = re.search(r'init_output=\$\(.*?init\b(.*?)2>&1\)', self.src, re.DOTALL)
-        self.assertIsNotNone(match, "Could not find init invocation in wrapper")
-        assert match is not None
-        init_args = match.group(1)
-        self.assertNotIn("--schema-pack", init_args)
+        """Neither init invocation (fresh --pglite nor existing
+        --migrate-only) may receive the schema-pack flag: the schema is
+        installed via the pack install step."""
+        body = _extract_function(self.src, "do_reindex")
+        init_lines = re.findall(r'"\$GBRAIN_BIN" init ([^\n]*2>&1)', body)
+        self.assertGreaterEqual(len(init_lines), 2,
+                                "expected both the fresh and existing init branches")
+        for line in init_lines:
+            self.assertNotIn("--schema-pack", line)
 
     def test_reindex_does_not_pass_non_interactive_flag(self) -> None:
-        match = re.search(r'init_output=\$\(.*?init\b(.*?)2>&1\)', self.src, re.DOTALL)
-        self.assertIsNotNone(match, "Could not find init invocation in wrapper")
-        assert match is not None
-        init_args = match.group(1)
-        self.assertNotIn("--non-interactive", init_args)
+        """Neither init invocation (fresh --pglite nor existing
+        --migrate-only) may pass --non-interactive."""
+        body = _extract_function(self.src, "do_reindex")
+        init_lines = re.findall(r'"\$GBRAIN_BIN" init ([^\n]*2>&1)', body)
+        self.assertGreaterEqual(len(init_lines), 2,
+                                "expected both the fresh and existing init branches")
+        for line in init_lines:
+            self.assertNotIn("--non-interactive", line)
 
     def test_reindex_exports_skip_startup_hooks(self) -> None:
         body = _extract_function(self.src, "do_reindex")
@@ -201,13 +327,35 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         body = _extract_function(self.src, "do_reindex")
         self.assertIn("schema_source_missing", body)
 
-    def test_reindex_schema_install_before_init(self) -> None:
-        """schema pack install must happen BEFORE gbrain init."""
+    def test_reindex_schema_install_before_both_init_paths(self) -> None:
+        """Schema pack install must happen BEFORE both the fresh --pglite
+        init and the existing --migrate-only init."""
         body = _extract_function(self.src, "do_reindex")
         install_pos = body.find("install_source_pack")
-        init_pos = body.find("init --pglite")
-        self.assertLess(install_pos, init_pos,
-                        "schema pack install must precede gbrain init")
+        fresh_init_pos = body.find("init --pglite")
+        migrate_init_pos = body.find("init --migrate-only")
+        self.assertGreater(install_pos, -1)
+        self.assertGreater(fresh_init_pos, -1)
+        self.assertGreater(migrate_init_pos, -1)
+        self.assertLess(install_pos, fresh_init_pos,
+                        "schema pack install must precede the fresh init")
+        self.assertLess(install_pos, migrate_init_pos,
+                        "schema pack install must precede the migrate-only init")
+
+    def test_reindex_state_classification_after_lock_before_sync(self) -> None:
+        """The state classification must happen after lock acquisition and
+        before any sync work (issue #124): current ordering is preserved."""
+        body = _extract_function(self.src, "do_reindex")
+        lock_pos = body.find("acquire_tasknotes_lock reindex")
+        class_pos = body.find('if [ "$preflight_state" = "existing" ]')
+        sync_pos = body.find("run_sync_extract_links")
+        self.assertGreater(lock_pos, -1)
+        self.assertGreater(class_pos, -1)
+        self.assertGreater(sync_pos, -1)
+        self.assertLess(lock_pos, class_pos,
+                        "state classification must follow lock acquisition")
+        self.assertLess(class_pos, sync_pos,
+                        "state classification must precede the full sync")
 
     def test_reindex_schema_install_before_sync(self) -> None:
         """schema pack install must happen BEFORE gbrain sync."""
@@ -289,9 +437,22 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         self.assertIn('runtime_gbrain_home="$GBRAIN_HOME"', body)
         self.assertNotIn('runtime_gbrain_home="${GBRAIN_HOME:-', body)
 
-    def test_reindex_creates_state_dir(self) -> None:
+    def test_reindex_has_no_shell_mkdir_p(self) -> None:
+        """The state root must NOT be pre-created by a shell `mkdir -p`
+        (that would follow a symlinked .gbrain ancestor): root establishment
+        happens fail-closed inside the lock-held preflight."""
         body = _extract_function(self.src, "do_reindex")
-        self.assertIn('mkdir -p "$GBRAIN_STATE_DIR"', body)
+        self.assertNotIn('mkdir -p "$GBRAIN_STATE_DIR"', body)
+
+    def test_reindex_does_not_invoke_embedding_operations(self) -> None:
+        """reindex must not invoke enable-embeddings, migrate embeddings,
+        embed, or embed-backfill (issue #124: embedding activation stays
+        explicit and is never triggered by reindex)."""
+        body = _extract_function(self.src, "do_reindex")
+        for op in ("enable-embeddings", "migrate embeddings",
+                   "embed --stale", "embed-backfill",
+                   "embed --include-null-signature"):
+            self.assertNotIn(op, body)
 
     def test_reindex_persists_schema_pack_marker_atomically(self) -> None:
         """The active schema pack marker must be written atomically: temp
@@ -325,6 +486,363 @@ class GbrainReindexActivationContractTests(unittest.TestCase):
         body = _extract_function(self.src, "do_reindex")
         self.assertIn("os.path.islink(path)", body)
         self.assertIn("os.path.islink(parent)", body)
+
+
+class GbrainReindexStateGuardContractTests(unittest.TestCase):
+    """Issue #132 Findings 1-2: a fail-closed state preflight runs under the
+    shared lock BEFORE any native gbrain invocation (including the custom
+    schema-pack native validation). Healthy existing = regular non-symlink
+    config.json (JSON object, engine exactly pglite, database_path resolving
+    to the canonical PGLite path, no database_url) + non-symlink DIRECTORY
+    brain.pglite; fresh = both artifacts absent; everything else is a
+    structured nonzero error. GBRAIN_DATABASE_URL and an effective
+    DATABASE_URL (per the exact cwd-dotenv heuristic) fail closed too."""
+
+    def setUp(self) -> None:
+        self.src = _read(WRAPPER_PATH)
+        self.body = _extract_function(self.src, "do_reindex")
+        self.preflight = _extract_preflight_python(self.src)
+
+    def test_pglite_path_constant_derived_from_state_dir(self) -> None:
+        """The canonical PGLite artifact path must be derived from the
+        existing state-dir variable (gbrainPath('brain.pglite')), not a new
+        sentinel store."""
+        self.assertIn('GBRAIN_PGLITE_PATH="${GBRAIN_STATE_DIR}/brain.pglite"', self.src)
+
+    def test_preflight_invocation_uses_fixed_isolated_interpreter(self) -> None:
+        self.assertIn(
+            '"$PYTHON_BIN" -I - "$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" '
+            '"$GBRAIN_NATIVE_CWD" "$GBRAIN_HOME"',
+            self.body,
+        )
+
+    def test_native_cwd_passed_to_preflight(self) -> None:
+        """The preflight must receive the fixed native gbrain cwd as an
+        argument (the launcher's /opt/gbrain dotenv boundary), not derive it
+        from the wrapper caller's cwd."""
+        self.assertIn('config_path, pglite_path, native_cwd, parent_path = sys.argv[1:5]',
+                      self.preflight)
+
+    def test_preflight_after_lock_before_native_commands_and_init(self) -> None:
+        """The preflight must run after lock acquisition and before the
+        custom schema-pack native validation, schema pack install, both init
+        branches, the state classification, and the sync."""
+        preflight_pos = self.body.find(
+            '"$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" "$GBRAIN_NATIVE_CWD" "$GBRAIN_HOME"'
+        )
+        lock_pos = self.body.find("acquire_tasknotes_lock reindex")
+        install_pos = self.body.find("install_source_pack")
+        validate_pos = self.body.find("validate_installed_pack")
+        fresh_pos = self.body.find("init --pglite")
+        migrate_pos = self.body.find("init --migrate-only")
+        class_pos = self.body.find('if [ "$preflight_state" = "existing" ]')
+        sync_pos = self.body.find("run_sync_extract_links")
+        self.assertGreater(preflight_pos, -1, "preflight invocation must exist")
+        self.assertLess(lock_pos, preflight_pos, "preflight must run under the lock")
+        self.assertLess(preflight_pos, install_pos,
+                        "preflight must precede schema pack install")
+        self.assertLess(preflight_pos, validate_pos,
+                        "preflight must precede the native schema-pack validation")
+        for pos, name in (
+            (fresh_pos, "fresh init"),
+            (migrate_pos, "migrate-only init"),
+            (class_pos, "state classification"),
+            (sync_pos, "sync"),
+        ):
+            self.assertGreater(pos, -1, f"missing {name}")
+            self.assertLess(preflight_pos, pos, f"preflight must precede {name}")
+
+    def test_preflight_fresh_status_kept_for_absent_artifacts(self) -> None:
+        """Both artifacts absent must yield the fresh status; the fresh
+        branch keeps the pglite init and the keyword-only write."""
+        self.assertIn('"status": "fresh"', self.preflight)
+        _, fresh = _extract_state_branches(self.body)
+        self.assertIn("init --pglite --no-embedding", fresh)
+        self.assertIn("config set search.mcp_keyword_only true", fresh)
+
+    def test_preflight_existing_status_kept_for_healthy_state(self) -> None:
+        """Healthy existing must yield the existing status consumed by the
+        migrate-only branch."""
+        self.assertIn('"status": "existing"', self.preflight)
+        existing, _ = _extract_state_branches(self.body)
+        self.assertIn("init --migrate-only", existing)
+
+    def test_preflight_rejects_symlinked_config(self) -> None:
+        self.assertIn("stat.S_ISLNK(config_mode)", self.preflight)
+        self.assertIn("gbrain_state_config_symlink", self.preflight)
+
+    def test_preflight_rejects_nonregular_config(self) -> None:
+        self.assertIn("stat.S_ISREG(config_mode)", self.preflight)
+        self.assertIn("gbrain_state_config_not_regular", self.preflight)
+
+    def test_preflight_rejects_symlinked_pglite(self) -> None:
+        self.assertIn("stat.S_ISLNK(pglite_mode)", self.preflight)
+        self.assertIn("gbrain_state_pglite_symlink", self.preflight)
+
+    def test_preflight_rejects_pglite_without_config(self) -> None:
+        self.assertIn("gbrain_state_pglite_without_config", self.preflight)
+
+    def test_preflight_rejects_config_without_pglite(self) -> None:
+        """Healthy existing REQUIRES the PGLite directory: config without
+        brain.pglite must fail closed (the stale claim that existing state
+        does not need brain.pglite is gone)."""
+        self.assertIn("gbrain_state_config_without_pglite", self.preflight)
+
+    def test_preflight_requires_pglite_directory(self) -> None:
+        """brain.pglite must be a non-symlink DIRECTORY; a regular file at
+        the path fails closed."""
+        self.assertIn("stat.S_ISDIR(pglite_mode)", self.preflight)
+        self.assertIn("gbrain_state_pglite_not_directory", self.preflight)
+
+    def test_preflight_rejects_malformed_config(self) -> None:
+        self.assertIn("json.load(fh)", self.preflight)
+        self.assertIn("gbrain_state_config_malformed", self.preflight)
+
+    def test_preflight_requires_json_object_config(self) -> None:
+        self.assertIn("isinstance(cfg, dict)", self.preflight)
+
+    def test_preflight_rejects_persisted_database_url(self) -> None:
+        self.assertIn('"database_url" in cfg', self.preflight)
+        self.assertIn("gbrain_state_config_database_url_persisted", self.preflight)
+
+    def test_preflight_requires_exact_pglite_engine(self) -> None:
+        """engine must be exactly 'pglite': engine-less historical shapes and
+        any other engine (e.g. postgres) fail closed."""
+        self.assertIn('cfg.get("engine") != "pglite"', self.preflight)
+        self.assertIn("gbrain_state_config_engine_invalid", self.preflight)
+
+    def test_preflight_requires_string_database_path(self) -> None:
+        self.assertIn("isinstance(database_path, str)", self.preflight)
+        self.assertIn("gbrain_state_config_database_path_invalid", self.preflight)
+
+    def test_preflight_requires_canonical_database_path(self) -> None:
+        """database_path must resolve to the fixed canonical PGLite path."""
+        self.assertIn("os.path.realpath(database_path)", self.preflight)
+        self.assertIn("os.path.realpath(pglite_path)", self.preflight)
+        self.assertIn("gbrain_state_config_database_path_invalid", self.preflight)
+
+    def test_preflight_rejects_effective_database_url(self) -> None:
+        """A truthy DATABASE_URL not matched by the fixed-native-cwd dotenv
+        union is effective (Postgres) and must fail closed."""
+        self.assertIn('os.environ.get("DATABASE_URL")', self.preflight)
+        self.assertIn('not in dotenv_values_for_key("DATABASE_URL", DOTENV_FILES)',
+                      self.preflight)
+        self.assertIn("gbrain_state_database_url_effective", self.preflight)
+
+    def test_dotenv_heuristic_uses_exact_pinned_files(self) -> None:
+        for name in (".env", ".env.local", ".env.development",
+                     ".env.production", ".env.test"):
+            self.assertIn(name, self.preflight)
+
+    def test_dotenv_heuristic_uses_fixed_native_cwd(self) -> None:
+        """The #427 DATABASE_URL matching must read gbrain's five dotenv
+        files from the FIXED native cwd (the launcher's /opt/gbrain), never
+        the wrapper caller's cwd."""
+        self.assertIn("os.path.join(native_cwd, name)", self.preflight)
+        self.assertNotIn("os.getcwd()", self.preflight)
+
+    def test_dotenv_heuristic_mirrors_pinned_parser(self) -> None:
+        """Exact dotenvValuesForKey mirror: LF-only split (content.split
+        ('\\n') — a lone CR is not a separator; the file is opened with
+        newline='' so universal-newline translation cannot pre-split CRs),
+        strip, skip blank/#, the pinned regex, case-sensitive key, trimmed
+        value, whole-value quote removal else truncate at the first ' #' AND
+        trim the remainder, ignore empties, union values."""
+        self.assertIn('fh.read().split("\\n")', self.preflight)
+        self.assertIn('newline=""', self.preflight)
+        self.assertNotIn("splitlines", self.preflight)
+        self.assertIn(r'^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$', self.preflight)
+        self.assertIn("m.group(1) != key", self.preflight)
+        self.assertIn("value[0] == value[-1]", self.preflight)
+        self.assertIn('value[0] in ("\'", \'"\')', self.preflight)
+        self.assertIn('value.find(" #")', self.preflight)
+        self.assertIn("value[:comment].strip()", self.preflight)
+        self.assertIn('if value == "":', self.preflight)
+        self.assertIn("values.append(value)", self.preflight)
+        self.assertIn("for name in filenames:", self.preflight)
+
+    def test_preflight_scans_bun_dotenv_surfaces_for_gbrain_database_url(self) -> None:
+        """Every possible Bun default dotenv suffix surface in the FIXED
+        native cwd must be scanned for a GBRAIN_DATABASE_URL declaration."""
+        for name in (".env", ".env.local", ".env.development", ".env.development.local",
+                     ".env.production", ".env.production.local",
+                     ".env.test", ".env.test.local"):
+            self.assertIn(name, self.preflight)
+        self.assertIn('declares_key("GBRAIN_DATABASE_URL"', self.preflight)
+        self.assertIn("gbrain_state_gbrain_database_url_dotenv", self.preflight)
+
+    def test_preflight_scan_rejects_any_syntactic_declaration(self) -> None:
+        """The Bun dotenv scan rejects ANY syntactic declaration (even empty
+        or quoted/expanded values — no Bun expansion reimplementation), and
+        diagnostics never echo values."""
+        self.assertIn("def declares_key(key, filenames):", self.preflight)
+        self.assertIn("m.group(1) == key", self.preflight)
+        self.assertNotIn("f\"", self.preflight)
+        self.assertNotIn(".format(", self.preflight)
+
+    def test_preflight_rejects_gbrain_database_url_env(self) -> None:
+        """The direct inherited GBRAIN_DATABASE_URL rejection remains."""
+        self.assertIn('os.environ.get("GBRAIN_DATABASE_URL")', self.preflight)
+        self.assertIn("gbrain_state_gbrain_database_url_env", self.preflight)
+
+    # --- state root establishment (issue #132 fourth iteration) ---
+
+    def test_preflight_receives_fixed_state_parent(self) -> None:
+        """The preflight must receive the fixed GBRAIN_HOME as the state
+        parent for no-follow root establishment (no shell mkdir -p precedes
+        it)."""
+        self.assertIn(
+            'config_path, pglite_path, native_cwd, parent_path = sys.argv[1:5]',
+            self.preflight,
+        )
+        self.assertNotIn('mkdir -p "$GBRAIN_STATE_DIR"', self.body)
+
+    def test_preflight_opens_parent_no_follow_directory(self) -> None:
+        """The fixed state parent must be opened with O_DIRECTORY|O_NOFOLLOW
+        (+O_CLOEXEC when available); missing/symlinked/non-directory/
+        inaccessible parents fail statically with gbrain_state_parent_invalid
+        (no path or exception echo)."""
+        self.assertIn("os.O_DIRECTORY", self.preflight)
+        self.assertIn("os.O_NOFOLLOW", self.preflight)
+        self.assertIn("hasattr(os, \"O_CLOEXEC\")", self.preflight)
+        self.assertIn("os.open(parent_path, open_flags)", self.preflight)
+        self.assertIn("gbrain_state_parent_invalid", self.preflight)
+
+    def test_preflight_establishes_root_no_follow_and_creates_absent(self) -> None:
+        """The .gbrain root must be opened O_DIRECTORY|O_NOFOLLOW relative to
+        the parent fd; absent roots are created with umask semantics via
+        dir_fd and immediately reopened no-follow (races fail closed)."""
+        self.assertIn('os.mkdir(root_leaf, 0o777, dir_fd=parent_fd)', self.preflight)
+        self.assertIn('os.open(root_leaf, open_flags, dir_fd=parent_fd)', self.preflight)
+        self.assertIn("gbrain_state_root_create_failed", self.preflight)
+        self.assertIn("gbrain_state_root_invalid", self.preflight)
+
+    def test_preflight_rejects_bad_roots_without_repair(self) -> None:
+        """Existing symlink (incl. dangling), regular file, non-directory, or
+        inaccessible root must static-fail — never followed, deleted,
+        repaired, or migrated."""
+        self.assertIn("except FileNotFoundError:", self.preflight)
+        self.assertIn("except OSError:", self.preflight)
+        self.assertNotIn("os.remove(root_leaf", self.preflight)
+        self.assertNotIn("os.unlink(root_leaf", self.preflight)
+        self.assertNotIn("os.rename(root_leaf", self.preflight)
+        self.assertNotIn("os.replace(root_leaf", self.preflight)
+
+    def test_preflight_validates_leaves_root_relative_no_follow(self) -> None:
+        """config.json and brain.pglite must be classified with no-follow
+        stats relative to the validated root fd, so an ancestor/leaf swap
+        cannot redirect the classifier."""
+        self.assertIn("dir_fd=root_fd", self.preflight)
+        self.assertIn("follow_symlinks=False", self.preflight)
+        self.assertIn("stat.S_ISLNK(config_mode)", self.preflight)
+        self.assertIn("stat.S_ISREG(config_mode)", self.preflight)
+        self.assertIn("stat.S_ISLNK(pglite_mode)", self.preflight)
+        self.assertIn("stat.S_ISDIR(pglite_mode)", self.preflight)
+
+    def test_preflight_reads_config_root_relative_no_follow(self) -> None:
+        """The existing-config read must go through the validated root fd
+        with O_NOFOLLOW."""
+        self.assertIn(
+            'os.open(config_leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)',
+            self.preflight,
+        )
+
+    def test_preflight_closes_fds_in_finally(self) -> None:
+        """Both fds must be closed in a finally block on every exit path."""
+        self.assertIn("finally:", self.preflight)
+        self.assertIn("os.close(root_fd)", self.preflight)
+        self.assertIn("os.close(parent_fd)", self.preflight)
+        finally_pos = self.preflight.find("finally:")
+        self.assertGreater(finally_pos, -1)
+        tail = self.preflight[finally_pos:]
+        self.assertIn("if root_fd is not None:", tail)
+        self.assertIn("if parent_fd is not None:", tail)
+
+    def test_root_mode_exception_order_enoent_only_absent(self) -> None:
+        """root_mode must return mode 0 ONLY for FileNotFoundError (ENOENT);
+        the generic OSError handler must follow it and must NOT map to
+        absent — it fails closed with gbrain_state_leaf_stat_failed."""
+        self.assertIn("except FileNotFoundError:", self.preflight)
+        self.assertIn("gbrain_state_leaf_stat_failed", self.preflight)
+        enoent_pos = self.preflight.find("except FileNotFoundError:")
+        return0_pos = self.preflight.find("return 0", enoent_pos)
+        oserror_pos = self.preflight.find("except OSError:", return0_pos)
+        self.assertGreater(return0_pos, -1, "ENOENT must return mode 0")
+        self.assertGreater(oserror_pos, -1,
+                           "a generic OSError handler must exist after ENOENT")
+        self.assertLess(enoent_pos, return0_pos,
+                        "FileNotFoundError must be handled before its return 0")
+        self.assertLess(return0_pos, oserror_pos,
+                        "the generic OSError handler must come AFTER the ENOENT return 0")
+
+    def test_no_oserror_to_absent_conversion_remains(self) -> None:
+        """The old `except OSError: return 0` (any inspection error =>
+        absent, possibly fresh) conversion must be gone from the preflight."""
+        self.assertNotIn("except OSError:\n            return 0", self.preflight)
+
+    def test_preflight_root_errors_are_static_and_leak_free(self) -> None:
+        """Root/leaf error messages are static (no path/exception echo) and
+        the preflight keeps its no-f-string/no-format diagnostic discipline."""
+        for code in ("gbrain_state_parent_invalid", "gbrain_state_root_invalid",
+                     "gbrain_state_root_create_failed", "gbrain_state_leaf_stat_failed"):
+            pos = self.preflight.find(code)
+            self.assertGreater(pos, -1, f"missing root error code {code}")
+        self.assertNotIn("f\"", self.preflight)
+        self.assertNotIn(".format(", self.preflight)
+
+    def test_preflight_output_parsed_by_exact_patterns_only(self) -> None:
+        """The dispatch accepts ONLY the two exact status envelopes; the old
+        substring-glob form must be gone so arbitrary output cannot smuggle
+        a status substring through."""
+        self.assertIn('case "$preflight_output" in', self.body)
+        self.assertIn("'{\"status\": \"fresh\"}')", self.body)
+        self.assertIn("'{\"status\": \"existing\"}')", self.body)
+        self.assertNotIn("*'\"status\": \"fresh\"'*", self.body)
+        self.assertNotIn("*'\"status\": \"existing\"'*", self.body)
+
+    def test_preflight_state_variable_bound_only_to_two_literals(self) -> None:
+        """preflight_state is assigned ONLY the literals fresh/existing, so
+        init selection can never observe arbitrary preflight output."""
+        assignments = re.findall(r'preflight_state="([^"]*)"', self.body)
+        self.assertEqual(assignments, ["fresh", "existing"])
+
+    def test_init_selection_uses_validated_state_only_no_reclassification(self) -> None:
+        """The init choice is driven only by the validated preflight state
+        variable: no later filesystem reclassification (e.g.
+        `[ -f "$GBRAIN_CONFIG_PATH" ]`) remains in do_reindex."""
+        self.assertIn('if [ "$preflight_state" = "existing" ]; then', self.body)
+        self.assertNotIn('[ -f "$GBRAIN_CONFIG_PATH" ]', self.body)
+
+    def test_preflight_errors_are_structured_nonzero(self) -> None:
+        """The preflight emits status:error JSON and the shell dispatch
+        converts it to a structured success:false reindex error and returns
+        1 from do_reindex."""
+        self.assertIn('"status": "error"', self.preflight)
+        dispatch_pos = self.body.find('"status": "fresh"')
+        self.assertGreater(dispatch_pos, -1, "status dispatch must exist")
+        tail = self.body[dispatch_pos:]
+        self.assertIn('"success": False', tail)
+        self.assertIn('"action": "reindex"', tail)
+        self.assertIn("return 1", tail)
+
+    def test_preflight_echoes_no_config_content(self) -> None:
+        """Diagnostics must never echo config content: messages are built
+        from static literals only (no f-strings / format interpolation)."""
+        self.assertNotIn("f\"", self.preflight)
+        self.assertNotIn("f'", self.preflight)
+        self.assertNotIn(".format(", self.preflight)
+
+    def test_preflight_region_has_no_embedding_repair_calls(self) -> None:
+        """The preflight must never attempt an embedding repair (no embed,
+        no migrate embeddings, no enable-embeddings invocation)."""
+        preflight_pos = self.body.find(
+            '"$GBRAIN_CONFIG_PATH" "$GBRAIN_PGLITE_PATH" "$GBRAIN_NATIVE_CWD" "$GBRAIN_HOME"'
+        )
+        class_pos = self.body.find('if [ "$preflight_state" = "existing" ]')
+        region = self.body[preflight_pos:class_pos]
+        for op in ('"$GBRAIN_BIN" embed', "embed --stale", "embed-backfill",
+                   "enable-embeddings", "migrate embeddings"):
+            self.assertNotIn(op, region)
 
 
 class GbrainRefreshContractTests(unittest.TestCase):
@@ -983,13 +1501,17 @@ class GbrainEmbedBackfillPreservationContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.src = _read(WRAPPER_PATH)
 
-    def test_reindex_still_uses_no_embedding_init(self) -> None:
+    def test_reindex_fresh_branch_still_uses_no_embedding_init(self) -> None:
+        """The fresh-activation branch must keep the no-embedding PGLite init."""
         body = _extract_function(self.src, "do_reindex")
-        self.assertIn("init --pglite --no-embedding", body)
+        _, fresh = _extract_state_branches(body)
+        self.assertIn("init --pglite --no-embedding", fresh)
 
-    def test_reindex_still_sets_keyword_only(self) -> None:
+    def test_reindex_fresh_branch_still_sets_keyword_only(self) -> None:
+        """The fresh-activation branch must keep keyword-only search mode."""
         body = _extract_function(self.src, "do_reindex")
-        self.assertIn("config set search.mcp_keyword_only true", body)
+        _, fresh = _extract_state_branches(body)
+        self.assertIn("config set search.mcp_keyword_only true", fresh)
 
     def test_reindex_does_not_invoke_embed(self) -> None:
         body = _extract_function(self.src, "do_reindex")
@@ -1703,9 +2225,13 @@ class GbrainEnableDisableEmbeddingsPreservationContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.src = _read(WRAPPER_PATH)
 
-    def test_reindex_still_sets_keyword_only_true(self) -> None:
+    def test_reindex_keyword_only_true_only_in_fresh_branch(self) -> None:
+        """reindex pins keyword-only only on fresh activation; the
+        existing-config branch must not touch search.mcp_keyword_only."""
         body = _extract_function(self.src, "do_reindex")
-        self.assertIn("config set search.mcp_keyword_only true", body)
+        existing, fresh = _extract_state_branches(body)
+        self.assertIn("config set search.mcp_keyword_only true", fresh)
+        self.assertNotIn("search.mcp_keyword_only", existing)
 
     def test_reindex_does_not_invoke_enable_embeddings(self) -> None:
         body = _extract_function(self.src, "do_reindex")
@@ -1849,6 +2375,22 @@ class GbrainDockerLayoutContractTests(unittest.TestCase):
         self.assertIn("cd /opt/gbrain", wrapper_line)
         self.assertIn("src/cli.ts", wrapper_line)
 
+    def test_native_wrapper_cd_is_fail_closed(self) -> None:
+        """Issue #132 Gate 1: the fixed-cwd activation must be fail-closed
+        (`cd /opt/gbrain || exit 1` before unset/exec) — a failing cd must
+        never let Bun resolve a caller-cwd src/cli.ts."""
+        match = re.search(r"printf.*?/opt/josemar/libexec/gbrain-native", self.src, re.DOTALL)
+        self.assertIsNotNone(match, "Could not find native wrapper creation in Dockerfile")
+        assert match is not None
+        wrapper_line = match.group(0)
+        self.assertIn("'cd /opt/gbrain || exit 1'", wrapper_line)
+        # The fail-closed cd must precede the unset and the bun invocation.
+        cd_pos = wrapper_line.find("cd /opt/gbrain || exit 1")
+        unset_pos = wrapper_line.find("unset GBRAIN_DATABASE_URL")
+        exec_pos = wrapper_line.find("GBRAIN_SKIP_STARTUP_HOOKS=1 exec")
+        self.assertLess(cd_pos, unset_pos, "fail-closed cd must precede the unset")
+        self.assertLess(cd_pos, exec_pos, "fail-closed cd must precede the bun exec")
+
     def test_native_wrapper_enforces_skip_startup_hooks(self) -> None:
         """Issue #112: the private launcher itself must enforce
         GBRAIN_SKIP_STARTUP_HOOKS=1 as an inline assignment before exec, so
@@ -1869,6 +2411,35 @@ class GbrainDockerLayoutContractTests(unittest.TestCase):
             wrapper_line.find("src/cli.ts"),
             "the assignment must apply to the bun CLI invocation",
         )
+
+    def test_native_wrapper_unsets_database_env(self) -> None:
+        """Issue #132 third iteration: the launcher must unset BOTH
+        GBRAIN_DATABASE_URL and DATABASE_URL after cd'ing into the fixed
+        native cwd, before the bun invocation (the pin honors truthy
+        GBRAIN_DATABASE_URL unconditionally)."""
+        match = re.search(r"printf.*?/opt/josemar/libexec/gbrain-native", self.src, re.DOTALL)
+        self.assertIsNotNone(match, "Could not find native wrapper creation in Dockerfile")
+        assert match is not None
+        wrapper_line = match.group(0)
+        self.assertIn("unset GBRAIN_DATABASE_URL DATABASE_URL", wrapper_line)
+        # The unset must run after the cd (fixed native cwd) and before exec.
+        self.assertLess(
+            wrapper_line.find("unset GBRAIN_DATABASE_URL"),
+            wrapper_line.find("GBRAIN_SKIP_STARTUP_HOOKS=1 exec"),
+            "the database env unset must precede the bun invocation",
+        )
+
+    def test_native_wrapper_disables_bun_dotenv(self) -> None:
+        """Issue #132 third iteration: the launcher must invoke the fixed Bun
+        with run --no-env-file so Bun cannot auto-load a dotenv file from the
+        fixed native cwd."""
+        match = re.search(r"printf.*?/opt/josemar/libexec/gbrain-native", self.src, re.DOTALL)
+        self.assertIsNotNone(match, "Could not find native wrapper creation in Dockerfile")
+        assert match is not None
+        wrapper_line = match.group(0)
+        self.assertIn("bun run --no-env-file src/cli.ts", wrapper_line)
+        self.assertNotIn("bun run src/cli.ts", wrapper_line,
+                         "--no-env-file must not be droppable by a stale shape")
 
     def test_no_native_wrapper_at_public_path(self) -> None:
         """The public /usr/local/bin/gbrain must never be the native wrapper:
@@ -2481,14 +3052,25 @@ class GbrainHomeSemanticsContractTests(unittest.TestCase):
     def test_schema_install_dir_under_state_dir(self) -> None:
         self.assertIn('SCHEMA_INSTALL_DIR="${GBRAIN_STATE_DIR}/schema-packs"', self.src)
 
+    def test_native_cwd_is_fixed(self) -> None:
+        """The native gbrain cwd must be a fixed constant (/opt/gbrain),
+        never env-overridable: it is the dotenv boundary of the native
+        launcher (Bun auto-load surface and the pin's own dotenv parsing)."""
+        self.assertIn('GBRAIN_NATIVE_CWD="/opt/gbrain"', self.src)
+        self.assertNotIn("${GBRAIN_NATIVE_CWD:-", self.src)
+
 
 class GbrainNativeLauncherBehaviorTests(unittest.TestCase):
-    """Issue #112: the private native launcher must enforce
-    GBRAIN_SKIP_STARTUP_HOOKS=1 itself, regardless of caller environment.
+    """Issue #112 + #132 third iteration: the private native launcher must
+    enforce GBRAIN_SKIP_STARTUP_HOOKS=1 itself, regardless of caller
+    environment, UNSET both database env vars (GBRAIN_DATABASE_URL /
+    DATABASE_URL — the pin honors truthy GBRAIN_DATABASE_URL
+    unconditionally), and invoke the fixed Bun with `run --no-env-file
+    src/cli.ts` so Bun cannot auto-load dotenv from the fixed native cwd.
 
     The launcher command is materialized exactly as Dockerfile.hermes writes
     it (image paths substituted for local fakes) and executed under hostile
-    caller env values; the fake CLI must always observe the enforced value.
+    caller env values; the fake CLI must always observe the enforced values.
     """
 
     def setUp(self) -> None:
@@ -2501,39 +3083,60 @@ class GbrainNativeLauncherBehaviorTests(unittest.TestCase):
     def _launcher_command(self) -> str:
         dockerfile = _read(DOCKERFILE_PATH)
         match = re.search(
-            r"printf '%s\\n' '#!/bin/sh' '([^']*)' > /opt/josemar/libexec/gbrain-native",
+            r"printf '%s\\n' '#!/bin/sh' (.*?) > /opt/josemar/libexec/gbrain-native",
             dockerfile,
+            re.DOTALL,
         )
         self.assertIsNotNone(
             match, "Could not extract the native launcher line from Dockerfile.hermes"
         )
         assert match is not None
-        return match.group(1)
+        parts = re.findall(r"'([^']*)'", match.group(1))
+        self.assertTrue(parts, "launcher must be built from quoted shell lines")
+        return "\n".join(parts)
 
     def _fake_chain(self) -> tuple[Path, Path]:
-        """One fake gbrain tree: a `bun` stand-in that execs a fake
-        src/cli.ts which logs the enforced env value."""
+        """One fake gbrain tree: a `bun` stand-in that logs its invocation and
+        resolves the script argument RELATIVE TO ITS CWD (modeling `bun run`
+        reality) by exec'ing ./src/cli.ts, which logs the enforced env values
+        (startup-hook skip, whether the database env vars survived the
+        launcher unset) and the full argv."""
         gbrain_dir = self.tmp / "gbrain"
         (gbrain_dir / "src").mkdir(parents=True, exist_ok=True)
         cli = gbrain_dir / "src" / "cli.ts"
         cli.write_text(
             "#!/bin/sh\n"
-            f"printf 'GBRAIN_SKIP_STARTUP_HOOKS=%s\\n' "
-            f"\"${{GBRAIN_SKIP_STARTUP_HOOKS:-}}\" > \"{self.cli_env_log}\"\n",
+            "{\n"
+            f"  printf 'GBRAIN_SKIP_STARTUP_HOOKS=%s\\n' \"${{GBRAIN_SKIP_STARTUP_HOOKS:-}}\"\n"
+            "  printf 'GBRAIN_DATABASE_URL=%s\\n' \"${GBRAIN_DATABASE_URL-unset}\"\n"
+            "  printf 'DATABASE_URL=%s\\n' \"${DATABASE_URL-unset}\"\n"
+            "  printf 'ARGS=%s\\n' \"$*\"\n"
+            f"}} > \"{self.cli_env_log}\"\n",
             encoding="utf-8",
         )
         cli.chmod(0o755)
         fake_bun = self.tmp / "bun"
-        fake_bun.write_text(f"#!/bin/sh\nexec \"{cli}\" \"$@\"\n", encoding="utf-8")
+        fake_bun.write_text(
+            f"#!/bin/sh\n"
+            f"printf 'bun-invoked\\n' >> \"{self.bun_log}\"\n"
+            f"exec ./src/cli.ts \"$@\"\n",
+            encoding="utf-8",
+        )
         fake_bun.chmod(0o755)
         return gbrain_dir, fake_bun
 
     def _run_launcher(
-        self, caller_value: str | None, gbrain_dir: Path, fake_bun: Path
+        self,
+        caller_value: str | None,
+        gbrain_dir: Path,
+        fake_bun: Path,
+        hostile_db_env: bool = False,
+        target_dir: Path | None = None,
+        cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = (
             self._launcher_command()
-            .replace("/opt/gbrain", str(gbrain_dir))
+            .replace("/opt/gbrain", str(target_dir if target_dir is not None else gbrain_dir))
             .replace("/usr/local/bin/bun", str(fake_bun))
         )
         env = os.environ.copy()
@@ -2541,6 +3144,12 @@ class GbrainNativeLauncherBehaviorTests(unittest.TestCase):
             env.pop("GBRAIN_SKIP_STARTUP_HOOKS", None)
         else:
             env["GBRAIN_SKIP_STARTUP_HOOKS"] = caller_value
+        if hostile_db_env:
+            env["GBRAIN_DATABASE_URL"] = "postgres://hostile"
+            env["DATABASE_URL"] = "postgres://hostile"
+        else:
+            env.pop("GBRAIN_DATABASE_URL", None)
+            env.pop("DATABASE_URL", None)
         return subprocess.run(
             ["/bin/sh", "-c", command, "sh", "status"],
             capture_output=True,
@@ -2548,6 +3157,7 @@ class GbrainNativeLauncherBehaviorTests(unittest.TestCase):
             check=False,
             timeout=15,
             env=env,
+            cwd=str(cwd) if cwd is not None else None,
         )
 
     def test_launcher_enforces_skip_startup_hooks_for_any_caller_env(self) -> None:
@@ -2555,13 +3165,74 @@ class GbrainNativeLauncherBehaviorTests(unittest.TestCase):
         for index, (value, label) in enumerate(cases):
             with self.subTest(caller=label):
                 self.cli_env_log = self.tmp / f"cli-env-{index}.log"
+                self.bun_log = self.tmp / f"bun-env-{index}.log"
                 gbrain_dir, fake_bun = self._fake_chain()
                 result = self._run_launcher(value, gbrain_dir, fake_bun)
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(self.bun_log.exists(), "bun must have run")
+                lines = self.cli_env_log.read_text(encoding="utf-8").splitlines()
                 self.assertEqual(
-                    self.cli_env_log.read_text(encoding="utf-8").strip(),
+                    lines[0],
                     "GBRAIN_SKIP_STARTUP_HOOKS=1",
+                    "the launcher must enforce the startup-hook skip",
                 )
+
+    def test_launcher_unsets_database_env_and_disables_bun_dotenv(self) -> None:
+        """Issue #132 third iteration: for ANY hostile caller environment the
+        launcher must unset both database env vars (the pin honors truthy
+        GBRAIN_DATABASE_URL unconditionally) and invoke the fixed Bun with
+        `run --no-env-file src/cli.ts` (no Bun dotenv auto-load)."""
+        cases = [("0", "caller sets 0"), ("", "caller sets empty"), (None, "caller unsets")]
+        for index, (value, label) in enumerate(cases):
+            with self.subTest(caller=label):
+                self.cli_env_log = self.tmp / f"cli-db-{index}.log"
+                self.bun_log = self.tmp / f"bun-db-{index}.log"
+                gbrain_dir, fake_bun = self._fake_chain()
+                result = self._run_launcher(
+                    value, gbrain_dir, fake_bun, hostile_db_env=True
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                lines = self.cli_env_log.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(lines[0], "GBRAIN_SKIP_STARTUP_HOOKS=1")
+                self.assertEqual(lines[1], "GBRAIN_DATABASE_URL=unset",
+                                 "GBRAIN_DATABASE_URL must be unset by the launcher")
+                self.assertEqual(lines[2], "DATABASE_URL=unset",
+                                 "DATABASE_URL must be unset by the launcher")
+                self.assertIn("run --no-env-file src/cli.ts", lines[3],
+                              "the launcher must invoke bun with --no-env-file")
+
+    def test_launcher_fails_closed_when_fixed_native_cwd_absent(self) -> None:
+        """Issue #132 Gate 1: with the fixed native cwd ABSENT the launcher
+        must exit nonzero BEFORE exec'ing bun — the fake Bun/CLI are never
+        invoked, and a caller-cwd `src/cli.ts` sentinel cannot execute (a
+        standalone `cd` without `|| exit 1` would fall through and let bun
+        resolve the caller-cwd script)."""
+        caller_dir = self.tmp / "caller-cwd"
+        caller_dir.mkdir()
+        sentinel = caller_dir / "src"
+        sentinel.mkdir()
+        sentinel_cli = sentinel / "cli.ts"
+        sentinel_cli.write_text(
+            f"#!/bin/sh\ntouch {self.tmp / 'sentinel-ran'}\n", encoding="utf-8"
+        )
+        sentinel_cli.chmod(0o755)
+        self.cli_env_log = self.tmp / "cli-absent.log"
+        self.bun_log = self.tmp / "bun-absent.log"
+        gbrain_dir, fake_bun = self._fake_chain()
+        result = self._run_launcher(
+            None,
+            gbrain_dir,
+            fake_bun,
+            target_dir=self.tmp / "missing-native-cwd",
+            cwd=caller_dir,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.bun_log.exists(), "fake Bun must never be invoked")
+        self.assertFalse(self.cli_env_log.exists(), "fake CLI must never be invoked")
+        self.assertFalse(
+            (self.tmp / "sentinel-ran").exists(),
+            "a caller-cwd src/cli.ts sentinel must never execute",
+        )
 
 
 if __name__ == "__main__":

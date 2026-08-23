@@ -179,10 +179,16 @@ RUN chmod +x /usr/local/bin/bun
 # Install pinned gbrain CLI from the deterministic build stage. The native
 # CLI lives at a private, non-PATH path (/opt/josemar/libexec/gbrain-native):
 # the PUBLIC /usr/local/bin/gbrain is the issue #110 adapter, so no bare
-# native gbrain remains reachable from a normal PATH.
+# native gbrain remains reachable from a normal PATH. The launcher pins the
+# native cwd to /opt/gbrain (the only Bun dotenv auto-load surface) with a
+# FAIL-CLOSED activation (`cd /opt/gbrain || exit 1` — a failing cd must
+# never let Bun resolve a caller-cwd src/cli.ts), unsets both database env
+# vars (the pin honors truthy GBRAIN_DATABASE_URL unconditionally), and
+# disables Bun dotenv loading entirely (--no-env-file); the wrapper preflight
+# enforces the same boundary before any native call.
 COPY --from=gbrain-builder /opt/gbrain /opt/gbrain
 RUN mkdir -p /opt/josemar/libexec \
-    && printf '%s\n' '#!/bin/sh' 'cd /opt/gbrain && GBRAIN_SKIP_STARTUP_HOOKS=1 exec /usr/local/bin/bun run src/cli.ts "$@"' > /opt/josemar/libexec/gbrain-native \
+    && printf '%s\n' '#!/bin/sh' 'cd /opt/gbrain || exit 1' 'unset GBRAIN_DATABASE_URL DATABASE_URL' 'GBRAIN_SKIP_STARTUP_HOOKS=1 exec /usr/local/bin/bun run --no-env-file src/cli.ts "$@"' > /opt/josemar/libexec/gbrain-native \
     && chmod 755 /opt/josemar/libexec/gbrain-native
 
 RUN mkdir -p /opt/josemar/skills /opt/josemar/hermes /opt/josemar/scripts

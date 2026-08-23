@@ -40,6 +40,45 @@ The `verify` target runs fast tests plus compose validation:
 make verify
 ```
 
+### gbrain reindex state preflight and native launcher fast gates (PR #132)
+
+The fail-closed reindex state preflight and the native launcher dotenv
+boundary (see `docs/gbrain-operations.md` → "Safe Initial Production
+Activation" and → "Issue #110: Safe gbrain Adapter") are enforced without
+Docker by two fast contract suites that run on ordinary `make test`:
+
+- `tests.gbrain.test_gbrain_manual_refresh_reindex_lock` — preflight
+  semantics, executed against the real (fixture-patched) wrapper: fresh only
+  when BOTH canonical artifacts (`config.json` and `brain.pglite`) are
+  absent; healthy existing state (regular JSON config, engine exactly
+  `pglite`, canonical `database_path`, no persisted `database_url`,
+  non-symlink PGLite directory) runs migrate-only; every
+  partial/malformed/Postgres case fails closed with a structured nonzero
+  envelope and zero native gbrain activity. Database redirects are judged at
+  the FIXED NATIVE cwd (`/opt/gbrain`), never the caller's cwd: the
+  executable zero-native regression
+  (`test_native_cwd_dotenv_declaring_gbrain_database_url_fails_closed`)
+  plants a `GBRAIN_DATABASE_URL` declaration in each possible Bun default
+  dotenv file of the fixed native cwd and asserts structured nonzero, zero
+  native calls, and untouched config/PGLite.
+- `tests.gbrain.test_gbrain_wrapper_contract` — wrapper wiring plus the
+  materialized native launcher: the preflight runs under the shared lock
+  with the fixed isolated interpreter and before any native command; init
+  selection is driven exclusively by the validated preflight state
+  (`fresh` / `existing`), never reclassified; the `DATABASE_URL` exception
+  matches the pinned fixed-native-cwd parser exactly (`.env`, `.env.local`,
+  `.env.development`, `.env.production`, `.env.test`). The launcher
+  regressions execute the actual launcher line from `Dockerfile.hermes`:
+  the fail-closed missing-cwd regression
+  (`test_launcher_fails_closed_when_fixed_native_cwd_absent`) proves a
+  missing native cwd exits nonzero before Bun/CLI and a caller-cwd
+  `src/cli.ts` sentinel never executes;
+  `test_launcher_unsets_database_env_and_disables_bun_dotenv` proves both
+  database env vars are unset and `bun run --no-env-file src/cli.ts` is
+  used for any hostile caller environment.
+
+These are unit/contract tests — no Docker, no gbrain binary.
+
 ## Runtime Docker Tests
 
 Runtime tests are skipped unless explicitly enabled:
@@ -296,7 +335,9 @@ make test-gbrain-upgrade-conformance-embeddings GBRAIN_CONFORMANCE_CANDIDATE_REF
   Dockerfile pin, or the validated upgrade-only
   `GBRAIN_CONFORMANCE_BASELINE_REF` override; see below).
 - `test-gbrain-upgrade-conformance-embeddings` — candidate upgrade with the
-  real TEI gate.
+  real TEI gate; the candidate `josemar-gbrain reindex` runs as the issue #124
+  hard preservation regression (classification required exactly `fixed`, no
+  recovery path).
 
 ### Candidate refs are exact SHAs only
 
@@ -379,19 +420,41 @@ v0.46.26.0 upgrade.
 - Reports are written under the gitignored `dump_folder/gbrain-conformance/`
   and contain synthetic command/result metadata only (argv, rc, stdout,
   stderr, elapsed) — never environment dumps.
+- Persisted config evidence is narrow-only (PR #132): when the suites
+  need the file-plane config (`/opt/data/.gbrain/config.json`), they read it
+  through an in-container parser on the pinned runtime `python3` that emits
+  exactly the explicitly necessary non-secret fields (`embedding_disabled`,
+  `embedding_model`, `embedding_dimensions`) as a minimal JSON object — never
+  whole `config.json` stdout. Structure tests
+  (`test_no_raw_config_capture_in_evidence`,
+  `test_config_read_helpers_route_through_narrow_extract`,
+  `test_config_extract_emits_only_necessary_fields`) enforce that no raw
+  config capture exists in either embeddings suite.
 - Final cleanup is unconditional `docker compose down -v --remove-orphans` for
   the disposable project.
 - The embeddings gates download the E5/TEI model on first run and are
   expensive; they are explicit and infrequent by design.
 
-### Known regression probes (#124 / #125)
+### Known regression probes (#125)
 
-The suite contains explicit reproducible probes for the known open regressions
-#124 and #125. Each probe is classified in the report as `fixed`, `present`,
-`changed_failure_mode`, or `inconclusive` — the canonical baseline target does
-not fail permanently solely because a known issue is open. When the owning bug
-is fixed, the fixing PR converts the corresponding probe to a hard regression
-assertion.
+The suite contains an explicit reproducible probe for the known open regression
+#125, classified in the report as `fixed`, `present`, `changed_failure_mode`,
+or `inconclusive` — the canonical baseline target does not fail permanently
+solely because a known issue is open. When the owning bug is fixed, the fixing
+PR converts the corresponding probe to a hard regression assertion.
+
+Issue #124 is NOT a probe anymore: it is a hard preservation regression. The
+former report-only reindex probe and its workaround path were converted into a
+hard gate — the reindex classification must be exactly `fixed` in the
+embeddings and upgrade-embeddings suites (see the "Operation-level coverage
+index" below), and the suite fails on any other outcome. The `fixed`
+classification covers semantic-mode preservation: search mode, embedding
+config, completion marker, corpus coverage, and semantic retrieval
+(`issue124_proof`, `reindex_mode_preserved`, `reindex_config_preserved`,
+`reindex_marker_preserved`, `reindex_coverage_preserved`,
+`reindex_semantic_retrieval`) are all hard-asserted — the tests enforce the
+semantic-preservation `fixed` gate (PR #132). The only remaining
+report-only classifications are `schema-status` and the #125 upgrade probe.
 
 ### Sync-move regression characterization (issue #125 W1)
 
@@ -482,14 +545,14 @@ without hard-asserting the outcome. Scenario names in parentheses are the
 | `timeline`, `day`/`day --week`, `since`, `last-seen`, `on-this-day`, `orient`, `ontology` | public `gbrain` | core + chronicle | core zero-event smoke (`chronicle_*`); chronicle provider-gated deep event behavior | — |
 | `search` (semantic/hybrid) | public `gbrain` | embeddings | deep (`semantic_search`) | — |
 | `query --no-expand` | public `gbrain` | embeddings | deep (`query_no_expand`) | — |
-| `reindex` | operator (`josemar-gbrain`) | core + embeddings | deep (`reindex`, `public_reindex_rejected`); probe (`reindex_probe`, `reindex_probe_workaround`) | #124 probe: report-only |
+| `reindex` | operator (`josemar-gbrain`) | core + embeddings | deep (`reindex`, `public_reindex_rejected`); hard #124 preservation gate (`issue124_proof`, `reindex_probe`, `reindex_mode_preserved`, `reindex_config_preserved`, `reindex_marker_preserved`, `reindex_coverage_preserved`, `reindex_semantic_retrieval`) | #124 hard gate: classification required exactly `fixed` |
 | `refresh` | operator (`josemar-gbrain`) | core | deep (`refresh`, `external_edit_pre_refresh`, `external_edit_post_refresh`, `refresh_lock_busy`) | — |
 | `embed-backfill` | operator (`josemar-gbrain`) | embeddings | deep (`embed_backfill`) | — |
 | `enable-embeddings` | operator (`josemar-gbrain`) | embeddings | deep (`enable_embeddings`) | — |
 | `disable-embeddings` | operator (`josemar-gbrain`) | embeddings | deep (`disable_embeddings`, `disable_keyword_sentinel`, `disable_vectors_preserved`) | — |
 | `refresh-embeddings` | operator (`josemar-gbrain`; sole chat-allowed maintenance command) | embeddings | deep (`stale_edit_refresh`) | — |
 | `schema-status` | public `gbrain` (allowlisted read-only diagnostic) | core | smoke (`schema_status_probe`) | `fixed` / `present` / `changed_failure_mode` / `inconclusive` (report-only) |
-| reindex probe (issue #124) | operator-only classification | embeddings | smoke (`issue124_proof`, `reindex_probe`, `reindex_probe_workaround`) | `fixed` / `present` / `changed_failure_mode` / `inconclusive` (report-only) |
+| reindex preservation (issue #124) | operator-only classification | embeddings | hard (`issue124_proof`, `reindex_probe`, `reindex_mode_preserved`, `reindex_config_preserved`, `reindex_marker_preserved`, `reindex_coverage_preserved`, `reindex_semantic_retrieval`) | hard gate: classification required exactly `fixed` (no recovery path) |
 
 Notes:
 
@@ -504,7 +567,10 @@ Notes:
   pin; they own no additional operations.
 - **Probe status.** Report-only classifications recorded in the report
   metadata, never hard-asserted; a fixing PR converts the probe to a hard
-  regression assertion.
+  regression assertion. Issue #124 is the converted case: its reindex
+  classification is hard-asserted (exactly `fixed`) in the embeddings and
+  upgrade-embeddings suites, and its former workaround/recovery path is
+  eliminated.
 - **Not owned by any suite.** Native commands classified `operator_only` in
   the adapter inventory but without a direct coverage entry (`init`, `config`,
   `sync`, `extract`, `embed`, `migrate`, `schema`, `import`, `export`, `jobs`,
