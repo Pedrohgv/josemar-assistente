@@ -103,6 +103,7 @@ EMBEDDINGS_OVERLAY = REPO_ROOT / "docker-compose.embeddings.yml"
 BROWSER_OVERLAY = REPO_ROOT / "docker-compose.browser-control.yml"
 BASE_COMPOSE = REPO_ROOT / "docker-compose.yml"
 VAULT_RECOVERY_OVERLAY = REPO_ROOT / "docker-compose.vault-recovery.yml"
+DOCKERFILE = REPO_ROOT / "Dockerfile.hermes"
 
 RCLONE_DIGEST = "rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548"
 
@@ -1447,40 +1448,29 @@ class DeployWorkflowContractTests(unittest.TestCase):
         self.assertIn("mnemosyne-backup-uploader", backup)
         self.assertIn("Up", backup)
 
-    def test_backup_check_uses_real_cron_schema(self) -> None:
-        backup = _step_text(
-            self.workflow,
-            "Verify Mnemosyne backup (uploader running + exactly one export cron)",
-        )
-        # Must parse data["jobs"], not a flat list.
-        self.assertIn('data.get("jobs"', backup)
-        self.assertIn("schedule", backup)
-        self.assertIn("kind", backup)
-        self.assertIn("interval", backup)
-        self.assertIn("minutes", backup)
-        self.assertIn("script", backup)
-        self.assertIn("no_agent", backup)
-        self.assertIn("workdir", backup)
-        # Must assert script == mnemosyne-backup-export.sh.
-        self.assertIn("mnemosyne-backup-export.sh", backup)
-        # workdir must equal /opt/data EXACTLY (not merely nonempty).
-        self.assertIn('if workdir != "/opt/data":', backup)
-        self.assertIn('workdir is not \'/opt/data\'', backup)
-
-    def test_backup_check_rejects_bool_minutes(self) -> None:
-        backup = _step_text(
-            self.workflow,
-            "Verify Mnemosyne backup (uploader running + exactly one export cron)",
-        )
-        # The check must reject bool (True/False are ints in Python).
-        self.assertIn("bool", backup)
-
-    def test_backup_check_uses_hermes_venv_python(self) -> None:
+    def test_backup_check_uses_canonical_cron_validator(self) -> None:
         backup = _step_text(
             self.workflow,
             "Verify Mnemosyne backup (uploader running + exactly one export cron)",
         )
         self.assertIn("/opt/hermes/.venv/bin/python3", backup)
+        self.assertIn(
+            "/opt/josemar/scripts/verify_mnemosyne_backup_cron.py", backup
+        )
+        self.assertIn("--jobs-file /opt/data/cron/jobs.json", backup)
+        self.assertIn(
+            '--expected-interval "${MNEMOSYNE_BACKUP_EXPORT_INTERVAL}"', backup
+        )
+        self.assertNotIn("<<'PY'", backup)
+        self.assertNotIn('data.get("jobs")', backup)
+        self.assertNotIn("schedule.get", backup)
+
+    def test_dockerfile_copies_canonical_cron_validator(self) -> None:
+        self.assertIn(
+            "COPY scripts/verify_mnemosyne_backup_cron.py "
+            "/opt/josemar/scripts/verify_mnemosyne_backup_cron.py",
+            DOCKERFILE.read_text(encoding="utf-8"),
+        )
 
     def test_mode_specific_steps_gated_correctly(self) -> None:
         steps = self.workflow["jobs"]["deploy"]["steps"]
