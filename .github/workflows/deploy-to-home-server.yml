@@ -1738,56 +1738,11 @@ jobs:
           fi
           echo "mnemosyne-backup-uploader is running"
 
-          echo "Confirming exactly one mnemosyne-backup-export cron job with the real schema..."
-          EXPECTED_INTERVAL="${MNEMOSYNE_BACKUP_EXPORT_INTERVAL}"
-          # The actual jobs.json shape is {"jobs": [...], "updated_at": ...}
-          # with schedule objects {"kind":"interval","minutes":N,"display":"every Nm"},
-          # script="mnemosyne-backup-export.sh", no_agent=true, workdir=/opt/data.
-          docker compose exec -T hermes /opt/hermes/.venv/bin/python3 - "$EXPECTED_INTERVAL" <<'PY'
-          import json, sys, os
-          expected = int(sys.argv[1])
-          try:
-              with open("/opt/data/cron/jobs.json", encoding="utf-8") as fh:
-                  data = json.load(fh)
-          except Exception as exc:
-              print(f"ERROR: could not read /opt/data/cron/jobs.json: {exc}", file=sys.stderr)
-              sys.exit(1)
-          jobs = data.get("jobs")
-          if not isinstance(jobs, list):
-              print("ERROR: jobs.json 'jobs' is not a list", file=sys.stderr)
-              sys.exit(1)
-          export_jobs = [j for j in jobs if isinstance(j, dict) and j.get("name") == "mnemosyne-backup-export"]
-          if len(export_jobs) != 1:
-              print(f"ERROR: expected exactly 1 mnemosyne-backup-export cron job, got {len(export_jobs)}", file=sys.stderr)
-              sys.exit(1)
-          job = export_jobs[0]
-          schedule = job.get("schedule")
-          if not isinstance(schedule, dict):
-              print("ERROR: schedule is not an object", file=sys.stderr)
-              sys.exit(1)
-          if schedule.get("kind") != "interval":
-              print(f"ERROR: schedule.kind is not 'interval' (got: {schedule.get('kind')!r})", file=sys.stderr)
-              sys.exit(1)
-          minutes = schedule.get("minutes")
-          # Reject bool (True/False are ints in Python) and non-int.
-          if not isinstance(minutes, int) or isinstance(minutes, bool):
-              print(f"ERROR: schedule.minutes is not an integer (got: {minutes!r})", file=sys.stderr)
-              sys.exit(1)
-          if minutes != expected:
-              print(f"ERROR: schedule.minutes {minutes} does not match MNEMOSYNE_BACKUP_EXPORT_INTERVAL {expected}", file=sys.stderr)
-              sys.exit(1)
-          if job.get("script") != "mnemosyne-backup-export.sh":
-              print(f"ERROR: script is not 'mnemosyne-backup-export.sh' (got: {job.get('script')!r})", file=sys.stderr)
-              sys.exit(1)
-          if job.get("no_agent") is not True:
-              print(f"ERROR: no_agent is not true (got: {job.get('no_agent')!r})", file=sys.stderr)
-              sys.exit(1)
-          workdir = job.get("workdir")
-          if workdir != "/opt/data":
-              print(f"ERROR: workdir is not '/opt/data' (got: {workdir!r})", file=sys.stderr)
-              sys.exit(1)
-          print(f"BACKUP_CRON_OK minutes={minutes} workdir={workdir}")
-          PY
+          echo "Confirming exactly one mnemosyne-backup-export cron job with the canonical validator..."
+          docker compose exec -T hermes /opt/hermes/.venv/bin/python3 \
+            /opt/josemar/scripts/verify_mnemosyne_backup_cron.py \
+            --jobs-file /opt/data/cron/jobs.json \
+            --expected-interval "${MNEMOSYNE_BACKUP_EXPORT_INTERVAL}"
           echo "Mnemosyne backup verified"
 
       - name: Verify vault-recovery deployment (uploader + export cron + plaintext absence)
