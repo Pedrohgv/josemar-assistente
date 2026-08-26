@@ -319,23 +319,30 @@ automation. To display one effective-week grouping where a day-scheduled
 task shows its scheduled week, a week-planned task shows its planned week,
 and everything else falls into a Backlog bucket, define a formula property
 that resolves `scheduled` first, then `planned_week`, then the literal
-Backlog label:
+Backlog bucket:
 
 ```yaml
 formulas:
-  effectiveWeek: 'if(scheduled, date(scheduled).format("YYYY-[W]WW"), if(planned_week, date(planned_week).format("YYYY-[W]WW"), "Backlog"))'
+  effectiveWeek: 'if((scheduled.isEmpty() == false), (date(scheduled) - (duration("1d") * (number(date(scheduled).format("E")) - 1))).format("YYYY-MM-DD"), if((planned_week.isEmpty() == false), date(planned_week).format("YYYY-MM-DD"), "Backlog"))'
 ```
 
-Group the view by `formula.effectiveWeek` (Bases `groupBy.property`). Notes:
+Group the view by `formula.effectiveWeek` (Bases `groupBy.property`). The
+formula value IS the grouping key: a canonical ISO `YYYY-MM-DD` Monday date,
+not a week-number label. It works because:
 
-- Stored task values remain plain Monday dates; the `YYYY-[W]WW` label is
-  presentation-only. The formatter follows the pinned TaskNotes 4.11.1
-  shipped template convention (see the official default base templates),
-  including its calendar-year boundary caveat: around New Year the formatted
-  calendar year and the ISO week year can disagree, so treat boundary labels
-  as approximate.
+- `format("E")` yields the ISO weekday number with Monday=`1` through
+  Sunday=`7`; subtracting `duration("1d") * (E - 1)` days from any date
+  lands on that week's Monday — exactly the value week planning stores.
+  Worked example across a calendar-year boundary: `scheduled` 2026-01-02
+  (Friday, `E`=5) derives 2026-01-02 − 4 days = **2025-12-29**, and a task
+  week-planned as `planned_week` 2025-12-29 formats to **2025-12-29** —
+  both land in the same group.
+- Pinned Bases provides no native start-of-week/week arithmetic, so the
+  duration arithmetic above uses only officially supported primitives
+  (`isEmpty`, `date`, `duration`, `number`, `format` with the `E` token).
 - Formula syntax and grouping behavior must be validated in the app
-  (Obsidian Bases) against your own vault before relying on them.
+  (Obsidian Bases) against your own vault before relying on them; CI cannot
+  execute Bases formulas.
 - Formula-derived grouping is read-only presentation: dragging a card in a
   formula-grouped view cannot reschedule the underlying task. Rescheduling
   goes through the MCP tools or explicit Obsidian edits.
@@ -362,10 +369,13 @@ require pausing the owned jobs:
    legacy metadata expressed week-only planning, run
    `task_update(planned_week="<Monday>")`. Setting the week plan also clears
    `scheduled`; tasks with a real day schedule keep it untouched.
-3. **Remove legacy `scheduled_week` metadata.** Delete the stale key from
-   task frontmatter (direct Obsidian edit or operator tooling; the MCP never
-   writes that key). Stale metadata can mislead callers until removed, so
-   treat this as a required rollout step, not cleanup-on-demand.
+3. **Clear legacy `scheduled_week` metadata through the bounded MCP path.**
+   While the legacy field is still configured as a user field, clear it per
+   task with `task_update(custom_fields={"scheduled_week": null})`. This
+   must happen BEFORE retiring the configuration entry: once the field
+   leaves the profile, the generic `custom_fields` argument rejects unknown
+   keys. Stale metadata can mislead callers until cleared, so treat this as
+   a required rollout step, not cleanup-on-demand.
 4. **Update the private Base.** Switch week grouping to the effective-week
    formula above (`scheduled` precedence, then `planned_week`, then
    Backlog).

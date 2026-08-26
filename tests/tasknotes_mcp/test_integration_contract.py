@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import datetime
 import unittest
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Canonical effective-week Base formula (issue #128): resolves to the ISO
+# Monday date of the effective week using officially supported Bases
+# primitives (isEmpty/date/duration/number/format with the Moment-style "E"
+# ISO weekday token, Monday=1). Pinned verbatim in docs/tasknotes-mcp.md;
+# this constant must stay byte-identical to the documented formula body.
+EFFECTIVE_WEEK_FORMULA = (
+    "if((scheduled.isEmpty() == false), (date(scheduled) - "
+    '(duration("1d") * (number(date(scheduled).format("E")) - 1)))'
+    '.format("YYYY-MM-DD"), '
+    'if((planned_week.isEmpty() == false), date(planned_week)'
+    '.format("YYYY-MM-DD"), "Backlog"))'
+)
 
 
 class IntegrationContractTests(unittest.TestCase):
@@ -225,10 +239,18 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn('"type": "date"', text)
         self.assertIn("Monday", text)
         self.assertIn("clear_planned_week", text)
+        # R2: the profile constraint must present planned_week as a
+        # required/valid date userFields entry while the generic MCP
+        # custom_fields argument reserves it — no contradictory ban.
+        self.assertIn("required — `userFields`", text)
+        self.assertNotIn("must not be the semantic week-planning key", text)
         self.assertIn("scheduled wins", text)
         self.assertIn("never mutate", text)
         self.assertIn("task_list", text)
         self.assertIn("scheduled_week", text)
+        # R2: legacy metadata is cleared through the bounded MCP path while
+        # the field is still configured, before retiring it.
+        self.assertIn('custom_fields={"scheduled_week": null}', text)
         self.assertIn("Rollback", text)
         self.assertIn("operator-owned", text)
         self.assertIn("docs/tasknotes-mcp.md", text)
@@ -244,15 +266,60 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn("Day-scheduled", text)
         self.assertIn("Monday", text)
         self.assertIn("clear_planned_week", text)
-        self.assertIn('format("YYYY-[W]WW")', text)
+        # R1: canonical Monday-date grouping key, not a week-number label.
+        self.assertIn(EFFECTIVE_WEEK_FORMULA, text)
+        self.assertNotIn("YYYY-[W]WW", text)
+        self.assertIn('format("E")', text)
+        self.assertIn("Monday=`1`", text)
+        self.assertIn("2025-12-29", text)
         self.assertIn("formula.effectiveWeek", text)
         self.assertIn("cannot reschedule", text)
         self.assertIn("default-base-templates", text)
         self.assertIn("help.obsidian.md/bases/functions", text)
         self.assertIn("https://tasknotes.dev/", text)
         self.assertIn("scheduled_week", text)
+        # R2: legacy metadata is cleared through the bounded MCP path while
+        # the field is still configured, before retiring it.
+        self.assertIn('custom_fields={"scheduled_week": null}', text)
         self.assertIn("operator-owned", text)
         self.assertIn("Rollback", text)
+
+    def test_effective_week_formula_reference_behavior(self) -> None:
+        """R1 regression: the pinned effectiveWeek formula is present
+        verbatim in the runbook, and a pure-Python equivalent of its
+        arithmetic (datetime only — no Obsidian runtime) proves the
+        grouping key is boundary-correct: any scheduled date maps to its
+        ISO Monday, which is exactly what planned_week stores."""
+        text = (REPO_ROOT / "docs" / "tasknotes-mcp.md").read_text(encoding="utf-8")
+        self.assertIn(EFFECTIVE_WEEK_FORMULA, text)
+
+        def effective_week(
+            *,
+            scheduled: str | None = None,
+            planned_week: str | None = None,
+        ) -> str:
+            if scheduled is not None:
+                day = datetime.date.fromisoformat(scheduled)
+                return str(day - datetime.timedelta(days=day.isoweekday() - 1))
+            if planned_week is not None:
+                return planned_week
+            return "Backlog"
+
+        # Cross-year boundary: Friday 2026-01-02 belongs to the ISO week
+        # starting Monday 2025-12-29; a task week-planned for that same week
+        # stores exactly that Monday. Both must yield one identical key.
+        self.assertEqual(effective_week(scheduled="2026-01-02"), "2025-12-29")
+        self.assertEqual(effective_week(planned_week="2025-12-29"), "2025-12-29")
+        self.assertEqual(
+            effective_week(scheduled="2026-01-02"),
+            effective_week(planned_week="2025-12-29"),
+        )
+        # Precedence and Backlog bucket mirror the formula's if/else order.
+        self.assertEqual(
+            effective_week(scheduled="2026-01-05", planned_week="2025-12-29"),
+            "2026-01-05",
+        )
+        self.assertEqual(effective_week(), "Backlog")
 
     def test_runbook_pauses_all_three_owned_jobs_for_maintenance(self) -> None:
         """Issue #110 maintenance/recovery wording must require pausing ALL

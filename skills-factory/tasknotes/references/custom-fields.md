@@ -24,9 +24,11 @@ Each entry is an object with:
 - `key` must be unique across all user fields
 - `key` must not collide with reserved frontmatter keys (`type`, `tags`, `slug`, `ingested_via`, `ingested_at`, `source_kind`)
 - `key` must not collide with modeled field mapping values (the property names used for status, priority, due, scheduled, projects, completedDate)
-- `key` must not be the semantic week-planning key `planned_week`: it is a
-  first-class tool argument, never writable through `custom_fields` (see
-  "Week planning" below)
+- `planned_week` is a valid — and for week planning, required — `userFields`
+  entry of type `date` (see "Week planning" below). Separately, the MCP's
+  generic `custom_fields` argument reserves that key and always rejects it:
+  callers set and clear week planning only through the first-class
+  `planned_week`/`clear_planned_week` arguments
 
 Example `data.json` snippet:
 
@@ -187,9 +189,13 @@ migration":
 1. Define the `planned_week` date user field (snippet above).
 2. Re-express genuine week-only intent as Monday dates via
    `task_update(planned_week=...)`.
-3. Remove stale legacy `scheduled_week` metadata from task frontmatter.
+3. While the legacy field is still configured as a user field, clear stale
+   `scheduled_week` values through the bounded MCP path:
+   `task_update(custom_fields={"scheduled_week": null})`.
 4. Update private Base views to effective-week grouping, then retire the
-   legacy field from the TaskNotes configuration.
+   legacy field from the TaskNotes configuration. Clearing must precede
+   retirement: after the field leaves the profile, the generic
+   `custom_fields` argument rejects the unknown key.
 
 **Rollback:** code rollback restores the prior MCP schema; vault-side
 rollback is to stop using/remove `planned_week` values and restore the prior
