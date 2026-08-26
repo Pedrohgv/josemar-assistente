@@ -176,6 +176,99 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn("status", text)
         self.assertIn("archived", text)
 
+    def test_skill_documents_three_planning_states(self) -> None:
+        """Issue #128: the always-loaded skill must present exactly the
+        three effective planning states, the first-class/reserved
+        planned_week argument, mutual exclusivity with automatic clearing,
+        and pointers to the detailed reference/runbook."""
+        text = (REPO_ROOT / "skills-factory" / "tasknotes" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("## Planning states", text)
+        self.assertIn("Backlog", text)
+        self.assertIn("Week-planned", text)
+        self.assertIn("Day-scheduled", text)
+        self.assertIn("`planned_week`", text)
+        self.assertIn("Monday", text)
+        self.assertIn("mutually exclusive", text)
+        self.assertIn("automatically clears the other", text)
+        self.assertIn("Never pass `planned_week` through `custom_fields`", text)
+        self.assertIn("reserved", text)
+        self.assertIn("type `date`", text)
+        self.assertIn("`clear_planned_week`", text)
+        self.assertIn("references/custom-fields.md", text)
+        self.assertIn("docs/tasknotes-mcp.md", text)
+
+    def test_skill_stays_concise(self) -> None:
+        """The skill organization policy keeps the always-loaded SKILL.md
+        small; deep configuration/migration detail lives in references/ and
+        the runbook."""
+        text = (REPO_ROOT / "skills-factory" / "tasknotes" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertLess(len(text.splitlines()), 160)
+
+    def test_custom_fields_reference_locks_planned_week_contract(self) -> None:
+        """The reference must document the reserved key, the date user-field
+        prerequisite with a safe configuration snippet, transition
+        semantics, the scheduled-wins normalization trade-off, the read
+        visibility exception, and legacy scheduled_week migration."""
+        text = (
+            REPO_ROOT
+            / "skills-factory"
+            / "tasknotes"
+            / "references"
+            / "custom-fields.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("`planned_week`", text)
+        self.assertIn("rejected inside `custom_fields`", text)
+        self.assertIn('"type": "date"', text)
+        self.assertIn("Monday", text)
+        self.assertIn("clear_planned_week", text)
+        self.assertIn("scheduled wins", text)
+        self.assertIn("never mutate", text)
+        self.assertIn("task_list", text)
+        self.assertIn("scheduled_week", text)
+        self.assertIn("Rollback", text)
+        self.assertIn("operator-owned", text)
+        self.assertIn("docs/tasknotes-mcp.md", text)
+
+    def test_runbook_documents_week_planning_migration_and_bases(self) -> None:
+        """The runbook must document the semantic model, precise
+        transitions, direct-edit trade-off, read visibility, effective-week
+        Base guidance with citations, and the legacy migration/rollback."""
+        text = (REPO_ROOT / "docs" / "tasknotes-mcp.md").read_text(encoding="utf-8")
+        self.assertIn("## Week planning (issue #128)", text)
+        self.assertIn("Backlog", text)
+        self.assertIn("Week-planned", text)
+        self.assertIn("Day-scheduled", text)
+        self.assertIn("Monday", text)
+        self.assertIn("clear_planned_week", text)
+        self.assertIn('format("YYYY-[W]WW")', text)
+        self.assertIn("formula.effectiveWeek", text)
+        self.assertIn("cannot reschedule", text)
+        self.assertIn("default-base-templates", text)
+        self.assertIn("help.obsidian.md/bases/functions", text)
+        self.assertIn("https://tasknotes.dev/", text)
+        self.assertIn("scheduled_week", text)
+        self.assertIn("operator-owned", text)
+        self.assertIn("Rollback", text)
+
+    def test_runbook_pauses_all_three_owned_jobs_for_maintenance(self) -> None:
+        """Issue #110 maintenance/recovery wording must require pausing ALL
+        THREE owned jobs (both refresh crons plus vault-recovery-export);
+        the narrower 'both crons' phrasing must not survive."""
+        text = (REPO_ROOT / "docs" / "tasknotes-mcp.md").read_text(encoding="utf-8")
+        self.assertIn("ALL THREE", text)
+        for job in (
+            "gbrain-refresh",
+            "gbrain-embedding-refresh",
+            "vault-recovery-export",
+        ):
+            self.assertIn(f"`{job}`", text)
+        self.assertNotIn("BOTH", text)
+        self.assertNotIn("Resume both crons", text)
+
     def test_compose_passes_refresh_timeout(self) -> None:
         text = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn("GBRAIN_REFRESH_TIMEOUT=${GBRAIN_REFRESH_TIMEOUT:-240}", text)

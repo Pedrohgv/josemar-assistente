@@ -35,6 +35,12 @@ Design invariants (fixed, do not redesign):
   - Completion date defaults to today in the configured TZ; explicit dates
     must be valid ``YYYY-MM-DD``. Already-completed tasks preserve the
     existing completion date.
+  - Week planning (issue #128) is the semantic ``planned_week`` argument:
+    a valid ``YYYY-MM-DD`` Monday stored under the raw ``planned_week``
+    key, mutually exclusive with ``scheduled`` on MCP writes, reserved
+    from generic custom_fields, and requiring a profile ``userFields``
+    entry of type ``date`` to set. Rewrites normalize a manually
+    inconsistent pair to scheduled-only; reads never mutate.
 """
 
 from __future__ import annotations
@@ -73,6 +79,14 @@ REQUIRED_MAPPINGS: Tuple[str, ...] = (
     "projects",
     "completedDate",
 )
+
+# Semantic week-planning field (issue #128). Stored under the raw
+# ``planned_week`` frontmatter key as the ISO ``YYYY-MM-DD`` date of that
+# week's Monday. It is a first-class MCP argument, NOT a fieldMapping
+# entry: setting it requires a profile ``userFields`` entry with this key
+# and type ``date``, and the key is reserved from generic custom_fields.
+# Native ``scheduled`` wins: an MCP rewrite never persists both keys.
+PLANNED_WEEK_KEY = "planned_week"
 
 # Structural/provenance keys that mapped field values must not collide with.
 # Collisions would corrupt canonical reconstruction (gbrain re-injects
@@ -558,6 +572,30 @@ def _validate_user_fields(value: Any) -> Tuple[Dict[str, Any], ...]:
         seen_ids.add(fid)
         out.append(field)
     return tuple(out)
+
+
+def _require_planned_week_user_field(profile: TaskNotesProfile) -> Dict[str, Any]:
+    """Require a ``planned_week`` user field of type ``date`` in the profile.
+
+    Week planning (issue #128) is stored under the raw ``planned_week``
+    frontmatter key, which must be declared as a TaskNotes user field of
+    type ``date`` for correct plugin/UI behavior. Setting the field fails
+    explicitly (before any side effect) when the definition is missing or
+    has an incompatible type. Normalization of already-stored values does
+    NOT require this definition.
+    """
+    for uf in profile.user_fields:
+        if uf["key"] == PLANNED_WEEK_KEY:
+            if uf["type"] != "date":
+                raise ValidationError(
+                    f"profile user field {PLANNED_WEEK_KEY!r} must have type "
+                    f"'date', found {uf['type']!r}"
+                )
+            return uf
+    raise ValidationError(
+        f"profile must define a {PLANNED_WEEK_KEY!r} user field of type "
+        "'date' to set week planning"
+    )
 
 
 def _git_state_ok(vault: Path, git_env: Dict[str, str]) -> None:
@@ -1773,6 +1811,16 @@ def reconstruct_markdown(
         else:
             fm[key] = value
 
+    # Planning-state invariant (issue #128): native ``scheduled`` wins over
+    # semantic week planning. Whenever a rewrite leaves both keys present
+    # (only possible via manual Obsidian edits), drop the stale
+    # ``planned_week`` so no MCP write persists the inconsistent pair.
+    # Centralized here so every non-delete rewrite (update, complete,
+    # archive, tag paths) normalizes; reads never mutate and delete is
+    # untouched. Works regardless of profile userFields configuration.
+    if PLANNED_WEEK_KEY in fm and profile.mappings["scheduled"] in fm:
+        fm.pop(PLANNED_WEEK_KEY, None)
+
     # Rehydrate structural fields that gbrain returns only at the page level.
     fm["type"] = decoded["type"]
     fm["title"] = decoded["title"]
@@ -1824,8 +1872,20 @@ def build_create_markdown(
     body: str,
     custom_fields: Optional[Dict[str, Any]] = None,
     recurrence: Optional[str] = None,
+    planned_week: Optional[str] = None,
 ) -> str:
-    """Build markdown for a new task (no existing page)."""
+    """Build markdown for a new task (no existing page).
+
+    ``planned_week`` is the semantic week-planning target (issue #128):
+    mutually exclusive with ``scheduled`` and written under the raw
+    ``planned_week`` key, which must be declared as a profile user field
+    of type ``date``.
+    """
+    if scheduled is not None and planned_week is not None:
+        raise ValidationError(
+            "scheduled and planned_week are mutually exclusive; "
+            "choose one planning target"
+        )
     m = profile.mappings
     fm: Dict[str, Any] = {
         "type": "note",
@@ -1839,6 +1899,9 @@ def build_create_markdown(
         fm[m["due"]] = due
     if scheduled is not None:
         fm[m["scheduled"]] = scheduled
+    if planned_week is not None:
+        _require_planned_week_user_field(profile)
+        fm[PLANNED_WEEK_KEY] = planned_week
     if projects is not None:
         fm[m["projects"]] = list(projects)
     if recurrence is not None:
@@ -1911,17 +1974,14 @@ def _normalize_semantic_frontmatter(
     normalized = _strip_provenance(frontmatter)
     for key in ("type", "title", "tags", "slug", profile.mappings["title"]):
         normalized.pop(key, None)
-    # Pinned gbrain normalizes bare TaskNotes dates to midnight UTC strings.
-    for logical in ("due", "scheduled", "completedDate"):
-        key = profile.mappings[logical]
-        value = normalized.get(key)
-        if isinstance(value, str) and _DATE_RE.fullmatch(value):
-            normalized[key] = value + "T00:00:00.000Z"
-    # Custom user fields of type "date" are also normalized by gbrain on disk.
-    for uf in profile.user_fields:
-        if uf["type"] != "date":
-            continue
-        key = uf["key"]
+    # Pinned gbrain normalizes bare TaskNotes dates to midnight UTC strings:
+    # the modeled date mappings, the semantic ``planned_week`` key
+    # (regardless of profile userFields configuration), and custom user
+    # fields declared with type ``date``.
+    date_keys = [profile.mappings[logical] for logical in ("due", "scheduled", "completedDate")]
+    date_keys.append(PLANNED_WEEK_KEY)
+    date_keys.extend(uf["key"] for uf in profile.user_fields if uf["type"] == "date")
+    for key in date_keys:
         value = normalized.get(key)
         if isinstance(value, str) and _DATE_RE.fullmatch(value):
             normalized[key] = value + "T00:00:00.000Z"
@@ -1932,12 +1992,14 @@ def _date_valued_frontmatter_keys(profile: TaskNotesProfile) -> set:
     """Return the set of frontmatter keys that hold bare-date values.
 
     Includes the modeled date mappings (``due``, ``scheduled``,
-    ``completedDate``) and any custom user fields declared with
-    ``type: date``. These are the keys whose values gbrain normalizes
-    to ``YYYY-MM-DDT00:00:00.000Z`` on read and that the write path
-    must collapse back to plain ``YYYY-MM-DD``.
+    ``completedDate``), the semantic ``planned_week`` key (always, even
+    when the profile lacks its userFields definition), and any custom
+    user fields declared with ``type: date``. These are the keys whose
+    values gbrain normalizes to ``YYYY-MM-DDT00:00:00.000Z`` on read and
+    that the write path must collapse back to plain ``YYYY-MM-DD``.
     """
     keys = {profile.mappings[logical] for logical in ("due", "scheduled", "completedDate")}
+    keys.add(PLANNED_WEEK_KEY)
     for uf in profile.user_fields:
         if uf["type"] == "date":
             keys.add(uf["key"])
@@ -2189,13 +2251,21 @@ def _extract_modeled_fields(
     frontmatter: Mapping[str, Any],
     profile: TaskNotesProfile,
 ) -> Dict[str, Any]:
-    """Extract modeled fields from frontmatter using profile mappings."""
+    """Extract modeled fields from frontmatter using profile mappings.
+
+    Also promotes the semantic ``planned_week`` key when present
+    (issue #128) so structured get/list output distinguishes Backlog,
+    week-planned, and day-scheduled tasks. Unrelated user fields stay
+    unexposed.
+    """
     out: Dict[str, Any] = {}
     m = profile.mappings
     for logical in REQUIRED_MAPPINGS:
         key = m[logical]
         if key in frontmatter:
             out[logical] = frontmatter[key]
+    if PLANNED_WEEK_KEY in frontmatter:
+        out[PLANNED_WEEK_KEY] = frontmatter[PLANNED_WEEK_KEY]
     return out
 
 
@@ -2265,6 +2335,18 @@ def validate_optional_date(value: Any, field_name: str) -> Optional[str]:
     if value is None:
         return None
     return validate_date(value, field_name)
+
+
+def validate_planned_week(value: Any) -> str:
+    """Validate a semantic week-planning value (issue #128).
+
+    Must be a valid ``YYYY-MM-DD`` calendar date AND a Monday (the ISO
+    week start). No silent rounding: any non-Monday date is rejected.
+    """
+    value = validate_date(value, "planned_week")
+    if datetime.date.fromisoformat(value).weekday() != 0:
+        raise ValidationError("planned_week must be a Monday (ISO week start)")
+    return value
 
 
 def validate_recurrence(value: Any) -> str:
@@ -2349,6 +2431,15 @@ def validate_custom_fields(
     for key, value in custom_fields.items():
         if not isinstance(key, str) or not key:
             raise ValidationError("custom_fields keys must be non-empty strings")
+        if key == PLANNED_WEEK_KEY:
+            # Reserved semantic key (issue #128): week planning must go
+            # through the dedicated planned_week argument so transition
+            # and invariant logic cannot be bypassed. Rejected even when
+            # the value is None (clearing uses clear_planned_week).
+            raise ValidationError(
+                f"custom field {key!r} is reserved; use the dedicated "
+                "planned_week argument"
+            )
         field = by_key.get(key)
         if field is None:
             raise ValidationError(f"custom field {key!r} is not defined in profile")
@@ -2695,11 +2786,17 @@ class TaskNotesEngine:
         body: str = "",
         custom_fields: Optional[Dict[str, Any]] = None,
         recurrence: Optional[str] = None,
+        planned_week: Optional[str] = None,
     ) -> MutationResult:
         """Create a new task. Rejects completed status and archive tag.
 
         When ``slug`` is ``None``, a slug is auto-generated from the title
         and current timestamp (``YYYY-MM-DD-HHmmss-slugified-title``).
+
+        Planning target (issue #128): at most one of ``scheduled`` and
+        ``planned_week`` may be supplied. ``planned_week`` must be a valid
+        ``YYYY-MM-DD`` Monday and requires a profile ``userFields`` entry
+        of type ``date``; supplying neither creates a Backlog task.
         """
         # Input validation BEFORE preflight (no side effects).
         if slug is None:
@@ -2708,9 +2805,20 @@ class TaskNotesEngine:
         title = validate_title(title)
         body = validate_body(body)
         recurrence_v = validate_recurrence(recurrence) if recurrence is not None else None
+        planned_week_v = (
+            validate_planned_week(planned_week) if planned_week is not None else None
+        )
+        if scheduled is not None and planned_week_v is not None:
+            raise ValidationError(
+                "scheduled and planned_week are mutually exclusive; "
+                "choose one planning target"
+            )
         with Lock(self.lock_path, timeout=self.lock_timeout):
             self._check_recovery_marker()
             profile = self.load_profile()
+            if planned_week_v is not None:
+                # Explicit profile prerequisite check before any side effect.
+                _require_planned_week_user_field(profile)
             st = status if status is not None else profile.default_status
             if st == profile.completed_status:
                 raise ValidationError("create rejects completed status")
@@ -2737,7 +2845,7 @@ class TaskNotesEngine:
             # Build markdown.
             markdown = build_create_markdown(
                 profile, title, st, pr, due_v, scheduled_v, projects_v, tags_v, body,
-                custom_fields_v, recurrence_v,
+                custom_fields_v, recurrence_v, planned_week_v,
             )
             _validate_markdown_bound(markdown)
             expected_document = semantic_from_markdown(markdown, profile)
@@ -2811,6 +2919,8 @@ class TaskNotesEngine:
         clear_projects: bool = False,
         custom_fields: Optional[Dict[str, Any]] = None,
         body: Optional[str] = None,
+        planned_week: Optional[str] = None,
+        clear_planned_week: bool = False,
     ) -> MutationResult:
         """Update status/priority/dates/projects/custom fields and optionally the body.
 
@@ -2818,6 +2928,16 @@ class TaskNotesEngine:
         ``""`` clears the body; a non-empty string replaces the body
         content. Body edits do not affect the title (title edits remain
         unsupported). No completion transition.
+
+        Planning transitions (issue #128): callers express exactly one
+        desired target — ``scheduled=<date>`` sets day scheduling and
+        removes ``planned_week``; ``planned_week=<Monday>`` sets week
+        planning and removes ``scheduled``; ``clear_scheduled`` with no
+        new target removes both (Backlog); ``clear_planned_week`` with no
+        new target removes only ``planned_week`` (a manual ``scheduled``
+        remains authoritative). Contradictory or redundant combinations
+        that compose a set with a clear of the same planning transition
+        are rejected before any side effect.
         """
         validate_slug(slug)
         # Input validation BEFORE preflight.
@@ -2832,11 +2952,15 @@ class TaskNotesEngine:
             priority_v = None
         due_v = validate_optional_date(due, "due") if due is not None else None
         scheduled_v = validate_optional_date(scheduled, "scheduled") if scheduled is not None else None
+        planned_week_v = (
+            validate_planned_week(planned_week) if planned_week is not None else None
+        )
         projects_v = validate_projects(projects) if projects is not None else None
         for name, value in (
             ("clear_due", clear_due),
             ("clear_scheduled", clear_scheduled),
             ("clear_projects", clear_projects),
+            ("clear_planned_week", clear_planned_week),
         ):
             if not isinstance(value, bool):
                 raise ValidationError(f"{name} must be a boolean")
@@ -2846,6 +2970,25 @@ class TaskNotesEngine:
             raise ValidationError("scheduled and clear_scheduled are mutually exclusive")
         if projects is not None and clear_projects:
             raise ValidationError("projects and clear_projects are mutually exclusive")
+        if planned_week is not None and clear_planned_week:
+            raise ValidationError(
+                "planned_week and clear_planned_week are mutually exclusive"
+            )
+        if scheduled is not None and planned_week is not None:
+            raise ValidationError(
+                "scheduled and planned_week are mutually exclusive; "
+                "set one planning target"
+            )
+        if clear_scheduled and planned_week is not None:
+            raise ValidationError(
+                "clear_scheduled cannot be combined with planned_week; "
+                "set the desired target only"
+            )
+        if clear_planned_week and scheduled is not None:
+            raise ValidationError(
+                "clear_planned_week cannot be combined with scheduled; "
+                "set the desired target only"
+            )
         with Lock(self.lock_path, timeout=self.lock_timeout):
             self._check_recovery_marker()
             profile = self.load_profile()
@@ -2856,6 +2999,9 @@ class TaskNotesEngine:
                 status_v = validate_status_value(status_v, profile)
             if priority_v is not None:
                 priority_v = validate_priority_value(priority_v, profile)
+            if planned_week_v is not None:
+                # Explicit profile prerequisite check before any side effect.
+                _require_planned_week_user_field(profile)
             custom_fields_v = validate_custom_fields(custom_fields, profile)
             # Verify gbrain source under lock.
             profile = self._verify_source(profile)
@@ -2884,10 +3030,21 @@ class TaskNotesEngine:
                 updates["due"] = None
             elif due_v is not None:
                 updates["due"] = due_v
-            if clear_scheduled:
-                updates["scheduled"] = None
-            elif scheduled_v is not None:
+            # Planning-state transitions (issue #128): setting one target
+            # clears the other; explicit clears yield Backlog unless a
+            # manual ``scheduled`` exists (scheduled wins). The raw
+            # ``planned_week`` key is applied as a custom update below.
+            if scheduled_v is not None:
                 updates["scheduled"] = scheduled_v
+                updates[PLANNED_WEEK_KEY] = None
+            elif planned_week_v is not None:
+                updates[PLANNED_WEEK_KEY] = planned_week_v
+                updates["scheduled"] = None
+            elif clear_scheduled:
+                updates["scheduled"] = None
+                updates[PLANNED_WEEK_KEY] = None
+            elif clear_planned_week:
+                updates[PLANNED_WEEK_KEY] = None
             if clear_projects:
                 updates["projects"] = None
             elif projects_v is not None:

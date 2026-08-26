@@ -93,6 +93,7 @@ PROFILE = {
     ],
     "userFields": [
         {"id": "pipeline_stage", "key": "pipeline_stage", "type": "text", "label": "Pipeline Stage"},
+        {"id": "planned_week", "key": "planned_week", "type": "date", "label": "Planned week"},
     ],
 }
 
@@ -442,14 +443,55 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
             assert "followup" not in final["tags"], final
             assert final["body"].strip() == "Disposable body preserved by gbrain.", final
 
+            # Week-planning lifecycle (issue #128): bounded real-MCP proof of
+            # the three planning states and the scheduled/planned_week
+            # invariant on a second disposable task.
+            monday = "2026-07-20"  # verified Monday (ISO week start)
+            week_created = await call(
+                session,
+                "task_create",
+                {
+                    "slug": "20260720t090000",
+                    "title": "Disposable week-planned task",
+                    "planned_week": monday,
+                    "body": "Week-only plan.",
+                },
+            )
+            assert week_created["state"] == "applied_and_committed", week_created
+
+            week_fetched = await call(session, "task_get", {"slug": "20260720t090000"})
+            assert str(week_fetched.get("planned_week"))[:10] == monday, week_fetched
+            assert "scheduled" not in week_fetched, week_fetched
+
+            listed = await call(session, "task_list", {"max_results": 10})
+            by_slug = {item["slug"]: item for item in listed["result"]}
+            assert set(by_slug) == {"20260719t120000", "20260720t090000"}, listed
+            assert str(by_slug["20260720t090000"].get("planned_week")) == monday, listed
+
+            # Invariant: setting a day schedule clears the week plan.
+            rescheduled = await call(
+                session,
+                "task_update",
+                {"slug": "20260720t090000", "scheduled": "2026-07-21"},
+            )
+            assert rescheduled["state"] == "applied_and_committed", rescheduled
+            refetched = await call(session, "task_get", {"slug": "20260720t090000"})
+            assert str(refetched["scheduled"])[:10] == "2026-07-21", refetched
+            assert "planned_week" not in refetched, refetched
+
     clean = run(["git", "status", "--porcelain"], env=env, cwd=vault)
     assert clean.strip() == "", clean
     log = run(["git", "log", "--oneline"], env=env, cwd=vault)
-    assert log.count("tasknotes-mcp: task update") == 6, log
+    # 6 mutations for the first task (create, add/remove tag, update,
+    # complete, archive) plus the week-planning create and reschedule.
+    assert log.count("tasknotes-mcp: task update") == 8, log
     task_text = (vault / "tasks" / "20260719t120000.md").read_text(encoding="utf-8")
     assert "archived" in task_text
     assert "pipeline_stage" in task_text
     assert "Disposable body preserved by gbrain." in task_text
+    week_text = (vault / "tasks" / "20260720t090000.md").read_text(encoding="utf-8")
+    assert "scheduled" in week_text
+    assert "planned_week" not in week_text
 
 
 def _assert_fixed_contract_paths_used() -> None:

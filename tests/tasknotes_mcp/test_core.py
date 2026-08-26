@@ -154,6 +154,8 @@ REAL_PROFILE_DATA = {
          "label": "Blocked"},
         {"id": "review_date", "key": "review_date", "type": "date",
          "label": "Review date"},
+        {"id": "planned_week", "key": "planned_week", "type": "date",
+         "label": "Planned week"},
         {"id": "related", "key": "related", "type": "link",
          "label": "Related note"},
         {"id": "team", "key": "team", "type": "enum",
@@ -2808,6 +2810,302 @@ class CustomFieldsTests(unittest.TestCase):
             (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
         )
         self.assertNotIn("team", fm)
+
+
+@unittest.skipUnless(_has_yaml(), "PyYAML required")
+class PlannedWeekTests(unittest.TestCase):
+    """Semantic week-planning model (issue #128).
+
+    Covers the three planning states (Backlog / week-planned / day-
+    scheduled), Monday-only validation, the reserved custom-field key,
+    the profile ``userFields`` date prerequisite, create/update
+    transitions and conflicts, scheduled-wins normalization of manually
+    inconsistent pairs across mutation paths, idempotency, unrelated
+    custom-field preservation, and structured get/list exposure.
+    """
+
+    MONDAY = "2026-08-24"
+    NEXT_MONDAY = "2026-08-31"
+    TUESDAY = "2026-08-25"
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_"))
+        self.engine, self.vault, self.gbrain_bin = _make_engine(self.core, self.tmpdir)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _disk_fm(self, slug: str) -> dict:
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / f"{slug}.md").read_text(encoding="utf-8")
+        )
+        return fm
+
+    def _rewrite_disk_fm(self, slug: str, extra: dict) -> None:
+        """Hand-edit task frontmatter (simulates a manual Obsidian edit)."""
+        import yaml
+        path = self.vault / "tasks" / f"{slug}.md"
+        fm, body = self.core._parse_frontmatter(path.read_text(encoding="utf-8"))
+        fm.update(extra)
+        fm_text = yaml.safe_dump(
+            fm, default_flow_style=False, sort_keys=False, allow_unicode=True
+        )
+        path.write_text(f"---\n{fm_text}---\n{body}", encoding="utf-8")
+
+    def _profile_without_planned_week(self) -> dict:
+        d = copy.deepcopy(REAL_PROFILE_DATA)
+        d["userFields"] = [
+            uf for uf in d["userFields"] if uf["key"] != "planned_week"
+        ]
+        return d
+
+    def _profile_with_wrong_planned_week_type(self) -> dict:
+        d = copy.deepcopy(REAL_PROFILE_DATA)
+        for uf in d["userFields"]:
+            if uf["key"] == "planned_week":
+                uf["type"] = "text"
+        return d
+
+    def _gbrain_cmds(self) -> List[str]:
+        return [c["argv"][0] if c["argv"] else "" for c in _read_calls(self.tmpdir)]
+
+    # -- create states -----------------------------------------------------
+
+    def test_create_backlog_omits_planning_fields(self) -> None:
+        result = self.engine.create("t1", "T", body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertNotIn("scheduled", fm)
+        self.assertNotIn("planned_week", fm)
+
+    def test_create_day_scheduled_writes_scheduled_only(self) -> None:
+        self.engine.create("t1", "T", scheduled="2026-09-01", body="b")
+        fm = self._disk_fm("t1")
+        self.assertEqual(str(fm["scheduled"]), "2026-09-01")
+        self.assertNotIn("planned_week", fm)
+
+    def test_create_week_planned_writes_monday_planned_week(self) -> None:
+        self.engine.create("t1", "T", planned_week=self.MONDAY, body="b")
+        fm = self._disk_fm("t1")
+        self.assertEqual(str(fm["planned_week"]), self.MONDAY)
+        self.assertNotIn("scheduled", fm)
+
+    def test_create_rejects_both_planning_targets(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create(
+                "t1", "T", scheduled="2026-09-01", planned_week=self.MONDAY, body="b"
+            )
+        self.assertNotIn("capture", self._gbrain_cmds())
+
+    def test_create_rejects_non_monday_planned_week(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "T", planned_week=self.TUESDAY, body="b")
+
+    def test_create_rejects_invalid_planned_week_date(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "T", planned_week="not-a-date", body="b")
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "T", planned_week="2026-13-45", body="b")
+
+    # -- profile prerequisite -----------------------------------------------
+
+    def test_create_requires_profile_planned_week_field(self) -> None:
+        _write_profile(self.vault, data=self._profile_without_planned_week())
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "T", planned_week=self.MONDAY, body="b")
+        cmds = self._gbrain_cmds()
+        self.assertNotIn("sync", cmds)
+        self.assertNotIn("capture", cmds)
+
+    def test_create_requires_date_type_for_planned_week(self) -> None:
+        _write_profile(self.vault, data=self._profile_with_wrong_planned_week_type())
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "T", planned_week=self.MONDAY, body="b")
+
+    def test_update_requires_profile_planned_week_field(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        _write_profile(self.vault, data=self._profile_without_planned_week())
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.update("t1", planned_week=self.MONDAY)
+
+    # -- reserved custom-field key ------------------------------------------
+
+    def test_custom_fields_reject_reserved_planned_week_key(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create(
+                "t1", "T", body="b", custom_fields={"planned_week": self.MONDAY}
+            )
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create(
+                "t1", "T", body="b", custom_fields={"planned_week": None}
+            )
+        self.engine.create("t2", "T", body="b")
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.update(
+                "t2", custom_fields={"planned_week": self.MONDAY}
+            )
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.update("t2", custom_fields={"planned_week": None})
+
+    # -- update transitions --------------------------------------------------
+
+    def test_update_sets_week_planned_from_backlog(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        result = self.engine.update("t1", planned_week=self.MONDAY)
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertEqual(str(fm["planned_week"]), self.MONDAY)
+        self.assertNotIn("scheduled", fm)
+
+    def test_update_scheduled_clears_planned_week(self) -> None:
+        self.engine.create("t1", "T", planned_week=self.MONDAY, body="b")
+        result = self.engine.update("t1", scheduled="2026-09-01")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertEqual(str(fm["scheduled"]), "2026-09-01")
+        self.assertNotIn("planned_week", fm)
+
+    def test_update_planned_week_clears_scheduled(self) -> None:
+        self.engine.create("t1", "T", scheduled="2026-09-01", body="b")
+        result = self.engine.update("t1", planned_week=self.MONDAY)
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertEqual(str(fm["planned_week"]), self.MONDAY)
+        self.assertNotIn("scheduled", fm)
+
+    def test_update_clear_scheduled_removes_both_targets(self) -> None:
+        self.engine.create("t1", "T", planned_week=self.MONDAY, body="b")
+        result = self.engine.update("t1", clear_scheduled=True)
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertNotIn("scheduled", fm)
+        self.assertNotIn("planned_week", fm)
+
+    def test_update_clear_planned_week_yields_backlog(self) -> None:
+        self.engine.create("t1", "T", planned_week=self.MONDAY, body="b")
+        result = self.engine.update("t1", clear_planned_week=True)
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertNotIn("planned_week", fm)
+        self.assertNotIn("scheduled", fm)
+
+    def test_update_clear_planned_week_retains_manual_scheduled(self) -> None:
+        self.engine.create("t1", "T", scheduled="2026-09-01", body="b")
+        self._rewrite_disk_fm("t1", {"planned_week": self.MONDAY})
+        result = self.engine.update("t1", clear_planned_week=True)
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertEqual(str(fm["scheduled"]), "2026-09-01")
+        self.assertNotIn("planned_week", fm)
+
+    def test_update_rejects_contradictory_planning_combinations(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        captures_before = self._gbrain_cmds().count("capture")
+        cases = [
+            {"planned_week": self.MONDAY, "clear_planned_week": True},
+            {"scheduled": "2026-09-01", "planned_week": self.MONDAY},
+            {"clear_scheduled": True, "planned_week": self.MONDAY},
+            {"clear_planned_week": True, "scheduled": "2026-09-01"},
+        ]
+        for kwargs in cases:
+            with self.subTest(**kwargs):
+                with self.assertRaises(self.core.ValidationError):
+                    self.engine.update("t1", **kwargs)
+        self.assertEqual(self._gbrain_cmds().count("capture"), captures_before)
+
+    def test_update_rejects_non_monday_planned_week(self) -> None:
+        self.engine.create("t1", "T", body="b")
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.update("t1", planned_week=self.TUESDAY)
+
+    def test_update_planned_week_idempotent(self) -> None:
+        self.engine.create("t1", "T", planned_week=self.MONDAY, body="b")
+        result = self.engine.update("t1", planned_week=self.MONDAY)
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertEqual(str(fm["planned_week"]), self.MONDAY)
+        self.assertNotIn("scheduled", fm)
+        result = self.engine.update("t1", planned_week=self.NEXT_MONDAY)
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertEqual(str(fm["planned_week"]), self.NEXT_MONDAY)
+        self.assertNotIn("scheduled", fm)
+
+    # -- scheduled-wins normalization on rewrites -----------------------------
+
+    def test_unrelated_update_normalizes_manual_inconsistent_pair(self) -> None:
+        self.engine.create("t1", "T", scheduled="2026-09-01", body="b")
+        self._rewrite_disk_fm("t1", {"planned_week": self.MONDAY})
+        result = self.engine.update("t1", priority="high")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertEqual(str(fm["scheduled"]), "2026-09-01")
+        self.assertNotIn("planned_week", fm)
+        self.assertEqual(fm["priority"], "high")
+
+    def test_complete_normalizes_manual_inconsistent_pair(self) -> None:
+        self.engine.create("t1", "T", scheduled="2026-09-01", body="b")
+        self._rewrite_disk_fm("t1", {"planned_week": self.MONDAY})
+        result = self.engine.complete("t1", completion_date="2026-09-01")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertEqual(fm["status"], "done")
+        self.assertEqual(str(fm["scheduled"]), "2026-09-01")
+        self.assertNotIn("planned_week", fm)
+
+    def test_normalization_works_without_profile_planned_week_definition(self) -> None:
+        _write_profile(self.vault, data=self._profile_without_planned_week())
+        self.engine.create("t1", "T", scheduled="2026-09-01", body="b")
+        self._rewrite_disk_fm("t1", {"planned_week": self.MONDAY})
+        result = self.engine.update("t1", priority="high")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertEqual(str(fm["scheduled"]), "2026-09-01")
+        self.assertNotIn("planned_week", fm)
+
+    # -- unrelated custom fields and structured output ------------------------
+
+    def test_planned_week_preserves_unrelated_custom_fields(self) -> None:
+        self.engine.create(
+            "t1", "T", body="b", custom_fields={"pipeline_stage": "drafting"}
+        )
+        result = self.engine.update("t1", planned_week=self.MONDAY)
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        fm = self._disk_fm("t1")
+        self.assertEqual(fm["pipeline_stage"], "drafting")
+        self.assertEqual(str(fm["planned_week"]), self.MONDAY)
+
+    def test_get_exposes_planned_week_only_when_present(self) -> None:
+        self.engine.create("week", "W", planned_week=self.MONDAY, body="b")
+        self.engine.create("day", "D", scheduled="2026-09-01", body="b")
+        self.engine.create("backlog", "B", body="b")
+        fetched = self.engine.get("week")
+        self.assertIn("planned_week", fetched)
+        self.assertEqual(str(fetched["planned_week"])[:10], self.MONDAY)
+        self.assertNotIn("planned_week", self.engine.get("day"))
+        self.assertNotIn("planned_week", self.engine.get("backlog"))
+
+    def test_list_exposes_planned_week_only_when_present(self) -> None:
+        self.engine.create("week", "W", planned_week=self.MONDAY, body="b")
+        self.engine.create("day", "D", scheduled="2026-09-01", body="b")
+        self.engine.create("backlog", "B", body="b")
+        rows = {r["slug"]: r for r in self.engine.list()}
+        self.assertIn("planned_week", rows["week"])
+        self.assertEqual(str(rows["week"]["planned_week"])[:10], self.MONDAY)
+        self.assertNotIn("planned_week", rows["day"])
+        self.assertNotIn("planned_week", rows["backlog"])
+
+    def test_structured_outputs_hide_unrelated_user_fields(self) -> None:
+        self.engine.create(
+            "t1", "T", planned_week=self.MONDAY, body="b",
+            custom_fields={"review_date": "2026-09-01"},
+        )
+        fetched = self.engine.get("t1")
+        self.assertNotIn("review_date", fetched)
+        row = next(r for r in self.engine.list() if r["slug"] == "t1")
+        self.assertNotIn("review_date", row)
+        self.assertIn("planned_week", row)
 
 
 @unittest.skipUnless(_has_yaml(), "PyYAML required")

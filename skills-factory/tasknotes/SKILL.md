@@ -25,6 +25,31 @@ priority, dates, projects, completion, or archival.
 - If the request is ambiguous and the distinction matters, ask whether the user
   wants a tracked task, a recurring task, or an agent-triggered action.
 
+## Planning states
+
+Every task is in exactly one of three effective planning states:
+
+| State | Frontmatter |
+|---|---|
+| Backlog | neither `scheduled` nor `planned_week` |
+| Week-planned | `planned_week` only — the Monday (`YYYY-MM-DD`) of the target week |
+| Day-scheduled | native `scheduled` only |
+
+- `planned_week` is a first-class argument on `task_create` and `task_update`
+  (`clear_planned_week` on update): a week-only target stored as the ISO
+  Monday date. It is not a commitment to any single day.
+- `scheduled` and `planned_week` are mutually exclusive. Setting either
+  automatically clears the other; `clear_scheduled` with no new target
+  removes both (Backlog).
+- Never pass `planned_week` through `custom_fields` — the key is reserved
+  and rejected there. Setting it also requires the profile to define a
+  `planned_week` user field of type `date`.
+- Direct Obsidian edits can leave both keys on one task; reads tolerate that,
+  and the next MCP write keeps `scheduled` and drops stale `planned_week`.
+
+Profile configuration, legacy `scheduled_week` migration, and effective-week
+Base setup: see `references/custom-fields.md` and `docs/tasknotes-mcp.md`.
+
 ## Tools
 
 - `task_create`: create one task. The slug is optional; when omitted, a
@@ -36,18 +61,21 @@ priority, dates, projects, completion, or archival.
   `FREQ=WEEKLY;BYDAY=MO,WE,FR`). Accepts `custom_fields` keyed by field key
   from the profile's user field definitions; see
   `references/custom-fields.md` for types, validation, and how to define
-  custom fields in the plugin configuration.
-- `task_get`: read one task by slug.
+  custom fields in the plugin configuration. Also accepts `planned_week`
+  (Monday `YYYY-MM-DD`, mutually exclusive with `scheduled`).
+- `task_get`: read one task by slug. Includes `planned_week` when set.
 - `task_list`: list structured task metadata with a bounded result count.
   Supports optional filters: `status`, `priority`, `tag`, and `archived`
-  (combine with AND logic).
+  (combine with AND logic). Results include `planned_week` when set.
 - `task_update`: change status, priority, due date, scheduled date,
   projects, custom user fields, or the body. Use the explicit clear flags to remove
   optional fields. Pass `custom_fields` with `null` values to clear custom
   fields. Same dict shape as `task_create`; see `references/custom-fields.md`.
   The optional `body` field edits the task body: `body=None` (default) leaves
   the body unchanged, `body=""` clears it, and a string replaces the body
-  content. Title edits are not supported.
+  content. Title edits are not supported. `planned_week=<Monday>` switches
+  the task to week planning and clears `scheduled`; `clear_planned_week`
+  removes only the week plan.
 - `task_complete`: complete a task. Omit the completion date to use today in the
   configured timezone.
 - `task_archive`: add the configured archive tag. This is idempotent.
@@ -67,7 +95,8 @@ priority, dates, projects, completion, or archival.
 - `task_remove_tag`: remove a custom tag from a task. Rejects the
   task-identification tag and the archive tag. Idempotent.
 
-Dates must use `YYYY-MM-DD`. Keep slugs lowercase and treat them as immutable.
+Dates must use `YYYY-MM-DD`; `planned_week` must additionally be a Monday.
+Keep slugs lowercase and treat them as immutable.
 Use the status and priority values accepted by the current TaskNotes profile;
 if the profile rejects a value, report that constraint instead of guessing.
 
@@ -89,61 +118,18 @@ gbrain-safe (lowercase, hyphens, no spaces).
 
 The TaskNotes plugin is configured via `<vault>/.obsidian/plugins/tasknotes/data.json`.
 The MCP server reads this profile dynamically on every operation and adapts to
-the configured values. All settings can be edited directly in the JSON file or
-configured through the Obsidian UI. See `references/custom-fields.md` for
-defining custom user fields and their per-type constraints.
-
-### Key configuration areas
-
-| Setting area | What it controls | UI path |
-|---|---|---|
-| Task Properties → Status | Custom status labels and order | Settings → TaskNotes → Task Properties → Status |
-| Task Properties → Priority | Custom priority levels and order | Settings → TaskNotes → Task Properties → Priority |
-| Task Properties → Custom User Fields | Arbitrary fields (text, list, date, link, enum, number, boolean) | Settings → TaskNotes → Task Properties → Custom User Fields |
-| Task Defaults → Folder | Where task files are created (`tasksFolder`) | Settings → TaskNotes → Task Defaults |
-| Task Defaults → Filename | Format of task filenames | Settings → TaskNotes → Task Defaults |
-| Views | `.base` files in `TaskNotes/Views/` | Command palette or ribbon icon |
-
-### What the adapter requires vs. adapts to
+the configured values. All settings can be edited in the Obsidian UI
+(Settings → TaskNotes) or directly in the JSON file.
 
 The only hard requirement is `taskIdentificationMethod: "tag"` — the adapter's
-entire model depends on identifying tasks by tag. All other settings are
-config-adaptive:
+entire model depends on identifying tasks by tag. Everything else (statuses,
+priorities, folders, filename format, archive behavior, custom user fields) is
+config-adaptive and validated against the live profile. Views are user-owned
+`.base` files in `TaskNotes/Views/`; create and customize them in Obsidian.
 
-- `tasksFolder`: read dynamically; the adapter writes to whatever folder is
-  configured.
-- `archiveFolder`: when `moveArchivedTasks` is true, the adapter checks both
-  the tasks folder and the archive folder for existing tasks.
-- `storeTitleInFilename` and `taskFilenameFormat`: do not affect adapter-created
-  tasks because gbrain writes files with explicit slugs and the frontmatter
-  title always takes precedence.
-- `customStatuses` and `customPriorities`: the adapter validates against the
-  configured sets and rejects invalid values.
-
-### Current limitations
-
-The adapter does not yet support:
-
-- Unarchive (removing the archive tag without a full unarchive workflow).
-- Rename/move, title edits, bulk operations, raw frontmatter,
-  or inline-task conversion. (Delete is supported via `task_delete`;
-  body edits are supported via `task_update`'s `body` field.)
-
-### Views (.base files)
-
-Views are YAML files stored in `TaskNotes/Views/`. They control how tasks are
-displayed. Key properties:
-
-- `groupBy.property`: what to group columns by (`task.status`,
-  `note.pipeline_stage`, etc.)
-- `config.swimLane`: optional second grouping dimension
-- `config.hideEmptyColumns`: hide columns with no tasks
-- `config.pinnedColumns`: always-visible columns
-- Filters: configured via Bases filter editor in Obsidian
-
-Views are user state (not repo-owned). Create and customize them in Obsidian.
-
-**Full reference:** <https://tasknotes.dev/>
+**Details:** `references/custom-fields.md` (custom user fields, reserved
+`planned_week` date field) and `docs/tasknotes-mcp.md` (profile requirements,
+effective-week Bases, migration runbook). Full reference: <https://tasknotes.dev/>
 
 ## Boundaries
 

@@ -120,6 +120,7 @@ class ServerContractTests(unittest.TestCase):
             body="Details",
             custom_fields=None,
             recurrence=None,
+            planned_week=None,
         )
 
     def test_create_auto_generates_slug_when_omitted(self) -> None:
@@ -144,6 +145,30 @@ class ServerContractTests(unittest.TestCase):
             body="",
             custom_fields=None,
             recurrence=None,
+            planned_week=None,
+        )
+
+    def test_create_forwards_explicit_planned_week(self) -> None:
+        """The semantic week-planning argument is forwarded exactly; the
+        Monday/Mutual-exclusion validation lives in the engine."""
+        self.engine.create.return_value = self.server.MutationResult(
+            state="applied_and_committed", slug="t1", commit_id="abc"
+        )
+        result = self.server.task_create("Task", slug="t1", planned_week="2026-08-24")
+        self.assertEqual(result["state"], "applied_and_committed")
+        self.engine.create.assert_called_once_with(
+            "t1",
+            "Task",
+            status=None,
+            priority=None,
+            due=None,
+            scheduled=None,
+            projects=None,
+            tags=None,
+            body="",
+            custom_fields=None,
+            recurrence=None,
+            planned_week="2026-08-24",
         )
 
     def test_update_forwards_only_supported_fields(self) -> None:
@@ -164,6 +189,8 @@ class ServerContractTests(unittest.TestCase):
             clear_projects=False,
             custom_fields=None,
             body=None,
+            planned_week=None,
+            clear_planned_week=False,
         )
 
     def test_create_forwards_custom_fields(self) -> None:
@@ -187,6 +214,7 @@ class ServerContractTests(unittest.TestCase):
             body="",
             custom_fields={"pipeline_stage": "drafting"},
             recurrence=None,
+            planned_week=None,
         )
 
     def test_update_forwards_custom_fields(self) -> None:
@@ -206,6 +234,56 @@ class ServerContractTests(unittest.TestCase):
             clear_projects=False,
             custom_fields={"pipeline_stage": None},
             body=None,
+            planned_week=None,
+            clear_planned_week=False,
+        )
+
+    def test_update_forwards_explicit_planned_week(self) -> None:
+        """Setting the week-planning target is forwarded exactly; the engine
+        owns the transition (clears native scheduled)."""
+        self.engine.update.return_value = self.server.MutationResult(
+            state="applied_and_committed", slug="t1", commit_id="abc"
+        )
+        result = self.server.task_update("t1", planned_week="2026-08-31")
+        self.assertEqual(result["state"], "applied_and_committed")
+        self.engine.update.assert_called_once_with(
+            "t1",
+            status=None,
+            priority=None,
+            due=None,
+            scheduled=None,
+            projects=None,
+            clear_due=False,
+            clear_scheduled=False,
+            clear_projects=False,
+            custom_fields=None,
+            body=None,
+            planned_week="2026-08-31",
+            clear_planned_week=False,
+        )
+
+    def test_update_forwards_clear_planned_week(self) -> None:
+        """The week-plan clear flag is forwarded exactly; the engine owns the
+        clearing semantics (removes only the week-only plan)."""
+        self.engine.update.return_value = self.server.MutationResult(
+            state="applied_and_committed", slug="t1", commit_id="abc"
+        )
+        result = self.server.task_update("t1", clear_planned_week=True)
+        self.assertEqual(result["state"], "applied_and_committed")
+        self.engine.update.assert_called_once_with(
+            "t1",
+            status=None,
+            priority=None,
+            due=None,
+            scheduled=None,
+            projects=None,
+            clear_due=False,
+            clear_scheduled=False,
+            clear_projects=False,
+            custom_fields=None,
+            body=None,
+            planned_week=None,
+            clear_planned_week=True,
         )
 
     def test_update_forwards_body(self) -> None:
@@ -225,6 +303,8 @@ class ServerContractTests(unittest.TestCase):
             clear_projects=False,
             custom_fields=None,
             body="new body",
+            planned_week=None,
+            clear_planned_week=False,
         )
 
     def test_update_forwards_empty_body(self) -> None:
@@ -244,6 +324,8 @@ class ServerContractTests(unittest.TestCase):
             clear_projects=False,
             custom_fields=None,
             body="",
+            planned_week=None,
+            clear_planned_week=False,
         )
 
     def test_add_tag_forwards_to_engine(self) -> None:
