@@ -127,8 +127,9 @@ def task_create(
     slug: Optional[str] = None,
     custom_fields: Optional[dict[str, Any]] = None,
     recurrence: Optional[str] = None,
+    planned_week: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Create one task. When slug is omitted, a timestamp-prefixed slug is auto-generated from the title (e.g. 2026-07-18-143000-buy-groceries). Dates use YYYY-MM-DD. ``recurrence`` is an optional RFC 5545 RRULE string (e.g. FREQ=WEEKLY;BYDAY=MO,WE,FR)."""
+    """Create one task. When slug is omitted, a timestamp-prefixed slug is auto-generated from the title (e.g. 2026-07-18-143000-buy-groceries). Dates use YYYY-MM-DD. ``recurrence`` is an optional RFC 5545 RRULE string (e.g. FREQ=WEEKLY;BYDAY=MO,WE,FR). ``planned_week`` is optional week-only planning: a YYYY-MM-DD date that must be a Monday. It and ``scheduled`` are mutually exclusive planning targets — supply at most one; neither creates a Backlog task."""
     result = _engine_call(
         "task_create",
         "create",
@@ -143,6 +144,7 @@ def task_create(
         body=body,
         custom_fields=custom_fields,
         recurrence=recurrence,
+        planned_week=planned_week,
     )
     return _mutation_dict(result)
 
@@ -190,8 +192,10 @@ def task_update(
     clear_projects: bool = False,
     custom_fields: Optional[dict[str, Any]] = None,
     body: Optional[str] = None,
+    planned_week: Optional[str] = None,
+    clear_planned_week: bool = False,
 ) -> dict[str, Any]:
-    """Update status, priority, dates, projects, or body; cannot complete a task. ``body=None`` leaves the body unchanged, ``body=""`` clears it, and a string replaces the body content. Title edits are not supported."""
+    """Update status, priority, dates, projects, or body; cannot complete a task. ``body=None`` leaves the body unchanged, ``body=""`` clears it, and a string replaces the body content. Title edits are not supported. Planning targets: ``scheduled`` (YYYY-MM-DD) and ``planned_week`` (YYYY-MM-DD Monday, week-only planning) are mutually exclusive — set exactly one to select that state; setting either clears the other. ``clear_scheduled`` removes both planning fields (Backlog); ``clear_planned_week`` removes only the week-only plan."""
     result = _engine_call(
         "task_update",
         "update",
@@ -206,6 +210,8 @@ def task_update(
         clear_projects=clear_projects,
         custom_fields=custom_fields,
         body=body,
+        planned_week=planned_week,
+        clear_planned_week=clear_planned_week,
     )
     return _mutation_dict(result)
 

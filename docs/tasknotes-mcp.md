@@ -28,6 +28,9 @@ e.g. `FREQ=WEEKLY;BYDAY=MO,WE,FR`) for native TaskNotes repeating tasks. The
 profile must declare a `recurrence` field mapping; otherwise `task_create`
 rejects the call before any Git or gbrain mutation.
 
+`task_create` and `task_update` also accept the semantic `planned_week`
+argument for week-only planning (issue #128); see "Week planning" below.
+
 ## Access non-negotiables (issue #110)
 
 The public `gbrain` command (safe by default) is the single
@@ -52,11 +55,13 @@ bounded pattern).
   transaction-level global lock). Conversely, the public wrapper must never be
   used for TaskNotes task-file mutations and must never call into TaskNotes.
   Task-file mutations go through the `task_*` MCP tools only.
-- **Pause both crons for maintenance windows.** For recovery, reindex/rebuild,
-  migrations, vault swaps, and unadapted/third-party diagnostics, the operator
-  pauses BOTH `gbrain-refresh` and `gbrain-embedding-refresh` (procedure in
-  `docs/gbrain-operations.md` → "Cron Pause/Resume for Maintenance Windows").
-  Routine adapted access does not require pausing.
+- **Pause ALL THREE owned jobs for maintenance windows.** For recovery,
+  reindex/rebuild, migrations, vault swaps, and unadapted/third-party
+  diagnostics, the operator pauses `gbrain-refresh`,
+  `gbrain-embedding-refresh`, AND `vault-recovery-export` — a lock-held
+  export would repopulate state inside the window (procedure in
+  `docs/gbrain-operations.md` → "Cron Pause/Resume for Maintenance
+  Windows"). Routine adapted access does not require pausing.
 
 ## External prerequisites
 
@@ -104,6 +109,11 @@ the profile differs. Required settings are:
 - unique, non-conflicting mappings for title, status, priority, due, scheduled,
   projects, and completed date;
 - a valid archive tag different from the task-identification tag.
+
+Week planning additionally requires a `userFields` entry with key
+`planned_week` and type `date` — but only when a caller actually sets
+`planned_week`; see "Week planning" below for the exact prerequisite and
+failure behavior.
 
 The adapter is config-adaptive for other plugin settings:
 
@@ -241,6 +251,144 @@ For discovery, use ``task_list`` with tag or status filters to find all tasks
 linked to a parent project, or inspect the ``projects`` field in individual
 ``task_get`` responses.
 
+## Week planning (issue #128)
+
+The MCP models three unambiguous planning states. A task is in exactly one:
+
+| State | Frontmatter |
+|---|---|
+| Backlog | neither `scheduled` nor `planned_week` |
+| Week-planned | `planned_week` only |
+| Day-scheduled | native `scheduled` only |
+
+`planned_week` is a first-class argument on `task_create` and `task_update`
+(`clear_planned_week` on update), stored under the raw `planned_week`
+frontmatter key as the ISO `YYYY-MM-DD` date of the target week's Monday. It
+expresses week-only intent ("sometime that week") without fabricating an
+exact day.
+
+### API semantics
+
+- **Validation.** `planned_week` must be a valid `YYYY-MM-DD` calendar date
+  AND a Monday (the ISO week start). Non-Monday dates are rejected; nothing
+  is silently rounded.
+- **Mutual exclusivity.** Supplying both `scheduled` and `planned_week` on
+  create or update is rejected before any side effect.
+- **Create.** At most one target: `scheduled=<date>` (day-scheduled),
+  `planned_week=<Monday>` (week-planned), neither (Backlog).
+- **Update transitions.**
+  - `scheduled=<date>` → sets `scheduled`, removes `planned_week`.
+  - `planned_week=<Monday>` → sets `planned_week`, removes `scheduled`.
+  - `clear_scheduled=true` with no new target → removes both (Backlog).
+  - `clear_planned_week=true` with no new target → removes only
+    `planned_week`; on a manually inconsistent task an existing `scheduled`
+    remains authoritative.
+  - Contradictory or redundant combinations that express both a set and a
+    clear for the same planning transition are rejected before any side
+    effect. Callers set the desired target state instead of composing both
+    halves.
+- **Normalization.** The invariant is centralized in the core rewrite layer:
+  whenever any non-delete MCP mutation rewrites an existing task carrying
+  both keys (only possible via direct/manual Obsidian edits), native
+  `scheduled` wins and the stale `planned_week` is dropped. This keeps
+  `task_complete`, archive/tag updates, and unrelated `task_update` calls
+  from perpetuating an inconsistent pair. Reads never mutate state merely to
+  repair it — the manual-edit inconsistency is an accepted trade-off of this
+  design.
+- **Reserved key.** `planned_week` cannot be written through generic
+  `custom_fields` (rejected even with a `null` value), so the transition and
+  invariant logic cannot be bypassed.
+- **Profile prerequisite.** Setting `planned_week` requires the profile to
+  define a `userFields` entry with key `planned_week` and type `date`. A
+  missing definition or incompatible type fails explicitly before any Git or
+  gbrain side effect. Normalizing already-stored values does not require the
+  definition.
+- **Read visibility.** Unlike other custom user fields, `planned_week` is
+  promoted into structured `task_list` results and `task_get` output so
+  automated callers can distinguish Backlog, week-planned, and day-scheduled
+  tasks without raw-frontmatter access. No new list filter was added.
+- **No upgrade, no workflows.** TaskNotes remains pinned to `4.11.1`. This
+  feature introduces no plugin upgrade and no TaskNotes Workflows or other
+  Obsidian-side synchronization dependency.
+
+### Effective-week Base views (operator-owned)
+
+`.base` views are private user state. They are NOT repository-owned: never
+commit them to this repository and never manipulate them from repo
+automation. To display one effective-week grouping where a day-scheduled
+task shows its scheduled week, a week-planned task shows its planned week,
+and everything else falls into a Backlog bucket, define a formula property
+that resolves `scheduled` first, then `planned_week`, then the literal
+Backlog bucket:
+
+```yaml
+formulas:
+  effectiveWeek: 'if((scheduled.isEmpty() == false), (date(scheduled) - (duration("1d") * (number(date(scheduled).format("E")) - 1))).format("YYYY-MM-DD"), if((planned_week.isEmpty() == false), date(planned_week).format("YYYY-MM-DD"), "Backlog"))'
+```
+
+Group the view by `formula.effectiveWeek` (Bases `groupBy.property`). The
+formula value IS the grouping key: a canonical ISO `YYYY-MM-DD` Monday date,
+not a week-number label. It works because:
+
+- `format("E")` yields the ISO weekday number with Monday=`1` through
+  Sunday=`7`; subtracting `duration("1d") * (E - 1)` days from any date
+  lands on that week's Monday — exactly the value week planning stores.
+  Worked example across a calendar-year boundary: `scheduled` 2026-01-02
+  (Friday, `E`=5) derives 2026-01-02 − 4 days = **2025-12-29**, and a task
+  week-planned as `planned_week` 2025-12-29 formats to **2025-12-29** —
+  both land in the same group.
+- Pinned Bases provides no native start-of-week/week arithmetic, so the
+  duration arithmetic above uses only officially supported primitives
+  (`isEmpty`, `date`, `duration`, `number`, `format` with the `E` token).
+- Formula syntax and grouping behavior must be validated in the app
+  (Obsidian Bases) against your own vault before relying on them; CI cannot
+  execute Bases formulas.
+- Formula-derived grouping is read-only presentation: dragging a card in a
+  formula-grouped view cannot reschedule the underlying task. Rescheduling
+  goes through the MCP tools or explicit Obsidian edits.
+
+References: [TaskNotes documentation](https://tasknotes.dev/) (pinned
+4.11.1) and its official
+[default base templates](https://github.com/callumalpass/tasknotes/blob/main/docs/views/default-base-templates.md);
+[Obsidian Bases functions reference](https://help.obsidian.md/bases/functions).
+
+### Legacy `scheduled_week` migration (operator)
+
+Earlier design discussion used a `scheduled_week` metadata key. It is not
+retained as a cache or alias. The repository change ships code and docs
+only: private `.base` files and vault task state are operator-owned and must
+never be committed to or manipulated by this repository change. The
+migration is a normal operator rollout — routine adapted MCP access does not
+require pausing the owned jobs:
+
+1. **Define the `planned_week` date field.** Add the `userFields` entry
+   (type `date`) via Settings → TaskNotes → Task Properties → Custom User
+   Fields, or via a backed-up, JSON-validated edit of `data.json` (see
+   `skills-factory/tasknotes/references/custom-fields.md`).
+2. **Migrate genuine week-only intent to Monday dates.** For each task whose
+   legacy metadata expressed week-only planning, run
+   `task_update(planned_week="<Monday>")`. Setting the week plan also clears
+   `scheduled`; tasks with a real day schedule keep it untouched.
+3. **Clear legacy `scheduled_week` metadata through the bounded MCP path.**
+   While the legacy field is still configured as a user field, clear it per
+   task with `task_update(custom_fields={"scheduled_week": null})`. This
+   must happen BEFORE retiring the configuration entry: once the field
+   leaves the profile, the generic `custom_fields` argument rejects unknown
+   keys. Stale metadata can mislead callers until cleared, so treat this as
+   a required rollout step, not cleanup-on-demand.
+4. **Update the private Base.** Switch week grouping to the effective-week
+   formula above (`scheduled` precedence, then `planned_week`, then
+   Backlog).
+5. **Retire the old profile field.** Remove the legacy `scheduled_week`
+   entry from the TaskNotes configuration so it stops appearing as an
+   available property.
+
+**Rollback.** Code rollback restores the prior MCP schema; calls using
+`planned_week` disappear and any stored frontmatter keys become inert
+metadata. Vault-side rollback is simply to stop using/remove `planned_week`
+values and restore the prior private Base if desired. No schema/database
+migration and no TaskNotes upgrade is introduced in either direction.
+
 ## Current limitations
 
 The adapter does not yet support:
@@ -287,8 +435,9 @@ on disk, and the next sync cycle will re-import it.
 When `recovery_required` occurs, later mutations are blocked by
 `/opt/data/.locks/tasknotes-recovery.marker`.
 
-1. Pause BOTH refresh crons for the window (`gbrain-refresh` and
-   `gbrain-embedding-refresh`; see `docs/gbrain-operations.md` → "Cron
+1. Pause ALL THREE owned jobs for the window (`gbrain-refresh`,
+   `gbrain-embedding-refresh`, and `vault-recovery-export`; see
+   `docs/gbrain-operations.md` → "Cron
    Pause/Resume for Maintenance Windows"). Stop task mutations and inspect the
    reported task, vault Git status, free
    space, permissions, and gbrain source status.
@@ -303,7 +452,8 @@ When `recovery_required` occurs, later mutations are blocked by
      'rm -- /opt/data/.locks/tasknotes-recovery.marker'
    ```
 
-Resume both crons only after step 4 and a successful verification read.
+Resume all three owned jobs only after step 4 and a successful verification
+read.
 
 Never remove the marker merely to retry a failed call.
 
