@@ -40,6 +40,7 @@ jobs:
           WORKSPACE_STATE_REPO: ${{ vars.WORKSPACE_STATE_REPO }}
           SYNCTHING_GUI_BIND_IP: ${{ vars.SYNCTHING_GUI_BIND_IP }}
           HERMES_DASHBOARD_BIND_IP: ${{ vars.HERMES_DASHBOARD_BIND_IP }}
+          HERMES_BASE_IMAGE: ${{ vars.HERMES_BASE_IMAGE }}
           BROWSER_CONTROL_ENABLED_INPUT: ${{ vars.BROWSER_CONTROL_ENABLED }}
           BROWSER_CONTROL_SUBNET: ${{ vars.BROWSER_CONTROL_SUBNET }}
           BROWSER_CONTROL_GATEWAY: ${{ vars.BROWSER_CONTROL_GATEWAY }}
@@ -53,6 +54,21 @@ jobs:
         run: |
           if [ -z "$WORKSPACE_STATE_REPO" ]; then
             echo "ERROR: Repository variable WORKSPACE_STATE_REPO is required"
+            exit 1
+          fi
+
+          # Production base-image pin contract (issue #89, review R1): when
+          # the HERMES_BASE_IMAGE repository variable is set, it must equal
+          # the reviewed Dockerfile.hermes pin exactly. Base-image upgrades
+          # change the Dockerfile ARG pin and the reviewed tripwire
+          # (EXPECTED_HERMES_BASE_IMAGE in
+          # tests/skill_state/test_models_overlay.py) TOGETHER, and the
+          # auxiliary allowlist must be re-reviewed against that release.
+          # Empty is allowed: Compose then uses its repo-authored default.
+          # Local/development override stays outside this production gate.
+          if [ -n "$HERMES_BASE_IMAGE" ] && [ "$HERMES_BASE_IMAGE" != "nousresearch/hermes-agent:v2026.8.18" ]; then
+            echo "ERROR: HERMES_BASE_IMAGE must be empty (repo-authored Compose default) or exactly 'nousresearch/hermes-agent:v2026.8.18' (got: $HERMES_BASE_IMAGE)"
+            echo "       Base-image upgrades change the reviewed pin contract TOGETHER: the Dockerfile.hermes ARG pin, the docker-compose.yml Compose default build arg, and the reviewed tripwire (EXPECTED_HERMES_BASE_IMAGE in tests/skill_state/test_models_overlay.py); update all three and re-review the auxiliary allowlist against the new release before setting this variable."
             exit 1
           fi
 
