@@ -79,6 +79,68 @@ Docker by two fast contract suites that run on ordinary `make test`:
 
 These are unit/contract tests — no Docker, no gbrain binary.
 
+### Browser-routing contract (issue #136, revision 2)
+
+The rev-2 Hermes browser routing (three intentionally distinct routes:
+search/extraction first; ordinary server-headless `browser_*` tools backed
+by baked `agent-browser@0.26.0` + a pinned Chrome for Testing
+(152.0.7977.64, SHA256
+`8b592f066af71f054aab2cc80fc26f73c775c6d44ebb99d16ade924b24756c2e`) baked
+at `/opt/josemar/agent-browser/chrome/chrome` and selected via the image
+`ENV AGENT_BROWSER_EXECUTABLE_PATH` — a sanctioned deviation from the rev-2
+base-cache reuse, because runtime evidence proved the base image's Playwright
+headless-shell is unusable by agent-browser@0.26.0 and the agent-browser
+HOME cache under `/opt/data` is masked by the runtime volume;
+explicit `connected_browser_exec` for the operator's externally connected
+browser via `browser.connected_cdp_url`, fail-closed with no fallback) is
+enforced without Docker by fast contract suites that run on ordinary
+`make test`:
+
+- `tests.runtime.test_browser_routing_contract` — config (`backend: "off"`
+  quoted, `cloud_provider: "local"`, `connected_cdp_url`; no global
+  `cdp_url` key; "must never consume" comment), patch-source shape
+  (importable, fail-loud `replace_once`, 11-needle
+  `assert_upstream_symbols`, `connected_browser_exec` registration in the
+  `browser` toolset with schema code/session/timeout_s and check_fn
+  `is_connected_browser_configured`, `__jc_0`/`__jc_1_` constants, the
+  route-selector env scrub incl. provider/LLM keys, the fixed CLI
+  `/opt/josemar/browser-use/bin/browser-use` invocation with no
+  `uvx`/`_find_cli` in the connected implementation, `_OWN_TAB_PREAMBLE`
+  applied, upstream `browser_exec` body untouched, the `model_tools.py` terminal gate extended, loopback ws authority
+  normalization for non-loopback configured endpoints with the production
+  `127.0.0.1` layout untouched), session mapping (reserved names pass the
+  harness rule `\A[A-Za-z0-9_-]{1,64}\Z` and FAIL `_SESSION_RE` —
+  mechanical disjointness — deterministic, no truncation collisions), a
+  functional apply proof against an anchor/mechanics fixture of the pinned
+  upstream shape (duplicate apply fails loudly, a missing upstream symbol
+  fails loudly, patched modules compile, connected nonzero CLI → generic
+  leak-free error with scrubbed env and own-tab preamble), and the
+  Dockerfile contract (exact `agent-browser@0.26.0` bake; the exact Chrome
+  for Testing URL + version + sha256 co-located in ONE fail-loud RUN block
+  with `sha256sum -c`, whole-tree unzip, `test -x`, version grep, the
+  mandatory headless smoke launch, and tmp cleanup; the exact
+  `ENV AGENT_BROWSER_EXECUTABLE_PATH=` line; both
+  `/opt/josemar/agent-browser` and the
+  `/opt/josemar/browser-use` venv NOT in `HERMES_WRITABLE_VOLUMES` and not
+  under `/opt/data`; the fail-loud
+  patch block py_compiling both files). The skeleton is a MECHANICS
+  fixture, not a claim of complete upstream fidelity — the real Docker
+  image build is the drift proof.
+- `tests.runtime.test_browser_control_skill_contract` — the rev-2 skill
+  (version 3.0.0) requires `connected_browser_exec` only, teaches the
+  three-route decision rule ("different browsers with different state"),
+  keeps every safety concept (web_search preference, scope,
+  prompt-injection, credentials/2FA/CAPTCHA/payment, consequential
+  confirmation, dedicated profile, do-not-close, operator-controlled
+  recovery, setup.md pointer), and forbids the revision-1
+  `use_connected_browser` vocabulary and any "not part of the active tool
+  surface" claim (the built-in `browser_*` tools are the ordinary route,
+  never banned).
+- `tests.runtime.test_browser_tunnel_contract` — the config carries
+  `backend: "off"` / `cloud_provider: "local"` / `connected_cdp_url`
+  (never the global `browser.cdp_url`), and the Dockerfile applies the
+  rev-2 patch fail-loudly with py_compile of both patched modules.
+
 ## Runtime Docker Tests
 
 Runtime tests are skipped unless explicitly enabled:
@@ -124,6 +186,96 @@ Or:
 ```bash
 make test-aux-runtime
 ```
+
+### Browser-routing runtime gate (issue #136, revision 2)
+
+An opt-in Docker suite that builds the disposable Hermes image from the
+production `Dockerfile.hermes` (which exercises the real rev-2 patch path
+plus the `agent-browser@0.26.0` and `/opt/josemar/browser-use` bakes) and
+proves the three-route design inside the container as the `hermes` runtime
+user (never root, per the issue #110 conventions). This gate is the
+authoritative drift/build proof for the patch anchors and the dependency
+bakes. The evidence is layered, and each phase proves exactly what it
+claims:
+
+- **Config schema/startup acceptance**: the runtime config
+  (`/opt/data/config.yaml`) materializes; the real `hermes_cli.config`
+  loader accepts it with `backend: "off"`, `cloud_provider: "local"` and
+  `browser.connected_cdp_url` set; the RAW runtime-file view (real raw
+  reader or direct YAML parse) has no global `browser.cdp_url` key; the
+  gateway is alive (bounded restart count + live gateway process).
+- **LIVE SESSION TOOLSET (the design's core claim)**: in the built image
+  with the shipped config, upstream `browser_exec` is HIDDEN
+  (`is_browser_use_cli_mode() == False` under `backend: "off"`) while
+  `connected_browser_exec` is VISIBLE (`is_connected_browser_configured()
+  == True`) and the built-in `browser_navigate`/`browser_snapshot` exist.
+  The check_fn results are the authoritative visibility gate (they drive
+  tool inclusion in the schema assembly path); registry/toolset
+  introspection is also attempted and reported.
+- **Cold-start ordinary `browser_*`**: `agent-browser@0.26.0` and the pinned
+  Chrome for Testing tree are baked and UNCHANGED across the
+  first real `browser_navigate` + `browser_snapshot` against a disposable
+  loopback HTTP fixture — proving no runtime npx/package/browser download.
+  The proof re-points at the baked tree: a before/after snapshot of
+  `/opt/josemar/agent-browser` plus top-level scans of `$HOME` and `/tmp`
+  must be identical, `$HOME/.agent-browser` (the agent-browser HOME cache,
+  masked by the runtime volume) must stay ABSENT, and
+  `AGENT_BROWSER_EXECUTABLE_PATH` must be set in-container as the hermes
+  user.
+  An unavailable `browser.connected_cdp_url` does not affect ordinary
+  success, and the Hermes container never listens on 9222.
+- **Connected fail-closed**: `connected_browser_exec` with the endpoint
+  down returns the generic connected-route error, never opens/mutates an
+  ordinary headless session, never falls back, and never binds 9222.
+- **Real connected success (required by the plan)**: a separate, disposable
+  Chrome/Chromium fixture container (same built image, own namespace
+  on the isolated Compose network, no published host ports) serves CDP on
+  9222 inside ITS OWN container; the disposable runtime config only (never
+  a tracked file) points `browser.connected_cdp_url` at the fixture. The
+  fixture is a CONTAINER-ONLY test-topology deviation: because Hermes
+  reaches it via the bridge hostname (unlike the real laptop launcher's
+  loopback-only reverse-tunnel posture), Chrome stays loopback-only and a
+  test-only stdlib TCP forwarder exposes its CDP endpoint on `0.0.0.0:9222`
+  inside the fixture container; no host ports are published and the launcher's
+  no-`--remote-allow-origins` posture is kept. The connected preflight
+  normalizes Chrome's loopback-reported
+  websocket authority to the configured fixture authority (only when the
+  configured host is non-loopback; the production `127.0.0.1:9222` layout is
+  untouched), and the normalized route is proven bridge-reachable FROM
+  Hermes with a real TCP connect before the REAL `connected_browser_exec`
+  runs through the REAL `/opt/josemar/browser-use` CLI. Proven: env scrub
+  (ambient route selectors + provider/LLM keys cleared; only the preflighted
+  `BU_CDP_WS` + reserved `BU_NAME` survive), deterministic session mapping
+  with reserved namespace disjointness, own-tab safety (a pre-opened marker
+  tab keeps its URL and stays open — no cross-session attach, no close of
+  unrelated targets), and a hanging CLI killed within the bounded timeout
+  with a generic leak-free error. The Hermes container itself never listens
+  on 9222 during this phase; only the fixture does. A missing browser
+  executable in the built image fails the gate loudly with the
+  fixture-unavailable reason.
+
+Any evidence the pinned image cannot provide (e.g. a patch defect such as
+the W1 `_CONNECTED_BROWSER_CLI` definition gap) fails the gate with the
+exact probe output — success is never faked.
+
+```bash
+RUN_DOCKER_TESTS=1 RUN_BROWSER_ROUTING_RUNTIME_TESTS=1 \
+  python3 -m unittest tests.runtime.test_browser_routing_runtime -v
+```
+
+Or:
+
+```bash
+make test-browser-routing-runtime
+```
+
+It is skipped by default (gated on `RUN_DOCKER_TESTS=1` AND
+`RUN_BROWSER_ROUTING_RUNTIME_TESTS=1`) and never runs on ordinary
+`make test`, `make test-runtime`, or `make verify`. No production
+data/secrets/volumes are mounted; probe artifacts land only under the
+gitignored `dump_folder/browser-routing-runtime/`; teardown is unconditional
+(`docker compose down -v --remove-orphans` plus `docker rm -f` for the
+fixture).
 
 ## Mnemosyne Portuguese Retrieval Quality Gate (Phase 3)
 

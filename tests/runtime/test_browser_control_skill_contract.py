@@ -3,10 +3,13 @@
 The skill is instruction-only (SKILL.md + SETUP.md, no executable) and is
 baked into the Hermes image so it is always registered, regardless of
 whether the browser-control Compose overlay is enabled. The overlay gates the
-tunnel sidecar and network, not the skill. These tests enforce the agreed
-design: valid frontmatter with required tools, generic operator-agnostic
-wording in SKILL.md (operator-specific setup content lives in SETUP.md),
-the native workflow/safety/recovery guidance, and image-baked registration.
+optional connected-browser tunnel sidecar and network, not the skill. These
+tests enforce the agreed rev-2 design: valid frontmatter requiring
+``connected_browser_exec``, the three-route decision rule (search/extraction
+preferred for public research; ordinary server-headless ``browser_*`` tools
+for interactive/rendered work; explicit ``connected_browser_exec`` for the
+operator's externally connected browser — fail-closed, no fallback), the
+safety/recovery guidance, and image-baked registration.
 """
 
 from __future__ import annotations
@@ -65,10 +68,10 @@ def parse_frontmatter(text: str) -> dict:
 
 # Operator-specific / unsupported strings that must not leak into the
 # LLM-facing SKILL.md (runtime-driving guidance). Operator-specific setup
-# content lives in SETUP.md, which has its own content contract. Includes
-# the unsupported `browser_select` tool (pinned Hermes exposes
-# navigate/snapshot/click/type/scroll/back/press/get_images/
-# vision/console/cdp/dialog, not select).
+# content lives in SETUP.md, which has its own content contract. Also
+# forbidden: the revision-1 `use_connected_browser` flag vocabulary and any
+# claim that the built-in browser_* tools are not part of the active surface
+# (they are now the ordinary server-headless route).
 FORBIDDEN_SKILL_STRINGS = [
     "Josemar Browser", "josemar-browser-control", ".josemar-chrome-profile",
     "BROWSER_TUNNEL_AUTHORIZED_KEY", "BROWSER_CONTROL_ENABLED",
@@ -77,21 +80,33 @@ FORBIDDEN_SKILL_STRINGS = [
     "ssh -R", "ssh -N", "ExitOnForwardFailure", "GitHub", "Pedro",
     "josemar-server", "google-chrome", "--user-data-dir",
     "--remote-debugging-port", "0.0.0.0", "browser_select",
+    "use_connected_browser", "not part of the active tool surface",
 ]
 
 # Required substrings in the SKILL.md body, grouped by concern. Each entry is
 # (label, needle) so failures name the missing concept, not just the string.
+# Wording matches the rev-2 skill (version 3.0.0): three intentionally
+# distinct routes — search/extraction first, ordinary server-headless
+# browser_* for interactive work, explicit connected_browser_exec for the
+# operator's externally connected browser (fail-closed, no fallback,
+# operator-controlled recovery).
 REQUIRED_SKILL_STRINGS = [
-    ("headful external browser", "externally connected"),
-    ("headful external browser", "headful"),
+    ("three-route rule", "three intentionally distinct"),
+    ("three-route rule", "different browsers with different state"),
+    ("three-route rule", "search/extraction"),
+    ("three-route rule", "connected_browser_exec"),
+    ("three-route rule", "browser_*"),
     ("web_search preference", "web_search"),
     ("web_search preference", "read-only"),
-    ("snapshot-first workflow", "browser_snapshot"),
-    ("snapshot-first workflow", "snapshot first"),
-    ("snapshot-first workflow", "refs"),
-    ("snapshot-first workflow", "re-snapshot"),
-    ("snapshot-first workflow", "verify"),
-    ("connection-failure recovery", "operator"),
+    ("ordinary route tool vocabulary", "browser_snapshot"),
+    ("ordinary route snapshot workflow", "snapshot"),
+    ("ordinary route snapshot workflow", "re-snapshot"),
+    ("ordinary route snapshot workflow", "refs"),
+    ("no first-use download", "first-use"),
+    ("fail-closed connected route", "fails closed"),
+    ("fail-closed connected route", "fall back to"),
+    ("connected session vocabulary", "session"),
+    ("connection-failure recovery", "operator-controlled"),
     ("connection-failure recovery", "reopen"),
     ("connection-failure recovery", "retry"),
     ("prompt-injection defense", "prompt-injection"),
@@ -100,13 +115,14 @@ REQUIRED_SKILL_STRINGS = [
     ("credential/auth boundaries", "password"),
     ("credential/auth boundaries", "2fa"),
     ("credential/auth boundaries", "payment"),
+    ("credential/auth boundaries", "captcha"),
+    ("consequential confirmation", "consequential"),
+    ("consequential confirmation", "confirm with the user"),
     ("no session termination", "do not close"),
-    ("no session termination", "session"),
     ("task scoping", "scope"),
     ("task scoping", "unrelated"),
-    ("instruction-only/repo-owned", "instruction-only"),
-    ("soft-gate: always registered", "always registered"),
-    ("soft-gate: overlay gates tunnel not skill", "overlay gates"),
+    ("dedicated profile", "dedicated"),
+    ("dedicated profile", "profile"),
     ("setup pointer", "setup.md"),
 ]
 
@@ -176,7 +192,7 @@ class BrowserControlSkillContractTests(unittest.TestCase):
             self.skipTest("PyYAML not available")
         data = parse_frontmatter(self.text)
         self.assertEqual(data.get("name"), "browser-control")
-        self.assertEqual(data.get("version"), "1.1.0")
+        self.assertEqual(data.get("version"), "3.0.0")
         desc = data.get("description")
         self.assertIsInstance(desc, str)
         assert isinstance(desc, str)
@@ -186,8 +202,14 @@ class BrowserControlSkillContractTests(unittest.TestCase):
         requires = hermes.get("requires_tools")
         self.assertIsInstance(requires, list, "metadata.hermes.requires_tools must be a list")
         assert isinstance(requires, list)
-        self.assertIn("browser_navigate", requires)
-        self.assertIn("browser_snapshot", requires)
+        # Version 3.0.0 (issue #136 rev-2): the skill requires the explicit
+        # connected_browser_exec tool. The ordinary server-headless route is
+        # the built-in browser_* tools (not gated by requires_tools), and
+        # upstream browser_exec is hidden by browser.backend: "off".
+        self.assertIn("connected_browser_exec", requires)
+        self.assertNotIn("browser_exec", requires)
+        self.assertNotIn("browser_navigate", requires)
+        self.assertNotIn("browser_snapshot", requires)
 
     def test_skill_body_is_generic_and_accurate(self) -> None:
         for needle in FORBIDDEN_SKILL_STRINGS:
@@ -339,6 +361,10 @@ class BrowserControlDocsAccuracyTests(unittest.TestCase):
         self.assertIn(
             "baked", self.docs,
             "docs should state the repo-owned skill is baked into the image",
+        )
+        self.assertIn(
+            "connected_browser_exec", self.docs,
+            "docs should describe the separate connected_browser_exec route",
         )
 
 

@@ -1,10 +1,117 @@
 # Remote Browser Control
 
-Optional Compose overlay that lets a laptop expose its local Chrome DevTools
-Protocol (CDP) endpoint to the Josemar Hermes gateway over a reverse SSH
-tunnel, so Hermes can drive the laptop's Chrome as a remote browser client.
-Disabled by default; enabling it does not change Syncthing, the Obsidian vault,
-Tailscale node identity, or any existing service.
+Josemar has three intentionally distinct web-access paths. This document is
+the operator-facing architecture and routing guide. It is also the source of
+truth for the optional **browser-control overlay**, which provides exactly one
+of those three paths: remote access to the operator's laptop browser.
+
+## Three-route routing model
+
+| Need | Preferred route | Backing |
+| --- | --- | --- |
+| Public facts/read-only research where search/extraction suffices | `web_search` / `web_extract` (Tavily when configured) | no browser |
+| Interactive/rendered page with no need for the operator's existing session | built-in `browser_*` tools | deterministic server-headless Chromium (agent-browser@0.26.0 + pinned Chrome for Testing 152.0.7977.64) |
+| Existing login/cookies/session on the operator's browser, or an explicit request to use that browser | `connected_browser_exec` | optional browser-control overlay (this document) |
+
+The two browser routes are **different browsers with different state**:
+
+- **Server-headless `browser_*` (ordinary route).** Hermes's built-in
+  `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`,
+  `browser_scroll`, `browser_back`, `browser_press`, `browser_get_images`,
+  `browser_vision`, and `browser_console` tools are enabled by
+  `browser.backend: "off"` and `browser.cloud_provider: "local"` in
+  `config/hermes-config.yaml`. They drive a deterministic, server-side
+  headless Chromium baked into the image: `agent-browser@0.26.0` plus a
+  pinned full Chrome for Testing (152.0.7977.64) at
+  `/opt/josemar/agent-browser/chrome/chrome`, selected via the
+  `AGENT_BROWSER_EXECUTABLE_PATH` image ENV.
+  There is no first-use package or browser download. This route is completely
+  independent of the browser-control overlay and works when the laptop tunnel
+  is entirely absent. It shares none of the operator's logins, cookies, or
+  sessions.
+- **`connected_browser_exec` (connected route).** A NEW tool, separate from
+  the built-in `browser_*` tools, registered by a narrow fail-loud Hermes
+  compatibility patch (`scripts/patch-hermes-browser-routing.py`). It drives
+  ONLY the operator's externally connected browser exposed via
+  `browser.connected_cdp_url`, preserves the operator's existing
+  login/session, fails closed when that route is unavailable, and NEVER falls
+  back to the server-headless browser, a cloud browser, or any other browser.
+
+The upstream `browser_exec` tool is hidden under the shipped configuration
+(`browser.backend: "off"`), and the revision-1 connected-mode flag on
+`browser_exec` does not exist.
+
+### Server-headless browser route (deterministic)
+
+- `browser.backend: "off"` is explicit and quoted: it keeps the Browser Use
+  CLI from replacing the built-in browser tools, so upstream `browser_exec`
+  stays hidden.
+- `browser.cloud_provider: "local"` prevents credential auto-detection from
+  silently converting `browser_*` into a cloud browser.
+- The matching `agent-browser@0.26.0` CLI is baked into the image at build
+  time (it is the concrete release matching the pinned Hermes
+  `AGENT_BROWSER_NPX_SPEC = "agent-browser@^0.26.0"` compatibility line).
+  The browser it drives is a pinned full Chrome for Testing
+  (152.0.7977.64, SHA256
+  `8b592f066af71f054aab2cc80fc26f73c775c6d44ebb99d16ade924b24756c2e`,
+  Google's official CfT distribution) baked as the whole extracted tree at
+  `/opt/josemar/agent-browser/chrome/` and selected via the single image
+  `ENV AGENT_BROWSER_EXECUTABLE_PATH=/opt/josemar/agent-browser/chrome/chrome`.
+  This is a sanctioned deviation from the rev-2 default of reusing the Hermes
+  base image's Playwright headless-shell cache: runtime gate evidence proved
+  `agent-browser@0.26.0` does not launch against the base image's
+  headless-shell, and the agent-browser HOME cache under `/opt/data` is
+  masked by the runtime volume, so the browser is baked outside runtime
+  state. No runtime `npx` or package/browser download occurs on first use.
+- There is deliberately no global `browser.cdp_url` / `BROWSER_CDP_URL` for
+  this feature: the ordinary route must never consume the connected endpoint.
+  Those upstream keys remain available only as an operator-level escape hatch
+  if deliberately configured outside this feature.
+
+### Connected-browser tool semantics (`connected_browser_exec`)
+
+- **Config source.** Reads ONLY `browser.connected_cdp_url` straight from the
+  raw config file — never the upstream `_get_cdp_override` chain,
+  `BROWSER_CDP_URL`, or the global `browser.cdp_url`.
+- **Preflight.** Issues a plain `GET <endpoint>/json/version` (never spawns or
+  binds a browser), requires a valid `webSocketDebuggerUrl`, and injects that
+  exact websocket as the ONLY `BU_CDP_WS` in the per-call environment.
+- **CLI.** Invokes the build-owned, immutable environment at the absolute
+  path `/opt/josemar/browser-use/bin/browser-use` (exact
+  `browser-use==0.13.8` + `browser-harness==0.1.9`, installed with the pinned
+  Hermes Python interpreter). It never uses `uvx` and never installs into the
+  Hermes venv or under `$HERMES_HOME`/`/opt/data`.
+- **Session isolation.** Connected sessions map deterministically into a
+  reserved daemon `BU_NAME` namespace — `__jc_0` for the omitted public
+  session, `__jc_1_` + a 43-char digest for named sessions. This
+  underscore-leading namespace is mechanically disjoint from every valid
+  public session name, so no connected daemon can collide with a normal
+  upstream Browser Use daemon. The shared-CDP own-tab/ownership preamble is
+  preserved, so the task does not enumerate or commandeer unrelated tabs.
+- **Fail-closed.** Missing, malformed, unreachable, or disappearing endpoints,
+  and connected subprocess failures, all produce a connected-browser-specific
+  generic failure (no endpoint/websocket/stderr leakage) with NO fallback to
+  the ordinary `browser_*`, Browser Use cloud, Browserbase, or any other
+  browser.
+- **Never auto-start.** The tool never starts a Chrome process on
+  `connected_cdp_url`; that endpoint semantically represents the optional
+  external transport.
+- **Availability check.** The tool's check function inspects static config and
+  executable presence only — no network/CDP probe during schema assembly — so
+  an offline laptop leaves the tool visible and invocation returns actionable
+  connection guidance.
+
+### Browser-control overlay (this document)
+
+The laptop browser exposed via the overlay is the **connected browser**.
+Hermes drives it only through explicit `connected_browser_exec` calls. The
+overlay is an optional Compose file that lets a laptop expose its local Chrome
+DevTools Protocol (CDP) endpoint to the Josemar Hermes gateway over a reverse
+SSH tunnel, so Hermes can drive the laptop's Chrome as a remote browser
+client. Disabled by default; enabling it does not change Syncthing, the
+Obsidian vault, Tailscale node identity, or any existing service. It affects
+only the connected route: the server-headless `browser_*` route and
+search/extraction are unaffected.
 
 > The Desktop app on the laptop is only a **remote client**. The server-side
 > gateway opens CDP inside the Hermes container's network namespace; nothing
@@ -64,11 +171,15 @@ Key points:
 - Tailscale Serve forwards `tcp:2222` on the existing Tailscale node to
   `BROWSER_CONTROL_HERMES_IP:2222` (an explicit IP, not a Docker DNS alias).
   No Funnel, no host port publication.
-- `config/hermes-config.yaml` sets `browser.cdp_url: "http://127.0.0.1:9222"`.
-  No Playwright/Chrome install, no Hermes source patch. The repo-owned
-  `browser-control` skill is baked into the Hermes image (see
-  "Repo-owned browser-control skill" below), so it is always registered and
-  can guide first-time setup and self-diagnose when the overlay is disabled.
+- `config/hermes-config.yaml` sets
+  `browser.connected_cdp_url: "http://127.0.0.1:9222"` — the CDP endpoint
+  `connected_browser_exec` reads, exclusively for the connected route. The
+  narrow fail-loud Hermes compatibility patch
+  (`scripts/patch-hermes-browser-routing.py`) registers the new
+  `connected_browser_exec` tool and keeps its routing separate from the
+  built-in `browser_*` tools and from upstream `browser_exec` (which the
+  shipped `browser.backend: "off"` keeps hidden). The ordinary server-headless
+  route is independent of this endpoint, the overlay, and the tunnel.
 - SSH user (`tunnel`), SSH port (`2222`), and CDP port (`9222`) are fixed
   constants and not configurable.
 
@@ -85,7 +196,9 @@ Browser control lives in a committed overlay file,
   `tcp:2222` forward from a previous enabled deploy. The repo-owned
   `browser-control` skill remains registered (it is baked into the image), so
   Josemar can guide the operator through first-time setup and surface
-  "overlay disabled" as a likely cause when `browser_*` calls fail.
+  "overlay disabled" as a likely cause when `connected_browser_exec` calls
+  fail closed. The server-headless `browser_*` tools are unaffected by the
+  overlay.
 - **Enabled**: the deploy workflow sets
   `COMPOSE_FILE=docker-compose.yml:docker-compose.browser-control.yml` and adds
   `browser-control` to `COMPOSE_PROFILES` (preserving `aux-ml` if enabled).
@@ -195,7 +308,10 @@ desktop entry also exposes a right-click "Stop Josemar Browser" action.
   the menu entry and choose "Stop Josemar Browser", or run
   `josemar-browser-control stop` in a terminal.
 - **Status**: `josemar-browser-control status` reports controller/chrome/tunnel/
-  cdp state without reading page or session contents.
+  cdp state without reading page or session contents. While it reports `cdp`
+  reachable, `connected_browser_exec` can reach the laptop browser; when the
+  tunnel is down, the connected route fails closed. The server-headless
+  `browser_*` tools are unaffected either way.
 
 #### What persists across reboot
 
@@ -362,13 +478,23 @@ From the laptop, after opening the reverse tunnel:
 curl -s http://127.0.0.1:9222/json/version
 ```
 
-Inside Hermes (server-side), CDP is reachable at the configured URL:
+Inside Hermes (server-side), the connected-CDP endpoint configured as
+`browser.connected_cdp_url` is reachable at:
 
 ```bash
 docker compose exec -T hermes curl -s http://127.0.0.1:9222/json/version
 ```
 
-This only works while the laptop's reverse tunnel is up.
+This only works while the laptop's reverse tunnel is up. It verifies only the
+connected route.
+
+The ordinary server-headless `browser_*` route is independent of the overlay:
+it needs no tunnel and no laptop browser, and its Chromium is baked into the
+image. Verify it is enabled from the shipped config
+(`browser.backend: "off"`, `browser.cloud_provider: "local"`) and that no
+global `browser.cdp_url` is set; runtime proof of an ordinary
+`browser_navigate`/`browser_snapshot` cycle is covered by the opt-in
+browser-routing runtime tests.
 
 ## Recovery and restarts
 
@@ -384,6 +510,12 @@ This only works while the laptop's reverse tunnel is up.
   container: `docker compose restart tailscale`.
 - A disabled redeploy writes `{}` into `tailscale-serve-config`, so a stale
   tcp:2222 forward is removed on the next tailscale restart/redeploy.
+- Closing the external browser on the operator side makes the connected-CDP
+  endpoint unreachable, so `connected_browser_exec` calls fail closed with
+  guidance and do NOT fall back to the server-headless browser or a cloud
+  browser. Reopening the external browser restores the endpoint, and later
+  connected calls reconnect without restarting Hermes. The server-headless
+  `browser_*` tools are unaffected either way.
 
 ## Disable / rollback
 
@@ -424,36 +556,42 @@ does not change (it pins the Tailscale node name, not the browser-control IP).
   is unchanged.
 - The `obsidian-vault` volume, rclone backup, and gbrain vault interface are
   untouched.
-- No new Hermes source patch, no Playwright/Chrome install on the server.
+- Outside the browser tools, Hermes behavior is unchanged. The narrow
+  fail-loud compatibility patch is limited to registering the
+  `connected_browser_exec` tool and its connected-only routing; ordinary
+  Hermes behavior and the built-in `browser_*` security/sandbox/SSRF behavior
+  are preserved. The two browser dependencies (`agent-browser@0.26.0` and the
+  `/opt/josemar/browser-use` environment) are provisioned at image build time,
+  not downloaded at runtime.
 
 ## Repo-owned browser-control skill
 
 The repo-owned `skills-factory/browser-control/SKILL.md` is an instruction-only
-skill (a SKILL.md with no executable binary) that teaches the assistant how to
-use the `browser_*` tools against the externally connected browser and what the
-safety boundaries are. Unlike `gbrain`, `aux-ml`, and `workspace-sync`, it
-carries a companion `SETUP.md` with the first-time setup walkthrough (SSH
+skill (a SKILL.md with no executable binary) that teaches the assistant the
+three-route model — search/extraction first, ordinary server-headless
+`browser_*` as the default interactive route, and `connected_browser_exec`
+only for authenticated/session-dependent work in the operator's browser — and
+the safety boundaries of each. It states plainly that `browser_*` and
+`connected_browser_exec` are different browsers with different state and never
+implies a failed connected route may be retried on the headless route when
+authentication/session state matters. `metadata.hermes.requires_tools` is
+`["connected_browser_exec"]`. Unlike `gbrain`, `aux-ml`, and `workspace-sync`,
+it carries a companion `SETUP.md` with the first-time setup walkthrough (SSH
 keypair, server-side overlay enablement, laptop launcher install, Tailscale
 ACL). The skill is **baked into the Hermes image** via
 `COPY skills-factory/browser-control /opt/josemar/skills/browser-control` in
 `Dockerfile.hermes`, so it is always registered regardless of whether the
 browser-control overlay is enabled. This lets Josemar guide the operator
-through first-time setup and self-diagnose when `browser_*` calls fail (the
-skill surfaces both "overlay disabled" and "laptop client offline" as
-possible causes and points to `SETUP.md`).
+through first-time setup and self-diagnose connected failures (the skill
+surfaces "overlay disabled", "client/launcher offline", and "tunnel dropped"
+as possible causes and points to `SETUP.md`).
 
 The overlay no longer bind-mounts the skill directory. The overlay only adds
 the `browser-control` network attachment and the `browser-tunnel` sidecar; the
-skill itself is always present from the image. This does not remove Hermes's
-built-in browser tool schemas; the skill is guidance for driving the
-externally connected browser, not the tool registration mechanism. The skill
-has no executable binary; the actual integration point is Hermes's
-`browser.cdp_url` config in `config/hermes-config.yaml`.
-
-Closing the external browser on the operator side makes the CDP endpoint
-unreachable, so subsequent `browser_*` calls fail. Reopening the external
-browser restores the endpoint, and later `browser_*` calls reconnect without
-restarting Hermes.
+skill itself is always present from the image. The skill has no executable
+binary; the connected-mode integration point is `browser.connected_cdp_url`
+in `config/hermes-config.yaml`, and the server-headless `browser_*` tools do
+not depend on the overlay at all.
 
 ## Warnings
 

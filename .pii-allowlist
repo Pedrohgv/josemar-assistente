@@ -3,6 +3,11 @@
 #   file_path:line_number:kind:value:line_text
 #
 # Keep this file minimal and documented when adding exceptions.
+
+# Pinned Hermes v2026.8.18 upstream commit used by the issue #136 compatibility
+# patch; its numeric run is provenance, not a personal phone number.
+scripts/patch-hermes-browser-routing\.py:\d+:phone:9388[3]84012:.*e624e9fde561e1add9388[3]84012b295fde669ade
+
 agent@josemar\.local
 token@github\.com
 YOUR_GATEWAY_AUTH_PASSWORD@your-domain\.com

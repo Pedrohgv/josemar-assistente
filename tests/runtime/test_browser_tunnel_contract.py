@@ -9,6 +9,7 @@ BROWSER_TUNNEL_DIR = REPO_ROOT / "browser-tunnel"
 ENTRYPOINT = BROWSER_TUNNEL_DIR / "entrypoint.sh"
 SSHD_TEMPLATE = BROWSER_TUNNEL_DIR / "sshd_config.template"
 DOCKERFILE = BROWSER_TUNNEL_DIR / "Dockerfile"
+HERMES_DOCKERFILE = REPO_ROOT / "Dockerfile.hermes"
 COMPOSE = REPO_ROOT / "docker-compose.yml"
 OVERLAY = REPO_ROOT / "docker-compose.browser-control.yml"
 HERMES_CONFIG = REPO_ROOT / "config" / "hermes-config.yaml"
@@ -25,6 +26,23 @@ def service_block(text: str, service: str) -> str:
             end = index
             break
         if line.startswith("  ") and not line.startswith("    ") and line.strip().endswith(":"):
+            end = index
+            break
+    return "".join(lines[start:end])
+
+
+def top_level_block(text: str, key: str) -> str:
+    """Return the column-0 `<key>:` YAML block from a config file."""
+    lines = text.splitlines(keepends=True)
+    marker = f"{key}:\n"
+    try:
+        start = next(index for index, line in enumerate(lines) if line == marker)
+    except StopIteration as exc:
+        raise AssertionError(f"missing top-level YAML key {key!r}") from exc
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line and not line.startswith(" "):
             end = index
             break
     return "".join(lines[start:end])
@@ -136,8 +154,40 @@ class ComposeBrowserControlContractTests(unittest.TestCase):
 
     def test_hermes_config_has_fixed_cdp_url(self) -> None:
         text = HERMES_CONFIG.read_text(encoding="utf-8")
-        self.assertIn("browser:", text)
-        self.assertIn('cdp_url: "http://127.0.0.1:9222"', text)
+        browser_block = top_level_block(text, "browser")
+        # Issue #136 rev-2: the browser block is backend "off" +
+        # cloud_provider "local" (ordinary server-headless browser_* route)
+        # plus the Josemar-owned connected endpoint for connected_browser_exec.
+        self.assertIn('backend: "off"', browser_block)
+        self.assertIn("cloud_provider: \"local\"", browser_block)
+        self.assertIn('connected_cdp_url: "http://127.0.0.1:9222"', browser_block)
+        # The global browser.cdp_url must NOT be defined: the ordinary route
+        # must never consume the connected endpoint.
+        for line in browser_block.splitlines():
+            self.assertNotRegex(
+                line, r"^\s*cdp_url:",
+                f"global browser.cdp_url must not be defined: {line!r}",
+            )
+
+    def test_dockerfile_browser_routing_patch_fail_loud(self) -> None:
+        """The browser-routing patch (issue #136 rev-2) is applied with the
+        same fail-loud COPY + RUN ... && py_compile ... && rm pattern as the
+        other Hermes patchers: any missing upstream anchor, missing
+        upstream symbol, or accidental second apply aborts the build. Both
+        patched modules are compile-checked."""
+        text = HERMES_DOCKERFILE.read_text(encoding="utf-8")
+        self.assertIn(
+            "COPY scripts/patch-hermes-browser-routing.py /tmp/patch-hermes-browser-routing.py",
+            text,
+        )
+        self.assertIn(
+            "RUN python3 /tmp/patch-hermes-browser-routing.py \\\n"
+            "    && /opt/hermes/.venv/bin/python3 -m py_compile \\\n"
+            "        /opt/hermes/tools/browser_use_cli.py \\\n"
+            "        /opt/hermes/model_tools.py \\\n"
+            "    && rm /tmp/patch-hermes-browser-routing.py",
+            text,
+        )
 
     def test_overlay_browser_tunnel_no_host_ports(self) -> None:
         block = service_block(self.overlay, "browser-tunnel")

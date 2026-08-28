@@ -18,9 +18,11 @@
 #
 # The repo-owned browser-control skill is baked into the Hermes image
 # (see Dockerfile.hermes), so this overlay no longer bind-mounts it. The skill
-# is always registered; when this overlay is disabled, `browser_*` calls fail
-# at the CDP endpoint and the skill surfaces both "overlay disabled" and
-# "laptop client offline" as possible causes. See
+# is always registered. This overlay exists only for the connected browser
+# (`connected_browser_exec`), which reads `browser.connected_cdp_url` and
+# fails closed when the overlay is disabled or the laptop client is offline.
+# The ordinary server-headless `browser_*` tools are independent of this
+# overlay and unaffected by it. See
 # skills-factory/browser-control/SKILL.md and SETUP.md.
 #
 # When browser control is disabled, this overlay is NOT applied; the base

@@ -150,6 +150,81 @@ RUN /opt/hermes/.venv/bin/python3 -m ensurepip --upgrade \
     && /usr/bin/python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore \
        pymupdf Markdown==3.7
 
+# Deterministic ordinary-browser route (issue #136): bake exactly
+# agent-browser@0.26.0 — the concrete release matching the pinned Hermes
+# AGENT_BROWSER_NPX_SPEC "agent-browser@^0.26.0" — so the built-in browser_*
+# tools never fall back to a first-use `npx agent-browser` download at
+# runtime. Fail-loud: the version assertion aborts the build if the
+# wrong/missing CLI is installed.
+RUN npm install -g --no-audit --fetch-retries=5 agent-browser@0.26.0 \
+    && test -n "$(command -v agent-browser)" \
+    && agent-browser --version 2>&1 | grep -Eq '^agent-browser v?0\.26\.0$|^v?0\.26\.0$'
+
+# Deterministic Chrome for Testing bake (issue #136; SANCTIONED deviation
+# from the rev-2 default of reusing the Hermes base image's Playwright
+# headless-shell cache). Runtime gate evidence proved agent-browser@0.26.0
+# does NOT launch against the base image's headless-shell, and the
+# agent-browser HOME cache under /opt/data is masked by the runtime volume,
+# so the ordinary browser_* route gets a pinned full Chrome for Testing
+# OUTSIDE runtime state. Provenance: Google's official CfT distribution
+# (storage.googleapis.com/chrome-for-testing-public), version 152.0.7977.64
+# linux64, SHA256
+# 8b592f066af71f054aab2cc80fc26f73c775c6d44ebb99d16ade924b24756c2e. The
+# URL, version, and sha256 live in the SAME RUN block so a version bump
+# cannot silently skip the checksum bump. The whole extracted tree ships at
+# /opt/josemar/agent-browser/chrome/ (chrome, chrome_crashpad_handler,
+# chrome_sandbox, icudtl.dat, libEGL.so, libGLESv2.so, locales/,
+# resources.pak, v8_context_snapshot.bin, and all siblings) and
+# AGENT_BROWSER_EXECUTABLE_PATH points at it — a single source, never set
+# again in compose. Root-owned 0755; NOT in HERMES_WRITABLE_VOLUMES
+# (docker-hermes-init.sh never chowns it); not under /opt/data. The
+# mandatory headless smoke launch catches full-Chrome OS shared-library gaps
+# at build time.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /tmp/cft-bake \
+    && curl -fsSL --retry 3 -o /tmp/cft-bake/chrome-linux64.zip \
+        "https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.64/linux64/chrome-linux64.zip" \
+    && echo "8b592f066af71f054aab2cc80fc26f73c775c6d44ebb99d16ade924b24756c2e  /tmp/cft-bake/chrome-linux64.zip" \
+        > /tmp/cft-bake/chrome-linux64.zip.sha256 \
+    && sha256sum -c /tmp/cft-bake/chrome-linux64.zip.sha256 \
+    && mkdir -p /opt/josemar/agent-browser /tmp/cft-bake/tree \
+    && unzip -q /tmp/cft-bake/chrome-linux64.zip -d /tmp/cft-bake/tree \
+    && mv /tmp/cft-bake/tree/chrome-linux64 /opt/josemar/agent-browser/chrome \
+    && chown -R root:root /opt/josemar/agent-browser/chrome \
+    && chmod -R 0755 /opt/josemar/agent-browser/chrome \
+    && test -x /opt/josemar/agent-browser/chrome/chrome \
+    && /opt/josemar/agent-browser/chrome/chrome --version 2>&1 \
+        | grep -Eq '152\.0\.7977\.64' \
+    && /opt/josemar/agent-browser/chrome/chrome --headless --no-sandbox \
+        --disable-dev-shm-usage --dump-dom about:blank >/dev/null 2>&1 \
+    && rm -rf /tmp/cft-bake
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/opt/josemar/agent-browser/chrome/chrome
+
+# Deterministic connected-browser route (issue #136): build an isolated,
+# immutable Python env at /opt/josemar/browser-use with the pinned Hermes
+# interpreter (bare python3-venv may be absent) and install EXACTLY
+# browser-use==0.13.8 together with its pinned compatibility dependency
+# browser-harness==0.1.9 (both pinned explicitly so the resolved closure is
+# deterministic). Fail-loud assertions verify the console executable and both
+# versions. The env is
+# root-owned and NOT writable by the hermes runtime UID (10000), and is
+# deliberately not part of HERMES_WRITABLE_VOLUMES (docker-hermes-init.sh
+# never chowns it). It is not installed into the Hermes venv and not placed
+# under $HERMES_HOME (/opt/data). connected_browser_exec invokes
+# /opt/josemar/browser-use/bin/browser-use directly — no runtime uvx
+# download.
+RUN /opt/hermes/.venv/bin/python3 -m venv /opt/josemar/browser-use \
+    && /opt/josemar/browser-use/bin/python3 -m pip install --no-cache-dir \
+        browser-use==0.13.8 \
+        browser-harness==0.1.9 \
+    && test -x /opt/josemar/browser-use/bin/browser-use \
+    && /opt/josemar/browser-use/bin/python3 -m pip show browser-use \
+        | grep -q '^Version: 0\.13\.8$' \
+    && /opt/josemar/browser-use/bin/python3 -m pip show browser-harness \
+        | grep -q '^Version: 0\.1\.9$'
+
 COPY scripts/patch-hermes-dashboard-profile-name.py /tmp/patch-hermes-dashboard-profile-name.py
 RUN python3 /tmp/patch-hermes-dashboard-profile-name.py \
     && /opt/hermes/.venv/bin/python3 -m py_compile \
@@ -168,6 +243,20 @@ RUN python3 /tmp/patch-hermes-skills-config.py \
         /opt/hermes/hermes_cli/skills_config.py \
         /opt/hermes/hermes_cli/josemar_skill_state.py \
     && rm /tmp/patch-hermes-skills-config.py
+
+# Josemar connected-browser routing (issue #136, revision 2): patch
+# tools/browser_use_cli.py to register the separate connected_browser_exec
+# tool (drives ONLY browser.connected_cdp_url via the fixed
+# /opt/josemar/browser-use CLI) and patch model_tools.py to extend the
+# session-level terminal gate to the new code-execution tool. Fail-loud like
+# the other patchers: the script raises if any upstream anchor is missing or
+# on accidental second apply.
+COPY scripts/patch-hermes-browser-routing.py /tmp/patch-hermes-browser-routing.py
+RUN python3 /tmp/patch-hermes-browser-routing.py \
+    && /opt/hermes/.venv/bin/python3 -m py_compile \
+        /opt/hermes/tools/browser_use_cli.py \
+        /opt/hermes/model_tools.py \
+    && rm /tmp/patch-hermes-browser-routing.py
 
 COPY --from=gogcli-builder /build/bin/gog /usr/local/bin/gog
 RUN chmod +x /usr/local/bin/gog

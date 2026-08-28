@@ -1,4 +1,5 @@
 .PHONY: test test-runtime test-aux-runtime verify \
+	test-browser-routing-runtime \
 	test-vault-recovery test-vault-recovery-portability test-vault-recovery-round-trip \
 	test-vault-recovery-dr-drill \
 	test-mnemosyne-retrieval test-mnemosyne-retrieval-smoke test-mnemosyne-retrieval-tei-smoke \
@@ -23,6 +24,24 @@ test-runtime:
 
 test-aux-runtime:
 	RUN_DOCKER_TESTS=1 RUN_AUX_ML_RUNTIME_TESTS=1 python3 -m unittest tests.runtime.test_aux_ml_runtime_contract -v
+
+# Browser-routing runtime gate (issue #136, revision 2): builds the
+# disposable Hermes image (which exercises the Dockerfile browser-routing
+# patch + the agent-browser@0.26.0 bake, the pinned Chrome for Testing bake,
+# and the /opt/josemar/browser-use venv bake) and
+# proves the three-route design inside the container as the hermes runtime
+# user (never root): config schema/startup, LIVE SESSION TOOLSET
+# (browser_exec hidden under backend "off", connected_browser_exec visible),
+# cold-start ordinary browser_* success with no runtime download, connected
+# fail-closed with no fallback, and real connected_browser_exec success
+# against a separate disposable CDP fixture (own-tab safety, env scrub,
+# deterministic session mapping, bounded timeout). Skipped unless both
+# RUN_DOCKER_TESTS=1 and RUN_BROWSER_ROUTING_RUNTIME_TESTS=1 are set (the
+# target supplies both); the fast contract suite
+# (tests.runtime.test_browser_routing_contract) runs on ordinary `make test`.
+test-browser-routing-runtime:
+	RUN_DOCKER_TESTS=1 RUN_BROWSER_ROUTING_RUNTIME_TESTS=1 \
+	python3 -m unittest tests.runtime.test_browser_routing_runtime -v
 
 # Vault-recovery Phase 1: fast unit/contract suite (no Docker).
 test-vault-recovery:

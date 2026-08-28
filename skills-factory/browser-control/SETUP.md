@@ -1,14 +1,38 @@
 # Browser Control First-Time Setup
 
 This is the operator-facing setup walkthrough for the browser-control feature.
-The companion `SKILL.md` covers runtime driving of an already-connected
-browser; this file covers the one-time setup that makes the connection
-possible. When the user asks how to set up browser control for the first
-time, read this file and walk them through it. Do not paraphrase from memory.
+The companion `SKILL.md` covers runtime driving of the connected browser via
+`connected_browser_exec`; this file covers the one-time setup that makes that
+connection possible. When the user asks how to set up browser control for the
+first time, read this file and walk them through it. Do not paraphrase from
+memory.
 
 The authoritative source of truth for any detail here is
 `docs/browser-control.md` in the repo. If this file and that doc disagree,
 the doc wins; flag the discrepancy so the doc and this file can be reconciled.
+
+## What this enables
+
+This setup exposes the operator's dedicated laptop browser to Hermes as the
+**connected browser**, driven by `connected_browser_exec` calls. The CDP
+endpoint that tool reads is configured as `browser.connected_cdp_url` in the
+Hermes runtime config, pointing at `http://127.0.0.1:9222` inside the Hermes
+container.
+
+Two browsers, two scopes — this setup covers only the connected one:
+
+- Ordinary interactive/rendered web work uses the built-in server-headless
+  `browser_*` tools, which are independent of this overlay, the tunnel, and
+  every step on this page. They work even when browser control is disabled;
+  nothing here configures them.
+- `connected_browser_exec` reads only `browser.connected_cdp_url` and **fails
+  closed** when it is unavailable. It never silently falls back to the
+  server-headless browser, a cloud browser, or any other browser.
+
+"Server browser is out of scope" language below is scoped to this overlay's
+transport architecture only; it is not a claim that Josemar lacks a
+server-side browser. The ordinary server-headless `browser_*` route always
+exists.
 
 ## Prerequisites
 
@@ -125,7 +149,11 @@ docker compose exec -T hermes curl -s http://127.0.0.1:9222/json/version
 ```
 
 Both should return Chrome's CDP version JSON. The server-side call only
-works while the laptop's reverse tunnel is up.
+works while the laptop's reverse tunnel is up. This is the endpoint
+`browser.connected_cdp_url` points at: when it answers,
+`connected_browser_exec` can reach the laptop browser. The ordinary
+server-headless `browser_*` tools do not use this endpoint and are unaffected
+by whether it answers.
 
 ## macOS / Windows
 
@@ -144,7 +172,11 @@ Linux lifecycle script. These are not tested or supported.
   Also: right-click the menu entry > "Stop Josemar Browser", or
   `josemar-browser-control stop`.
 - **Status**: `josemar-browser-control status` reports controller/chrome/
-  tunnel/cdp state without reading page or session contents.
+  tunnel/cdp state without reading page or session contents. While it reports
+  `cdp` reachable, `connected_browser_exec` calls can reach the laptop
+  browser; when the tunnel is down, the connected route fails closed (it does
+  not fall back to the server-headless browser). The ordinary server-headless
+  `browser_*` tools are unaffected either way.
 
 ## What persists across reboot
 
