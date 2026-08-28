@@ -14,6 +14,7 @@ and strict listing limits/filtering.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import importlib.util
 import json
 import os
@@ -3176,6 +3177,1983 @@ class TagMutationTests(unittest.TestCase):
         self.engine.create("t1", "T", body="b")
         with self.assertRaises(self.core.ValidationError):
             self.engine.remove_tag("t1", "archived")
+
+
+# ---------------------------------------------------------------------------
+# Daily Notes primitives (issue #139, W1a)
+# ---------------------------------------------------------------------------
+
+
+def _make_plain_vault(tmpdir: Path, name: str = "vault") -> Path:
+    """Bare vault directory with .obsidian (no git, no TaskNotes profile)."""
+    vault = tmpdir / name
+    vault.mkdir()
+    (vault / ".obsidian").mkdir()
+    return vault
+
+
+def _write_daily_config(vault: Path, config: dict) -> None:
+    (vault / ".obsidian" / "daily-notes.json").write_text(
+        json.dumps(config), encoding="utf-8"
+    )
+
+
+class DailyNotesConfigTests(unittest.TestCase):
+    """Strict lazy reader for .obsidian/daily-notes.json."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_daily_cfg_"))
+        self.vault = _make_plain_vault(self.tmpdir)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_missing_config_file_fails_closed(self) -> None:
+        with self.assertRaises(self.core.CoreError):
+            self.core.load_daily_notes_config(self.vault)
+
+    def test_missing_obsidian_dir_fails_closed(self) -> None:
+        vault = self.tmpdir / "bare"
+        vault.mkdir()
+        with self.assertRaises(self.core.CoreError):
+            self.core.load_daily_notes_config(vault)
+
+    def test_valid_config_parsed(self) -> None:
+        (self.vault / "journal").mkdir()
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily.md").write_text(
+            "# {{date}}\n", encoding="utf-8"
+        )
+        _write_daily_config(self.vault, {
+            "folder": "journal",
+            "format": "YYYY/MM/DD",
+            "template": "templates/daily.md",
+        })
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.folder, "journal")
+        self.assertEqual(cfg.format, "YYYY/MM/DD")
+        self.assertEqual(cfg.template, "templates/daily.md")
+
+    def test_empty_and_null_values_fall_back_to_defaults(self) -> None:
+        _write_daily_config(self.vault, {
+            "folder": "",
+            "format": None,
+            "template": None,
+        })
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.folder, "")
+        self.assertEqual(cfg.format, "YYYY-MM-DD")
+        self.assertIsNone(cfg.template)
+
+    def test_unknown_keys_ignored(self) -> None:
+        _write_daily_config(self.vault, {
+            "folder": "journal",
+            "autorun": True,
+            "somethingElse": {"nested": 1},
+        })
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.folder, "journal")
+
+    def test_malformed_json_rejected(self) -> None:
+        (self.vault / ".obsidian" / "daily-notes.json").write_text(
+            "{not json", encoding="utf-8"
+        )
+        with self.assertRaises(self.core.ValidationError):
+            self.core.load_daily_notes_config(self.vault)
+
+    def test_non_object_root_rejected(self) -> None:
+        (self.vault / ".obsidian" / "daily-notes.json").write_text(
+            '["not", "an", "object"]', encoding="utf-8"
+        )
+        with self.assertRaises(self.core.ValidationError):
+            self.core.load_daily_notes_config(self.vault)
+
+    def test_folder_absolute_rejected(self) -> None:
+        _write_daily_config(self.vault, {"folder": "/etc"})
+        with self.assertRaises(self.core.PathError):
+            self.core.load_daily_notes_config(self.vault)
+
+    def test_folder_traversal_rejected(self) -> None:
+        for folder in ("..", "a/../b", "."):
+            _write_daily_config(self.vault, {"folder": folder})
+            with self.assertRaises(self.core.PathError):
+                self.core.load_daily_notes_config(self.vault)
+
+    def test_folder_empty_segments_rejected(self) -> None:
+        for folder in ("a//b", "a/", "/a"):
+            _write_daily_config(self.vault, {"folder": folder})
+            with self.assertRaises(self.core.PathError):
+                self.core.load_daily_notes_config(self.vault)
+
+    def test_folder_backslash_rejected(self) -> None:
+        _write_daily_config(self.vault, {"folder": "a\\b"})
+        with self.assertRaises(self.core.PathError):
+            self.core.load_daily_notes_config(self.vault)
+
+    def test_folder_control_char_rejected(self) -> None:
+        _write_daily_config(self.vault, {"folder": "a\x0bb"})
+        with self.assertRaises(self.core.PathError):
+            self.core.load_daily_notes_config(self.vault)
+
+    def test_folder_non_string_rejected(self) -> None:
+        _write_daily_config(self.vault, {"folder": 5})
+        with self.assertRaises(self.core.ValidationError):
+            self.core.load_daily_notes_config(self.vault)
+
+    def test_folder_missing_dir_accepted(self) -> None:
+        _write_daily_config(self.vault, {"folder": "does-not-exist-yet"})
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.folder, "does-not-exist-yet")
+
+    def test_folder_existing_dir_accepted(self) -> None:
+        (self.vault / "journal").mkdir()
+        _write_daily_config(self.vault, {"folder": "journal"})
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.folder, "journal")
+
+    def test_folder_symlink_component_rejected(self) -> None:
+        (self.vault / "real-dir").mkdir()
+        os.symlink("real-dir", str(self.vault / "alias"))
+        _write_daily_config(self.vault, {"folder": "alias"})
+        with self.assertRaises(self.core.PathError):
+            self.core.load_daily_notes_config(self.vault)
+
+    def test_format_non_string_rejected(self) -> None:
+        _write_daily_config(self.vault, {"format": ["YYYY"]})
+        with self.assertRaises(self.core.ValidationError):
+            self.core.load_daily_notes_config(self.vault)
+
+    def test_format_unsupported_syntax_rejected(self) -> None:
+        for fmt in ("YYYY MMM", "YYYY-MM-DD-dddd", "woop"):
+            _write_daily_config(self.vault, {"format": fmt})
+            with self.assertRaises(self.core.ValidationError):
+                self.core.load_daily_notes_config(self.vault)
+
+    def test_template_non_string_rejected(self) -> None:
+        _write_daily_config(self.vault, {"template": 42})
+        with self.assertRaises(self.core.ValidationError):
+            self.core.load_daily_notes_config(self.vault)
+
+    def test_template_unsafe_paths_rejected(self) -> None:
+        for template in ("/tmp/t.md", "a\\b.md", "../evil.md", "a//b.md", "notes.txt"):
+            _write_daily_config(self.vault, {"template": template})
+            with self.assertRaises(self.core.PathError):
+                self.core.load_daily_notes_config(self.vault)
+
+    def test_template_missing_file_accepted_at_load(self) -> None:
+        _write_daily_config(self.vault, {"template": "templates/daily.md"})
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.template, "templates/daily.md")
+
+    def test_template_symlink_rejected(self) -> None:
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "real.md").write_text("x", encoding="utf-8")
+        os.symlink("real.md", str(self.vault / "templates" / "alias.md"))
+        _write_daily_config(self.vault, {"template": "templates/alias.md"})
+        with self.assertRaises(self.core.PathError):
+            self.core.load_daily_notes_config(self.vault)
+
+
+class DailyNoteTemplateReadTests(unittest.TestCase):
+    """No-follow bounded template reading."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_daily_read_"))
+        self.vault = _make_plain_vault(self.tmpdir)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_none_when_unconfigured(self) -> None:
+        cfg = self.core.DailyNotesConfig()
+        self.assertIsNone(self.core.read_daily_note_template(self.vault, cfg))
+
+    def test_reads_template_content(self) -> None:
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily.md").write_text(
+            "# {{date}}\n## Tasks\n", encoding="utf-8"
+        )
+        cfg = self.core.DailyNotesConfig(template="templates/daily.md")
+        self.assertEqual(
+            self.core.read_daily_note_template(self.vault, cfg),
+            "# {{date}}\n## Tasks\n",
+        )
+
+    def test_missing_template_file_rejected_at_read(self) -> None:
+        cfg = self.core.DailyNotesConfig(template="templates/ghost.md")
+        with self.assertRaises(self.core.PathError):
+            self.core.read_daily_note_template(self.vault, cfg)
+
+    def test_symlinked_template_rejected_at_read(self) -> None:
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "real.md").write_text("x", encoding="utf-8")
+        os.symlink("real.md", str(self.vault / "templates" / "alias.md"))
+        cfg = self.core.DailyNotesConfig(template="templates/alias.md")
+        with self.assertRaises(self.core.PathError):
+            self.core.read_daily_note_template(self.vault, cfg)
+
+
+class DailyNoteFormatTests(unittest.TestCase):
+    """Deterministic date formatter (strict token subset)."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+
+    def test_default_format(self) -> None:
+        self.assertEqual(
+            self.core.format_daily_note_date("2026-08-28", "YYYY-MM-DD"),
+            "2026-08-28",
+        )
+
+    def test_each_token(self) -> None:
+        cases = {
+            "YYYY": "2026",
+            "YY": "26",
+            "MM": "08",
+            "M": "8",
+            "DD": "28",
+            "D": "28",
+        }
+        for token, expected in cases.items():
+            self.assertEqual(
+                self.core.format_daily_note_date("2026-08-28", token), expected
+            )
+
+    def test_yy_zero_padding(self) -> None:
+        self.assertEqual(
+            self.core.format_daily_note_date("2005-01-05", "YY"), "05"
+        )
+        self.assertEqual(
+            self.core.format_daily_note_date("2005-01-05", "M/D/YY"), "1/5/05"
+        )
+
+    def test_combined_tokens_and_separators(self) -> None:
+        self.assertEqual(
+            self.core.format_daily_note_date("2026-08-28", "M.D.YY"), "8.28.26"
+        )
+        self.assertEqual(
+            self.core.format_daily_note_date("2026-08-28", "YYYY_MM"), "2026_08"
+        )
+
+    def test_nested_path_format(self) -> None:
+        self.assertEqual(
+            self.core.format_daily_note_date("2026-08-28", "YYYY/MM/DD"),
+            "2026/08/28",
+        )
+
+    def test_unsupported_alphabetic_rejected(self) -> None:
+        for fmt in (
+            "YYYY-MM-DD-dddd",
+            "MMM",
+            "DDDD",
+            "YYYYMM",
+            "YYYY woop",
+            "x",
+            "YYYYwMM",
+        ):
+            with self.assertRaises(self.core.ValidationError):
+                self.core.format_daily_note_date("2026-08-28", fmt)
+
+    def test_unsafe_literals_rejected(self) -> None:
+        for fmt in ("YYYY MM", "YYYY=MM", "YYYY(MM)", "YYYY\\MM"):
+            with self.assertRaises(self.core.ValidationError):
+                self.core.format_daily_note_date("2026-08-28", fmt)
+
+    def test_empty_format_rejected(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.format_daily_note_date("2026-08-28", "")
+
+    def test_format_requires_token(self) -> None:
+        for fmt in ("-", "--", "..."):
+            with self.assertRaises(self.core.ValidationError):
+                self.core.format_daily_note_date("2026-08-28", fmt)
+
+    def test_invalid_date_rejected(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.format_daily_note_date("2026-2-28", "YYYY-MM-DD")
+        with self.assertRaises(self.core.ValidationError):
+            self.core.format_daily_note_date("not-a-date", "YYYY")
+
+    def test_oversized_format_rejected(self) -> None:
+        fmt = "YYYY-MM-" * 20
+        with self.assertRaises(self.core.ValidationError):
+            self.core.format_daily_note_date("2026-08-28", fmt)
+
+
+class DailyNotePathTests(unittest.TestCase):
+    """Vault-confined <folder>/<formatted date>.md resolution."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_daily_path_"))
+        self.vault = _make_plain_vault(self.tmpdir)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_resolve_root_folder(self) -> None:
+        cfg = self.core.DailyNotesConfig()
+        path = self.core.resolve_daily_note_path(self.vault, cfg, "2026-08-28")
+        self.assertEqual(path, self.vault / "2026-08-28.md")
+
+    def test_resolve_with_folder(self) -> None:
+        cfg = self.core.DailyNotesConfig(folder="journal")
+        path = self.core.resolve_daily_note_path(self.vault, cfg, "2026-08-28")
+        self.assertEqual(path, self.vault / "journal" / "2026-08-28.md")
+
+    def test_resolve_nested_format(self) -> None:
+        cfg = self.core.DailyNotesConfig(folder="journal", format="YYYY/MM/DD")
+        path = self.core.resolve_daily_note_path(self.vault, cfg, "2026-08-28")
+        self.assertEqual(path, self.vault / "journal" / "2026" / "08" / "28.md")
+
+    def test_resolve_vault_confined(self) -> None:
+        cfg = self.core.DailyNotesConfig(folder="journal", format="YYYY/MM/DD")
+        path = self.core.resolve_daily_note_path(self.vault, cfg, "2026-08-28")
+        self.assertTrue(str(path).startswith(str(self.vault)))
+
+    def test_resolve_invalid_date_rejected(self) -> None:
+        cfg = self.core.DailyNotesConfig()
+        with self.assertRaises(self.core.ValidationError):
+            self.core.resolve_daily_note_path(self.vault, cfg, "28-08-2026")
+
+
+class DailyNoteTemplateRenderTests(unittest.TestCase):
+    """Template rendering ({{date}}, {{title}}, {{date:FORMAT}} only)."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+
+    def test_render_date_and_title(self) -> None:
+        out = self.core.render_daily_note_template(
+            "# {{date}}\n\n{{title}}\n", date="2026-08-28", title="Day 1"
+        )
+        self.assertEqual(out, "# 2026-08-28\n\nDay 1\n")
+
+    def test_render_date_with_format(self) -> None:
+        out = self.core.render_daily_note_template(
+            "{{date:YYYY/MM/DD}}", date="2026-08-28", title="T"
+        )
+        self.assertEqual(out, "2026/08/28")
+
+    def test_unsupported_expressions_rejected(self) -> None:
+        for template in ("{{time}}", "{{date:dddd}}", "{{foo}}"):
+            with self.assertRaises(self.core.ValidationError):
+                self.core.render_daily_note_template(
+                    template, date="2026-08-28", title="T"
+                )
+
+    def test_no_code_execution(self) -> None:
+        for template in ("{{ 7*7 }}", "{{ self.__init__ }}", "{{ date.format() }}"):
+            with self.assertRaises(self.core.ValidationError):
+                self.core.render_daily_note_template(
+                    template, date="2026-08-28", title="T"
+                )
+
+    def test_literal_braces_preserved(self) -> None:
+        out = self.core.render_daily_note_template(
+            "{x} {{date}} }", date="2026-08-28", title="T"
+        )
+        self.assertEqual(out, "{x} 2026-08-28 }")
+
+    def test_oversized_template_rejected(self) -> None:
+        template = "x" * (self.core.MAX_BODY_LEN + 1)
+        with self.assertRaises(self.core.ValidationError):
+            self.core.render_daily_note_template(
+                template, date="2026-08-28", title="T"
+            )
+
+    def test_default_body_shape(self) -> None:
+        body = self.core.build_default_daily_note_body("2026-08-28")
+        self.assertEqual(body, "# 2026-08-28\n\n## Tasks\n")
+        start, end = self.core.find_tasks_section(body)
+        self.assertEqual(body[start:end], "## Tasks\n")
+
+    def test_default_body_rejects_invalid_date(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.build_default_daily_note_body("2026-08-28T00:00")
+
+    def test_rendered_body_tasks_requirement_enforced(self) -> None:
+        rendered = self.core.render_daily_note_template(
+            "# {{date}}\n\n## Tasks\n", date="2026-08-28", title="T"
+        )
+        self.core.find_tasks_section(rendered)  # must not raise
+        missing = self.core.render_daily_note_template(
+            "# {{date}}\n", date="2026-08-28", title="T"
+        )
+        with self.assertRaises(self.core.ValidationError):
+            self.core.find_tasks_section(missing)
+
+
+class DailyNoteFrontmatterTests(unittest.TestCase):
+    """Empty/null top-level date/title normalization."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+
+    def test_empty_strings_filled(self) -> None:
+        out = self.core.normalize_daily_note_frontmatter(
+            {"date": "", "title": ""}, date="2026-08-28", title_stem="2026-08-28"
+        )
+        self.assertEqual(out["date"], "2026-08-28")
+        self.assertEqual(out["title"], "2026-08-28")
+
+    def test_nulls_filled(self) -> None:
+        out = self.core.normalize_daily_note_frontmatter(
+            {"date": None, "title": None}, date="2026-08-28", title_stem="stem"
+        )
+        self.assertEqual(out["date"], "2026-08-28")
+        self.assertEqual(out["title"], "stem")
+
+    def test_blank_strings_filled(self) -> None:
+        out = self.core.normalize_daily_note_frontmatter(
+            {"date": "   ", "title": ""}, date="2026-08-28", title_stem="stem"
+        )
+        self.assertEqual(out["date"], "2026-08-28")
+        self.assertEqual(out["title"], "stem")
+
+    def test_nonempty_values_unchanged(self) -> None:
+        marker = object()
+        out = self.core.normalize_daily_note_frontmatter(
+            {"date": "2020-01-01", "title": "My Day", "extra": marker},
+            date="2026-08-28",
+            title_stem="stem",
+        )
+        self.assertEqual(out["date"], "2020-01-01")
+        self.assertEqual(out["title"], "My Day")
+        self.assertIs(out["extra"], marker)
+
+    def test_missing_keys_unchanged(self) -> None:
+        out = self.core.normalize_daily_note_frontmatter(
+            {"tags": ["task"]}, date="2026-08-28", title_stem="stem"
+        )
+        self.assertEqual(out, {"tags": ["task"]})
+
+    def test_non_mapping_rejected(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.normalize_daily_note_frontmatter(
+                ["not", "a", "mapping"], date="2026-08-28", title_stem="stem"
+            )
+
+    def test_invalid_date_rejected(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.normalize_daily_note_frontmatter(
+                {}, date="2026-13-01", title_stem="stem"
+            )
+
+
+class DailyTasksSectionTests(unittest.TestCase):
+    """find_tasks_section and the structural add/remove transformer."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+
+    # -- find_tasks_section ------------------------------------------------
+
+    def test_find_section_offsets(self) -> None:
+        body = "# Day\n\n## Tasks\n- [[a]]\n\n## Notes\nx"
+        start, end = self.core.find_tasks_section(body)
+        self.assertEqual(body[start:end], "## Tasks\n- [[a]]\n\n")
+
+    def test_find_section_to_eof(self) -> None:
+        body = "## Tasks\n- [[a]]\n"
+        start, end = self.core.find_tasks_section(body)
+        self.assertEqual((start, end), (0, len(body)))
+
+    def test_h1_h3_do_not_end_section(self) -> None:
+        body = "## Tasks\ncontent\n# Not H2\n### Not H2 either\nmore\n## Next\n"
+        start, end = self.core.find_tasks_section(body)
+        self.assertTrue(body[start:end].startswith("## Tasks"))
+        self.assertTrue(body[start:end].endswith("more\n"))
+
+    def test_zero_tasks_sections_rejected(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.find_tasks_section("# Day\n\n## Notes\n")
+
+    def test_two_tasks_sections_rejected(self) -> None:
+        body = "## Tasks\na\n## Mid\n## Tasks\nb\n"
+        with self.assertRaises(self.core.ValidationError):
+            self.core.find_tasks_section(body)
+
+    def test_indented_tasks_heading_not_matched(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.find_tasks_section("  ## Tasks\n")
+
+    def test_trailing_whitespace_heading_matched(self) -> None:
+        start, _ = self.core.find_tasks_section("## Tasks  \nbody\n")
+        self.assertEqual(start, 0)
+
+    def test_oversized_body_rejected(self) -> None:
+        body = "## Tasks\n" + "x" * (self.core.MAX_BODY_LEN + 1)
+        with self.assertRaises(self.core.ValidationError):
+            self.core.find_tasks_section(body)
+
+    # -- add_daily_note_task_link ------------------------------------------
+
+    def test_add_appends_to_empty_section(self) -> None:
+        body = "## Tasks\n"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="Task 1"
+        )
+        self.assertTrue(changed)
+        self.assertEqual(new_body, "## Tasks\n- [[task-1|Task 1]]\n")
+
+    def test_add_appends_before_next_h2(self) -> None:
+        body = "# Day\n\n## Tasks\n\n## Notes\n"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="Task 1"
+        )
+        self.assertTrue(changed)
+        self.assertEqual(
+            new_body, "# Day\n\n## Tasks\n\n- [[task-1|Task 1]]\n## Notes\n"
+        )
+
+    def test_add_appends_at_eof_without_trailing_newline(self) -> None:
+        body = "# Day\n## Tasks"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="Task 1"
+        )
+        self.assertTrue(changed)
+        self.assertEqual(new_body, "# Day\n## Tasks\n- [[task-1|Task 1]]\n")
+
+    def test_add_preserves_bytes_outside_section(self) -> None:
+        prefix = "# Day\n\nintro prose\n"
+        suffix = "\n## Notes\nkeep me\n"
+        body = prefix + "## Tasks\n- [[other|Other]]\n" + suffix
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="Task 1"
+        )
+        self.assertTrue(changed)
+        self.assertTrue(new_body.startswith(prefix))
+        self.assertTrue(new_body.endswith(suffix))
+        self.assertIn("- [[other|Other]]", new_body)
+
+    def test_add_normalizes_bare_link(self) -> None:
+        body = "## Tasks\n- [[task-1]]\n"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="Task 1"
+        )
+        self.assertTrue(changed)
+        self.assertEqual(new_body, "## Tasks\n- [[task-1|Task 1]]\n")
+
+    def test_add_normalizes_alt_bullet_and_stale_display(self) -> None:
+        body = "## Tasks\n* [[task-1|Old Title]]\n"
+        new_body, _ = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="New Title"
+        )
+        self.assertEqual(new_body, "## Tasks\n- [[task-1|New Title]]\n")
+
+    def test_add_preserves_indent_of_existing_link(self) -> None:
+        body = "## Tasks\n  - [[task-1]]\n"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="Task 1"
+        )
+        self.assertTrue(changed)
+        self.assertEqual(new_body, "## Tasks\n  - [[task-1|Task 1]]\n")
+
+    def test_add_dedupes_multiple_occurrences(self) -> None:
+        body = "## Tasks\n- [[task-1]]\n- [[task-1|Again]]\ntext\n- [[task-1|Third]]\n"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="Task 1"
+        )
+        self.assertTrue(changed)
+        self.assertEqual(
+            new_body, "## Tasks\n- [[task-1|Task 1]]\ntext\n"
+        )
+
+    def test_add_idempotent(self) -> None:
+        body = "## Tasks\n- [[task-1|Task 1]]\n"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="Task 1"
+        )
+        self.assertFalse(changed)
+        self.assertEqual(new_body, body)
+
+    def test_add_ignores_similar_slugs(self) -> None:
+        body = "## Tasks\n- [[task-1x|Similar]]\n- [[task-12]]\n- [[ task-1 ]]\n"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="Task 1"
+        )
+        self.assertTrue(changed)
+        self.assertIn("- [[task-1x|Similar]]", new_body)
+        self.assertIn("- [[task-12]]", new_body)
+        self.assertIn("- [[ task-1 ]]", new_body)
+        self.assertIn("\n- [[task-1|Task 1]]\n", new_body)
+
+    def test_add_ignores_prose_mention(self) -> None:
+        body = "## Tasks\nsee [[task-1]] for details\n"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="Task 1"
+        )
+        self.assertTrue(changed)
+        self.assertIn("see [[task-1]] for details", new_body)
+        self.assertTrue(new_body.endswith("- [[task-1|Task 1]]\n"))
+
+    def test_add_ignores_checkbox_line(self) -> None:
+        body = "## Tasks\n- [ ] [[task-1]]\n"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="Task 1"
+        )
+        self.assertTrue(changed)
+        self.assertIn("- [ ] [[task-1]]", new_body)
+        self.assertTrue(new_body.endswith("- [[task-1|Task 1]]\n"))
+
+    def test_add_preserves_outside_section_slugs(self) -> None:
+        body = "- [[task-1]] before\n\n## Tasks\n\n## Notes\n- [[task-1]] after\n"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1", title="Task 1"
+        )
+        self.assertTrue(changed)
+        self.assertTrue(new_body.startswith("- [[task-1]] before\n"))
+        self.assertTrue(new_body.endswith("## Notes\n- [[task-1]] after\n"))
+
+    def test_add_rejects_invalid_slug(self) -> None:
+        with self.assertRaises(self.core.PathError):
+            self.core.add_daily_note_task_link(
+                "## Tasks\n", slug="Bad Slug", title="T"
+            )
+
+    def test_add_rejects_wikilink_metacharacters_in_title(self) -> None:
+        for title in ("a]]b", "a|b", "a[b", "a]b", ""):
+            with self.assertRaises(self.core.ValidationError):
+                self.core.add_daily_note_task_link(
+                    "## Tasks\n", slug="task-1", title=title
+                )
+
+    def test_add_requires_tasks_section(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.add_daily_note_task_link(
+                "# no tasks here\n", slug="task-1", title="T"
+            )
+
+    # -- remove_daily_note_task_link ---------------------------------------
+
+    def test_remove_removes_exact_link_only(self) -> None:
+        body = "## Tasks\n- [[task-1|Task 1]]\n- [[other|Other]]\n"
+        new_body, changed = self.core.remove_daily_note_task_link(
+            body, slug="task-1"
+        )
+        self.assertTrue(changed)
+        self.assertEqual(new_body, "## Tasks\n- [[other|Other]]\n")
+
+    def test_remove_preserves_similar_slugs_and_prose(self) -> None:
+        body = (
+            "## Tasks\n- [[task-1|T]]\nsee [[task-1]] prose\n"
+            "- [[task-1x|Similar]]\n"
+        )
+        new_body, changed = self.core.remove_daily_note_task_link(
+            body, slug="task-1"
+        )
+        self.assertTrue(changed)
+        self.assertEqual(
+            new_body, "## Tasks\nsee [[task-1]] prose\n- [[task-1x|Similar]]\n"
+        )
+
+    def test_remove_preserves_outside_section(self) -> None:
+        body = "- [[task-1]] before\n\n## Tasks\n- [[task-1|T]]\n\n## Notes\n- [[task-1]] after\n"
+        new_body, changed = self.core.remove_daily_note_task_link(
+            body, slug="task-1"
+        )
+        self.assertTrue(changed)
+        self.assertEqual(
+            new_body,
+            "- [[task-1]] before\n\n## Tasks\n\n## Notes\n- [[task-1]] after\n",
+        )
+
+    def test_remove_idempotent(self) -> None:
+        body = "## Tasks\n- [[other|Other]]\n"
+        new_body, changed = self.core.remove_daily_note_task_link(
+            body, slug="task-1"
+        )
+        self.assertFalse(changed)
+        self.assertEqual(new_body, body)
+
+    def test_remove_last_line_without_trailing_newline(self) -> None:
+        body = "## Tasks\n- [[task-1|T]]"
+        new_body, changed = self.core.remove_daily_note_task_link(
+            body, slug="task-1"
+        )
+        self.assertTrue(changed)
+        self.assertEqual(new_body, "## Tasks")
+
+    def test_remove_consecutive_dups_at_eof(self) -> None:
+        body = "## Tasks\n- [[task-1|A]]\n- [[task-1|B]]"
+        new_body, changed = self.core.remove_daily_note_task_link(
+            body, slug="task-1"
+        )
+        self.assertTrue(changed)
+        # Both bullet lines and the inner newline are removed; the heading
+        # line keeps its own trailing newline.
+        self.assertEqual(new_body, "## Tasks\n")
+
+    def test_remove_requires_tasks_section(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.remove_daily_note_task_link("# nothing\n", slug="task-1")
+
+    def test_remove_rejects_invalid_slug(self) -> None:
+        with self.assertRaises(self.core.PathError):
+            self.core.remove_daily_note_task_link("## Tasks\n", slug="../x")
+
+
+class MutationResultDailyFieldsTests(unittest.TestCase):
+    """Backward-compatible daily link fields and serialization behavior."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+
+    def _mutation_dict(self, result):
+        """Mirror the MCP server serialization (drop None values)."""
+        return {
+            key: value
+            for key, value in dataclasses.asdict(result).items()
+            if value is not None
+        }
+
+    def test_daily_fields_default_none(self) -> None:
+        result = self.core.MutationResult(state="applied", slug="t1")
+        self.assertIsNone(result.daily_link_state)
+        self.assertIsNone(result.daily_link_detail)
+        self.assertIsNone(result.daily_link_dates)
+
+    def test_backward_compat_positional(self) -> None:
+        result = self.core.MutationResult("s", "t1", "abc", "detail")
+        self.assertEqual(result.state, "s")
+        self.assertEqual(result.slug, "t1")
+        self.assertEqual(result.commit_id, "abc")
+        self.assertEqual(result.detail, "detail")
+        self.assertIsNone(result.daily_link_state)
+
+    def test_daily_fields_set(self) -> None:
+        result = self.core.MutationResult(
+            state="applied",
+            slug="t1",
+            daily_link_state="applied_and_committed",
+            daily_link_detail="daily note updated",
+            daily_link_dates=["2026-08-28"],
+        )
+        self.assertEqual(result.daily_link_state, "applied_and_committed")
+        self.assertEqual(result.daily_link_detail, "daily note updated")
+        self.assertEqual(result.daily_link_dates, ["2026-08-28"])
+
+    def test_daily_link_dates_supports_multiple(self) -> None:
+        result = self.core.MutationResult(
+            state="applied",
+            slug="t1",
+            daily_link_dates=["2026-08-27", "2026-08-28"],
+        )
+        self.assertEqual(result.daily_link_dates, ["2026-08-27", "2026-08-28"])
+
+    def test_asdict_includes_daily_fields(self) -> None:
+        result = self.core.MutationResult(state="s", slug="t1")
+        raw = dataclasses.asdict(result)
+        self.assertIn("daily_link_state", raw)
+        self.assertIn("daily_link_detail", raw)
+        self.assertIn("daily_link_dates", raw)
+
+    def test_serialization_drops_none_and_keeps_set(self) -> None:
+        unset = self._mutation_dict(
+            self.core.MutationResult(state="s", slug="t1")
+        )
+        self.assertNotIn("daily_link_state", unset)
+        self.assertNotIn("daily_link_detail", unset)
+        self.assertNotIn("daily_link_dates", unset)
+        set_result = self._mutation_dict(
+            self.core.MutationResult(
+                state="s",
+                slug="t1",
+                daily_link_state="not_applied",
+                daily_link_dates=["2026-08-27", "2026-08-28"],
+            )
+        )
+        self.assertEqual(set_result["daily_link_state"], "not_applied")
+        self.assertEqual(
+            set_result["daily_link_dates"], ["2026-08-27", "2026-08-28"]
+        )
+        self.assertNotIn("daily_link_detail", set_result)
+        json.dumps(set_result)  # must remain JSON-serializable
+
+    def test_legacy_results_unaffected(self) -> None:
+        result = self.core.MutationResult(
+            state=self.core.APPLIED_AND_COMMITTED,
+            slug="t1",
+            commit_id="abc",
+        )
+        as_dict = self._mutation_dict(result)
+        self.assertEqual(
+            as_dict,
+            {"state": "applied_and_committed", "slug": "t1", "commit_id": "abc"},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Daily Notes projection preparation/persistence (issue #139, W1b)
+# ---------------------------------------------------------------------------
+
+
+def _make_plain_git_vault(tmpdir: Path, name: str = "vault") -> Path:
+    """Plain daily-notes vault backed by a Git repo (no TaskNotes profile)."""
+    vault = _make_plain_vault(tmpdir, name)
+    _init_git_repo(vault)
+    return vault
+
+
+def _write_note(path: Path, text: str, mode: Optional[int] = None) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    if mode is not None:
+        os.chmod(path, mode)
+    return path
+
+
+@unittest.skipUnless(_has_yaml(), "PyYAML required")
+class DailyProjectionPrepareTests(unittest.TestCase):
+    """prepare_daily_note_projection: pre-read, transform, classify."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_daily_prep_"))
+        self.vault = _make_plain_vault(self.tmpdir)
+        self.cfg = self.core.DailyNotesConfig(folder="journal")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_ensure_missing_note_creates_from_default_body(self) -> None:
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="Task 1",
+        )
+        self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_CREATE)
+        self.assertIsNone(proj.fingerprint)
+        self.assertIsNotNone(proj.content)
+        content = proj.content.decode("utf-8")
+        self.assertEqual(
+            content, "# 2026-08-28\n\n## Tasks\n- [[task-1|Task 1]]\n"
+        )
+        self.assertFalse((self.vault / "journal" / "2026-08-28.md").exists())
+
+    def test_ensure_missing_note_uses_template_and_normalizes_frontmatter(self) -> None:
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily.md").write_text(
+            "---\ndate: \ntitle: \ntags:\n  - day\n---\n# {{date}}\n\n## Tasks\n",
+            encoding="utf-8",
+        )
+        cfg = self.core.DailyNotesConfig(
+            folder="journal", template="templates/daily.md"
+        )
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, cfg, "ensure", "2026-08-28",
+            slug="task-1", title="Task 1",
+        )
+        self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_CREATE)
+        content = proj.content.decode("utf-8")
+        fm, body = self.core._parse_frontmatter(content)
+        self.assertEqual(fm["date"], "2026-08-28")
+        self.assertEqual(fm["title"], "2026-08-28")
+        self.assertEqual(fm["tags"], ["day"])
+        self.assertIn("- [[task-1|Task 1]]", body)
+
+    def test_ensure_template_missing_tasks_section_rejected_before_write(self) -> None:
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily.md").write_text(
+            "# {{date}}\n\nno tasks here\n", encoding="utf-8"
+        )
+        cfg = self.core.DailyNotesConfig(
+            folder="journal", template="templates/daily.md"
+        )
+        with self.assertRaises(self.core.ValidationError):
+            self.core.prepare_daily_note_projection(
+                self.vault, cfg, "ensure", "2026-08-28",
+                slug="task-1", title="Task 1",
+            )
+        self.assertFalse((self.vault / "journal").exists())
+
+    def test_ensure_existing_note_replaces_preserving_outside_bytes(self) -> None:
+        original = "# Day\n\nintro\n\n## Tasks\n\n## Notes\nkeep me\n"
+        _write_note(self.vault / "journal" / "2026-08-28.md", original)
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="Task 1",
+        )
+        self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_REPLACE)
+        self.assertIsNotNone(proj.fingerprint)
+        content = proj.content.decode("utf-8")
+        self.assertTrue(content.startswith("# Day\n\nintro\n\n## Tasks\n"))
+        self.assertTrue(content.endswith("## Notes\nkeep me\n"))
+        self.assertIn("- [[task-1|Task 1]]\n## Notes", content)
+
+    def test_ensure_existing_note_normalizes_empty_frontmatter(self) -> None:
+        _write_note(
+            self.vault / "journal" / "2026-08-28.md",
+            "---\ndate: \"\"\n---\n## Tasks\n",
+        )
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="Task 1",
+        )
+        self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_REPLACE)
+        fm, _body = self.core._parse_frontmatter(proj.content.decode("utf-8"))
+        self.assertEqual(fm["date"], "2026-08-28")
+
+    def test_ensure_canonical_note_is_noop(self) -> None:
+        _write_note(
+            self.vault / "journal" / "2026-08-28.md",
+            "## Tasks\n- [[task-1|Task 1]]\n",
+        )
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="Task 1",
+        )
+        self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_NONE)
+        self.assertIsNone(proj.content)
+        self.assertIsNotNone(proj.fingerprint)
+
+    def test_remove_missing_note_is_idempotent_noop(self) -> None:
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "remove", "2026-08-28", slug="task-1",
+        )
+        self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_NONE)
+        self.assertIsNone(proj.content)
+        self.assertFalse((self.vault / "journal").exists())
+
+    def test_remove_existing_note_removes_link_only(self) -> None:
+        _write_note(
+            self.vault / "journal" / "2026-08-28.md",
+            "# Day\n\n## Tasks\n- [[task-1|T]]\n- [[other|O]]\n\n## Notes\nx\n",
+        )
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "remove", "2026-08-28", slug="task-1",
+        )
+        self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_REPLACE)
+        content = proj.content.decode("utf-8")
+        self.assertNotIn("[[task-1", content)
+        self.assertIn("- [[other|O]]", content)
+        self.assertIn("## Notes\nx", content)
+
+    def test_remove_existing_without_link_is_noop(self) -> None:
+        _write_note(
+            self.vault / "journal" / "2026-08-28.md", "## Tasks\n- [[other|O]]\n"
+        )
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "remove", "2026-08-28", slug="task-1",
+        )
+        self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_NONE)
+
+    def test_existing_note_with_two_tasks_sections_rejected(self) -> None:
+        _write_note(
+            self.vault / "journal" / "2026-08-28.md",
+            "## Tasks\na\n## Mid\n## Tasks\nb\n",
+        )
+        with self.assertRaises(self.core.ValidationError):
+            self.core.prepare_daily_note_projection(
+                self.vault, self.cfg, "ensure", "2026-08-28",
+                slug="task-1", title="T",
+            )
+
+    def test_oversized_existing_note_rejected_bounded(self) -> None:
+        big = "## Tasks\n" + "x" * (self.core.DAILY_NOTES_MAX_FILE_SIZE + 1)
+        _write_note(self.vault / "journal" / "2026-08-28.md", big)
+        with self.assertRaises(self.core.CoreError):
+            self.core.prepare_daily_note_projection(
+                self.vault, self.cfg, "remove", "2026-08-28", slug="task-1",
+            )
+
+    def test_invalid_inputs_rejected(self) -> None:
+        for date in ("28-08-2026", "not-a-date"):
+            with self.assertRaises(self.core.ValidationError):
+                self.core.prepare_daily_note_projection(
+                    self.vault, self.cfg, "ensure", date,
+                    slug="task-1", title="T",
+                )
+        with self.assertRaises(self.core.PathError):
+            self.core.prepare_daily_note_projection(
+                self.vault, self.cfg, "ensure", "2026-08-28",
+                slug="Bad Slug", title="T",
+            )
+        with self.assertRaises(self.core.ValidationError):
+            self.core.prepare_daily_note_projection(
+                self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
+            )
+        with self.assertRaises(self.core.ValidationError):
+            self.core.prepare_daily_note_projection(
+                self.vault, self.cfg, "rename", "2026-08-28",
+                slug="task-1", title="T",
+            )
+
+    def test_symlinked_note_rejected(self) -> None:
+        (self.vault / "journal").mkdir()
+        (self.vault / "journal" / "real.md").write_text("## Tasks\n", encoding="utf-8")
+        os.symlink("real.md", str(self.vault / "journal" / "2026-08-28.md"))
+        with self.assertRaises(self.core.PathError):
+            self.core.prepare_daily_note_projection(
+                self.vault, self.cfg, "ensure", "2026-08-28",
+                slug="task-1", title="T",
+            )
+
+    def test_symlinked_folder_component_rejected(self) -> None:
+        (self.vault / "real-dir").mkdir()
+        os.symlink("real-dir", str(self.vault / "journal"))
+        with self.assertRaises(self.core.PathError):
+            self.core.prepare_daily_note_projection(
+                self.vault, self.cfg, "ensure", "2026-08-28",
+                slug="task-1", title="T",
+            )
+
+
+@unittest.skipUnless(_has_yaml(), "PyYAML required")
+class DailyProjectionWriterTests(unittest.TestCase):
+    """apply_daily_note_projection: atomic replace, modes, cleanup, races."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_daily_apply_"))
+        self.vault = _make_plain_vault(self.tmpdir)
+        self.cfg = self.core.DailyNotesConfig(folder="journal")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _note(self, name: str = "2026-08-28.md") -> Path:
+        return self.vault / "journal" / name
+
+    def test_apply_create_writes_file_with_content_and_mode(self) -> None:
+        mask = os.umask(0o022)
+        os.umask(mask)
+        try:
+            proj = self.core.prepare_daily_note_projection(
+                self.vault, self.cfg, "ensure", "2026-08-28",
+                slug="task-1", title="Task 1",
+            )
+            outcome = self.core.apply_daily_note_projection(
+                self.vault, self.cfg, proj
+            )
+        finally:
+            os.umask(mask)
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_APPLIED)
+        self.assertTrue(outcome.created)
+        self.assertFalse(outcome.changed)
+        self.assertEqual(outcome.attempts, 1)
+        self.assertEqual(
+            self._note().read_text(encoding="utf-8"),
+            "# 2026-08-28\n\n## Tasks\n- [[task-1|Task 1]]\n",
+        )
+        expected_mode = 0o644 & ~mask
+        self.assertEqual(os.stat(self._note()).st_mode & 0o777, expected_mode)
+
+    def test_apply_replace_preserves_existing_mode(self) -> None:
+        _write_note(
+            self._note(), "## Tasks\n- [[task-1|Old]]\n", mode=0o640
+        )
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="New",
+        )
+        outcome = self.core.apply_daily_note_projection(self.vault, self.cfg, proj)
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_APPLIED)
+        self.assertFalse(outcome.created)
+        self.assertTrue(outcome.changed)
+        self.assertEqual(os.stat(self._note()).st_mode & 0o777, 0o640)
+        self.assertIn("- [[task-1|New]]", self._note().read_text(encoding="utf-8"))
+
+    def test_apply_create_missing_parents_safely(self) -> None:
+        cfg = self.core.DailyNotesConfig(folder="journal", format="YYYY/MM/DD")
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, cfg, "ensure", "2026-08-28",
+            slug="task-1", title="T",
+        )
+        outcome = self.core.apply_daily_note_projection(self.vault, cfg, proj)
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_APPLIED)
+        self.assertTrue(
+            (self.vault / "journal" / "2026" / "08" / "28.md").is_dir() is False
+        )
+        self.assertTrue((self.vault / "journal" / "2026" / "08" / "28.md").exists())
+
+    def test_apply_parent_component_is_file_rejected(self) -> None:
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="T",
+        )
+        # A regular file occupies the configured folder between
+        # prepare and apply; the writer must reject it (no clobber).
+        (self.vault / "journal").write_text("not a dir\n", encoding="utf-8")
+        with self.assertRaises(self.core.PathError):
+            self.core.apply_daily_note_projection(self.vault, self.cfg, proj)
+        self.assertFalse((self.vault / "journal" / "2026-08-28.md").exists())
+
+    def test_apply_parent_component_symlink_rejected(self) -> None:
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="T",
+        )
+        # A symlink swap occupies the configured folder between
+        # prepare and apply; the writer must not traverse it.
+        (self.vault / "real-dir").mkdir()
+        os.symlink("real-dir", str(self.vault / "journal"))
+        with self.assertRaises(self.core.PathError):
+            self.core.apply_daily_note_projection(self.vault, self.cfg, proj)
+        self.assertFalse((self.vault / "journal" / "2026-08-28.md").exists())
+
+    def test_apply_remove_missing_note_writes_nothing(self) -> None:
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "remove", "2026-08-28", slug="task-1",
+        )
+        outcome = self.core.apply_daily_note_projection(self.vault, self.cfg, proj)
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_NOT_APPLIED)
+        self.assertEqual(outcome.attempts, 1)
+        self.assertFalse(self._note().exists())
+        self.assertFalse((self.vault / "journal").exists())
+
+    def test_apply_canonical_ensure_is_not_applied(self) -> None:
+        _write_note(self._note(), "## Tasks\n- [[task-1|Task 1]]\n")
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="Task 1",
+        )
+        before = os.stat(self._note()).st_mtime_ns
+        outcome = self.core.apply_daily_note_projection(self.vault, self.cfg, proj)
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_NOT_APPLIED)
+        self.assertEqual(os.stat(self._note()).st_mtime_ns, before)
+
+    def test_none_projection_drift_race_recomputes_and_applies(self) -> None:
+        _write_note(self._note(), "# Day\n\n## Tasks\n- [[other|O]]\n")
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "remove", "2026-08-28", slug="task-1",
+        )
+        self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_NONE)
+        # A concurrent editor re-adds the link between prepare and apply.
+        _write_note(
+            self._note(), "# Day\n\n## Tasks\n- [[other|O]]\n- [[task-1|T]]\n"
+        )
+        outcome = self.core.apply_daily_note_projection(self.vault, self.cfg, proj)
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_APPLIED)
+        self.assertEqual(outcome.attempts, 2)
+        content = self._note().read_text(encoding="utf-8")
+        self.assertNotIn("[[task-1", content)
+        self.assertIn("- [[other|O]]", content)
+
+    def test_temp_cleanup_on_failure(self) -> None:
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="T",
+        )
+
+        def boom() -> None:
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            self.core.apply_daily_note_projection(
+                self.vault, self.cfg, proj, _final_check_hook=boom
+            )
+        entries = list((self.vault / "journal").iterdir())
+        self.assertEqual(entries, [])
+
+    def test_apply_rejects_replace_projection_without_content(self) -> None:
+        broken = self.core.DailyNoteProjection(
+            operation="ensure", date="2026-08-28", slug="task-1", title="T",
+            target_relative="journal/2026-08-28.md",
+            kind=self.core.DAILY_NOTE_PROJECTION_REPLACE,
+            content=None, fingerprint=None,
+        )
+        with self.assertRaises(self.core.ValidationError):
+            self.core.apply_daily_note_projection(self.vault, self.cfg, broken)
+
+
+@unittest.skipUnless(_has_yaml(), "PyYAML required")
+class DailyProjectionRaceTests(unittest.TestCase):
+    """Conflict/race/retry: injected single race and persistent race."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_daily_race_"))
+        self.vault = _make_plain_vault(self.tmpdir)
+        self.cfg = self.core.DailyNotesConfig(folder="journal")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _note(self) -> Path:
+        return self.vault / "journal" / "2026-08-28.md"
+
+    def test_single_injected_race_recomputes_and_succeeds(self) -> None:
+        _write_note(
+            self._note(),
+            "# Day\n\n## Tasks\n- [[task-1|Old]]\n\n## Notes\nkeep\n",
+        )
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="New",
+        )
+        fired = {"n": 0}
+
+        def single_race() -> None:
+            if fired["n"] == 0:
+                fired["n"] += 1
+                # Concurrent editor modifies the note after prepare.
+                self._note().write_text(
+                    "# Day\n\n## Tasks\n- [[task-1|Old]]\n\n## Notes\nuser edit\n",
+                    encoding="utf-8",
+                )
+
+        outcome = self.core.apply_daily_note_projection(
+            self.vault, self.cfg, proj, _final_check_hook=single_race
+        )
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_APPLIED)
+        self.assertEqual(outcome.attempts, 2)
+        content = self._note().read_text(encoding="utf-8")
+        # The recomputed transformation preserved the racing edit.
+        self.assertIn("user edit", content)
+        self.assertIn("- [[task-1|New]]", content)
+        self.assertIn("## Notes", content)
+
+    def test_persistent_race_conflicts_without_overwrite(self) -> None:
+        _write_note(
+            self._note(), "# v0\n\n## Tasks\n- [[task-1|Old]]\n"
+        )
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="New",
+        )
+        counter = {"n": 0}
+
+        def persistent_race() -> None:
+            counter["n"] += 1
+            self._note().write_text(
+                f"# v{counter['n']}\n\n## Tasks\n- [[task-1|Old]]\n",
+                encoding="utf-8",
+            )
+
+        outcome = self.core.apply_daily_note_projection(
+            self.vault, self.cfg, proj, _final_check_hook=persistent_race
+        )
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_CONFLICT)
+        self.assertEqual(outcome.attempts, self.core.DAILY_PROJECTION_MAX_ATTEMPTS)
+        # The racing content survived; our bytes were never applied.
+        self.assertEqual(
+            self._note().read_text(encoding="utf-8"),
+            f"# v{counter['n']}\n\n## Tasks\n- [[task-1|Old]]\n",
+        )
+        self.assertNotIn("[[task-1|New]]", self._note().read_text(encoding="utf-8"))
+        # Temp files are cleaned up after the conflict.
+        self.assertEqual(
+            [p.name for p in (self.vault / "journal").iterdir()],
+            ["2026-08-28.md"],
+        )
+
+    def test_create_race_recomputes_to_replace_and_applies(self) -> None:
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="New",
+        )
+        fired = {"n": 0}
+
+        def create_race() -> None:
+            if fired["n"] == 0:
+                fired["n"] += 1
+                # A concurrent creator materializes the note first.
+                _write_note(
+                    self._note(), "# Mine\n\n## Tasks\n- [[task-1|User]]\n"
+                )
+
+        outcome = self.core.apply_daily_note_projection(
+            self.vault, self.cfg, proj, _final_check_hook=create_race
+        )
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_APPLIED)
+        self.assertEqual(outcome.attempts, 2)
+        self.assertFalse(outcome.created)  # second attempt was a replace
+        content = self._note().read_text(encoding="utf-8")
+        self.assertIn("# Mine", content)
+        self.assertIn("- [[task-1|New]]", content)
+
+    def test_persistent_create_race_conflicts_without_overwrite(self) -> None:
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="New",
+        )
+        counter = {"n": 0}
+
+        def persistent_create_race() -> None:
+            counter["n"] += 1
+            _write_note(
+                self._note(),
+                f"# v{counter['n']}\n\n## Tasks\n- [[task-1|User]]\n",
+            )
+
+        outcome = self.core.apply_daily_note_projection(
+            self.vault, self.cfg, proj, _final_check_hook=persistent_create_race
+        )
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_CONFLICT)
+        self.assertEqual(outcome.attempts, 2)
+        self.assertEqual(
+            self._note().read_text(encoding="utf-8"),
+            f"# v{counter['n']}\n\n## Tasks\n- [[task-1|User]]\n",
+        )
+        self.assertNotIn("[[task-1|New]]", self._note().read_text(encoding="utf-8"))
+
+
+class DailyProjectionGitTests(unittest.TestCase):
+    """Bounded explicit multi-target staging + content-free commit."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_daily_git_"))
+        self.vault = _make_plain_git_vault(self.tmpdir)
+        self.git_env = self.core._build_git_env()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=str(self.vault),
+            capture_output=True, text=True, check=True,
+        )
+        return result.stdout
+
+    def _write_daily_note(self, date: str) -> Path:
+        note = self.vault / "journal" / f"{date}.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(f"# {date}\n\n## Tasks\n", encoding="utf-8")
+        return note
+
+    def test_commits_only_provided_targets(self) -> None:
+        note1 = self._write_daily_note("2026-08-27")
+        note2 = self._write_daily_note("2026-08-28")
+        unrelated = self.vault / "unrelated.md"
+        unrelated.write_text("dirty\n", encoding="utf-8")
+        committed = self.core.git_commit_daily_projection_targets(
+            self.vault, [note1, note2], self.git_env
+        )
+        self.assertTrue(committed)
+        status = self._git("status", "--porcelain")
+        self.assertIn("unrelated.md", status)
+        self.assertNotIn("2026-08-27.md", status)
+        self.assertNotIn("2026-08-28.md", status)
+        names = set(self._git("show", "--name-only", "--pretty=format:", "HEAD").split())
+        self.assertEqual(names, {"journal/2026-08-27.md", "journal/2026-08-28.md"})
+        subject = self._git("log", "-1", "--pretty=%s").strip()
+        self.assertEqual(subject, self.core.DAILY_PROJECTION_COMMIT_MSG)
+
+    def test_accepts_relative_and_absolute_paths(self) -> None:
+        note1 = self._write_daily_note("2026-08-27")
+        note2 = self._write_daily_note("2026-08-28")
+        committed = self.core.git_commit_daily_projection_targets(
+            self.vault, [note1, Path("journal/2026-08-28.md")], self.git_env
+        )
+        self.assertTrue(committed)
+        self.assertTrue(
+            self.core.git_target_clean(self.vault, note2, self.git_env)
+        )
+        _ = note1  # both staged exactly once
+
+    def test_nothing_to_commit_returns_false(self) -> None:
+        note = self._write_daily_note("2026-08-27")
+        self.core.git_commit_daily_projection_targets(self.vault, [note], self.git_env)
+        committed = self.core.git_commit_daily_projection_targets(
+            self.vault, [note], self.git_env
+        )
+        self.assertFalse(committed)
+
+    def test_empty_targets_returns_false(self) -> None:
+        self.assertFalse(
+            self.core.git_commit_daily_projection_targets(
+                self.vault, [], self.git_env
+            )
+        )
+
+    def test_target_count_bound(self) -> None:
+        targets = [
+            Path(f"journal/{i}.md")
+            for i in range(self.core.MAX_DAILY_PROJECTION_TARGETS + 1)
+        ]
+        with self.assertRaises(self.core.ValidationError):
+            self.core.git_commit_daily_projection_targets(
+                self.vault, targets, self.git_env
+            )
+
+    def test_unconfined_paths_rejected(self) -> None:
+        for bad in ("../evil.md", "a\\b.md", "/etc/passwd"):
+            with self.assertRaises(self.core.PathError):
+                self.core.git_commit_daily_projection_targets(
+                    self.vault, [Path(bad)], self.git_env
+                )
+
+    def test_duplicate_targets_single_commit(self) -> None:
+        note = self._write_daily_note("2026-08-27")
+        committed = self.core.git_commit_daily_projection_targets(
+            self.vault, [note, note], self.git_env
+        )
+        self.assertTrue(committed)
+        self.assertEqual(int(self._git("rev-list", "--count", "HEAD")), 2)
+
+
+# ---------------------------------------------------------------------------
+# Daily Notes link integration (issue #139, W2: engine lifecycle)
+# ---------------------------------------------------------------------------
+
+_D1 = "2026-08-27"
+_D2 = "2026-08-28"
+
+
+def _make_daily_engine(
+    core,
+    tmpdir: Path,
+    behavior: Optional[dict] = None,
+    *,
+    daily_links_enabled: bool = True,
+):
+    """Engine vault with a valid Daily Notes config + journal folder."""
+    vault = _make_vault(tmpdir)
+    _write_daily_config(vault, {"folder": "journal"})
+    (vault / "journal").mkdir()
+    subprocess.run(["git", "add", "-A"], cwd=str(vault), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "daily setup"], cwd=str(vault), check=True, capture_output=True)
+    behavior = dict(behavior or {})
+    behavior["vault"] = str(vault)
+    gbrain_bin = _write_fake_gbrain(tmpdir, behavior)
+    gbrain_home = tmpdir / "gbrain_home"
+    gbrain_home.mkdir()
+    lock_dir = tmpdir / "locks"
+    engine = core.TaskNotesEngine(
+        vault=vault,
+        gbrain_bin=str(gbrain_bin),
+        gbrain_home=gbrain_home,
+        lock_dir=lock_dir,
+        lock_timeout=2.0,
+        tz="UTC",
+        daily_links_enabled=daily_links_enabled,
+    )
+    return engine, vault, gbrain_bin
+
+
+def _git_log_with_subjects(vault: Path, count: int = 8) -> Dict[str, str]:
+    """Map commit subject -> hash for the last ``count`` commits."""
+    result = subprocess.run(
+        ["git", "log", f"-n{count}", "--pretty=%H %s"],
+        cwd=str(vault), capture_output=True, text=True, check=True,
+    )
+    out: Dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split(" ", 1)
+        if len(parts) == 2:
+            out[parts[1]] = parts[0]
+    return out
+
+
+@unittest.skipUnless(_has_yaml(), "PyYAML required")
+class DailyLinkIntegrationTests(unittest.TestCase):
+    """Scheduled-driven Daily Notes projection in create/update/delete."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_daily_link_"))
+        self.engine, self.vault, self.gbrain_bin = _make_daily_engine(
+            self.core, self.tmpdir
+        )
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    # -- helpers ------------------------------------------------------------
+
+    def _note(self, date: str) -> Path:
+        return self.vault / "journal" / f"{date}.md"
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=str(self.vault),
+            capture_output=True, text=True, check=True,
+        ).stdout
+
+    def _no_recovery_marker(self) -> None:
+        self.assertFalse(
+            (self.tmpdir / "locks" / "tasknotes-recovery.marker").exists()
+        )
+
+    def _patch_apply(self, wrapper):
+        return mock.patch.object(
+            self.core, "apply_daily_note_projection", wrapper
+        )
+
+    # -- ctor safety ---------------------------------------------------------
+
+    def test_ctor_rejects_non_boolean_flag(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.TaskNotesEngine(
+                vault=self.vault,
+                gbrain_bin=str(self.gbrain_bin),
+                gbrain_home=self.tmpdir / "gbrain_home",
+                lock_dir=self.tmpdir / "locks",
+                daily_links_enabled="yes",
+            )
+
+    # -- disabled mode -------------------------------------------------------
+
+    def test_disabled_zero_daily_config_reads_and_unchanged_results(self) -> None:
+        # Separate vault so setUp's engine stays untouched.
+        sub = self.tmpdir / "disabled"
+        sub.mkdir()
+        engine, vault, _ = _make_daily_engine(
+            self.core, sub, daily_links_enabled=False
+        )
+        # Invalid config on disk proves it is never read.
+        (vault / ".obsidian" / "daily-notes.json").write_text(
+            "{not json", encoding="utf-8"
+        )
+        read_counter = {"n": 0}
+        real_load = self.core.load_daily_notes_config
+
+        def counting_load(v):
+            read_counter["n"] += 1
+            return real_load(v)
+
+        with mock.patch.object(self.core, "load_daily_notes_config", counting_load):
+            created = engine.create("t1", "My Task", scheduled=_D1, body="b")
+            updated = engine.update("t1", scheduled=_D2, body="b2")
+            deleted = engine.delete("t1")
+        self.assertEqual(read_counter["n"], 0)
+        for result in (created, updated, deleted):
+            self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+            self.assertIsNone(result.daily_link_state)
+            self.assertIsNone(result.daily_link_detail)
+            self.assertIsNone(result.daily_link_dates)
+        self.assertFalse((vault / "journal" / f"{_D1}.md").exists())
+        self.assertFalse((vault / "journal" / f"{_D2}.md").exists())
+
+    def test_enabled_backlog_create_does_not_load_config(self) -> None:
+        read_counter = {"n": 0}
+        real_load = self.core.load_daily_notes_config
+
+        def counting_load(v):
+            read_counter["n"] += 1
+            return real_load(v)
+
+        with mock.patch.object(self.core, "load_daily_notes_config", counting_load):
+            result = self.engine.create("t1", "My Task", body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_NOT_APPLICABLE)
+        self.assertIsNone(result.daily_link_dates)
+        self.assertEqual(read_counter["n"], 0)
+
+    # -- transition matrix: create -------------------------------------------
+
+    def test_create_scheduled_ensures_link(self) -> None:
+        result = self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        self.assertIsNone(result.daily_link_detail)
+        self.assertEqual(result.daily_link_dates, [_D1])
+        content = self._note(_D1).read_text(encoding="utf-8")
+        self.assertIn("- [[t1|My Task]]", content)
+        self.assertEqual(self._git("status", "--porcelain").strip(), "")
+        syncs = [c for c in _read_calls(self.tmpdir) if c["argv"][0] == "sync"]
+        self.assertGreaterEqual(len(syncs), 2)  # preflight + post-commit
+
+    def test_create_backlog_no_link(self) -> None:
+        result = self.engine.create("t1", "My Task", body="b")
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_NOT_APPLICABLE)
+        self.assertFalse(self._note(_D1).exists())
+
+    def test_create_planned_week_no_link(self) -> None:
+        result = self.engine.create(
+            "t1", "My Task", planned_week="2026-08-31", body="b"
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_NOT_APPLICABLE)
+        self.assertFalse(self._note(_D1).exists())
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fm["planned_week"], "2026-08-31")
+
+    # -- transition matrix: update -------------------------------------------
+
+    def test_update_backlog_to_scheduled_ensures(self) -> None:
+        self.engine.create("t1", "My Task", body="b")
+        result = self.engine.update("t1", scheduled=_D1, body="b2")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        self.assertEqual(result.daily_link_dates, [_D1])
+        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+        self.assertEqual(self._git("status", "--porcelain").strip(), "")
+
+    def test_update_scheduled_d1_to_d2_ensures_then_removes(self) -> None:
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        result = self.engine.update("t1", scheduled=_D2, body="b2")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        # Ensure D2 first, then remove D1.
+        self.assertEqual(result.daily_link_dates, [_D2, _D1])
+        self.assertIn("- [[t1|My Task]]", self._note(_D2).read_text(encoding="utf-8"))
+        d1_content = self._note(_D1).read_text(encoding="utf-8")
+        self.assertNotIn("[[t1", d1_content)
+        self.assertIn("## Tasks", d1_content)
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fm["scheduled"], _D2)
+        self.assertEqual(self._git("status", "--porcelain").strip(), "")
+
+    def test_update_scheduled_to_backlog_removes_link(self) -> None:
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        result = self.engine.update("t1", clear_scheduled=True, body="b2")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        self.assertEqual(result.daily_link_dates, [_D1])
+        self.assertNotIn("[[t1", self._note(_D1).read_text(encoding="utf-8"))
+
+    def test_update_scheduled_to_week_removes_link(self) -> None:
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        result = self.engine.update("t1", planned_week="2026-08-31", body="b2")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        self.assertEqual(result.daily_link_dates, [_D1])
+        self.assertNotIn("[[t1", self._note(_D1).read_text(encoding="utf-8"))
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("scheduled", fm)
+        self.assertEqual(fm["planned_week"], "2026-08-31")
+
+    def test_update_same_day_is_no_unnecessary_write_and_no_duplicate(self) -> None:
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        before = self._note(_D1).stat().st_mtime_ns
+        result = self.engine.update("t1", scheduled=_D1, body="b2")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_NOT_APPLIED)
+        self.assertEqual(result.daily_link_dates, [_D1])
+        self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
+        content = self._note(_D1).read_text(encoding="utf-8")
+        self.assertEqual(content.count("- [[t1|My Task]]"), 1)
+        self.assertEqual(self._git("status", "--porcelain").strip(), "")
+
+    def test_update_non_scheduling_does_not_project(self) -> None:
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        before = self._note(_D1).stat().st_mtime_ns
+        result = self.engine.update("t1", priority="high")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_NOT_APPLICABLE)
+        self.assertIsNone(result.daily_link_dates)
+        self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
+        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+
+    # -- scheduled is the sole source -----------------------------------------
+
+    def test_due_only_change_does_not_project(self) -> None:
+        self.engine.create("t1", "My Task", body="b")
+        before_counts = {"reads": None}
+        result = self.engine.update("t1", due=_D1)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_NOT_APPLICABLE)
+        self.assertFalse(self._note(_D1).exists())
+        _ = before_counts
+
+    def test_recurrence_projects_only_current_schedule(self) -> None:
+        result = self.engine.create(
+            "t1", "My Task", scheduled=_D1,
+            recurrence="FREQ=DAILY;INTERVAL=1", body="b",
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_dates, [_D1])
+        self.assertEqual(
+            [p.name for p in (self.vault / "journal").iterdir()],
+            [f"{_D1}.md"],
+        )
+
+    def test_complete_archive_and_tags_do_not_project(self) -> None:
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        before = self._note(_D1).stat().st_mtime_ns
+        completed = self.engine.complete("t1")
+        self.assertIsNone(completed.daily_link_state)
+        self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
+        archived = self.engine.archive("t1")
+        self.assertIsNone(archived.daily_link_state)
+        self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
+        tagged = self.engine.add_tag("t1", "custom")
+        self.assertIsNone(tagged.daily_link_state)
+        self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
+        untagged = self.engine.remove_tag("t1", "custom")
+        self.assertIsNone(untagged.daily_link_state)
+        self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
+        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+
+    # -- prevalidation and failure isolation ----------------------------------
+
+    def test_prevalidation_failure_zero_task_side_effects(self) -> None:
+        # Template without a '## Tasks' section fails deterministically
+        # BEFORE capture; no task file, no capture call.
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily.md").write_text(
+            "# {{date}}\n", encoding="utf-8"
+        )
+        _write_daily_config(
+            self.vault, {"folder": "journal", "template": "templates/daily.md"}
+        )
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertFalse((self.vault / "tasks" / "t1.md").exists())
+        self.assertFalse(self._note(_D1).exists())
+        self.assertEqual(
+            [c for c in _read_calls(self.tmpdir) if c["argv"][0] == "capture"],
+            [],
+        )
+
+    def test_capture_failure_zero_projection_writes(self) -> None:
+        sub = self.tmpdir / "capture_fail"
+        sub.mkdir()
+        engine, vault, _ = _make_daily_engine(
+            self.core, sub, {"capture_fail": ["tasks/t1"]}
+        )
+        result = engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertNotEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertIsNone(result.daily_link_state)
+        self.assertIsNone(result.daily_link_dates)
+        self.assertFalse((vault / "journal" / f"{_D1}.md").exists())
+
+    def test_sync_failure_after_commit_reports_degradation_without_marker(self) -> None:
+        real_sync = self.core.gbrain_sync_incremental
+        calls = {"n": 0}
+
+        def flaky_sync(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] >= 2:  # first sync = preflight, second = projection
+                raise self.core.GbrainError("injected sync failure")
+            return real_sync(*args, **kwargs)
+
+        with mock.patch.object(self.core, "gbrain_sync_incremental", flaky_sync):
+            result = self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_SYNC_FAILED)
+        self.assertEqual(
+            result.daily_link_detail,
+            "daily note projection committed but sync failed",
+        )
+        self.assertEqual(result.daily_link_dates, [_D1])
+        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+        self.assertEqual(self._git("status", "--porcelain").strip(), "")
+        self._no_recovery_marker()
+
+    def test_git_projection_failure_reports_degradation_without_marker(self) -> None:
+        def failing_commit(*args, **kwargs):
+            raise self.core.GitError("injected projection commit failure")
+
+        with mock.patch.object(
+            self.core, "git_commit_daily_projection_targets", failing_commit
+        ):
+            result = self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertIsNotNone(result.commit_id)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_COMMIT_FAILED)
+        self.assertEqual(
+            result.daily_link_detail, "daily note projection commit failed"
+        )
+        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+        self.assertIn("journal", self._git("status", "--porcelain"))
+        self._no_recovery_marker()
+
+    # -- OSError containment after task commit (submit-gating remediation) ---
+
+    def test_writer_oserror_on_replace_maps_to_write_failed(self) -> None:
+        def failing_replace(src, dst, **kwargs):
+            raise OSError(28, "injected replace failure")
+
+        with mock.patch.object(os, "replace", failing_replace):
+            result = self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_WRITE_FAILED)
+        self.assertEqual(
+            result.daily_link_detail, "daily note projection write failed"
+        )
+        self.assertEqual(result.daily_link_dates, [_D1])
+        # Target never created; no temp file survived; no recovery marker.
+        self.assertEqual(
+            [p.name for p in (self.vault / "journal").iterdir()], []
+        )
+        self.assertTrue((self.vault / "tasks" / "t1.md").exists())
+        self._no_recovery_marker()
+
+    def test_writer_oserror_on_temp_write_maps_to_write_failed(self) -> None:
+        def failing_fchmod(fd, mode):
+            raise OSError(28, "injected fchmod failure")
+
+        with mock.patch.object(os, "fchmod", failing_fchmod):
+            result = self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_WRITE_FAILED)
+        self.assertEqual(
+            result.daily_link_detail, "daily note projection write failed"
+        )
+        self.assertEqual(
+            [p.name for p in (self.vault / "journal").iterdir()], []
+        )
+        self._no_recovery_marker()
+
+    # -- config freshness (lazy load, cached for engine/process lifetime) -----
+
+    def test_daily_config_cached_for_engine_lifetime(self) -> None:
+        read_counter = {"n": 0}
+        real_load = self.core.load_daily_notes_config
+
+        def counting_load(v):
+            read_counter["n"] += 1
+            return real_load(v)
+
+        with mock.patch.object(self.core, "load_daily_notes_config", counting_load):
+            self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+            self.assertEqual(read_counter["n"], 1)
+            # Mid-life config change is ignored until an MCP restart.
+            _write_daily_config(self.vault, {"folder": "journal2"})
+            result = self.engine.update("t1", scheduled=_D2, body="b2")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        self.assertEqual(result.daily_link_dates, [_D2, _D1])
+        # The projection used the cached config's folder, not the new one.
+        self.assertTrue((self.vault / "journal" / f"{_D2}.md").exists())
+        self.assertFalse((self.vault / "journal2").exists())
+        self.assertEqual(read_counter["n"], 1)
+
+    # -- D1 -> D2 add-before-remove degradation -------------------------------
+
+    def test_d1_to_d2_remove_failure_commits_d2_and_degrades(self) -> None:
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        real_apply = self.core.apply_daily_note_projection
+
+        def failing_remove(vault, config, projection, **kwargs):
+            if projection.operation == self.core.DAILY_PROJECTION_OP_REMOVE:
+                raise self.core.CoreError("injected removal failure")
+            return real_apply(vault, config, projection, **kwargs)
+
+        with self._patch_apply(failing_remove):
+            result = self.engine.update("t1", scheduled=_D2, body="b2")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_WRITE_FAILED)
+        self.assertEqual(
+            result.daily_link_detail,
+            "daily note projection partially applied; "
+            "applied targets committed and synced",
+        )
+        self.assertEqual(result.daily_link_dates, [_D2, _D1])
+        # D2 ensure survived (committed + synced); D1 removal failed but
+        # the D1 file was never clobbered.
+        self.assertIn("- [[t1|My Task]]", self._note(_D2).read_text(encoding="utf-8"))
+        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+        self.assertEqual(self._git("status", "--porcelain").strip(), "")
+        self._no_recovery_marker()
+
+    def test_d1_to_d2_remove_conflict_commits_d2_and_degrades(self) -> None:
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        real_apply = self.core.apply_daily_note_projection
+
+        def conflicting_remove(vault, config, projection, **kwargs):
+            if projection.operation == self.core.DAILY_PROJECTION_OP_REMOVE:
+                return self.core.DailyNoteProjectionOutcome(
+                    state=self.core.DAILY_PROJECTION_CONFLICT, attempts=2
+                )
+            return real_apply(vault, config, projection, **kwargs)
+
+        with self._patch_apply(conflicting_remove):
+            result = self.engine.update("t1", scheduled=_D2, body="b2")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_CONFLICT)
+        self.assertEqual(
+            result.daily_link_detail,
+            "daily note projection partially applied; "
+            "applied targets committed and synced",
+        )
+        self.assertIn("- [[t1|My Task]]", self._note(_D2).read_text(encoding="utf-8"))
+        self._no_recovery_marker()
+
+    # -- delete (D13 ordering) --------------------------------------------------
+
+    def test_delete_scheduled_removes_link_and_returns_task_commit(self) -> None:
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        result = self.engine.delete("t1")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        self.assertEqual(result.daily_link_dates, [_D1])
+        self.assertNotIn("[[t1", self._note(_D1).read_text(encoding="utf-8"))
+        # commit_id is the TASK deletion commit, not the daily commit.
+        log = _git_log_with_subjects(self.vault)
+        self.assertEqual(log[self.core.POSTWRITE_DELETE_COMMIT_MSG], result.commit_id)
+        self.assertIn(self.core.DAILY_PROJECTION_COMMIT_MSG, log)
+        self.assertFalse((self.vault / "tasks" / "t1.md").exists())
+        self.assertEqual(self._git("status", "--porcelain").strip(), "")
+
+    def test_delete_backlog_reports_not_applicable(self) -> None:
+        self.engine.create("t1", "My Task", body="b")
+        result = self.engine.delete("t1")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_NOT_APPLICABLE)
+
+    def test_delete_prevalidation_failure_zero_side_effects(self) -> None:
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        # Break the target note structure deterministically.
+        self._note(_D1).write_text(
+            "## Tasks\na\n## Mid\n## Tasks\nb\n", encoding="utf-8"
+        )
+        subprocess.run(["git", "add", "-A"], cwd=str(self.vault), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "break"], cwd=str(self.vault), check=True, capture_output=True)
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.delete("t1")
+        # Task file untouched; soft-delete never ran.
+        self.assertTrue((self.vault / "tasks" / "t1.md").exists())
+        self.assertEqual(
+            [c for c in _read_calls(self.tmpdir) if c["argv"][0] == "delete"],
+            [],
+        )
+
+    def test_delete_gbrain_gate_failure_leaves_link_untouched(self) -> None:
+        sub = self.tmpdir / "delete_fail"
+        sub.mkdir()
+        engine, vault, _ = _make_daily_engine(
+            self.core, sub, {"delete_fail": ["tasks/t1"]}
+        )
+        engine.create("t1", "My Task", scheduled=_D1, body="b")
+        apply_calls: List[str] = []
+        real_apply = self.core.apply_daily_note_projection
+
+        def recording_apply(v, c, projection, **kwargs):
+            apply_calls.append(projection.operation)
+            return real_apply(v, c, projection, **kwargs)
+
+        with self._patch_apply(recording_apply):
+            with self.assertRaises(self.core.GbrainError):
+                engine.delete("t1")
+        self.assertEqual(apply_calls, [])
+        self.assertTrue((vault / "tasks" / "t1.md").exists())
+        self.assertIn("- [[t1|My Task]]", (vault / "journal" / f"{_D1}.md").read_text(encoding="utf-8"))
+
+    def test_delete_runs_projection_only_after_verified_deletion(self) -> None:
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        apply_calls: List[str] = []
+        real_apply = self.core.apply_daily_note_projection
+
+        def recording_apply(v, c, projection, **kwargs):
+            apply_calls.append(projection.operation)
+            return real_apply(v, c, projection, **kwargs)
+
+        with self._patch_apply(recording_apply):
+            result = self.engine.delete("t1")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(apply_calls, [self.core.DAILY_PROJECTION_OP_REMOVE])
+
+    def test_delete_success_with_projection_failure_degrades(self) -> None:
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+
+        def failing_apply(vault, config, projection, **kwargs):
+            raise self.core.CoreError("injected projection failure")
+
+        with self._patch_apply(failing_apply):
+            result = self.engine.delete("t1")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertIsNotNone(result.commit_id)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_WRITE_FAILED)
+        self.assertEqual(
+            result.daily_link_detail, "daily note projection write failed"
+        )
+        # Task deletion is authoritative; the link removal failed cleanly.
+        self.assertFalse((self.vault / "tasks" / "t1.md").exists())
+        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+        self._no_recovery_marker()
 
 
 if __name__ == "__main__":

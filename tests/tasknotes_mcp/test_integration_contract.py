@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
+import importlib.util
+import inspect
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -20,6 +25,19 @@ EFFECTIVE_WEEK_FORMULA = (
     '.format("YYYY-MM-DD"), '
     'if((planned_week.isEmpty() == false), date(planned_week)'
     '.format("YYYY-MM-DD"), "Backlog"))'
+)
+
+# Issue #139: documented projection outcome states (docs/tasknotes-mcp.md
+# "Projection outcomes" and references/daily-notes.md). The core constants
+# must match this exact set.
+DAILY_LINK_STATES = (
+    "applied_and_committed",
+    "not_applicable",
+    "not_applied",
+    "conflict",
+    "write_failed",
+    "commit_failed",
+    "committed_sync_failed",
 )
 
 
@@ -339,6 +357,333 @@ class IntegrationContractTests(unittest.TestCase):
     def test_compose_passes_refresh_timeout(self) -> None:
         text = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn("GBRAIN_REFRESH_TIMEOUT=${GBRAIN_REFRESH_TIMEOUT:-240}", text)
+
+
+class DailyNoteProjectionDocsContract(unittest.TestCase):
+    """Issue #139 W5: duplicated safety documentation and bounded-feature
+    contracts must stay consistent across root AGENTS.md, both runbooks,
+    the skill, and the deep-dive reference."""
+
+    def setUp(self) -> None:
+        self.runbook = (
+            REPO_ROOT / "docs" / "tasknotes-mcp.md"
+        ).read_text(encoding="utf-8")
+        self.reference = (
+            REPO_ROOT
+            / "skills-factory"
+            / "tasknotes"
+            / "references"
+            / "daily-notes.md"
+        ).read_text(encoding="utf-8")
+        self.skill = (
+            REPO_ROOT / "skills-factory" / "tasknotes" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.gbrain_ops = (
+            REPO_ROOT / "docs" / "gbrain-operations.md"
+        ).read_text(encoding="utf-8")
+
+    def test_task_markdown_stays_gbrain_only_in_every_invariant_copy(self) -> None:
+        """The sole-writer invariant plus the single narrow Daily Note
+        exception must be updated together in AGENTS.md, both runbooks,
+        and the runbook intro — no copy may keep the old unqualified
+        wording, and none may widen the exception into a generic writer."""
+        for name, text, fragments in (
+            (
+                "AGENTS.md ownership bullet",
+                self.agents,
+                (
+                    "default-off Daily Note task-link projection (issue #139)",
+                    "never a generic note writer and never nests the public `gbrain` wrapper",
+                ),
+            ),
+            (
+                "AGENTS.md non-negotiable 6",
+                self.agents,
+                (
+                    "filesystem exception (issue #139",
+                    "mandatory native incremental gbrain reconciliation",
+                    "generic note-write tool",
+                ),
+            ),
+            (
+                "docs/tasknotes-mcp.md intro",
+                self.runbook,
+                (
+                    "sole task-file writer",
+                    "never a generic note writer",
+                ),
+            ),
+            (
+                "docs/gbrain-operations.md non-negotiable 5",
+                self.gbrain_ops,
+                (
+                    "derived Daily Note task-link projection",
+                    "generic note-write tool",
+                ),
+            ),
+        ):
+            for fragment in fragments:
+                self.assertIn(fragment, text, f"{name} missing: {fragment}")
+        # The task runbook must state the architectural boundary section.
+        self.assertIn("### Architectural boundary", self.runbook)
+        self.assertIn("the sole projection source", self.runbook)
+
+    def test_runbook_documents_daily_note_projection_contract(self) -> None:
+        """The runbook must document the default-off flag, dynamic core
+        Daily Notes config, the bounded date/template subset, structural
+        `## Tasks` rules, canonical links, the transition matrix, ordering
+        guarantees, concurrency/atomic/Git/sync behavior, projection-only
+        outcome states, disabling behavior, and the v1 limitations."""
+        text = self.runbook
+        # Prose assertions run against whitespace-normalized text so
+        # Markdown line wrapping cannot mask a wording change.
+        prose = " ".join(text.split())
+        # Section + flag contract.
+        self.assertIn("## Daily Note task links (issue #139)", text)
+        self.assertIn("TASKNOTES_DAILY_LINKS_ENABLED", text)
+        self.assertIn("### Feature flag (default off)", text)
+        self.assertIn("Missing or empty resolves to disabled", prose)
+        self.assertIn("carry no `daily_link_*` fields", prose)
+        # Dynamic core config, fail-closed, no second config source,
+        # no Periodic Notes fallback.
+        self.assertIn("### Daily Notes configuration (dynamic, fail-closed)", text)
+        self.assertIn("daily-notes.json", text)
+        self.assertIn("`folder`", text)
+        self.assertIn("`format`", text)
+        self.assertIn("`template`", text)
+        self.assertIn("never read as a fallback", text)
+        # Date-format subset: supported tokens, safe separators, rejection.
+        self.assertIn("### Supported date-format subset", text)
+        self.assertIn("`YYYY YY MM M DD D`", text)
+        self.assertIn("is rejected before any task side effect", prose)
+        # Template variables and the no-execution prohibition.
+        self.assertIn("### Template rendering (bounded, no execution)", text)
+        self.assertIn("`{{date}}`", text)
+        self.assertIn("`{{title}}`", text)
+        self.assertIn("`{{date:FORMAT}}`", text)
+        self.assertIn("Templater or JavaScript execution never happens", prose)
+        # Structural contract on existing notes.
+        self.assertIn("### Existing-note structural contract", text)
+        self.assertIn("exactly one level-2 `## Tasks` heading", prose)
+        self.assertIn("duplicated `## Tasks` section fails closed", prose)
+        # Canonical link semantics.
+        self.assertIn("### Canonical link semantics", text)
+        self.assertIn("- [[<task-slug>|<task-title>]]", text)
+        self.assertIn("by exact wikilink target slug", prose)
+        # Transition matrix and ordering guarantees.
+        self.assertIn("### Transition matrix", text)
+        self.assertIn("add under D2 **first**, then remove from D1", text)
+        self.assertIn("remove link **after** verified deletion", text)
+        self.assertIn("link retained while `scheduled` remains", text)
+        self.assertIn("no future links pre-created", text)
+        self.assertIn("never from caller intent alone", prose)
+        # Concurrency/atomicity/Git/reconciliation.
+        self.assertIn("### Concurrency, atomicity, Git, and reconciliation", text)
+        self.assertIn("two attempts total", prose)
+        self.assertIn("instead of overwriting concurrent edits", prose)
+        self.assertIn("atomic `os.replace`", prose)
+        self.assertIn("tasknotes-mcp: daily note projection", text)
+        self.assertIn("staging only the affected Daily Note paths", prose)
+        self.assertIn(
+            "native incremental gbrain sync while the lock is still held", prose
+        )
+        # Projection outcome states and recovery-marker boundary.
+        self.assertIn("### Projection outcomes", text)
+        for state in DAILY_LINK_STATES:
+            self.assertIn(f"`{state}`", text)
+        self.assertIn("`daily_link_state`", text)
+        self.assertIn("`daily_link_detail`", text)
+        self.assertIn("`daily_link_dates`", text)
+        self.assertIn(
+            "never create the TaskNotes global recovery marker", prose
+        )
+        self.assertIn("`committed_sync_failed`", text)
+        # Disabling behavior and v1 limitations.
+        self.assertIn("### Disabling, manual edits, and v1 limitations", text)
+        self.assertIn("no watcher or backfill in v1", prose)
+        self.assertIn("are never bulk-removed", prose)
+        self.assertIn("No Periodic Notes compatibility is", prose)
+
+    def test_daily_notes_reference_documents_bounded_contract(self) -> None:
+        """The deep-dive reference must carry the full bounded contract and
+        stay pointed to by the always-loaded skill."""
+        text = self.reference
+        prose = " ".join(text.split())
+        self.assertIn("# Daily Note task-link projection (issue #139)", text)
+        self.assertIn("TASKNOTES_DAILY_LINKS_ENABLED", text)
+        self.assertIn("default `false`", text)
+        self.assertIn("/opt/data/.locks/tasknotes.lock", text)
+        self.assertIn("Task files remain gbrain-only", prose)
+        self.assertIn("wrapper nesting", prose)
+        self.assertIn("daily-notes.json", text)
+        self.assertIn("Periodic Notes config is never read", prose)
+        self.assertIn("`YYYY` (4-digit year)", prose)
+        self.assertIn("`MM`/`M`", text)
+        self.assertIn("`DD`/`D`", text)
+        self.assertIn("`{{date}}`", text)
+        self.assertIn("`{{title}}`", text)
+        self.assertIn("`{{date:FORMAT}}`", text)
+        self.assertIn("Templater/JavaScript is never executed", prose)
+        self.assertIn("top-level `date` frontmatter key", prose)
+        self.assertIn("exactly one `## Tasks` level-2 section", prose)
+        self.assertIn("- [[<task-slug>|<task-title>]]", text)
+        self.assertIn("add D2 **first**, then remove D1", text)
+        self.assertIn("remove after **verified** deletion", text)
+        self.assertIn("two attempts total", prose)
+        self.assertIn("`os.replace`", text)
+        self.assertIn("tasknotes-mcp: daily note projection", text)
+        self.assertIn("at most 16 targets per commit", prose)
+        for state in DAILY_LINK_STATES:
+            self.assertIn(f"`{state}`", text)
+        self.assertIn(
+            "never create the global TaskNotes recovery marker", prose
+        )
+        self.assertIn("No watcher, cron, or bulk backfill in v1", prose)
+        self.assertIn("never bulk-removed", prose)
+        self.assertIn("No Periodic Notes compatibility", prose)
+        # Cross-pointers.
+        self.assertIn("`SKILL.md`", text)
+        self.assertIn("`docs/tasknotes-mcp.md`", text)
+
+    def test_skill_documents_daily_note_projection_boundary(self) -> None:
+        """The always-loaded skill must present the concise boundary: the
+        projection is adapter-owned, opt-in/default-off, never manually
+        maintained during task workflows, with the deep-dive pointer —
+        while keeping the skill under the organization line limit."""
+        text = self.skill
+        prose = " ".join(text.split())
+        self.assertIn("## Daily Note links (opt-in)", text)
+        self.assertIn("TASKNOTES_DAILY_LINKS_ENABLED", text)
+        self.assertIn("default off", text)
+        self.assertIn("Never edit a projected link manually", prose)
+        self.assertIn("`- [[slug|title]]`", text)
+        self.assertIn("`## Tasks`", text)
+        self.assertIn("direct Obsidian task edits are not re-projected", prose)
+        self.assertIn("Backlog and week-planned tasks are never projected", prose)
+        self.assertIn("`references/daily-notes.md`", text)
+        self.assertLess(len(text.splitlines()), 160)
+
+    def test_runbook_mutation_outcomes_document_daily_fields(self) -> None:
+        """The mutation-outcome section must tie the optional daily fields
+        to the enabled feature without changing the authoritative states."""
+        text = self.runbook
+        prose = " ".join(text.split())
+        self.assertIn(
+            "`daily_link_state`, `daily_link_detail`, and `daily_link_dates`",
+            prose,
+        )
+        self.assertIn(
+            "They never change the authoritative task `state`", prose
+        )
+        self.assertIn("## Current limitations", text)
+        self.assertIn(
+            "Daily Note projection backfill/reconciliation (issue #139)", text
+        )
+
+
+class DailyProjectionCoreContract(unittest.TestCase):
+    """Issue #139: the implemented core projection contract must match the
+    documented bounded behavior (defaults, states, ordering, constants)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        core_path = REPO_ROOT / "scripts" / "tasknotes_mcp_core.py"
+        spec = importlib.util.spec_from_file_location(
+            "tasknotes_mcp_core_contract", core_path
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["tasknotes_mcp_core_contract"] = module
+        spec.loader.exec_module(module)
+        cls.core = module
+
+    def test_engine_flag_defaults_to_disabled_and_is_strict(self) -> None:
+        signature = inspect.signature(self.core.TaskNotesEngine.__init__)
+        param = signature.parameters["daily_links_enabled"]
+        self.assertIs(param.default, False)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(self.core.ValidationError):
+                self.core.TaskNotesEngine(
+                    vault=Path(tmp),
+                    gbrain_bin="gbrain-native",
+                    gbrain_home=Path(tmp),
+                    daily_links_enabled="true",  # type: ignore[arg-type]
+                )
+
+    def test_mutation_result_daily_fields_are_optional_additions(self) -> None:
+        fields = {
+            field.name: field
+            for field in dataclasses.fields(self.core.MutationResult)
+        }
+        for name in ("daily_link_state", "daily_link_detail", "daily_link_dates"):
+            self.assertIn(name, fields)
+            self.assertEqual(fields[name].default, None)
+        # Pre-existing fields remain authoritative and unchanged.
+        self.assertEqual(fields["state"].default, dataclasses.MISSING)
+        self.assertEqual(fields["slug"].default, dataclasses.MISSING)
+
+    def test_daily_link_states_match_documented_set(self) -> None:
+        constants = {
+            "applied_and_committed": self.core.DAILY_LINK_APPLIED,
+            "not_applicable": self.core.DAILY_LINK_NOT_APPLICABLE,
+            "not_applied": self.core.DAILY_LINK_NOT_APPLIED,
+            "conflict": self.core.DAILY_LINK_CONFLICT,
+            "write_failed": self.core.DAILY_LINK_WRITE_FAILED,
+            "commit_failed": self.core.DAILY_LINK_COMMIT_FAILED,
+            "committed_sync_failed": self.core.DAILY_LINK_SYNC_FAILED,
+        }
+        self.assertEqual(set(constants.values()), set(DAILY_LINK_STATES))
+        for documented, actual in constants.items():
+            self.assertEqual(actual, documented)
+
+    def test_daily_projection_constants_match_documented_behavior(self) -> None:
+        self.assertEqual(self.core.DAILY_NOTE_TASKS_HEADING, "## Tasks")
+        self.assertEqual(self.core.DAILY_NOTES_DEFAULT_FORMAT, "YYYY-MM-DD")
+        self.assertEqual(
+            self.core.DAILY_PROJECTION_COMMIT_MSG,
+            "tasknotes-mcp: daily note projection",
+        )
+        self.assertEqual(self.core.DAILY_PROJECTION_MAX_ATTEMPTS, 2)
+        self.assertEqual(
+            self.core._DAILY_FORMAT_TOKENS,
+            ("YYYY", "YY", "MM", "M", "DD", "D"),
+        )
+
+    def test_transition_plan_matches_documented_matrix(self) -> None:
+        plan = self.core._daily_link_plan
+        ensure = self.core.DAILY_PROJECTION_OP_ENSURE
+        remove = self.core.DAILY_PROJECTION_OP_REMOVE
+        # create/switch to scheduled D: ensure D.
+        self.assertEqual(plan(None, "2026-01-05"), [(ensure, "2026-01-05")])
+        # reschedule D1 -> D2: ensure new FIRST, then remove old.
+        self.assertEqual(
+            plan("2026-01-01", "2026-01-05"),
+            [(ensure, "2026-01-05"), (remove, "2026-01-01")],
+        )
+        # same-day update: idempotent ensure only, no duplicate removal.
+        self.assertEqual(plan("2026-01-05", "2026-01-05"), [(ensure, "2026-01-05")])
+        # scheduled -> planned_week/backlog: remove old only.
+        self.assertEqual(plan("2026-01-01", None), [(remove, "2026-01-01")])
+        # Backlog/week: no projection at all.
+        self.assertIsNone(plan(None, None))
+
+    def test_format_subset_matches_documented_tokens(self) -> None:
+        self.assertEqual(
+            self.core.format_daily_note_date("2026-01-05", "YYYY/MM/DD"),
+            "2026/01/05",
+        )
+        self.assertEqual(
+            self.core.format_daily_note_date("2026-01-05", "YYYY-M-D"),
+            "2026-1-5",
+        )
+        for unsupported in ("MMMM", "MMM DD", "dddd", "YYYY [W] WW"):
+            with self.assertRaises(self.core.ValidationError):
+                self.core.validate_daily_note_format(unsupported)
+        with self.assertRaises(self.core.ValidationError):
+            self.core.render_daily_note_template(
+                "{{ date:MMMM }}", date="2026-01-05", title="2026-01-05"
+            )
 
 
 if __name__ == "__main__":

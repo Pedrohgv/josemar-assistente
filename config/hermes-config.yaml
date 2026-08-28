@@ -93,6 +93,9 @@ mcp_servers:
       GBRAIN_EMBEDDING_MODEL_REVISION: "${GBRAIN_EMBEDDING_MODEL_REVISION}"
       GBRAIN_EMBEDDING_MODEL: "${GBRAIN_EMBEDDING_MODEL}"
       GBRAIN_EMBEDDING_DIMENSIONS: "${GBRAIN_EMBEDDING_DIMENSIONS}"
+      # Issue #139: explicitly forward the strict daily-links switch to the
+      # MCP subprocess. Compose defaults it to false; missing/empty disables.
+      TASKNOTES_DAILY_LINKS_ENABLED: "${TASKNOTES_DAILY_LINKS_ENABLED}"
     connect_timeout: 30
     timeout: 180
     supports_parallel_tool_calls: false

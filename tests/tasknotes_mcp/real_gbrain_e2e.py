@@ -11,9 +11,23 @@ runtime identity with the validated Hermes UID/GID. There is deliberately NO
 host-execution, environment, or executable-override escape hatch: host runs
 and caller-provided bypasses are refused.
 
+Two lifecycle phases run against the same disposable vault (issue #139 W4):
+
+1. Disabled mode (default): the plain task lifecycle runs BEFORE any Daily
+   Notes configuration exists, proving no configuration prerequisite and no
+   ``daily_link_*`` result fields.
+2. Daily-links mode (``TASKNOTES_DAILY_LINKS_ENABLED=true``): after a
+   fixture (numeric-subfolder ``daily-notes.json``, a template with empty
+   ``date``/``title`` identity, and one preexisting Daily Note) the real
+   MCP projects scheduled creates, D1->D2 reschedules, week/backlog
+   cleanups, delete cleanup, and completion/archive link retention into the
+   Daily Notes, commits them as content-free Git commits, syncs them under
+   the shared lock, and makes them visible to the real gbrain index.
+
 The script never deletes anything under /opt/data: the outer host test
 fixture owns the fresh temporary directory and removes it after the
-container exits.
+container exits; the Daily Notes fixture is only ever written, never
+removed.
 """
 
 from __future__ import annotations
@@ -21,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -96,6 +111,67 @@ PROFILE = {
         {"id": "planned_week", "key": "planned_week", "type": "date", "label": "Planned week"},
     ],
 }
+
+# ---------------------------------------------------------------------------
+# Daily Notes fixture (issue #139 W4): custom numeric-subfolder configuration,
+# a template with normal headings and empty date/title identity, and one
+# preexisting Daily Note. Written once between the two lifecycle phases;
+# never removed (the e2e never deletes anything under /opt/data).
+# ---------------------------------------------------------------------------
+
+DAILY_NOTES_CONFIG_NAME = "daily-notes.json"
+
+# Custom folder plus a numeric hierarchy format: notes resolve to
+# ``daily/YYYY/MM/<formatted date>.md``, exercising multi-level numeric
+# subfolder creation instead of the flat default.
+DAILY_FOLDER = "daily"
+DAILY_FORMAT = "YYYY/MM/DD"
+DAILY_TEMPLATE_REL = "templates/daily-template.md"
+
+DAILY_NOTES_CONFIG = {
+    "folder": DAILY_FOLDER,
+    "format": DAILY_FORMAT,
+    "template": DAILY_TEMPLATE_REL,
+}
+
+# Valid template: normal headings, exactly one ``## Tasks`` section, and
+# empty (null) top-level ``date``/``title`` identity that the projection
+# must fill (scheduled date / filename stem).
+DAILY_TEMPLATE_TEXT = """---
+date:
+title:
+---
+# {{date}}
+
+Plan for the day.
+
+## Tasks
+
+## Notes
+
+- Template rendered on {{date}} for {{title}}.
+"""
+
+# Preexisting human-authored Daily Note for 2026-07-19 with non-empty
+# date/title identity (must be preserved verbatim), an unrelated preexisting
+# link (must survive projections), and exactly one ``## Tasks`` section.
+PREEXISTING_DAILY_NOTE_DATE = "2026-07-19"
+PREEXISTING_DAILY_NOTE = """---
+date: 2026-07-19
+title: July 19 planning
+---
+# 2026-07-19
+
+Morning plan.
+
+## Tasks
+
+- [[20260718t090000|Preexisting unrelated link]]
+
+## Notes
+
+Human-authored content that must survive projections.
+"""
 
 
 def _refuse(reason: str) -> NoReturn:
@@ -342,6 +418,14 @@ async def call(session: Any, name: str, arguments: dict) -> dict:
 
 
 async def lifecycle(vault: Path, env: dict[str, str]) -> None:
+    # Disabled-mode subcase (issue #139): the flag is absent from env and no
+    # Daily Notes configuration exists yet — the plain lifecycle must work
+    # with no configuration prerequisite and no daily_link_* result fields.
+    assert not (vault / ".obsidian" / DAILY_NOTES_CONFIG_NAME).exists()
+    assert not any(
+        key.startswith("TASKNOTES_DAILY_LINKS_ENABLED") for key in env
+    ), env
+
     # The MCP client lives in the image venv; it is imported lazily so the
     # harness-proof guards above can run even on hosts without the package.
     from mcp import ClientSession, StdioServerParameters
@@ -385,6 +469,13 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
                 },
             )
             assert created["state"] == "applied_and_committed", created
+            # Disabled mode reports no daily link bookkeeping at all.
+            for daily_key in (
+                "daily_link_state",
+                "daily_link_detail",
+                "daily_link_dates",
+            ):
+                assert daily_key not in created, (daily_key, created)
 
             fetched = await call(session, "task_get", {"slug": "20260719t120000"})
             assert fetched["title"] == "Disposable lifecycle task", fetched
@@ -419,6 +510,12 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
                 },
             )
             assert updated["state"] == "applied_and_committed", updated
+            for daily_key in (
+                "daily_link_state",
+                "daily_link_detail",
+                "daily_link_dates",
+            ):
+                assert daily_key not in updated, (daily_key, updated)
 
             untagged = await call(
                 session,
@@ -458,6 +555,12 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
                 },
             )
             assert week_created["state"] == "applied_and_committed", week_created
+            for daily_key in (
+                "daily_link_state",
+                "daily_link_detail",
+                "daily_link_dates",
+            ):
+                assert daily_key not in week_created, (daily_key, week_created)
 
             week_fetched = await call(session, "task_get", {"slug": "20260720t090000"})
             assert str(week_fetched.get("planned_week"))[:10] == monday, week_fetched
@@ -494,6 +597,339 @@ async def lifecycle(vault: Path, env: dict[str, str]) -> None:
     assert "planned_week" not in week_text
 
 
+def install_daily_notes_fixture(vault: Path, env: dict[str, str]) -> None:
+    """Write the Daily Notes fixture and commit it (writes only, no deletion).
+
+    Installs the custom numeric-subfolder ``daily-notes.json``, the template
+    with normal headings and empty ``date``/``title`` identity, and one
+    preexisting human-authored Daily Note. Committing the fixture keeps the
+    daily-links phase starting from a clean tree so the phase's Git
+    accounting below stays deterministic (no preflight commits).
+    """
+    (vault / ".obsidian" / DAILY_NOTES_CONFIG_NAME).write_text(
+        json.dumps(DAILY_NOTES_CONFIG), encoding="utf-8"
+    )
+    template_path = vault / DAILY_TEMPLATE_REL
+    template_path.parent.mkdir(parents=True, exist_ok=True)
+    template_path.write_text(DAILY_TEMPLATE_TEXT, encoding="utf-8")
+    preexisting_path = _daily_note_path(PREEXISTING_DAILY_NOTE_DATE)
+    preexisting_path.parent.mkdir(parents=True, exist_ok=True)
+    preexisting_path.write_text(PREEXISTING_DAILY_NOTE, encoding="utf-8")
+    run(["git", "add", "-A"], env=env, cwd=vault)
+    run(["git", "commit", "-q", "-m", "Add Daily Notes fixture"], env=env, cwd=vault)
+
+
+def _daily_note_path(date: str) -> Path:
+    """Resolve a daily note path for the fixture's numeric-subfolder format.
+
+    ``YYYY/MM/DD`` renders the whole date as the relative path, so
+    2026-07-19 resolves to ``daily/2026/07/19.md`` (DD is zero-padded).
+    """
+    year, month, day = date.split("-")
+    return VAULT / DAILY_FOLDER / year / month / f"{int(day):02d}.md"
+
+
+def _read_daily_note(date: str) -> str:
+    return _daily_note_path(date).read_text(encoding="utf-8")
+
+
+def _frontmatter_block(text: str) -> str:
+    """Return the raw YAML frontmatter block (without fences) of a note."""
+    if not text.startswith("---\n"):
+        return ""
+    end = text.index("\n---\n", 4)
+    return text[4:end]
+
+
+def _assert_no_daily_link(note_text: str, slug: str) -> None:
+    assert f"[[{slug}" not in note_text, note_text
+
+
+async def daily_links_lifecycle(vault: Path, env: dict[str, str]) -> None:
+    """Real-MCP daily-links phase (issue #139): enabled mode end to end."""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    params = StdioServerParameters(
+        command="/opt/hermes/.venv/bin/python3",
+        args=["/opt/josemar/scripts/tasknotes_mcp.py"],
+        env=env,
+    )
+    async with stdio_client(params) as streams:
+        async with ClientSession(*streams) as session:
+            await session.initialize()
+            # -- alpha: scheduled create onto the PREEXISTING note --------
+            alpha = "20260721t100000"
+            alpha_title = "Disposable daily-link task alpha"
+            alpha_created = await call(
+                session,
+                "task_create",
+                {
+                    "slug": alpha,
+                    "title": alpha_title,
+                    "scheduled": PREEXISTING_DAILY_NOTE_DATE,
+                    "body": "Alpha body.",
+                },
+            )
+            assert alpha_created["state"] == "applied_and_committed", alpha_created
+            assert (
+                alpha_created["daily_link_state"] == "applied_and_committed"
+            ), alpha_created
+            assert alpha_created["daily_link_dates"] == [
+                PREEXISTING_DAILY_NOTE_DATE
+            ], alpha_created
+            assert "daily_link_detail" not in alpha_created, alpha_created
+
+            # Idempotent unchanged reschedule: link already canonical ->
+            # not_applied, no duplicate, no projection commit.
+            alpha_kept = await call(
+                session,
+                "task_update",
+                {"slug": alpha, "scheduled": PREEXISTING_DAILY_NOTE_DATE},
+            )
+            assert alpha_kept["state"] == "applied_and_committed", alpha_kept
+            assert alpha_kept["daily_link_state"] == "not_applied", alpha_kept
+            assert alpha_kept["daily_link_dates"] == [
+                PREEXISTING_DAILY_NOTE_DATE
+            ], alpha_kept
+
+            # Completion/archive retain the schedule link (no daily fields).
+            alpha_done = await call(
+                session,
+                "task_complete",
+                {"slug": alpha, "completion_date": "2026-07-21"},
+            )
+            assert alpha_done["state"] == "applied_and_committed", alpha_done
+            assert "daily_link_state" not in alpha_done, alpha_done
+            alpha_archived = await call(session, "task_archive", {"slug": alpha})
+            assert alpha_archived["state"] == "applied_and_committed", alpha_archived
+            assert "daily_link_state" not in alpha_archived, alpha_archived
+
+            note_19 = _read_daily_note(PREEXISTING_DAILY_NOTE_DATE)
+            assert f"- [[{alpha}|{alpha_title}]]" in note_19, note_19
+            # Non-empty identity and unrelated content preserved verbatim.
+            assert "date: 2026-07-19" in note_19, note_19
+            assert "title: July 19 planning" in note_19, note_19
+            assert "- [[20260718t090000|Preexisting unrelated link]]" in note_19, note_19
+            assert (
+                "Human-authored content that must survive projections." in note_19
+            ), note_19
+
+            # -- beta: template-created note, D1->D2 reschedule, week plan --
+            beta = "20260722t110000"
+            beta_title = "Disposable daily-link task beta"
+            beta_created = await call(
+                session,
+                "task_create",
+                {
+                    "slug": beta,
+                    "title": beta_title,
+                    "scheduled": "2026-07-20",
+                },
+            )
+            assert beta_created["state"] == "applied_and_committed", beta_created
+            assert (
+                beta_created["daily_link_state"] == "applied_and_committed"
+            ), beta_created
+            assert beta_created["daily_link_dates"] == ["2026-07-20"], beta_created
+
+            note_20 = _read_daily_note("2026-07-20")
+            # Template-rendered headings and filled empty date/title identity.
+            # The title identity is the filename stem ("20" under the
+            # numeric YYYY/MM/DD format), not the full date.
+            assert "# 2026-07-20" in note_20, note_20
+            assert "## Tasks" in note_20 and "## Notes" in note_20, note_20
+            fm_20 = _frontmatter_block(note_20)
+            stem_20 = re.escape(_daily_note_path("2026-07-20").stem)
+            assert re.search(rf"(?m)^date: '?2026-07-20'?$", fm_20), fm_20
+            assert re.search(rf"(?m)^title: '?{stem_20}'?$", fm_20), fm_20
+            assert f"- [[{beta}|{beta_title}]]" in note_20, note_20
+
+            # D1 -> D2 reschedule: the new date's link is ensured before the
+            # old one is removed (dates report the plan order).
+            rescheduled = await call(
+                session,
+                "task_update",
+                {"slug": beta, "scheduled": "2026-07-21"},
+            )
+            assert rescheduled["state"] == "applied_and_committed", rescheduled
+            assert (
+                rescheduled["daily_link_state"] == "applied_and_committed"
+            ), rescheduled
+            assert rescheduled["daily_link_dates"] == ["2026-07-21", "2026-07-20"], (
+                rescheduled
+            )
+            _assert_no_daily_link(_read_daily_note("2026-07-20"), beta)
+            note_21 = _read_daily_note("2026-07-21")
+            assert f"- [[{beta}|{beta_title}]]" in note_21, note_21
+
+            # D2 -> planned_week cleanup: link removed, note retained.
+            monday = "2026-07-27"  # verified Monday (ISO week start)
+            week_planned = await call(
+                session,
+                "task_update",
+                {"slug": beta, "planned_week": monday},
+            )
+            assert week_planned["state"] == "applied_and_committed", week_planned
+            assert (
+                week_planned["daily_link_state"] == "applied_and_committed"
+            ), week_planned
+            assert week_planned["daily_link_dates"] == ["2026-07-21"], week_planned
+            beta_after = await call(session, "task_get", {"slug": beta})
+            assert str(beta_after.get("planned_week"))[:10] == monday, beta_after
+            assert "scheduled" not in beta_after, beta_after
+            _assert_no_daily_link(_read_daily_note("2026-07-21"), beta)
+            assert _daily_note_path("2026-07-21").is_file()
+
+            # -- gamma: backlog cleanup and delete cleanup ------------------
+            gamma = "20260723t120000"
+            gamma_title = "Disposable daily-link task gamma"
+            gamma_created = await call(
+                session,
+                "task_create",
+                {
+                    "slug": gamma,
+                    "title": gamma_title,
+                    "scheduled": "2026-07-22",
+                },
+            )
+            assert gamma_created["state"] == "applied_and_committed", gamma_created
+            assert gamma_created["daily_link_dates"] == ["2026-07-22"], gamma_created
+
+            # scheduled -> Backlog cleanup.
+            backlogged = await call(
+                session,
+                "task_update",
+                {"slug": gamma, "clear_scheduled": True},
+            )
+            assert backlogged["state"] == "applied_and_committed", backlogged
+            assert (
+                backlogged["daily_link_state"] == "applied_and_committed"
+            ), backlogged
+            assert backlogged["daily_link_dates"] == ["2026-07-22"], backlogged
+            _assert_no_daily_link(_read_daily_note("2026-07-22"), gamma)
+
+            # Backlog -> scheduled again, then delete cleanup.
+            rescheduled_gamma = await call(
+                session,
+                "task_update",
+                {"slug": gamma, "scheduled": "2026-07-23"},
+            )
+            assert (
+                rescheduled_gamma["state"] == "applied_and_committed"
+            ), rescheduled_gamma
+            assert rescheduled_gamma["daily_link_dates"] == ["2026-07-23"], (
+                rescheduled_gamma
+            )
+            note_23 = _read_daily_note("2026-07-23")
+            assert f"- [[{gamma}|{gamma_title}]]" in note_23, note_23
+
+            deleted = await call(session, "task_delete", {"slug": gamma})
+            assert deleted["state"] == "applied_and_committed", deleted
+            assert deleted["daily_link_state"] == "applied_and_committed", deleted
+            assert deleted["daily_link_dates"] == ["2026-07-23"], deleted
+            assert deleted["commit_id"], deleted
+            assert not (vault / "tasks" / f"{gamma}.md").exists()
+            _assert_no_daily_link(_read_daily_note("2026-07-23"), gamma)
+            assert _daily_note_path("2026-07-23").is_file()
+
+            # Final listing: both phases' tasks remain; gamma is gone.
+            listed = await call(session, "task_list", {"max_results": 10})
+            assert {item["slug"] for item in listed["result"]} == {
+                "20260719t120000",
+                "20260720t090000",
+                alpha,
+                beta,
+            }, listed
+
+
+def _assert_daily_evidence(vault: Path, env: dict[str, str]) -> None:
+    """Git + native gbrain evidence for the daily-links phase.
+
+    Proves the deterministic Git projection commit accounting (projection
+    commits stage only Daily Note paths, never the whole vault) and that
+    the required incremental projection sync made the projected notes
+    visible to the real gbrain index.
+    """
+    clean = run(["git", "status", "--porcelain"], env=env, cwd=vault)
+    assert clean.strip() == "", clean
+    log = run(["git", "log", "--oneline"], env=env, cwd=vault)
+    # 8 task updates from the disabled-mode phase plus 10 daily-phase task
+    # updates (alpha create/unchanged-reschedule/complete/archive, beta
+    # create/reschedule/week, gamma create/backlog/reschedule).
+    assert log.count("tasknotes-mcp: task update") == 18, log
+    assert log.count("tasknotes-mcp: task delete") == 1, log
+    # One projection commit per mutation that CHANGED a daily target: alpha
+    # create; beta create/reschedule (two targets, one commit)/week cleanup;
+    # gamma create/backlog/reschedule/delete. The idempotent unchanged
+    # alpha reschedule and completion/archive commit nothing.
+    assert log.count("tasknotes-mcp: daily note projection") == 8, log
+    # The fixture was committed between phases; nothing is ever pending.
+    assert log.count("tasknotes-mcp: preflight sync") == 0, log
+    projection_ids = [
+        line.split(" ", 1)[0]
+        for line in log.splitlines()
+        if line.endswith("tasknotes-mcp: daily note projection")
+    ]
+    assert len(projection_ids) == 8, projection_ids
+    for commit_id in projection_ids:
+        names = run(
+            ["git", "show", "--name-only", "--pretty=format:", commit_id],
+            env=env,
+            cwd=vault,
+        )
+        paths = [line for line in names.splitlines() if line.strip()]
+        assert paths and all(path.startswith(f"{DAILY_FOLDER}/") for path in paths), (
+            commit_id,
+            paths,
+        )
+
+    # Native gbrain source visibility after the engine's required
+    # incremental projection sync (run under the shared lock). Slugs are
+    # the vault-relative note paths under the numeric-subfolder format.
+    sources = json.loads(run([GBRAIN_NATIVE, "sources", "list", "--json"], env=env))
+    matching = [
+        source for source in sources["sources"] if source.get("local_path") == str(vault)
+    ]
+    assert len(matching) == 1, sources
+    source_id = matching[0]["id"]
+    preexisting_slug = (
+        f"{DAILY_FOLDER}/2026/07/{PREEXISTING_DAILY_NOTE_DATE[-2:]}"
+    )
+    page_19 = json.loads(
+        run(
+            [
+                GBRAIN_NATIVE,
+                "call",
+                "--source",
+                source_id,
+                "get_page",
+                json.dumps({"slug": preexisting_slug}),
+            ],
+            env=env,
+        )
+    )
+    body_19 = page_19.get("compiled_truth", "")
+    assert "[[20260721t100000|Disposable daily-link task alpha]]" in body_19, body_19
+    assert "[[20260718t090000|Preexisting unrelated link]]" in body_19, body_19
+    page_20 = json.loads(
+        run(
+            [
+                GBRAIN_NATIVE,
+                "call",
+                "--source",
+                source_id,
+                "get_page",
+                json.dumps({"slug": f"{DAILY_FOLDER}/2026/07/20"}),
+            ],
+            env=env,
+        )
+    )
+    body_20 = page_20.get("compiled_truth", "")
+    assert "## Tasks" in body_20 and "Plan for the day." in body_20, body_20
+    assert "[[20260722t110000" not in body_20, body_20
+
+
 def _assert_fixed_contract_paths_used() -> None:
     """Runtime proof that the built-image MCP honored the fixed-path
     contract: gbrain state landed in /opt/data/.gbrain and the shared lock
@@ -511,8 +947,20 @@ def main() -> None:
     expected_gid = _validated_id("TASKNOTES_E2E_GID")
     _prove_docker_harness(expected_uid, expected_gid)
     vault, env = prepare()
+    # Phase 1 — disabled mode (issue #139): the plain lifecycle runs before
+    # any Daily Notes configuration exists, proving no configuration
+    # prerequisite and no daily_link_* result fields.
     asyncio.run(lifecycle(vault, env))
+    print("real-gbrain disabled-mode lifecycle: PASS")
+    # Phase 2 — daily-links mode: install the fixture (writes only), then
+    # run the enabled-mode lifecycle against the real MCP.
+    install_daily_notes_fixture(vault, env)
+    asyncio.run(
+        daily_links_lifecycle(vault, dict(env, TASKNOTES_DAILY_LINKS_ENABLED="true"))
+    )
+    _assert_daily_evidence(vault, env)
     _assert_fixed_contract_paths_used()
+    print("real-gbrain daily-links MCP lifecycle: PASS")
     print("real-gbrain MCP lifecycle: PASS")
 
 

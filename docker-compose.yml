@@ -130,6 +130,11 @@ services:
       - GBRAIN_EMBED_REFRESH_KILL_GRACE=${GBRAIN_EMBED_REFRESH_KILL_GRACE:-5}
       - GBRAIN_EMBED_REFRESH_GROUP_DRAIN=${GBRAIN_EMBED_REFRESH_GROUP_DRAIN:-2}
       - GBRAIN_EMBED_REFRESH_TIMEOUT_MARGIN=${GBRAIN_EMBED_REFRESH_TIMEOUT_MARGIN:-10}
+      # TaskNotes MCP daily-note task links (issue #139): strict default-off
+      # boolean forwarded to the MCP server via hermes-config.yaml. Missing or
+      # empty disables; the server rejects any non-true/false value at engine
+      # init. No Daily Notes folder/date/template or vault path is env-driven.
+      - TASKNOTES_DAILY_LINKS_ENABLED=${TASKNOTES_DAILY_LINKS_ENABLED:-false}
       # Vault-recovery export (Phase 1): default-enabled daily local staging
       # export. VAULT_RECOVERY_EXPORT_ENABLED=false removes the owned cron job.
       - VAULT_RECOVERY_EXPORT_ENABLED=${VAULT_RECOVERY_EXPORT_ENABLED:-true}

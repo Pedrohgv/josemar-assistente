@@ -229,6 +229,25 @@ class ComposeContractTests(unittest.TestCase):
         self.assertNotIn("GBRAIN_QUERY_MAX_LIMIT", block)
         self.assertNotIn("GBRAIN_CONTENT_MAX_CHARS", block)
 
+    def test_tasknotes_daily_links_env_default_off_and_no_extra_config(self) -> None:
+        """Issue #139: the hermes service carries exactly one strict
+        default-off boolean for TaskNotes daily-note task links; no Daily
+        Notes folder/date/template config and no vault path is env-driven."""
+        block = service_block(self.text, "hermes")
+        self.assertIn(
+            "- TASKNOTES_DAILY_LINKS_ENABLED=${TASKNOTES_DAILY_LINKS_ENABLED:-false}",
+            block,
+        )
+        for forbidden in (
+            "TASKNOTES_DAILY_NOTES_FOLDER",
+            "TASKNOTES_DAILY_NOTES_FORMAT",
+            "TASKNOTES_DAILY_NOTES_TEMPLATE",
+            "TASKNOTES_VAULT",
+            "TASKNOTES_GBRAIN_HOME",
+            "TASKNOTES_LOCK_DIR=",
+        ):
+            self.assertNotIn(forbidden, block)
+
     def test_gbrain_does_not_add_sidecar_or_volume(self) -> None:
         # No new volume and no new service should be introduced for gbrain.
         self.assertNotIn("gbrain-data:", self.text)

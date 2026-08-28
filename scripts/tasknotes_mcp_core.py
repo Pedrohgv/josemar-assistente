@@ -35,13 +35,18 @@ Design invariants (fixed, do not redesign):
   - Completion date defaults to today in the configured TZ; explicit dates
     must be valid ``YYYY-MM-DD``. Already-completed tasks preserve the
     existing completion date.
-  - Week planning (issue #128) is the semantic ``planned_week`` argument:
-    a valid ``YYYY-MM-DD`` Monday stored under the raw ``planned_week``
-    key, mutually exclusive with ``scheduled`` on MCP writes, reserved
-    from generic custom_fields, and requiring a profile ``userFields``
-    entry of type ``date`` to set. Rewrites normalize a manually
-    inconsistent pair to scheduled-only; reads never mutate.
-"""
+   - Week planning (issue #128) is the semantic ``planned_week`` argument:
+     a valid ``YYYY-MM-DD`` Monday stored under the raw ``planned_week``
+     key, mutually exclusive with ``scheduled`` on MCP writes, reserved
+     from generic custom_fields, and requiring a profile ``userFields``
+     entry of type ``date`` to set. Rewrites normalize a manually
+     inconsistent pair to scheduled-only; reads never mutate.
+   - Daily Notes projection primitives (issue #139 W1b) are internal-only:
+     they prepare transformed Daily Note bytes and apply them with a
+     no-follow optimistic atomic writer. They only accept a validated
+     ``DailyNotesConfig`` plus a resolved Daily Note target/operation,
+     never write task files, and never invoke gbrain/PGLite.
+ """
 
 from __future__ import annotations
 
@@ -2522,18 +2527,1363 @@ def today_in_tz(tz: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Daily Notes primitives (issue #139, W1a: pure/internal only)
+# ---------------------------------------------------------------------------
+#
+# Strict parsing/transformation primitives for Obsidian Daily Notes
+# integration. These are pure or internal-only helpers: they never write
+# task files, never invoke gbrain/PGLite, and are NOT wired into the
+# engine lifecycle (no engine construction requirement, no lifecycle
+# integration). Error messages are content-free.
+
+# Obsidian core Daily Notes plugin config (relative to the vault root).
+DAILY_NOTES_OBSIDIAN_DIR = ".obsidian"
+DAILY_NOTES_CONFIG_NAME = "daily-notes.json"
+DAILY_NOTES_DEFAULT_FORMAT = "YYYY-MM-DD"
+DAILY_NOTES_MAX_FILE_SIZE = 1024 * 1024  # 1 MB config/template read bound
+
+# Exact H2 heading that scopes the daily task list inside a daily note body.
+DAILY_NOTE_TASKS_HEADING = "## Tasks"
+
+# Top-level frontmatter keys normalized for daily note pages.
+DAILY_NOTE_DATE_KEY = "date"
+DAILY_NOTE_TITLE_KEY = "title"
+
+# Supported date tokens (strict subset of the Obsidian/moment syntax) and
+# the only literal characters allowed between tokens (safe numeric-path
+# separators). Every maximal alphabetic run must be exactly one supported
+# token; any other alphabetic syntax is rejected.
+_DAILY_FORMAT_TOKENS: Tuple[str, ...] = ("YYYY", "YY", "MM", "M", "DD", "D")
+_DAILY_FORMAT_ALPHA_RUN_RE = re.compile(r"[A-Za-z]+")
+_DAILY_FORMAT_SAFE_LITERAL_RE = re.compile(r"[-._/]")
+_DAILY_FORMAT_MAX_LEN = 64
+
+# Bullet list item that is exactly one wikilink (optional indent, optional
+# display text). Anything else in the section is preserved as prose.
+_DAILY_BULLET_WIKILINK_RE = re.compile(
+    r"^([ \t]*)[-*+][ \t]+\[\[([^\[\]]+)\]\][ \t]*$"
+)
+
+# Template expression (no nesting, no braces inside).
+_DAILY_TEMPLATE_EXPR_RE = re.compile(r"\{\{([^{}]*)\}\}")
+
+
+@dataclass(frozen=True)
+class DailyNotesConfig:
+    """Validated Daily Notes configuration (strict subset, lazy defaults).
+
+    ``folder`` is the relative daily-notes folder (``""`` = vault root),
+    ``format`` the note filename date format (default ``YYYY-MM-DD``), and
+    ``template`` an optional relative Markdown template (``None`` = unset).
+    """
+
+    folder: str = ""
+    format: str = DAILY_NOTES_DEFAULT_FORMAT
+    template: Optional[str] = None
+
+
+def validate_daily_note_format(fmt: str) -> str:
+    """Validate a Daily Notes date format string (strict token subset).
+
+    Every maximal alphabetic run must be exactly one of ``YYYY``, ``YY``,
+    ``MM``, ``M``, ``DD``, ``D``; literal characters between runs must be
+    safe numeric-path separators (``-``, ``.``, ``_``, ``/``). Any other
+    alphabetic or unsafe literal syntax is rejected. Returns the format
+    unchanged.
+    """
+    if not isinstance(fmt, str) or not fmt:
+        raise ValidationError("daily note format must be a non-empty string")
+    if len(fmt) > _DAILY_FORMAT_MAX_LEN:
+        raise ValidationError("daily note format exceeds length bound")
+    has_token = False
+    pos = 0
+    for run_match in _DAILY_FORMAT_ALPHA_RUN_RE.finditer(fmt):
+        for ch in fmt[pos:run_match.start()]:
+            if _DAILY_FORMAT_SAFE_LITERAL_RE.match(ch) is None:
+                raise ValidationError(
+                    "daily note format literal is not a safe path separator"
+                )
+        if run_match.group(0) not in _DAILY_FORMAT_TOKENS:
+            raise ValidationError("daily note format uses unsupported syntax")
+        has_token = True
+        pos = run_match.end()
+    for ch in fmt[pos:]:
+        if _DAILY_FORMAT_SAFE_LITERAL_RE.match(ch) is None:
+            raise ValidationError(
+                "daily note format literal is not a safe path separator"
+            )
+    if not has_token:
+        raise ValidationError("daily note format must contain a date token")
+    return fmt
+
+
+def _format_daily_token(token: str, parsed: datetime.date) -> str:
+    """Render one validated date token deterministically."""
+    if token == "YYYY":
+        return f"{parsed.year:04d}"
+    if token == "YY":
+        return f"{parsed.year % 100:02d}"
+    if token == "MM":
+        return f"{parsed.month:02d}"
+    if token == "M":
+        return str(parsed.month)
+    if token == "DD":
+        return f"{parsed.day:02d}"
+    return str(parsed.day)  # "D"
+
+
+def format_daily_note_date(date: str, fmt: str) -> str:
+    """Deterministically format a ``YYYY-MM-DD`` date with a validated format.
+
+    Token semantics: ``YYYY`` (4-digit year), ``YY`` (2-digit year),
+    ``MM``/``M`` (zero-padded/plain month), ``DD``/``D`` (zero-padded/
+    plain day). Literals must be safe numeric-path separators.
+    """
+    validate_date(date, "date")
+    validate_daily_note_format(fmt)
+    parsed = datetime.date.fromisoformat(date)
+    out: List[str] = []
+    pos = 0
+    for run_match in _DAILY_FORMAT_ALPHA_RUN_RE.finditer(fmt):
+        out.append(fmt[pos:run_match.start()])
+        out.append(_format_daily_token(run_match.group(0), parsed))
+        pos = run_match.end()
+    out.append(fmt[pos:])
+    return "".join(out)
+
+
+def _validate_relative_note_path(relative: str) -> str:
+    """Validate a vault-relative note path: safe segments only, no traversal."""
+    if not isinstance(relative, str) or not relative:
+        raise PathError("relative path must be a non-empty string")
+    if relative.startswith("/"):
+        raise PathError("relative path must not be absolute")
+    if "\\" in relative:
+        raise PathError("relative path must not contain backslash")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in relative):
+        raise PathError("relative path must not contain control characters")
+    for part in relative.split("/"):
+        if part in ("", ".", ".."):
+            raise PathError("relative path must not contain traversal segments")
+    return relative
+
+
+def _check_existing_dir_components_no_follow(vault: Path, relative_dir: str) -> None:
+    """Reject existing symlink components in a vault-relative directory path.
+
+    Missing components are tolerated (the Daily Notes plugin creates
+    folders lazily). Once a component is missing, nothing deeper can
+    exist, so the walk stops. Existing non-directory components are also
+    rejected.
+    """
+    if not relative_dir:
+        return
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    current_fd = _open_directory_no_follow(vault)
+    try:
+        for part in relative_dir.split("/"):
+            try:
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    return
+                if exc.errno == errno.ELOOP:
+                    raise PathError("path component is a symlink") from exc
+                raise PathError("cannot verify path component") from exc
+            os.close(current_fd)
+            current_fd = next_fd
+    finally:
+        os.close(current_fd)
+
+
+def _check_existing_regular_no_follow(path: Path) -> None:
+    """If ``path`` exists, require a regular file (no symlink). Tolerate absence."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise PathError("cannot inspect configured path") from exc
+    if not stat_is_regular_mode(st.st_mode):
+        raise PathError("configured path must be a regular file when present")
+
+
+def _validate_daily_notes_folder(folder: str, vault: Path) -> str:
+    """Validate the configured daily-notes folder path (may not exist yet)."""
+    if not folder:
+        return ""
+    _validate_relative_note_path(folder)
+    _check_existing_dir_components_no_follow(vault, folder)
+    return folder
+
+
+def _validate_daily_notes_template(template: str, vault: Path) -> str:
+    """Validate the configured daily-notes template path (relative Markdown)."""
+    _validate_relative_note_path(template)
+    if not template.endswith(".md"):
+        raise PathError("daily notes template must be a Markdown (.md) file")
+    parts = template.split("/")
+    dir_rel = "/".join(parts[:-1])
+    _check_existing_dir_components_no_follow(vault, dir_rel)
+    _check_existing_regular_no_follow(vault / template)
+    return template
+
+
+def load_daily_notes_config(vault: Path) -> DailyNotesConfig:
+    """Strict reader for ``<vault>/.obsidian/daily-notes.json`` (fail closed).
+
+    A validated active Obsidian core Daily Notes config is required: a
+    missing file (or missing ``.obsidian``) raises ``CoreError`` rather
+    than inferring defaults. Inside a present config, missing/empty/null
+    ``folder``/``format`` values retain their defaults (``""`` and
+    ``YYYY-MM-DD``) and ``template`` stays unset. When present, the file
+    must be a JSON object; only ``folder``, ``format``, and ``template``
+    are interpreted (unknown keys are ignored for Obsidian compatibility).
+    Path-shaped values are strictly validated: relative, no backslash/
+    control characters, no traversal or unsafe segments, and no symlink
+    components where they exist. Raises ``CoreError`` (``ValidationError``
+    /``PathError`` subclasses) on missing, malformed, or unsafe config.
+    """
+    config_path = vault / DAILY_NOTES_OBSIDIAN_DIR / DAILY_NOTES_CONFIG_NAME
+    if not target_exists_no_follow(config_path):
+        raise CoreError("daily notes config is required but missing")
+    try:
+        obsidian_fd = _open_relative_directory_no_follow(
+            vault, DAILY_NOTES_OBSIDIAN_DIR
+        )
+    except PathError:
+        raise
+    try:
+        text = _read_directory_entry_no_follow(
+            obsidian_fd,
+            DAILY_NOTES_CONFIG_NAME,
+            max_size=DAILY_NOTES_MAX_FILE_SIZE,
+        )
+    finally:
+        os.close(obsidian_fd)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValidationError("daily notes config is not valid JSON") from exc
+    if not isinstance(data, dict):
+        raise ValidationError("daily notes config root must be an object")
+
+    folder = data.get("folder")
+    if folder is None:
+        folder = ""
+    if not isinstance(folder, str):
+        raise ValidationError("daily notes folder must be a string")
+    folder = _validate_daily_notes_folder(folder, vault)
+
+    fmt = data.get("format")
+    if fmt is None:
+        fmt = ""
+    if not isinstance(fmt, str):
+        raise ValidationError("daily notes format must be a string")
+    if fmt:
+        validate_daily_note_format(fmt)
+    else:
+        fmt = DAILY_NOTES_DEFAULT_FORMAT
+
+    template = data.get("template")
+    if template is None:
+        template = ""
+    if not isinstance(template, str):
+        raise ValidationError("daily notes template must be a string")
+    if template:
+        template = _validate_daily_notes_template(template, vault)
+    else:
+        template = None
+
+    return DailyNotesConfig(folder=folder, format=fmt, template=template)
+
+
+def read_daily_note_template(vault: Path, config: DailyNotesConfig) -> Optional[str]:
+    """Read the configured daily-notes template no-follow and bounded.
+
+    Returns ``None`` when no template is configured. A configured template
+    must exist as a regular, non-symlink, bounded file; anything else is a
+    strict ``PathError``.
+    """
+    if not config.template:
+        return None
+    parts = config.template.split("/")
+    dir_rel = "/".join(parts[:-1])
+    name = parts[-1]
+    if dir_rel:
+        directory_fd = _open_relative_directory_no_follow(vault, dir_rel)
+    else:
+        directory_fd = _open_directory_no_follow(vault)
+    try:
+        return _read_directory_entry_no_follow(
+            directory_fd, name, max_size=DAILY_NOTES_MAX_FILE_SIZE
+        )
+    finally:
+        os.close(directory_fd)
+
+
+def resolve_daily_note_path(vault: Path, config: DailyNotesConfig, date: str) -> Path:
+    """Resolve ``<folder>/<formatted date>.md`` as a vault-confined path.
+
+    Pure computation over an already-validated config: the date must be a
+    valid ``YYYY-MM-DD``, the formatted filename must pass strict relative
+    path validation, and the result is joined under ``vault`` (vault-
+    confined by construction). No filesystem access.
+    """
+    validate_date(date, "date")
+    formatted = format_daily_note_date(date, config.format)
+    filename = f"{formatted}.md"
+    if config.folder:
+        relative = f"{config.folder}/{filename}"
+    else:
+        relative = filename
+    _validate_relative_note_path(relative)
+    return vault / relative
+
+
+def render_daily_note_template(template: str, *, date: str, title: str) -> str:
+    """Render a Daily Notes template body (no code execution).
+
+    Supported expressions only: ``{{date}}``, ``{{title}}``, and
+    ``{{date:FORMAT}}`` (``FORMAT`` validated by
+    :func:`validate_daily_note_format`). Any other expression is rejected;
+    nothing is ever evaluated.
+    """
+    if not isinstance(template, str):
+        raise ValidationError("daily note template must be a string")
+    if len(template) > MAX_BODY_LEN:
+        raise ValidationError("daily note template exceeds length bound")
+    validate_date(date, "date")
+    if not isinstance(title, str) or len(title) > MAX_TITLE_LEN:
+        raise ValidationError("daily note title must be a bounded string")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in title):
+        raise ValidationError("daily note title must not contain control characters")
+
+    def _replace(match: "re.Match[str]") -> str:
+        expr = match.group(1).strip()
+        if expr == "date":
+            return date
+        if expr == "title":
+            return title
+        if expr.startswith("date:"):
+            return format_daily_note_date(date, expr[len("date:"):])
+        raise ValidationError(
+            "daily note template contains an unsupported expression"
+        )
+
+    return _DAILY_TEMPLATE_EXPR_RE.sub(_replace, template)
+
+
+def build_default_daily_note_body(date: str) -> str:
+    """Deterministic default body for a missing daily note.
+
+    Includes the ``# <date>`` H1 and the exact ``## Tasks`` H2 that the
+    structural transformer scopes to.
+    """
+    validate_date(date, "date")
+    return f"# {date}\n\n{DAILY_NOTE_TASKS_HEADING}\n"
+
+
+def normalize_daily_note_frontmatter(
+    frontmatter: Mapping[str, Any], *, date: str, title_stem: str
+) -> Dict[str, Any]:
+    """Fill empty/null top-level daily-note frontmatter date/title.
+
+    A top-level ``date`` value that is null or an empty/blank string
+    becomes the scheduled ISO date; a top-level ``title`` value that is
+    null or empty/blank becomes the filename stem. Non-empty values (any
+    type) and absent keys are returned unchanged.
+    """
+    validate_date(date, "date")
+    if not isinstance(frontmatter, Mapping):
+        raise ValidationError("daily note frontmatter must be a mapping")
+    if not isinstance(title_stem, str) or not title_stem:
+        raise ValidationError("daily note title stem must be a non-empty string")
+    out = dict(frontmatter)
+    for key, fallback in (
+        (DAILY_NOTE_DATE_KEY, date),
+        (DAILY_NOTE_TITLE_KEY, title_stem),
+    ):
+        if key not in out:
+            continue
+        current = out[key]
+        if current is None or (isinstance(current, str) and not current.strip()):
+            out[key] = fallback
+    return out
+
+
+def _is_h2_heading(line: str) -> bool:
+    """Return True for exactly-level-2 headings (``##``/``## text``), not H3+."""
+    stripped = line.rstrip(" \t")
+    return stripped == "##" or stripped.startswith("## ")
+
+
+def _is_tasks_heading(line: str) -> bool:
+    """Return True for the exact ``## Tasks`` H2 (trailing whitespace tolerated)."""
+    return line.rstrip(" \t") == DAILY_NOTE_TASKS_HEADING
+
+
+def find_tasks_section(body: str) -> Tuple[int, int]:
+    """Locate the single ``## Tasks`` H2 section in a daily note body.
+
+    Returns ``(start, end)`` character offsets: ``start`` is the offset of
+    the heading line, ``end`` the offset of the next H2 heading line or
+    ``len(body)``. Only exact-text level-2 headings match; H1/H3 lines do
+    not end the section. Raises ``ValidationError`` unless the body
+    contains exactly one ``## Tasks`` heading.
+    """
+    if not isinstance(body, str):
+        raise ValidationError("daily note body must be a string")
+    if len(body) > MAX_BODY_LEN:
+        raise ValidationError("daily note body exceeds length bound")
+    lines = body.split("\n")
+    heading_offsets: List[int] = []
+    line_offsets: List[int] = []
+    offset = 0
+    for line in lines:
+        line_offsets.append(offset)
+        if _is_tasks_heading(line):
+            heading_offsets.append(offset)
+        offset += len(line) + 1
+    if len(heading_offsets) != 1:
+        raise ValidationError(
+            "daily note body must contain exactly one '## Tasks' section"
+        )
+    start = heading_offsets[0]
+    end = len(body)
+    for line, off in zip(lines, line_offsets):
+        if off > start and _is_h2_heading(line):
+            end = off
+            break
+    return start, end
+
+
+def _bullet_wikilink_matches_slug(line: str, slug: str) -> bool:
+    """Return True if the line is a bullet whose wikilink target is exactly ``slug``."""
+    matched = _DAILY_BULLET_WIKILINK_RE.match(line)
+    if matched is None:
+        return False
+    target = matched.group(2).split("|", 1)[0]
+    return target == slug
+
+
+def _validate_daily_link_title(title: str) -> str:
+    """Validate the display title used inside a canonical bullet wikilink."""
+    if not isinstance(title, str) or not title.strip():
+        raise ValidationError("daily note link title must be a non-empty string")
+    if len(title) > MAX_TITLE_LEN:
+        raise ValidationError("daily note link title exceeds length bound")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in title):
+        raise ValidationError(
+            "daily note link title must not contain control characters"
+        )
+    if any(ch in title for ch in "[]|"):
+        raise ValidationError(
+            "daily note link title must not contain wikilink metacharacters"
+        )
+    return title
+
+
+def _daily_link_line(slug: str, title: str, indent: str = "") -> str:
+    return f"{indent}- [[{slug}|{title}]]"
+
+
+def _section_bullet_wikilink_spans(
+    body: str, start: int, end: int, slug: str
+) -> List[Tuple[int, int]]:
+    """Return ``(offset, length)`` content spans of exact-slug bullet lines."""
+    spans: List[Tuple[int, int]] = []
+    offset = start
+    for line in body[start:end].split("\n"):
+        if _bullet_wikilink_matches_slug(line, slug):
+            spans.append((offset, len(line)))
+        offset += len(line) + 1
+    return spans
+
+
+def _line_removal_span(body: str, line_start: int, line_len: int) -> Tuple[int, int]:
+    """Extend a line content span to swallow exactly one adjacent newline."""
+    line_end = line_start + line_len
+    if line_end < len(body) and body[line_end] == "\n":
+        return line_start, line_end + 1
+    if line_start > 0 and body[line_start - 1] == "\n":
+        return line_start - 1, line_end
+    return line_start, line_end
+
+
+def _merge_removal_spans(
+    spans: List[Tuple[int, int]]
+) -> List[Tuple[int, int]]:
+    """Merge overlapping/adjacent removal spans (newline-swallow chains)."""
+    merged: List[Tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _apply_edits(body: str, edits: List[Tuple[int, int, str]]) -> str:
+    """Apply non-overlapping ``(start, end, replacement)`` edits in order."""
+    ordered = sorted(edits, key=lambda edit: (edit[0], edit[1]))
+    parts: List[str] = []
+    cursor = 0
+    for start, end, replacement in ordered:
+        parts.append(body[cursor:start])
+        parts.append(replacement)
+        cursor = end
+    parts.append(body[cursor:])
+    return "".join(parts)
+
+
+def add_daily_note_task_link(body: str, *, slug: str, title: str) -> Tuple[str, bool]:
+    """Add or normalize the task's bullet wikilink in the ``## Tasks`` section.
+
+    Exact task-slug bullet wikilinks (lines that are only a bullet plus a
+    wikilink whose target is exactly ``slug``) are normalized to the
+    canonical ``- [[slug|title]]`` form and deduped: the first occurrence
+    is rewritten in place (leading whitespace preserved), duplicates are
+    removed. When no exact-slug bullet exists, the canonical line is
+    appended at the end of the section. Bytes outside the section — and
+    similar-but-not-exact slugs or prose — are preserved verbatim.
+    Returns ``(new_body, changed)``.
+    """
+    slug = validate_slug(slug)
+    title = _validate_daily_link_title(title)
+    start, end = find_tasks_section(body)
+    spans = _section_bullet_wikilink_spans(body, start, end, slug)
+    if not spans:
+        canonical = _daily_link_line(slug, title)
+        prefix = ""
+        if end == len(body) and body and not body.endswith("\n"):
+            prefix = "\n"
+        new_body = body[:end] + prefix + canonical + "\n" + body[end:]
+        return new_body, True
+    first_start, first_len = spans[0]
+    matched = _DAILY_BULLET_WIKILINK_RE.match(body[first_start:first_start + first_len])
+    assert matched is not None  # matched in _section_bullet_wikilink_spans
+    canonical = _daily_link_line(slug, title, indent=matched.group(1))
+    edits: List[Tuple[int, int, str]] = [
+        (first_start, first_start + first_len, canonical)
+    ]
+    removal_spans = [
+        _line_removal_span(body, span_start, span_len)
+        for span_start, span_len in spans[1:]
+    ]
+    for rm_start, rm_end in _merge_removal_spans(removal_spans):
+        edits.append((rm_start, rm_end, ""))
+    new_body = _apply_edits(body, edits)
+    return new_body, new_body != body
+
+
+def remove_daily_note_task_link(body: str, *, slug: str) -> Tuple[str, bool]:
+    """Remove only exact-slug bullet wikilinks from the ``## Tasks`` section.
+
+    Every bullet line in the section that is exactly a wikilink targeting
+    ``slug`` is removed together with one adjacent newline. Similar slugs,
+    prose mentions, and bytes outside the section are preserved verbatim.
+    Returns ``(new_body, changed)``; unchanged bodies return
+    ``(body, False)``.
+    """
+    slug = validate_slug(slug)
+    start, end = find_tasks_section(body)
+    spans = _section_bullet_wikilink_spans(body, start, end, slug)
+    if not spans:
+        return body, False
+    removal_spans = [
+        _line_removal_span(body, span_start, span_len)
+        for span_start, span_len in spans
+    ]
+    new_body = _apply_edits(
+        body, [(s, e, "") for s, e in _merge_removal_spans(removal_spans)]
+    )
+    return new_body, True
+
+
+# ---------------------------------------------------------------------------
+# Daily Notes projection preparation/persistence (issue #139, W1b: internal)
+# ---------------------------------------------------------------------------
+#
+# Internal primitives that turn a planned task-link ensure/remove into
+# pre-computed Daily Note bytes and apply them with a no-follow optimistic
+# atomic writer. Built strictly on top of the W1a primitives (validated
+# DailyNotesConfig, template renderer, ``## Tasks`` section transformer).
+# These helpers are NOT wired into the engine lifecycle, never write task
+# files, never invoke gbrain/PGLite, and are NOT a generic writer/tool:
+# every API only accepts a validated DailyNotesConfig plus a resolved
+# Daily Note target/operation. Error messages are content-free (no note
+# contents, no absolute/private target paths, no temp names).
+
+# Projection operations.
+DAILY_PROJECTION_OP_ENSURE = "ensure"
+DAILY_PROJECTION_OP_REMOVE = "remove"
+
+# Projection kinds (what the writer must do with the target note).
+DAILY_NOTE_PROJECTION_CREATE = "create"    # note missing at prepare: create it
+DAILY_NOTE_PROJECTION_REPLACE = "replace"  # note exists: atomic replacement
+DAILY_NOTE_PROJECTION_NONE = "none"        # nothing to write (idempotent)
+
+# Projection outcome states.
+DAILY_PROJECTION_APPLIED = "applied"
+DAILY_PROJECTION_NOT_APPLIED = "not_applied"
+DAILY_PROJECTION_CONFLICT = "projection_conflict"
+
+# Modes for newly created daily-note folders/files (umask applies on create).
+DAILY_NOTE_CREATE_DIR_MODE = 0o755
+DAILY_NOTE_CREATE_FILE_MODE = 0o644
+
+# Hard bounds.
+MAX_DAILY_PROJECTION_TARGETS = 16
+DAILY_PROJECTION_MAX_ATTEMPTS = 2  # exactly two total attempts per projection
+
+# Generic content-free projection commit message.
+DAILY_PROJECTION_COMMIT_MSG = "tasknotes-mcp: daily note projection"
+
+
+@dataclass(frozen=True)
+class _DailySourceFingerprint:
+    """Identity of the exact Daily Note source a transformation was based on.
+
+    Combines stable identity/ freshness metadata (device, inode, size,
+    ``mtime_ns``) with a SHA-256 over the bytes actually read so the
+    writer can require "same source" immediately before replacement.
+    """
+
+    dev: int
+    ino: int
+    size: int
+    mtime_ns: int
+    mode: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class DailyNoteProjection:
+    """A prepared Daily Note projection ready for atomic application.
+
+    Produced by :func:`prepare_daily_note_projection` before any task
+    side effect. ``kind`` selects the writer behavior (create / replace /
+    none); ``content`` holds the transformed bytes (``None`` for the
+    ``none`` kind); ``fingerprint`` is the source identity the
+    transformation was computed against (``None`` when the note was
+    missing). Consumed only by :func:`apply_daily_note_projection`.
+    """
+
+    operation: str
+    date: str
+    slug: str
+    title: str
+    target_relative: str
+    kind: str
+    content: Optional[bytes]
+    fingerprint: Optional[_DailySourceFingerprint]
+
+
+@dataclass(frozen=True)
+class DailyNoteProjectionOutcome:
+    """Structured outcome of an applied Daily Note projection.
+
+    ``state`` is one of ``applied``, ``not_applied`` (idempotent no-op),
+    or ``projection_conflict`` (persistent race; nothing was written).
+    ``attempts`` reports the write attempts consumed (1 or 2).
+    """
+
+    state: str
+    attempts: int = 1
+    created: bool = False
+    changed: bool = False
+    detail: Optional[str] = None
+
+
+def _read_fd_bytes_bounded(fd: int, max_size: int) -> bytes:
+    """Read at most ``max_size + 1`` bytes from ``fd``; close the fd.
+
+    Raises ``CoreError`` if the source exceeds ``max_size``.
+    """
+    data = b""
+    try:
+        while len(data) <= max_size:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > max_size:
+            raise CoreError("daily note exceeds size bound")
+    finally:
+        os.close(fd)
+    return data
+
+
+def _read_daily_note_source(
+    vault: Path, relative: str
+) -> Optional[Tuple[str, _DailySourceFingerprint]]:
+    """Read a Daily Note no-follow and bounded; return text + fingerprint.
+
+    Every path component is opened with ``O_NOFOLLOW`` (symlinked
+    components raise ``PathError``); the note must be a regular file
+    within the size bound. Returns ``None`` when the note — or any
+    folder along the configured path — is absent.
+    """
+    parts = relative.split("/")
+    dir_flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_DIRECTORY"):
+        dir_flags |= os.O_DIRECTORY
+    parent_fd = _open_directory_no_follow(vault)
+    try:
+        for part in parts[:-1]:
+            try:
+                next_fd = os.open(part, dir_flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise PathError(
+                        "daily note folder component is a symlink"
+                    ) from exc
+                raise PathError("cannot open daily note folder component") from exc
+            os.close(parent_fd)
+            parent_fd = next_fd
+        try:
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise PathError("daily note is a symlink") from exc
+            raise PathError("cannot open daily note") from exc
+        try:
+            st = os.fstat(fd)
+        except OSError as exc:
+            os.close(fd)
+            raise PathError("cannot inspect daily note") from exc
+        if not stat_is_regular_mode(st.st_mode):
+            os.close(fd)
+            raise PathError("daily note is not a regular file")
+        try:
+            data = _read_fd_bytes_bounded(fd, DAILY_NOTES_MAX_FILE_SIZE)
+        except CoreError:
+            raise
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CoreError("daily note is not valid UTF-8") from exc
+        fingerprint = _DailySourceFingerprint(
+            dev=st.st_dev,
+            ino=st.st_ino,
+            size=st.st_size,
+            mtime_ns=st.st_mtime_ns,
+            mode=st.st_mode & 0o7777,
+            sha256=hashlib.sha256(data).hexdigest(),
+        )
+        return text, fingerprint
+    finally:
+        os.close(parent_fd)
+
+
+def _transform_daily_note_text(
+    text: str,
+    *,
+    operation: str,
+    slug: str,
+    link_title: str,
+    date: str,
+    stem: str,
+) -> Tuple[str, bool]:
+    """Apply the section transformer and frontmatter normalization to note text.
+
+    The ``## Tasks`` requirement is enforced by the W1a transformer
+    (exactly one section). The original frontmatter bytes are preserved
+    verbatim unless normalization changed a value. Returns
+    ``(new_text, changed)``.
+    """
+    fm, raw_body = _parse_frontmatter(text)
+    body_offset = len(text) - len(raw_body)
+    if operation == DAILY_PROJECTION_OP_ENSURE:
+        new_body, body_changed = add_daily_note_task_link(
+            raw_body, slug=slug, title=link_title
+        )
+    else:
+        new_body, body_changed = remove_daily_note_task_link(raw_body, slug=slug)
+    normalized = normalize_daily_note_frontmatter(fm, date=date, title_stem=stem)
+    fm_changed = normalized != fm
+    if fm_changed:
+        new_text = _serialize_frontmatter(normalized) + new_body
+    else:
+        new_text = text[:body_offset] + new_body
+    return new_text, body_changed or fm_changed
+
+
+def _validate_daily_note_content(text: str) -> bytes:
+    """Bound-check and encode transformed note content before any write."""
+    encoded = text.encode("utf-8")
+    if len(encoded) > DAILY_NOTES_MAX_FILE_SIZE:
+        raise ValidationError("daily note content exceeds size bound")
+    return encoded
+
+
+def prepare_daily_note_projection(
+    vault: Path,
+    config: DailyNotesConfig,
+    operation: str,
+    date: str,
+    *,
+    slug: str,
+    title: str = "",
+) -> DailyNoteProjection:
+    """Pre-read the target and compute the transformed bytes (no side effects).
+
+    For a planned ensure/remove, reads the existing target no-follow and
+    bounded, requires exactly one ``## Tasks`` section, applies the W1a
+    section transformer and frontmatter normalization, and returns the
+    full transformed bytes before any task side effect. Missing notes:
+    ensure prepares a create from the valid configured template (rendered)
+    or the deterministic default body; remove is an idempotent no-op (no
+    note is created just to remove it). Raises typed core errors on
+    invalid input, unreadable/symlinked/oversized sources, or a missing/
+    duplicated ``## Tasks`` section.
+    """
+    if not isinstance(config, DailyNotesConfig):
+        raise ValidationError(
+            "daily note projection requires a validated DailyNotesConfig"
+        )
+    if operation not in (DAILY_PROJECTION_OP_ENSURE, DAILY_PROJECTION_OP_REMOVE):
+        raise ValidationError(
+            "daily note operation must be 'ensure' or 'remove'"
+        )
+    validate_slug(slug)
+    target = resolve_daily_note_path(vault, config, date)
+    relative = target.relative_to(vault).as_posix()
+    stem = target.stem
+    source = _read_daily_note_source(vault, relative)
+    if source is None:
+        if operation == DAILY_PROJECTION_OP_REMOVE:
+            return DailyNoteProjection(
+                operation=operation,
+                date=date,
+                slug=slug,
+                title=title,
+                target_relative=relative,
+                kind=DAILY_NOTE_PROJECTION_NONE,
+                content=None,
+                fingerprint=None,
+            )
+        template_text = read_daily_note_template(vault, config)
+        if template_text is None:
+            base_text = build_default_daily_note_body(date)
+        else:
+            base_text = render_daily_note_template(
+                template_text, date=date, title=stem
+            )
+        new_text, _changed = _transform_daily_note_text(
+            base_text,
+            operation=operation,
+            slug=slug,
+            link_title=title,
+            date=date,
+            stem=stem,
+        )
+        return DailyNoteProjection(
+            operation=operation,
+            date=date,
+            slug=slug,
+            title=title,
+            target_relative=relative,
+            kind=DAILY_NOTE_PROJECTION_CREATE,
+            content=_validate_daily_note_content(new_text),
+            fingerprint=None,
+        )
+    text, fingerprint = source
+    new_text, changed = _transform_daily_note_text(
+        text,
+        operation=operation,
+        slug=slug,
+        link_title=title,
+        date=date,
+        stem=stem,
+    )
+    if not changed:
+        return DailyNoteProjection(
+            operation=operation,
+            date=date,
+            slug=slug,
+            title=title,
+            target_relative=relative,
+            kind=DAILY_NOTE_PROJECTION_NONE,
+            content=None,
+            fingerprint=fingerprint,
+        )
+    return DailyNoteProjection(
+        operation=operation,
+        date=date,
+        slug=slug,
+        title=title,
+        target_relative=relative,
+        kind=DAILY_NOTE_PROJECTION_REPLACE,
+        content=_validate_daily_note_content(new_text),
+        fingerprint=fingerprint,
+    )
+
+
+def _open_daily_parent_dir(
+    vault: Path, dir_rel: str, *, create: bool
+) -> Optional[int]:
+    """Open the note's parent directory no-follow; optionally mkdir missing parts.
+
+    Missing components are created only when ``create`` is true, along
+    the already-validated configured path, and each created (or racing)
+    component is immediately reopened with ``O_NOFOLLOW|O_DIRECTORY`` so
+    a symlink swap is rejected. Returns ``None`` when a component is
+    missing and creation was not requested.
+    """
+    if not dir_rel:
+        return _open_directory_no_follow(vault)
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    current_fd = _open_directory_no_follow(vault)
+    try:
+        for part in dir_rel.split("/"):
+            try:
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create:
+                    os.close(current_fd)
+                    return None
+                try:
+                    os.mkdir(part, DAILY_NOTE_CREATE_DIR_MODE, dir_fd=current_fd)
+                except FileExistsError:
+                    pass  # racing creator; re-checked by the open below
+                except OSError as exc:
+                    raise PathError("cannot create daily note folder") from exc
+                try:
+                    next_fd = os.open(part, flags, dir_fd=current_fd)
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP:
+                        raise PathError(
+                            "daily note folder component is a symlink"
+                        ) from exc
+                    raise PathError(
+                        "cannot open daily note folder component"
+                    ) from exc
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise PathError(
+                        "daily note folder component is a symlink"
+                    ) from exc
+                raise PathError("cannot open daily note folder component") from exc
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _daily_entry_exists(parent_fd: int, name: str) -> bool:
+    """No-follow existence check for one directory entry."""
+    try:
+        os.lstat(name, dir_fd=parent_fd)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise PathError("cannot inspect daily note path") from exc
+
+
+def _daily_fingerprint_matches(
+    parent_fd: int, name: str, fingerprint: _DailySourceFingerprint
+) -> bool:
+    """Reopen/restat/rehash the source; require the identical fingerprint."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise PathError("daily note is a symlink") from exc
+        raise PathError("cannot open daily note") from exc
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:
+        os.close(fd)
+        raise PathError("cannot inspect daily note") from exc
+    if (
+        st.st_dev,
+        st.st_ino,
+        st.st_size,
+        st.st_mtime_ns,
+    ) != (
+        fingerprint.dev,
+        fingerprint.ino,
+        fingerprint.size,
+        fingerprint.mtime_ns,
+    ):
+        os.close(fd)
+        return False
+    try:
+        data = _read_fd_bytes_bounded(fd, DAILY_NOTES_MAX_FILE_SIZE)
+    except (CoreError, OSError):
+        # Unreadable or overgrown source counts as a mismatch (race);
+        # the recompute path re-reads strictly.
+        return False
+    return hashlib.sha256(data).hexdigest() == fingerprint.sha256
+
+
+def _create_daily_temp_file(parent_fd: int, target_name: str) -> Tuple[str, int]:
+    """Create a sibling temp file with O_EXCL|O_NOFOLLOW; return (name, fd)."""
+    for _ in range(8):
+        candidate = f".{target_name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+        try:
+            fd = os.open(
+                candidate,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise PathError("daily note temp path is a symlink") from exc
+            raise CoreError("cannot create daily note temp file") from exc
+        return candidate, fd
+    raise CoreError("cannot create daily note temp file")
+
+
+def _apply_daily_projection_attempt(
+    vault: Path,
+    projection: DailyNoteProjection,
+    *,
+    hook: Optional[Callable[[], None]],
+) -> Optional[str]:
+    """Apply one projection attempt; return the outcome state or None on race.
+
+    Creates/opens the parent directory no-follow, writes a sibling temp
+    file (O_EXCL|O_NOFOLLOW), fsyncs the content, runs the final-check
+    test seam, re-verifies the source fingerprint (or continued absence),
+    publishes with ``os.replace``, fsyncs the parent when supported, and
+    always cleans the temp file on failure. Never overwrites a source
+    that changed since prepare. OSError from the write/publish syscalls
+    is mapped to a typed content-free ``CoreError`` so it degrades into
+    the projection write-failure result instead of escaping after the
+    task has been committed.
+    """
+    parts = projection.target_relative.split("/")
+    name = parts[-1]
+    dir_rel = "/".join(parts[:-1])
+    kind = projection.kind
+    if kind == DAILY_NOTE_PROJECTION_NONE:
+        parent_fd = _open_daily_parent_dir(vault, dir_rel, create=False)
+        try:
+            if parent_fd is None:
+                # The note (and its folder) cannot exist now.
+                if projection.fingerprint is None:
+                    return DAILY_PROJECTION_NOT_APPLIED
+                return None  # source vanished since prepare: race
+            if hook is not None:
+                hook()
+            if projection.fingerprint is None:
+                if _daily_entry_exists(parent_fd, name):
+                    return None  # note appeared since prepare: race
+                return DAILY_PROJECTION_NOT_APPLIED
+            if not _daily_fingerprint_matches(
+                parent_fd, name, projection.fingerprint
+            ):
+                return None  # changed since prepare: race
+            return DAILY_PROJECTION_NOT_APPLIED
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
+    if kind not in (DAILY_NOTE_PROJECTION_CREATE, DAILY_NOTE_PROJECTION_REPLACE):
+        raise ValidationError("invalid daily note projection kind")
+    if not isinstance(projection.content, (bytes, bytearray)):
+        raise ValidationError("daily note projection content must be bytes")
+    fingerprint = projection.fingerprint
+    if kind == DAILY_NOTE_PROJECTION_REPLACE and fingerprint is None:
+        raise ValidationError("replace projection requires a source fingerprint")
+    content = bytes(projection.content)
+    parent_fd = _open_daily_parent_dir(
+        vault, dir_rel, create=(kind == DAILY_NOTE_PROJECTION_CREATE)
+    )
+    if parent_fd is None:
+        return None  # parent vanished since prepare: race
+    mode = (
+        fingerprint.mode
+        if fingerprint is not None
+        else DAILY_NOTE_CREATE_FILE_MODE
+    )
+    temp_name: Optional[str] = None
+    published = False
+    try:
+        temp_name, temp_fd = _create_daily_temp_file(parent_fd, name)
+        try:
+            try:
+                view = memoryview(content)
+                while view:
+                    written = os.write(temp_fd, view)
+                    view = view[written:]
+                os.fsync(temp_fd)
+                os.fchmod(temp_fd, mode)
+            except OSError as exc:
+                # Write-stage failures must never escape after the task
+                # has been committed: map them into the typed projection
+                # write-failure path (degraded daily result, temp cleaned
+                # by the finally below, never a recovery marker).
+                raise CoreError(
+                    "daily note projection write failed"
+                ) from exc
+        finally:
+            os.close(temp_fd)
+        # Final-check test seam: runs immediately before the source
+        # re-verification so tests can inject concurrent modifications.
+        if hook is not None:
+            hook()
+        if kind == DAILY_NOTE_PROJECTION_CREATE:
+            if _daily_entry_exists(parent_fd, name):
+                return None  # note appeared since prepare: race
+        else:
+            if fingerprint is None or not _daily_fingerprint_matches(
+                parent_fd, name, fingerprint
+            ):
+                return None  # source changed since prepare: race
+        try:
+            os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except OSError as exc:
+            # Publish-stage failures map to the same typed write-failure
+            # path; the temp file is cleaned up below and the target is
+            # never partially written.
+            raise CoreError(
+                "daily note projection write failed"
+            ) from exc
+        published = True
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            pass  # parent fsync is best-effort (not supported everywhere)
+        return DAILY_PROJECTION_APPLIED
+    finally:
+        if temp_name is not None and not published:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        os.close(parent_fd)
+
+
+def apply_daily_note_projection(
+    vault: Path,
+    config: DailyNotesConfig,
+    projection: DailyNoteProjection,
+    *,
+    _final_check_hook: Optional[Callable[[], None]] = None,
+) -> DailyNoteProjectionOutcome:
+    """Optimistically apply a prepared projection (exactly two attempts).
+
+    The first attempt applies the prepared bytes; on a detected race the
+    transformation is recomputed (fresh strict read + transform) and the
+    second — final — attempt is made. A persistent race returns the
+    typed generic ``projection_conflict`` outcome and never overwrites
+    the racing content. OSError from the write/publish syscalls is
+    mapped to a typed content-free ``CoreError`` (write-failure path).
+    ``_final_check_hook`` is an internal test seam invoked immediately
+    before each final check.
+    """
+    if not isinstance(config, DailyNotesConfig):
+        raise ValidationError(
+            "daily note projection requires a validated DailyNotesConfig"
+        )
+    if not isinstance(projection, DailyNoteProjection):
+        raise ValidationError("daily note projection requires a prepared projection")
+    _validate_relative_note_path(projection.target_relative)
+    attempts = 0
+    current = projection
+    while attempts < DAILY_PROJECTION_MAX_ATTEMPTS:
+        attempts += 1
+        state = _apply_daily_projection_attempt(
+            vault, current, hook=_final_check_hook
+        )
+        if state is not None:
+            return DailyNoteProjectionOutcome(
+                state=state,
+                attempts=attempts,
+                created=(
+                    state == DAILY_PROJECTION_APPLIED
+                    and current.kind == DAILY_NOTE_PROJECTION_CREATE
+                ),
+                changed=(
+                    state == DAILY_PROJECTION_APPLIED
+                    and current.kind == DAILY_NOTE_PROJECTION_REPLACE
+                ),
+            )
+        if attempts < DAILY_PROJECTION_MAX_ATTEMPTS:
+            current = prepare_daily_note_projection(
+                vault,
+                config,
+                current.operation,
+                current.date,
+                slug=current.slug,
+                title=current.title,
+            )
+    return DailyNoteProjectionOutcome(
+        state=DAILY_PROJECTION_CONFLICT,
+        attempts=attempts,
+        detail="daily note changed during projection; not applied",
+    )
+
+
+def git_commit_daily_projection_targets(
+    vault: Path,
+    targets: List[Path],
+    git_env: Optional[Dict[str, str]] = None,
+) -> bool:
+    """Stage only the provided Daily Note paths and commit iff staged.
+
+    Bounded explicit multi-target companion to the task Git helpers: it
+    stages exactly the given (already vault-confined) changed Daily Note
+    paths — never ``git add -A`` — and creates one generic content-free
+    projection commit. Targets are lexically validated to stay inside
+    the vault (relative, no traversal, no backslash). Hooks, signing,
+    gc, and maintenance are disabled command-locally. Never runs
+    checkout/reset/clean/merge/pull/push. Returns True if a commit was
+    created, False if nothing was staged.
+    """
+    if git_env is None:
+        git_env = _build_git_env()
+    if len(targets) > MAX_DAILY_PROJECTION_TARGETS:
+        raise ValidationError("daily note projection targets exceed count bound")
+    rels: List[str] = []
+    seen: set = set()
+    for target in targets:
+        path = Path(target)
+        if path.is_absolute():
+            try:
+                rel = path.relative_to(vault)
+            except ValueError as exc:
+                raise PathError("daily note projection target is not in the vault") from exc
+        else:
+            rel = path
+        rel_str = rel.as_posix()
+        _validate_relative_note_path(rel_str)
+        if rel_str in seen:
+            continue
+        seen.add(rel_str)
+        rels.append(rel_str)
+    if not rels:
+        return False
+    r = _run_git(vault, git_env, ["add", "--"] + rels)
+    if r.returncode != 0:
+        raise GitError(f"git add daily projection targets failed: {_redact(r.stderr)[:200]}")
+    r = _run_git(vault, git_env, ["diff", "--cached", "--quiet"])
+    if r.returncode == 0:
+        return False
+    r = _run_git(vault, git_env, ["commit", "-m", DAILY_PROJECTION_COMMIT_MSG, "--"] + rels)
+    if r.returncode != 0:
+        raise GitError(f"git daily projection commit failed: {_redact(r.stderr)[:200]}")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Daily Notes link integration (issue #139, W2: engine lifecycle)
+# ---------------------------------------------------------------------------
+#
+# Scheduled-driven Daily Notes projection for create/update/delete. The
+# final ACTUAL scheduling state (never caller intent) drives the link
+# transitions; the W1b prepare/apply primitives and the multi-target Git
+# helper do all the work. Only ``applied_and_committed`` task outcomes
+# are projected; projection-only failures degrade the optional daily
+# result fields and never change the authoritative task state, never
+# write task files, and never use the recovery marker.
+
+# Daily link projection result states (content-free).
+DAILY_LINK_APPLIED = "applied_and_committed"
+DAILY_LINK_SYNC_FAILED = "committed_sync_failed"
+DAILY_LINK_CONFLICT = "conflict"
+DAILY_LINK_WRITE_FAILED = "write_failed"
+DAILY_LINK_COMMIT_FAILED = "commit_failed"
+DAILY_LINK_NOT_APPLICABLE = "not_applicable"
+DAILY_LINK_NOT_APPLIED = "not_applied"
+
+# Generic content-free details for degraded daily outcomes.
+_DAILY_LINK_FAILURE_DETAIL = {
+    DAILY_LINK_CONFLICT: "daily note projection conflict",
+    DAILY_LINK_WRITE_FAILED: "daily note projection write failed",
+    DAILY_LINK_COMMIT_FAILED: "daily note projection commit failed",
+    DAILY_LINK_SYNC_FAILED: "daily note projection committed but sync failed",
+}
+
+
+def _daily_scheduled_date(value: Any) -> Optional[str]:
+    """Extract a plain ``YYYY-MM-DD`` scheduled value; None when unusable.
+
+    Collapses the gbrain-normalized bare-date form back to ``YYYY-MM-DD``
+    and validates. Non-strings and invalid dates yield ``None`` (only a
+    valid scheduled date drives a daily link; scheduled is the sole
+    source).
+    """
+    if not isinstance(value, str):
+        return None
+    value = _denormalize_bare_date(value)
+    try:
+        return validate_date(value, "scheduled")
+    except ValidationError:
+        return None
+
+
+def _daily_link_plan(
+    old: Optional[str], new: Optional[str]
+) -> Optional[List[Tuple[str, str]]]:
+    """Compute ensure/remove steps from the actual scheduling transition.
+
+    ``old``/``new`` are plain ``YYYY-MM-DD`` scheduled dates or None
+    (backlog/week planning). Order matters: the ensure of the new date
+    always precedes the removal of the old date so a partial failure
+    never loses the link.
+    """
+    if new is not None:
+        steps: List[Tuple[str, str]] = [(DAILY_PROJECTION_OP_ENSURE, new)]
+        if old is not None and old != new:
+            steps.append((DAILY_PROJECTION_OP_REMOVE, old))
+        return steps
+    if old is not None:
+        return [(DAILY_PROJECTION_OP_REMOVE, old)]
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Mutation result
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class MutationResult:
-    """Structured outcome of a mutation operation."""
+    """Structured outcome of a mutation operation.
+
+    The ``daily_link_*`` fields (issue #139) are optional Daily Notes
+    link bookkeeping. They are populated only for ``create``/``update``/
+    ``delete`` operations with the daily-link feature enabled and an
+    ``applied_and_committed`` task outcome: ``daily_link_state`` reports
+    the projection outcome (``applied_and_committed``, or
+    ``not_applicable`` when no transition was required, or ``not_applied``
+    when nothing needed to change, or a degraded ``conflict``/
+    ``write_failed``/``commit_failed``/``committed_sync_failed``),
+    ``daily_link_detail`` carries a generic (content-free) degradation
+    detail, and ``daily_link_dates`` lists the affected ``YYYY-MM-DD``
+    daily note dates (multiple when a reschedule touches D1 and D2).
+    They default to ``None`` and stay ``None`` otherwise: disabled mode,
+    operations that never project (complete/archive/add_tag/remove_tag),
+    and task outcomes that did not apply and commit.
+    """
 
     state: str
     slug: str
     commit_id: Optional[str] = None
     detail: Optional[str] = None
+    daily_link_state: Optional[str] = None
+    daily_link_detail: Optional[str] = None
+    daily_link_dates: Optional[List[str]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -2561,7 +3911,10 @@ class TaskNotesEngine:
         lock_dir: Optional[Path] = None,
         lock_timeout: float = DEFAULT_LOCK_TIMEOUT,
         tz: str = "UTC",
+        daily_links_enabled: bool = False,
     ) -> None:
+        if not isinstance(daily_links_enabled, bool):
+            raise ValidationError("daily_links_enabled must be a boolean")
         self.vault = Path(vault)
         self.gbrain_bin = gbrain_bin
         self.gbrain_home = Path(gbrain_home)
@@ -2570,6 +3923,10 @@ class TaskNotesEngine:
         self.lock_path = self.lock_dir / DEFAULT_LOCK_NAME
         self.recovery_marker = self.lock_dir / RECOVERY_MARKER_NAME
         self.tz = tz
+        self.daily_links_enabled = daily_links_enabled
+        # Lazily loaded/validated Daily Notes config (issue #139). Never
+        # touched while daily_links_enabled is False.
+        self._daily_config: Optional[DailyNotesConfig] = None
         self._gbrain_env = _build_gbrain_env(self.gbrain_home, self.vault)
         self._git_env = _build_git_env()
         # Test seam: callable invoked after get_page/reconstruct and before
@@ -2770,6 +4127,144 @@ class TaskNotesEngine:
             return MutationResult(state=RECOVERY_REQUIRED, slug=slug)
         return MutationResult(state=DB_UPDATED_DISK_FAILED, slug=slug)
 
+    # -- daily link projection (issue #139, W2) ---------------------------
+
+    def _daily_config_lazy(self) -> DailyNotesConfig:
+        """Lazily load and validate the Daily Notes config (enabled mode only).
+
+        The validated config is cached for the engine (MCP process)
+        lifetime; editing ``daily-notes.json`` takes effect only after a
+        restart (single config source, no reload/watch path).
+        """
+        if self._daily_config is None:
+            self._daily_config = load_daily_notes_config(self.vault)
+        return self._daily_config
+
+    def _prepare_daily_link_projections(
+        self,
+        steps: List[Tuple[str, str]],
+        slug: str,
+        title: str,
+    ) -> List[DailyNoteProjection]:
+        """Pre-compute every needed projection target (no side effects).
+
+        Runs the W1b preparation (strict no-follow reads, structural
+        ``## Tasks`` validation, template rendering, frontmatter
+        normalization) so a deterministic failure raises BEFORE any task
+        or gbrain side effect.
+        """
+        config = self._daily_config_lazy()
+        return [
+            prepare_daily_note_projection(
+                self.vault, config, operation, date, slug=slug, title=title
+            )
+            for operation, date in steps
+        ]
+
+    def _run_daily_link_projection(
+        self,
+        profile: TaskNotesProfile,
+        projections: List[DailyNoteProjection],
+    ) -> Tuple[str, Optional[str], Optional[List[str]]]:
+        """Apply prepared projections, commit changed targets, sync (lock held).
+
+        Steps run in plan order (ensure before remove); the first failure
+        stops later steps so a failed ensure never loses the link. Changed
+        targets are committed with the W1 multi-target helper and synced
+        with the native source-scoped incremental sync. All failures are
+        content-free and never touch the recovery marker. Returns
+        ``(daily_link_state, daily_link_detail, daily_link_dates)``.
+        """
+        config = self._daily_config_lazy()
+        dates: List[str] = [projection.date for projection in projections]
+        changed: List[Path] = []
+        failure: Optional[str] = None
+        for projection in projections:
+            if failure is not None:
+                break
+            try:
+                outcome = apply_daily_note_projection(
+                    self.vault, config, projection
+                )
+            except CoreError:
+                failure = DAILY_LINK_WRITE_FAILED
+                continue
+            if outcome.state == DAILY_PROJECTION_APPLIED:
+                changed.append(self.vault / projection.target_relative)
+            elif outcome.state == DAILY_PROJECTION_CONFLICT:
+                failure = DAILY_LINK_CONFLICT
+            # DAILY_PROJECTION_NOT_APPLIED: nothing to commit for this target.
+        if not changed:
+            if failure is not None:
+                return failure, _DAILY_LINK_FAILURE_DETAIL[failure], dates
+            return DAILY_LINK_NOT_APPLIED, None, (dates or None)
+        try:
+            git_commit_daily_projection_targets(
+                self.vault, changed, self._git_env
+            )
+        except CoreError:
+            if failure is not None:
+                return (
+                    DAILY_LINK_COMMIT_FAILED,
+                    "daily note projection partially applied; commit failed",
+                    dates,
+                )
+            return (
+                DAILY_LINK_COMMIT_FAILED,
+                _DAILY_LINK_FAILURE_DETAIL[DAILY_LINK_COMMIT_FAILED],
+                dates,
+            )
+        try:
+            gbrain_sync_incremental(
+                self.gbrain_bin, self._gbrain_env, self.vault, profile.source_id  # type: ignore[arg-type]
+            )
+        except CoreError:
+            if failure is not None:
+                return (
+                    DAILY_LINK_SYNC_FAILED,
+                    "daily note projection partially applied; sync failed",
+                    dates,
+                )
+            return (
+                DAILY_LINK_SYNC_FAILED,
+                _DAILY_LINK_FAILURE_DETAIL[DAILY_LINK_SYNC_FAILED],
+                dates,
+            )
+        if failure is not None:
+            return (
+                failure,
+                "daily note projection partially applied; applied targets committed and synced",
+                dates,
+            )
+        return DAILY_LINK_APPLIED, None, dates
+
+    def _finish_with_daily_links(
+        self,
+        profile: TaskNotesProfile,
+        result: MutationResult,
+        projections: Optional[List[DailyNoteProjection]],
+    ) -> MutationResult:
+        """Attach Daily Notes projection outcomes to a finished mutation.
+
+        Disabled mode returns the task result untouched (no daily fields).
+        Projections run ONLY for ``applied_and_committed`` task outcomes;
+        any other outcome keeps the task result authoritative and untouched.
+        When enabled and no transition is required, reports
+        ``not_applicable``.
+        """
+        if not self.daily_links_enabled:
+            return result
+        if result.state != APPLIED_AND_COMMITTED:
+            return result
+        if projections is None:
+            result.daily_link_state = DAILY_LINK_NOT_APPLICABLE
+            return result
+        state, detail, dates = self._run_daily_link_projection(profile, projections)
+        result.daily_link_state = state
+        result.daily_link_detail = detail
+        result.daily_link_dates = dates
+        return result
+
     # -- public operations ------------------------------------------------
 
     def create(
@@ -2850,6 +4345,14 @@ class TaskNotesEngine:
             _validate_markdown_bound(markdown)
             expected_document = semantic_from_markdown(markdown, profile)
             gbrain_slug = resolve_gbrain_slug(profile, slug)
+            # Daily link prevalidation (issue #139 W2): enabled mode with a
+            # scheduled create pre-computes the ensure target BEFORE any
+            # task side effect; a deterministic failure raises here.
+            daily_projections: Optional[List[DailyNoteProjection]] = None
+            if self.daily_links_enabled and scheduled_v is not None:
+                daily_projections = self._prepare_daily_link_projections(
+                    [(DAILY_PROJECTION_OP_ENSURE, scheduled_v)], slug, title
+                )
             # CAPTURE-STARTED BOUNDARY: from here on, always return a MutationResult.
             try:
                 capture_result = gbrain_capture(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
@@ -2858,13 +4361,14 @@ class TaskNotesEngine:
                 return self._reconcile_after_capture_failure(
                     profile, slug, gbrain_slug, exc, expected_document
                 )
-            return self._handle_post_capture(
+            result = self._handle_post_capture(
                 profile,
                 slug,
                 gbrain_slug,
                 capture_result,
                 expected_document=expected_document,
             )
+            return self._finish_with_daily_links(profile, result, daily_projections)
 
     def get(self, slug: str) -> Dict[str, Any]:
         """Return one task by slug. Takes the shared lock (invokes gbrain)."""
@@ -3020,6 +4524,11 @@ class TaskNotesEngine:
             current_status = current_fm.get(profile.mappings["status"])
             if current_status == profile.completed_status:
                 raise ValidationError("cannot update a completed task")
+            # Actual current scheduling state (denormalized, validated);
+            # the sole driver of daily link transitions (issue #139 W2).
+            current_scheduled = _daily_scheduled_date(
+                current_fm.get(profile.mappings["scheduled"])
+            )
             # Build updates (only modeled fields, no tags/title/completedDate).
             updates: Dict[str, Any] = {}
             if status_v is not None:
@@ -3054,6 +4563,20 @@ class TaskNotesEngine:
                 updates[key] = value
             if not updates and body_v is None:
                 return MutationResult(state=NOT_APPLIED, slug=slug)
+            # Daily link plan (issue #139 W2) from the FINAL actual
+            # scheduling state (current page state + applied updates,
+            # never caller intent). Only updates that actually touch the
+            # scheduled field drive a projection; a non-scheduling update
+            # projects nothing. Pre-computed before any task side effect;
+            # a deterministic failure raises here.
+            daily_projections_update: Optional[List[DailyNoteProjection]] = None
+            if self.daily_links_enabled and "scheduled" in updates:
+                final_scheduled = _daily_scheduled_date(updates["scheduled"])
+                steps = _daily_link_plan(current_scheduled, final_scheduled)
+                if steps is not None:
+                    daily_projections_update = self._prepare_daily_link_projections(
+                        steps, slug, decoded["title"]
+                    )
             markdown = reconstruct_markdown(
                 page, profile, updates, body_override=body_v
             )
@@ -3073,12 +4596,15 @@ class TaskNotesEngine:
                 return self._reconcile_after_capture_failure(
                     profile, slug, gbrain_slug, exc, expected_document
                 )
-            return self._handle_post_capture(
+            result = self._handle_post_capture(
                 profile,
                 slug,
                 gbrain_slug,
                 capture_result,
                 expected_document=expected_document,
+            )
+            return self._finish_with_daily_links(
+                profile, result, daily_projections_update
             )
 
     def complete(
@@ -3237,6 +4763,28 @@ class TaskNotesEngine:
             # Re-resolve in case preflight changed things.
             gbrain_slug = resolve_gbrain_slug(profile, slug)
 
+            # Daily link prevalidation (issue #139 W2, D13 ordering): read
+            # and decode the CURRENT page to retain the actual scheduled
+            # state and title, then pre-compute the removal projection —
+            # BEFORE the soft-delete gate. A deterministic failure raises
+            # here: the task and its daily link stay untouched.
+            daily_projections_delete: Optional[List[DailyNoteProjection]] = None
+            if self.daily_links_enabled:
+                page = gbrain_get_page(
+                    self.gbrain_bin, self._gbrain_env,
+                    gbrain_slug, profile.source_id,  # type: ignore[arg-type]
+                )
+                decoded_delete = decode_page(page)
+                old_scheduled = _daily_scheduled_date(
+                    decoded_delete["frontmatter"].get(profile.mappings["scheduled"])
+                )
+                if old_scheduled is not None:
+                    daily_projections_delete = self._prepare_daily_link_projections(
+                        [(DAILY_PROJECTION_OP_REMOVE, old_scheduled)],
+                        slug,
+                        decoded_delete["title"],
+                    )
+
             # Gbrain soft-delete: confirmation gate.
             try:
                 gbrain_delete(
@@ -3281,10 +4829,18 @@ class TaskNotesEngine:
             except GbrainPageNotFound:
                 pass
 
-            return MutationResult(
+            result = MutationResult(
                 state=APPLIED_AND_COMMITTED,
                 slug=slug,
                 commit_id=commit_id,
+            )
+            # Daily link removal (issue #139 W2, D13): runs ONLY after the
+            # task deletion is verified (page_not_found above). A
+            # projection failure degrades the daily result fields while
+            # the task outcome stays authoritative; the returned
+            # commit_id remains the TASK deletion commit.
+            return self._finish_with_daily_links(
+                profile, result, daily_projections_delete
             )
 
     def _validate_tag_value(self, tag: Any) -> str:

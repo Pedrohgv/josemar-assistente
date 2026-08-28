@@ -5,7 +5,13 @@ authoritative TaskNotes documentation is [tasknotes.dev](https://tasknotes.dev/)
 
 The adapter uses short-lived native gbrain CLI commands. It does not run
 `gbrain serve`, open PGLite directly, or write task files directly. Gbrain is
-the sole task writer. The MCP exposes only:
+the sole task-file writer. The adapter's only direct filesystem write — and
+the only sanctioned exception to gbrain-only task Markdown — is the opt-in,
+default-off Daily Note task-link projection (issue #139): a derived,
+lock-held, vault-confined wikilink maintained in Obsidian core Daily Notes
+while the adapter owns its transaction lock, always followed by native
+incremental gbrain reconciliation. It is never a generic note writer. See
+"Daily Note task links (issue #139)" below. The MCP exposes only:
 
 - `task_create`
 - `task_get`
@@ -54,7 +60,11 @@ bounded pattern).
   wrapper's lock path inside its transaction path (it retains its
   transaction-level global lock). Conversely, the public wrapper must never be
   used for TaskNotes task-file mutations and must never call into TaskNotes.
-  Task-file mutations go through the `task_*` MCP tools only.
+  This includes the Daily Note projection (issue #139): its direct filesystem
+  write runs only inside the adapter's own lock and is reconciled with native
+  incremental sync — never through the public wrapper, and never with a
+  concurrent PGLite open. Task-file mutations go through the `task_*` MCP
+  tools only.
 - **Pause ALL THREE owned jobs for maintenance windows.** For recovery,
   reindex/rebuild, migrations, vault swaps, and unadapted/third-party
   diagnostics, the operator pauses `gbrain-refresh`,
@@ -389,6 +399,180 @@ metadata. Vault-side rollback is simply to stop using/remove `planned_week`
 values and restore the prior private Base if desired. No schema/database
 migration and no TaskNotes upgrade is introduced in either direction.
 
+## Daily Note task links (issue #139)
+
+The adapter can mechanically maintain one task wikilink in the Obsidian core
+Daily Note matching a task's exact `scheduled` date. The projection is
+derived state: the TaskNotes task remains authoritative, and `scheduled` is
+the sole projection source. `due`, `planned_week`, recurrence metadata,
+status, archive state, and completion date never create, move, or remove a
+link.
+
+### Architectural boundary
+
+Task Markdown remains gbrain-only. The projection is the adapter's only
+direct filesystem write: while it owns `/opt/data/.locks/tasknotes.lock` it
+may create/edit only the Daily Note file(s) implied by the validated
+configured Daily Notes path for the task's exact `scheduled` date(s), then
+reconcile the filesystem-originated change through source-scoped native
+incremental gbrain sync under the same lock. It never opens PGLite
+concurrently and never routes through (or is invoked from) the public `gbrain`
+wrapper. This is not a generic Markdown writer: no tool, API, or arbitrary
+note path is exposed.
+
+### Feature flag (default off)
+
+The feature is controlled by the strict boolean
+`TASKNOTES_DAILY_LINKS_ENABLED`, propagated deploy workflow → `.env` →
+Compose → Hermes TaskNotes MCP env → engine. Missing or empty resolves to
+disabled; only case-insensitive `true`/`false` are accepted and any other
+value fails closed at MCP initialization. When disabled, behavior is
+identical to previous TaskNotes releases: no Daily Notes config is read or
+required, no projection work runs, and mutation results carry no
+`daily_link_*` fields.
+
+### Daily Notes configuration (dynamic, fail-closed)
+
+The adapter reads `<vault>/.obsidian/daily-notes.json` dynamically — there is
+no second folder/date/template configuration. A validated config is required
+when the feature is enabled and a projection is needed: a missing config (or
+missing `.obsidian/`) fails closed rather than inferring defaults. Supported
+keys: `folder` (vault-relative; missing/empty → vault root), `format`
+(missing/empty → `YYYY-MM-DD`), `template` (optional vault-relative Markdown
+path). Unknown keys are ignored for Obsidian compatibility. Path values must
+be relative, free of backslashes/control characters/traversal segments, and
+must not pass through symlink components where they exist; the template must
+be a `.md` file. Malformed JSON, non-object roots, or unsafe paths fail
+closed before any task side effect. The Periodic Notes plugin configuration
+is never read as a fallback.
+
+Config freshness: the validated config is loaded lazily on the first
+enabled projection and then cached for the lifetime of the TaskNotes MCP
+process; editing `daily-notes.json` takes effect only after an MCP
+restart. This is deliberate — a single config source with no reload or
+watch path, consistent with the no-watcher v1 behavior below.
+
+### Supported date-format subset
+
+`format` supports exactly the numeric tokens `YYYY YY MM M DD D` with literal
+separators limited to safe path characters `- . _ /` (so both flat names and
+numeric hierarchies such as `YYYY/MM/DD` work). Every alphabetic run must be
+exactly one supported token; anything else — locale month/weekday names
+(`MMM`, `MMMM`, `ddd`, ...), quarters, escaping/quoting syntax — is rejected
+before any task side effect instead of being approximated.
+
+### Template rendering (bounded, no execution)
+
+If the target Daily Note does not exist, the adapter creates it from the
+configured template (if any) or a deterministic default body (`# <date>` plus
+one `## Tasks` section). Only three core template expressions are supported:
+`{{date}}` (the scheduled `YYYY-MM-DD`), `{{title}}` (the Daily Note filename
+stem), and `{{date:FORMAT}}` (rendered with the same supported token subset).
+Any other `{{...}}` expression is rejected before the projection runs;
+Templater or JavaScript execution never happens. After rendering, a
+top-level `date` frontmatter value that is null/empty is set to the scheduled
+date and a null/empty top-level `title` becomes the filename stem; non-empty
+values are preserved and no provenance fields are invented. The rendered
+note must contain exactly one `## Tasks` section, otherwise the projection
+fails closed.
+
+### Existing-note structural contract
+
+An existing Daily Note must contain exactly one level-2 `## Tasks` heading;
+its section extends to the next level-2 heading or end of file. A missing or
+duplicated `## Tasks` section fails closed — the adapter never restructures
+a human-authored note. Only exact generated task-link bullet lines inside
+that section are edited; nothing outside it (and no prose) is ever touched.
+
+### Canonical link semantics
+
+The canonical generated line is `- [[<task-slug>|<task-title>]]`. Matching is
+by exact wikilink target slug on bullet-only lines, never by alias text.
+Adding deduplicates and normalizes any existing exact-slug bullet to the
+canonical form (preserving its indentation and unrelated section lines);
+removal deletes only exact-slug bullet lines and leaves the section and note
+in place even when empty. Similar-prefix slugs and prose mentions are never
+matched or modified.
+
+### Transition matrix
+
+| Task transition | Daily Note projection |
+|---|---|
+| create Backlog task | none |
+| create `planned_week` task | none |
+| create with `scheduled=<D>` | add link under D |
+| update from Backlog/week to `scheduled=<D>` | add link under D |
+| reschedule `D1` → `D2` | add under D2 **first**, then remove from D1 |
+| update with unchanged `scheduled=<D>` | idempotent; no duplicate link |
+| `scheduled` → `planned_week` | remove old date's link |
+| `clear_scheduled` → Backlog | remove old date's link |
+| non-scheduling update | none (`not_applicable`) |
+| `task_complete` / `task_archive` / tag changes | none; link retained while `scheduled` remains |
+| `task_delete` of a scheduled task | remove link **after** verified deletion |
+| `task_delete` of a Backlog/week task | none |
+| recurrence creation | no future links pre-created |
+
+Transitions are computed from the task's actual old and final scheduling
+state, never from caller intent alone. Rescheduling adds the new date's link
+before removing the old one, so a partial projection failure can duplicate
+visibility but never lose the task from both Daily Notes. `task_delete`
+reads the current page and prevalidates the removal before the gbrain
+soft-delete gate, but only removes the link after task deletion is verified;
+a failed task deletion never touches the projection.
+
+### Concurrency, atomicity, Git, and reconciliation
+
+Obsidian and Syncthing do not honor the TaskNotes lock. The projection
+writer therefore transforms bytes in memory from a fingerprinted source
+(identity metadata plus content hash), re-verifies that fingerprint
+immediately before an atomic `os.replace`, retries once on a detected race
+(two attempts total), and reports a persistent conflict instead of
+overwriting concurrent edits. Writes go through a sibling temp file
+(exclusive, no-follow) with fsync and cleanup on every failure path; note
+and template reads are bounded (1 MB) and no-follow. A successful projection
+is recorded as one content-free Git commit
+(`tasknotes-mcp: daily note projection`) staging only the affected Daily
+Note paths — never the whole vault — and then reconciled with native
+incremental gbrain sync while the lock is still held. A projection commit is
+separate from the task commit; for deletions the reported `commit_id`
+remains the task deletion commit.
+
+### Projection outcomes
+
+When enabled, `task_create`, `task_update`, and `task_delete` additionally
+report optional projection fields (`daily_link_state`, `daily_link_detail`,
+`daily_link_dates`); disabled mode omits them and existing consumers are
+unaffected. The task `state` stays the authoritative mutation outcome and is
+never degraded by a projection problem:
+
+- `applied_and_committed`: projection written, committed, and synced.
+- `not_applicable`: enabled, but this operation has no projection
+  (e.g. non-scheduling update, Backlog/week task).
+- `not_applied`: nothing to change (already canonical/absent).
+- `conflict`: the Daily Note changed concurrently twice; nothing was
+  overwritten. Retry the mutation later.
+- `write_failed` / `commit_failed`: filesystem/Git failure. The task outcome
+  remains authoritative; `commit_failed` may leave uncommitted Daily Note
+  edits for the next preflight.
+- `committed_sync_failed`: vault/Git projection succeeded but incremental
+  sync failed; the links are already committed and a later locked refresh
+  reconciles the gbrain index.
+
+Projection-only failures never create the TaskNotes global recovery marker
+and never roll back the authoritative task mutation; partial multi-date
+projections report the degraded state truthfully (e.g. a reschedule whose
+new link was committed but whose old-link removal failed).
+
+### Disabling, manual edits, and v1 limitations
+
+Setting the flag to `false` stops future projection maintenance only; links
+already written are ordinary Markdown and are never bulk-removed. There is
+no watcher or backfill in v1: direct Obsidian edits to task files (including
+manual reschedules) are not re-projected until the next MCP scheduling
+transition touches that task, and already-scheduled tasks are not backfilled
+when the feature is first enabled. No Periodic Notes compatibility is
+provided — only the core Daily Notes plugin configuration is read.
+
 ## Current limitations
 
 The adapter does not yet support:
@@ -397,6 +581,11 @@ The adapter does not yet support:
 - **Rename/move, title edits, bulk operations, raw frontmatter,
   inline-task conversion**: these operations are not exposed via the MCP tools.
   Body edits are supported via `task_update`'s optional `body` field.
+- **Daily Note projection backfill/reconciliation (issue #139)**: when the
+  projection is enabled there is no watcher and no bulk backfill — direct
+  Obsidian task edits are not re-projected until the next MCP scheduling
+  transition touches that task, and disabling the flag stops future
+  maintenance without removing existing links.
 
 For these operations, suggest Obsidian or native gbrain (for non-task pages).
 
@@ -429,6 +618,11 @@ on disk, and the next sync cycle will re-import it.
 - `db_updated_disk_failed`: gbrain reported a write-through failure and the
   immediate full-sync reconciliation completed. Inspect before retrying.
 - `recovery_required`: state is uncertain. Do not retry.
+
+With the Daily Note projection enabled (issue #139), `task_create`,
+`task_update`, and `task_delete` also carry the optional `daily_link_state`,
+`daily_link_detail`, and `daily_link_dates` fields described in "Projection
+outcomes" above. They never change the authoritative task `state`.
 
 ## Recovery
 

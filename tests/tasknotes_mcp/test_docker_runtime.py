@@ -173,8 +173,15 @@ class TaskNotesDockerRuntimeTests(unittest.TestCase):
         data_dir = Path(tempfile.mkdtemp(prefix="tasknotes-runtime-"))
         self.addCleanup(shutil.rmtree, data_dir, ignore_errors=True)
         _chown_data_dir(data_dir, uid, gid)
-        result = self._run_e2e_container(data_dir, uid, gid, as_runtime_user=True)
+        # The e2e now runs two lifecycle phases (disabled mode plus the
+        # issue #139 daily-links phase with Git/gbrain evidence), roughly
+        # doubling the mutation count; give it a doubled budget.
+        result = self._run_e2e_container(
+            data_dir, uid, gid, as_runtime_user=True, timeout=600
+        )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("real-gbrain disabled-mode lifecycle: PASS", result.stdout)
+        self.assertIn("real-gbrain daily-links MCP lifecycle: PASS", result.stdout)
         self.assertIn("real-gbrain MCP lifecycle: PASS", result.stdout)
 
     def test_root_container_run_is_rejected(self) -> None:
@@ -344,6 +351,70 @@ class TaskNotesDockerHarnessContractTests(unittest.TestCase):
         e2e = _e2e_module()
         self.assertFalse(hasattr(e2e, "_remove_disposable_state"))
         self.assertFalse(hasattr(e2e, "_cleanup"))
+
+    def test_e2e_daily_links_scenario_contract(self) -> None:
+        """Issue #139 W4: the e2e lifecycle must run the disabled mode
+        before any Daily Notes configuration exists, run the daily-links
+        phase with the strict env flag against a custom numeric-subfolder
+        config + template with empty date/title identity + a preexisting
+        note, and prove Git projection commits plus native gbrain source
+        visibility after the incremental projection sync."""
+        text = self._e2e_text()
+        # Disabled-mode subcase runs first, without any Daily Notes config.
+        self.assertIn(
+            'assert not (vault / ".obsidian" / DAILY_NOTES_CONFIG_NAME).exists()',
+            text,
+        )
+        self.assertNotIn("TASKNOTES_DAILY_LINKS_ENABLED", self._harness_env_passthrough())
+        # Enabled phase uses the strict boolean env flag (value "true").
+        self.assertIn('dict(env, TASKNOTES_DAILY_LINKS_ENABLED="true")', text)
+        # Custom numeric-subfolder configuration (folder + YYYY/MM/DD).
+        self.assertIn('DAILY_FOLDER = "daily"', text)
+        self.assertIn('DAILY_FORMAT = "YYYY/MM/DD"', text)
+        self.assertIn('"template": DAILY_TEMPLATE_REL', text)
+        # Template with normal headings and empty date/title identity.
+        self.assertIn("date:\ntitle:\n---", text)
+        self.assertIn("## Tasks", text)
+        # At least one preexisting Daily Note is installed and never deleted.
+        self.assertIn("PREEXISTING_DAILY_NOTE_DATE = ", text)
+        self.assertIn('["git", "commit", "-q", "-m", "Add Daily Notes fixture"]', text)
+        # Scenario coverage: create on existing note, D1->D2 reschedule with
+        # ensure-before-remove ordering, week/backlog cleanups, delete
+        # cleanup, complete/archive retention, idempotent unchanged reschedule.
+        self.assertIn('== ["2026-07-21", "2026-07-20"]', text)
+        self.assertIn('{"slug": beta, "planned_week": monday}', text)
+        self.assertIn('{"slug": gamma, "clear_scheduled": True}', text)
+        self.assertIn('deleted["daily_link_state"] == "applied_and_committed"', text)
+        self.assertIn('"daily_link_state" not in alpha_done', text)
+        self.assertIn('alpha_kept["daily_link_state"] == "not_applied"', text)
+        # Git evidence: exact projection-commit accounting; projection
+        # commits stage only daily note paths, never the whole vault.
+        self.assertIn(
+            'log.count("tasknotes-mcp: daily note projection") == 8', text
+        )
+        self.assertIn('path.startswith(f"{DAILY_FOLDER}/")', text)
+        # Native gbrain visibility after the incremental projection sync:
+        # source-routed native get_page on the projected daily notes.
+        self.assertIn('"--source"', text)
+        self.assertIn('"get_page"', text)
+        self.assertIn("compiled_truth", text)
+        self.assertIn(
+            '"[[20260721t100000|Disposable daily-link task alpha]]" in body_19', text
+        )
+
+    @staticmethod
+    def _harness_env_passthrough() -> str:
+        """The harness container env must NOT forward the daily-links flag:
+        the e2e builds its own per-phase MCP env internally."""
+        return "\n".join(
+            line
+            for line in (
+                REPO_ROOT / "tests" / "tasknotes_mcp" / "test_docker_runtime.py"
+            )
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if '"-e"' in line or line.strip().startswith('"-e"')
+        )
 
 
 class TaskNotesE2ECallResultCompatTests(unittest.TestCase):

@@ -1507,6 +1507,68 @@ class DeployWorkflowContractTests(unittest.TestCase):
         self.assertIn('write_env GBRAIN_EMBEDDINGS_ENABLED "$GBRAIN_EMBEDDINGS_ENABLED"', env)
         self.assertIn('echo "GBRAIN_EMBEDDINGS_ENABLED=$GBRAIN_EMBEDDINGS_ENABLED" >> "$GITHUB_ENV"', env)
 
+    # --- TaskNotes MCP daily-note task links (issue #139) ---
+
+    def test_tasknotes_daily_links_variable_is_strict_default_off_before_mutation(
+        self,
+    ) -> None:
+        validate = _step_text(self.workflow, "Validate required repository variables")
+        # Repository variable feeds the strict validation.
+        self.assertIn(
+            "TASKNOTES_DAILY_LINKS_ENABLED_INPUT: "
+            "${{ vars.TASKNOTES_DAILY_LINKS_ENABLED }}",
+            self.text,
+        )
+        self.assertIn(
+            'TASKNOTES_DAILY_LINKS_ENABLED="$TASKNOTES_DAILY_LINKS_ENABLED_INPUT"',
+            validate,
+        )
+        # Missing/empty normalizes to disabled.
+        self.assertIn('if [ -z "$TASKNOTES_DAILY_LINKS_ENABLED" ]; then', validate)
+        self.assertIn('TASKNOTES_DAILY_LINKS_ENABLED="false"', validate)
+        # Nonempty values are case-insensitive true/false, normalized to
+        # lowercase for .env; anything else is rejected before any mutation.
+        self.assertIn("tr '[:upper:]' '[:lower:]'", validate)
+        self.assertIn(
+            "ERROR: TASKNOTES_DAILY_LINKS_ENABLED must be 'true' or 'false'",
+            validate,
+        )
+        # The effective normalized boolean persists for later steps.
+        self.assertIn(
+            'echo "TASKNOTES_DAILY_LINKS_ENABLED=$TASKNOTES_DAILY_LINKS_ENABLED" >> "$GITHUB_ENV"',
+            validate,
+        )
+        # Preflight-before-mutation ordering (same gate as the embeddings
+        # switch): validation runs before any service teardown.
+        self.assertLess(
+            _step_index(self.workflow, "Validate required repository variables"),
+            _step_index(self.workflow, "Stop existing services"),
+        )
+
+    def test_tasknotes_daily_links_env_file_value_is_normalized_and_persisted(
+        self,
+    ) -> None:
+        env = _step_text(self.workflow, "Create .env file")
+        self.assertIn(
+            "TASKNOTES_DAILY_LINKS_ENABLED_INPUT: "
+            "${{ vars.TASKNOTES_DAILY_LINKS_ENABLED }}",
+            self.text,
+        )
+        # The .env step re-derives and re-validates independently so the
+        # generated .env carries normalized lowercase true/false.
+        self.assertIn(
+            'TASKNOTES_DAILY_LINKS_ENABLED="$TASKNOTES_DAILY_LINKS_ENABLED_INPUT"',
+            env,
+        )
+        self.assertIn(
+            "ERROR: TASKNOTES_DAILY_LINKS_ENABLED must be 'true' or 'false'",
+            env,
+        )
+        self.assertIn(
+            'write_env TASKNOTES_DAILY_LINKS_ENABLED "$TASKNOTES_DAILY_LINKS_ENABLED"',
+            env,
+        )
+
     def test_post_start_embeddings_presence_health_check(self) -> None:
         verify = _step_text(self.workflow, "Verify embeddings overlay selection")
         self.assertIn('MAXIMAL_ARGS', verify)
