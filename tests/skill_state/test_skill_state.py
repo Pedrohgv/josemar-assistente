@@ -889,7 +889,12 @@ class DockerfileContractTests(unittest.TestCase):
         self.assertIn("skills_config.py", self.src)
 
     def test_dockerfile_py_compiles_helper(self) -> None:
-        self.assertIn("josemar_skill_state.py", self.src.split("py_compile")[-1])
+        # The skills-config patch block py_compiles the helper fail-loudly.
+        # Later patcher blocks (e.g. the browser-routing patch, issue #136)
+        # append their own py_compile lines, so scope the assertion to the
+        # skills-config segment instead of the whole file tail.
+        segment = self.src.split("patch-hermes-browser-routing.py")[0]
+        self.assertIn("josemar_skill_state.py", segment.split("py_compile")[-1])
 
 
 class HermesUpgradeContractTests(unittest.TestCase):

@@ -132,14 +132,33 @@ approvals:
   cron_mode: deny
   deny: []
 
-# Remote browser control (optional). When the browser-control Compose profile
-# is enabled and a laptop has established the reverse SSH tunnel, Chrome's CDP
-# endpoint is reachable at 127.0.0.1:9222 inside the Hermes container (the
-# browser-tunnel sidecar shares Hermes's network namespace). Leave this URL
-# pointing at 127.0.0.1:9222; never expose CDP on 0.0.0.0 or via Tailscale Funnel.
-# See docs/browser-control.md for enablement and laptop setup.
+# Browser routing (issue #136): three intentionally distinct web-access paths.
+# Ordinary interactive/rendered web work uses the built-in browser_* toolset
+# backed by a deterministic server-headless Chromium (pinned Chrome for
+# Testing, baked into the Josemar image at /opt/josemar/agent-browser);
+# authenticated/session-bearing operator-browser work uses the
+# separate connected_browser_exec tool against browser.connected_cdp_url;
+# public read-only research prefers search/extraction tools. No browser-control
+# overlay is required for the ordinary route.
 browser:
-  cdp_url: "http://127.0.0.1:9222"
+  # Explicit and quoted: keeps the Browser Use CLI from replacing the
+  # built-in browser tools (upstream browser_exec stays hidden).
+  backend: "off"
+  # Deterministic local backend: prevents credential auto-detection from
+  # silently converting browser_* into a cloud browser.
+  cloud_provider: "local"
+  # Josemar-owned connected-browser endpoint, read ONLY by
+  # connected_browser_exec: when the browser-control Compose profile is
+  # enabled and a laptop has established the reverse SSH tunnel, Chrome's CDP
+  # discovery endpoint is reachable at 127.0.0.1:9222 inside the Hermes
+  # container (the browser-tunnel sidecar shares Hermes's network namespace).
+  # The connected tool preflights this endpoint via /json/version and fails
+  # closed (never falls back to the server browser or a cloud browser).
+  # Deliberately NOT the upstream global browser.cdp_url / BROWSER_CDP_URL:
+  # the ordinary route must never consume it. Leave this URL pointing at
+  # 127.0.0.1:9222; never expose CDP on 0.0.0.0 or via Tailscale Funnel.
+  # See docs/browser-control.md for enablement and laptop setup.
+  connected_cdp_url: "http://127.0.0.1:9222"
 
 # ── Security ──────────────────────────────────────────────────────────
 # Secret redaction is ON by default — strings that look like API keys,
