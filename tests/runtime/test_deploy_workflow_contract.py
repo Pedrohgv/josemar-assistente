@@ -107,6 +107,8 @@ DOCKERFILE = REPO_ROOT / "Dockerfile.hermes"
 
 RCLONE_DIGEST = "rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548"
 
+REVIEWED_HERMES_BASE_IMAGE = "nousresearch/hermes-agent:v2026.8.18"
+
 LEGACY_MIGRATION_STEP_NAME = (
     "Migrate legacy rclone active config out of Mnemosyne backup state volume"
 )
@@ -1565,6 +1567,130 @@ class DeployWorkflowContractTests(unittest.TestCase):
         self.assertIn('GBRAIN_EMBEDDINGS_ENABLED}" = "true"', verify)
         self.assertIn("healthy", verify)
         self.assertIn("is absent", verify)
+
+
+class HermesBaseImageProductionPinContractTests(unittest.TestCase):
+    """R1 contract: the production HERMES_BASE_IMAGE repository variable is
+    a reviewed pin, not a free override.
+
+    The pre-mutation validation step must reject any non-empty value other
+    than the reviewed Dockerfile.hermes pin BEFORE any .env write/mutation;
+    empty remains allowed so Compose uses its repo-authored default. The
+    workflow guard literal must stay in lockstep with the Dockerfile ARG to
+    prevent drift. Pure-source: YAML/text parsing only, no Docker, no
+    network.
+    """
+
+    def setUp(self) -> None:
+        assert yaml is not None, "PyYAML is required for these contract tests"
+        self.workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        self.validate = _step_text(self.workflow, "Validate required repository variables")
+
+    def _workflow_guard_pins(self) -> list[str]:
+        """ALL exact-match guard literals in the validation step.
+
+        Returns every `[ "$HERMES_BASE_IMAGE" != "<literal>" ]` match so
+        callers can assert exactly one guard exists before comparing — no
+        first-match blind spot, no second divergent guard.
+        """
+        return re.findall(r'\[ "\$HERMES_BASE_IMAGE" != "([^"]+)" \]', self.validate)
+
+    def _dockerfile_arg_pin(self) -> str:
+        for line in DOCKERFILE.read_text(encoding="utf-8").splitlines():
+            match = re.match(r"^ARG\s+HERMES_BASE_IMAGE=(\S+)\s*$", line)
+            if match:
+                return match.group(1)
+        raise AssertionError("ARG HERMES_BASE_IMAGE not found in Dockerfile.hermes")
+
+    def test_validation_step_precedes_create_env(self) -> None:
+        # The guard runs in the pre-mutation validation step, strictly
+        # before the Create .env file step (any .env write/mutation).
+        self.assertLess(
+            _step_index(self.workflow, "Validate required repository variables"),
+            _step_index(self.workflow, "Create .env file"),
+        )
+        # The validate step itself never writes/mutates .env.
+        self.assertNotIn("write_env", self.validate)
+        self.assertNotIn("> .env", self.validate)
+
+    def test_validation_step_exposes_repository_variable_in_env(self) -> None:
+        steps = self.workflow["jobs"]["deploy"]["steps"]
+        step = next(
+            s for s in steps
+            if s.get("name") == "Validate required repository variables"
+        )
+        self.assertEqual(
+            step.get("env", {}).get("HERMES_BASE_IMAGE"),
+            "${{ vars.HERMES_BASE_IMAGE }}",
+        )
+
+    def test_guard_rejects_mismatch_with_exit_1(self) -> None:
+        # The guard fires only for a non-empty value (empty stays allowed).
+        self.assertIn(
+            'if [ -n "$HERMES_BASE_IMAGE" ] && [ "$HERMES_BASE_IMAGE" != "',
+            self.validate,
+        )
+        # The guard body exits nonzero with a reviewed-pin diagnostic.
+        guard_body = self.validate.split('if [ -n "$HERMES_BASE_IMAGE" ]')[1].split("\n          fi")[0]
+        self.assertIn("exit 1", guard_body)
+        self.assertIn("ERROR: HERMES_BASE_IMAGE", guard_body)
+
+    def test_guard_uses_reviewed_exact_pin(self) -> None:
+        pins = self._workflow_guard_pins()
+        # Exactly one exact-match guard literal: a second (possibly
+        # divergent) guard must fail here, not hide behind first-match.
+        self.assertEqual(len(pins), 1, f"expected exactly one guard literal, got: {pins}")
+        self.assertEqual(pins[0], REVIEWED_HERMES_BASE_IMAGE)
+
+    def test_error_explains_pin_and_tripwire_change_together(self) -> None:
+        # The error must explain that upgrades change the Dockerfile pin,
+        # the Compose default build arg, and the reviewed tripwire together.
+        self.assertIn("Dockerfile.hermes", self.validate)
+        self.assertIn("docker-compose.yml", self.validate)
+        self.assertIn("EXPECTED_HERMES_BASE_IMAGE", self.validate)
+        self.assertIn("tests/skill_state/test_models_overlay.py", self.validate)
+        self.assertIn("TOGETHER", self.validate)
+
+    def test_env_write_preserved_and_empty_allowed(self) -> None:
+        # Empty falls through the guard so Compose uses its repo-authored
+        # default; the later Create .env write behavior is preserved (now
+        # guarded by the earlier validation step).
+        env_step = _step_text(self.workflow, "Create .env file")
+        self.assertIn('write_env HERMES_BASE_IMAGE "$HERMES_BASE_IMAGE"', env_step)
+
+    def test_compose_default_build_arg_matches_reviewed_pin(self) -> None:
+        """The effective empty-value production Compose build arg must be
+        exactly `HERMES_BASE_IMAGE: ${HERMES_BASE_IMAGE:-<reviewed pin>}`
+        (the `:-` operator: empty OR unset falls back to the default). Tied
+        to the independently hardcoded reviewed pin AND the Dockerfile ARG
+        comparison: a Compose-default-only drift fails here."""
+        compose = BASE_COMPOSE.read_text(encoding="utf-8")
+        expected = "HERMES_BASE_IMAGE: ${HERMES_BASE_IMAGE:-" + REVIEWED_HERMES_BASE_IMAGE + "}"
+        self.assertIn(expected, compose)
+        # Exactly one such build arg: no second, divergent default.
+        self.assertEqual(compose.count(expected), 1)
+        # The `:-` empty-or-unset operator is required; a plain `-`
+        # (unset-only) default would pass an EMPTY build arg on an empty
+        # repository variable and override the Dockerfile ARG with "".
+        self.assertNotIn(
+            "HERMES_BASE_IMAGE: ${HERMES_BASE_IMAGE-" + REVIEWED_HERMES_BASE_IMAGE + "}",
+            compose,
+        )
+        # Cross-tie: the Compose default is the same reviewed pin as the
+        # Dockerfile ARG (Compose-default-only drift cannot pass).
+        pins = self._workflow_guard_pins()
+        self.assertEqual(len(pins), 1)
+        self.assertEqual(self._dockerfile_arg_pin(), REVIEWED_HERMES_BASE_IMAGE)
+        self.assertEqual(pins[0], self._dockerfile_arg_pin())
+
+    def test_pin_matches_dockerfile_arg_to_prevent_drift(self) -> None:
+        # The workflow guard literal and the Dockerfile.hermes ARG default
+        # must both be the exact reviewed pin: changing one without the
+        # other fails here.
+        pins = self._workflow_guard_pins()
+        self.assertEqual(len(pins), 1, f"expected exactly one guard literal, got: {pins}")
+        self.assertEqual(pins[0], self._dockerfile_arg_pin())
+        self.assertEqual(self._dockerfile_arg_pin(), REVIEWED_HERMES_BASE_IMAGE)
 
 
 class GbrainBackfillWorkflowContractTests(unittest.TestCase):

@@ -36,6 +36,7 @@ On the first run, if the state repo has no personality files (`SOUL.md`, `memori
 - `skills/`
 - `cron/jobs.json`
 - `avatars/`
+- `hermes/` (`models.yaml` + `skill-toggles/` sidecars — shipped template state, not personality)
 
 Personality and memory files (`SOUL.md`, `memories/USER.md`, `AGENTS.md`, optionally `memories/MEMORY.md`) are created/maintained by Hermes and automatically versioned by periodic sync.
 
@@ -73,7 +74,7 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 | `skills/` | Agent skills (SKILL.md + executables) | Agent / manual |
 | `cron/jobs.json` | Cron job definitions loaded by Hermes | Manual / agent |
 | `avatars/` | Agent avatar images | Manual |
-| `hermes/models.yaml` | State-owned Hermes model selections (strict selection-only v1: default, fallback, auxiliary vision, cron defaults) | Manual |
+| `hermes/models.yaml` | State-owned Hermes model selections (strict selection-only v1: default, fallback, 11 allowlisted auxiliary tasks, cron defaults) | Manual |
 
 ## Mnemosyne Pilot: Archive Status of Memory Files
 
@@ -113,14 +114,31 @@ multiplexing.
   allowed. The file carries exactly:
   - `model.{provider, default}` — default model for primary agent turns
   - `fallback_providers[].{provider, model}` — ordered fallback list
-  - `auxiliary.vision.{provider, model}` — vision/OCR task model routing
+  - `auxiliary.<task>.{provider, model}` — per-task model routing for exactly
+    the 11 allowlisted auxiliary tasks (upstream dashboard order): `vision`,
+    `web_extract`, `compression`, `skills_hub`, `approval`, `mcp`,
+    `title_generation`, `triage_specifier`, `kanban_decomposer`,
+    `profile_describer`, `curator`
   - `cron.{model, model_provider}` — fleet cron defaults (blank = inherit default)
   Individual cron job overrides stay in `cron/jobs.json` (per-job
   `model`/`provider` fields) and are NOT duplicated here.
+- **Auxiliary auto rule.** `provider` is required and non-empty. When
+  `provider` is exactly `auto`, `model` must be exactly `""` (upstream
+  selects the model); every other provider requires a non-empty `model`.
+  This rule applies only to auxiliary entries — root/fallback/cron keep
+  their own semantics.
+- **Sparse overlay; no auto-migration.** Only explicitly present entries
+  overlay the runtime config; absent entries never clear runtime keys.
+  Existing sparse v1 files that carry only a subset of the auxiliary slots
+  remain valid and are never auto-mutated or auto-expanded. Adopting new
+  slots is a manual edit: copy the desired entries from this template.
 - **Forbidden in this file.** `base_url`, `api_mode`, `extra_body`, timeouts,
-  token limits, `fallback_chain`, credentials/secret keys, provider
-  definitions, deployment topology, or any other Hermes config. Those live in
-  `config.yaml` / `.env` and are never versioned here.
+  token/context limits, `fallback_chain`, credentials/secret keys, provider
+  definitions, endpoints, security/deployment topology, or any other Hermes
+  config. The full Hermes `config.yaml` was reassessed and remains
+  repo/operator/runtime-owned and unversioned — it mixes operational,
+  security, and deployment controls. This file is versioned state for
+  provider/model selection only.
 - **Validation.** State changes are validated before sync commit; invalid
   files (unknown keys, forbidden fields, or schema violations) are rejected
   and never reach the runtime config.

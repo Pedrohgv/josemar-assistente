@@ -860,6 +860,16 @@ class ManifestGitignoreTests(unittest.TestCase):
         self.assertIn("hermes/skill-toggles/default.json", text)
         self.assertIn("hermes/skill-toggles/profiles/*.json", text)
 
+    def test_template_manifest_versions_models_yaml_exactly(self) -> None:
+        """The shipped template manifest carries the exact literal models.yaml entry."""
+        text = TEMPLATE_MANIFEST.read_text(encoding="utf-8")
+        self.assertIn("hermes/models.yaml", text.splitlines())
+
+    def test_template_gitignore_permits_models_yaml_exactly(self) -> None:
+        """The shipped template gitignore permits exactly !hermes/models.yaml."""
+        text = TEMPLATE_GITIGNORE.read_text(encoding="utf-8")
+        self.assertIn("!hermes/models.yaml", text.splitlines())
+
     def test_template_gitignore_allows_toggle_paths(self) -> None:
         text = TEMPLATE_GITIGNORE.read_text(encoding="utf-8")
         self.assertIn("!hermes/skill-toggles/default.json", text)

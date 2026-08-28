@@ -9,17 +9,36 @@ version: 1
 # Allowed keys:
 #   model.{provider, default}            default model for primary agent turns
 #   fallback_providers[].{provider, model} ordered fallback list
-#   auxiliary.vision.{provider, model}    vision/OCR task model routing
+#   auxiliary.<task>.{provider, model}   per-task model routing; <task> is
+#                                        exactly one of (upstream dashboard
+#                                        order): vision, web_extract,
+#                                        compression, skills_hub, approval,
+#                                        mcp, title_generation,
+#                                        triage_specifier, kanban_decomposer,
+#                                        profile_describer, curator
 #   cron.{model, model_provider}          fleet cron defaults (blank = inherit default)
+#
+# Auxiliary auto rule: provider is required and non-empty. When provider is
+# exactly "auto", model must be exactly "" (upstream selects the model);
+# every other provider requires a non-empty model.
+#
+# Sparse overlay: only explicitly present entries are applied to the runtime
+# config; absent entries never clear runtime keys. Existing sparse v1 files
+# that carry only a subset of the auxiliary slots remain valid and are never
+# auto-mutated or auto-expanded. Adopting new slots is a manual edit: copy
+# the desired entries from this template. Rollback remains whole-file
+# delete/revert.
 #
 # Individual cron job overrides remain in cron/jobs.json (per-job
 # model/provider fields) and are NOT duplicated here.
 #
 # Forbidden in this file (validation rejects the file if present):
-#   base_url, api_mode, extra_body, timeouts, token limits, fallback_chain,
-#   credentials/secret keys, provider definitions, deployment topology, or
-#   any other Hermes config. Those stay in config.yaml / .env and are never
-#   versioned here.
+#   base_url, api_mode, extra_body, timeouts, token/context limits,
+#   fallback_chain, credentials/secret keys, provider definitions, endpoints,
+#   security/deployment topology, or any other Hermes config. The full
+#   Hermes config.yaml mixes operational, security, and deployment controls
+#   and stays repo/operator/runtime-owned and unversioned; this file is
+#   versioned state for provider/model selection only.
 #
 # Source of truth: this file. Dashboard model changes are NOT source of
 # truth — they live only in the untracked runtime config.yaml and are
@@ -42,6 +61,36 @@ auxiliary:
   vision:
     provider: ollama-cloud
     model: kimi-k2.7-code
+  web_extract:
+    provider: auto
+    model: ""
+  compression:
+    provider: auto
+    model: ""
+  skills_hub:
+    provider: auto
+    model: ""
+  approval:
+    provider: auto
+    model: ""
+  mcp:
+    provider: auto
+    model: ""
+  title_generation:
+    provider: auto
+    model: ""
+  triage_specifier:
+    provider: auto
+    model: ""
+  kanban_decomposer:
+    provider: auto
+    model: ""
+  profile_describer:
+    provider: auto
+    model: ""
+  curator:
+    provider: auto
+    model: ""
 
 cron:
   model: ""

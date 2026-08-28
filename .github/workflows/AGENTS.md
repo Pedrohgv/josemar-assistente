@@ -62,7 +62,7 @@ All workflows run on a self-hosted runner.
 | `AUX_ML_LLAMACPP_TIMEOUT_SECONDS` | No | llama.cpp timeout |
 | `AUX_ML_ENFORCE_MEMORY_LIMIT` | No | Enforce aux-ml memory check |
 | `AUX_ML_OCR_MAX_PAGES` | No | OCR max pages per file |
-| `HERMES_BASE_IMAGE` | No | Override pinned Hermes base image |
+| `HERMES_BASE_IMAGE` | No | Production Hermes base image; must equal the reviewed `Dockerfile.hermes` pin `nousresearch/hermes-agent:v2026.8.18` (not a free override). Any other non-empty value is rejected before any mutation. Upgrading requires changing the Dockerfile ARG pin and the reviewed tripwire (`EXPECTED_HERMES_BASE_IMAGE` in `tests/skill_state/test_models_overlay.py`) together and re-reviewing the auxiliary allowlist against the new release. Leave unset to use the repo-authored default. |
 | `GOGCLI_REF` | No | Override pinned gogcli ref |
 | `HERMES_API_SERVER_ENABLED` | No | Enable Hermes API server for clients such as Hermes Desktop (default `false`) |
 | `HERMES_API_SERVER_BIND_IP` | No | Host bind IP for the API server port (default `127.0.0.1`) |
