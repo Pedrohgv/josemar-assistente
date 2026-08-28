@@ -88,9 +88,9 @@ _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 #     - provider: "<id>"         # required, nonempty
 #       model: "<model>"         # required, nonempty
 #   auxiliary:                   # optional mapping of task configs
-#     vision:                    # allowlisted task (at minimum)
+#     vision:                    # allowlisted task (see ALLOWED_AUXILIARY_TASKS)
 #       provider: "<id>"         # required, nonempty
-#       model: "<model>"         # required, nonempty
+#       model: "<model>"         # '' exactly iff provider == 'auto'; else nonempty
 #   cron:                        # optional
 #     model: "<model>"           # optional string (blank = inherit default)
 #     model_provider: "<id>"    # optional string (blank = inherit default)
@@ -111,9 +111,25 @@ _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 MODELS_SCHEMA_VERSION = 1
 MODELS_SIDECAR_NAME = "models.yaml"
-# Allowlisted auxiliary task names. ``vision`` is the minimum; the operator
-# may extend this set in code if new task configs are added upstream.
-ALLOWED_AUXILIARY_TASKS: Tuple[str, ...] = ("vision",)
+# Allowlisted auxiliary task names, in deterministic upstream dashboard
+# order. Pinned to the reviewed Hermes base image
+# (nousresearch/hermes-agent:v2026.8.18); extending this set requires an
+# upstream review. A fast tripwire test
+# (tests/skill_state/test_models_overlay.py) fails if either the image pin
+# or this exact list drifts.
+ALLOWED_AUXILIARY_TASKS: Tuple[str, ...] = (
+    "vision",
+    "web_extract",
+    "compression",
+    "skills_hub",
+    "approval",
+    "mcp",
+    "title_generation",
+    "triage_specifier",
+    "kanban_decomposer",
+    "profile_describer",
+    "curator",
+)
 # State-owned config keys (owned by the overlay). Used for rollback: when
 # models.yaml is absent/empty, these keys are restored to template defaults.
 # Only provider/model selection is owned — template-owned sibling fields
@@ -636,8 +652,18 @@ def _validate_auxiliary_task(node: Any, task: str) -> None:
     # fields (api_key, download_timeout, base_url, etc.) are NOT allowed
     # here — they stay in config.yaml and are preserved by deep merge.
     _reject_unknown_keys(node, set(AUXILIARY_SELECTION_KEYS), path)
-    _validate_str(node.get("provider"), f"{path}.provider", required=True)
-    _validate_str(node.get("model"), f"{path}.model", required=True)
+    provider = _validate_str(node.get("provider"), f"{path}.provider", required=True)
+    model = _validate_str(node.get("model"), f"{path}.model")
+    if provider == "auto":
+        # Auto provider routing: upstream selects the model, so model must
+        # be exactly the empty string. A non-empty model is rejected.
+        if model != "":
+            raise ValueError(
+                f"{path}.model: must be exactly '' when provider is 'auto'"
+            )
+    else:
+        # Every non-auto provider requires a non-empty model.
+        _validate_str(model, f"{path}.model", required=True)
 
 
 def _validate_auxiliary(node: Any) -> None:

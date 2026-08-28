@@ -9,7 +9,8 @@ Canonical v1 schema (strict selection-only):
   version: 1
   model: {provider: <nonempty>, default: <nonempty>}
   fallback_providers: [{provider: <nonempty>, model: <nonempty>}]
-  auxiliary: {<allowlisted task>: {provider: <nonempty>, model: <nonempty>}}
+  auxiliary: {<allowlisted task>: {provider: <nonempty>, model: <string>}}
+  #   auxiliary model: exactly '' iff provider == 'auto'; non-empty otherwise
   cron: {model: <string>, model_provider: <string>}
 
 Forbidden: base_url, api_mode, extra_body, timeouts, token limits,
@@ -25,6 +26,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1352,26 +1354,68 @@ class WorkspaceSyncModelsPathTests(unittest.TestCase):
 
 
 class TemplateSchemaCompatibilityTests(unittest.TestCase):
-    """The shipped template models.yaml must pass canonical validation."""
+    """The shipped template models.yaml must pass canonical validation and
+    carry exactly the reviewed auxiliary allowlist (manual migration only —
+    no automatic migration/expand of existing state files)."""
 
     def setUp(self) -> None:
         if not _has_yaml():
             self.skipTest("PyYAML not available")
         self.m = _load_helper()
 
-    def test_template_models_yaml_validates(self) -> None:
-        """The shipped template hermes/models.yaml passes strict v1 validation."""
-        if not TEMPLATE_MODELS_YAML.exists():
-            self.skipTest("template models.yaml not present (another worker owns it)")
+    def _validated_template(self) -> dict:
+        """Canonical-parse + validate the shipped template; dict, or fail.
+
+        The shipped template is a hard contract: a deleted/renamed
+        ``templates/agent-state-template/hermes/models.yaml`` must fail these
+        tests rather than silently skip them.
+        """
+        self.assertTrue(
+            TEMPLATE_MODELS_YAML.exists(),
+            "shipped template hermes/models.yaml is missing or renamed; its "
+            "contract tests must not silently skip",
+        )
         text = TEMPLATE_MODELS_YAML.read_text(encoding="utf-8")
         result = self.m.validate_models_state_from_text(text)
         self.assertIsNotNone(result)
         assert result is not None
+        return result
+
+    def test_template_models_yaml_validates(self) -> None:
+        """The shipped template hermes/models.yaml passes strict v1 validation."""
+        result = self._validated_template()
         self.assertEqual(result.get("version"), 1)
         # Must have model with nonempty provider/default.
         self.assertIn("model", result)
         self.assertTrue(result["model"]["provider"])
         self.assertTrue(result["model"]["default"])
+
+    def test_template_auxiliary_keys_equal_helper_allowlist(self) -> None:
+        """Template auxiliary keys are exactly ALLOWED_AUXILIARY_TASKS
+        (therefore the exact reviewed 11-ID allowlist, same order)."""
+        result = self._validated_template()
+        aux = result.get("auxiliary")
+        self.assertIsInstance(aux, dict)
+        assert isinstance(aux, dict)
+        self.assertEqual(list(aux.keys()), list(self.m.ALLOWED_AUXILIARY_TASKS))
+
+    def test_template_non_vision_auxiliary_slots_use_auto(self) -> None:
+        """All 10 non-vision template slots ship provider=auto, model=''."""
+        result = self._validated_template()
+        aux = result["auxiliary"]
+        for task in self.m.ALLOWED_AUXILIARY_TASKS:
+            if task == "vision":
+                continue
+            with self.subTest(task=task):
+                self.assertEqual(aux[task], {"provider": "auto", "model": ""})
+
+    def test_template_vision_keeps_concrete_selection(self) -> None:
+        """vision preserves its concrete (non-auto) selection."""
+        result = self._validated_template()
+        vision = result["auxiliary"]["vision"]
+        self.assertNotEqual(vision["provider"], "auto")
+        self.assertTrue(vision["provider"])
+        self.assertTrue(vision["model"])
 
 
 # ---------------------------------------------------------------------------
@@ -2142,6 +2186,293 @@ class FallbackPositionalMergeTests(unittest.TestCase):
         self.assertNotIn("model", entry)
         # Sibling preserved.
         self.assertEqual(entry["base_url"], "https://op")
+
+
+# ---------------------------------------------------------------------------
+# Auxiliary allowlist (reviewed upstream order) + auto-provider model rule
+# ---------------------------------------------------------------------------
+
+
+# The exact reviewed 11-ID allowlist, in deterministic upstream dashboard
+# order. Hardcoded literal on purpose: never dynamically discovered.
+EXPECTED_AUXILIARY_TASKS = (
+    "vision",
+    "web_extract",
+    "compression",
+    "skills_hub",
+    "approval",
+    "mcp",
+    "title_generation",
+    "triage_specifier",
+    "kanban_decomposer",
+    "profile_describer",
+    "curator",
+)
+# Tasks added to the allowlist beyond the original ``vision``-only set.
+NEW_AUXILIARY_TASKS = tuple(t for t in EXPECTED_AUXILIARY_TASKS if t != "vision")
+
+# Reviewed production Hermes base image pin (Dockerfile.hermes ARG).
+EXPECTED_HERMES_BASE_IMAGE = "nousresearch/hermes-agent:v2026.8.18"
+
+
+class AuxiliaryAllowlistTests(unittest.TestCase):
+    """ALLOWED_AUXILIARY_TASKS is exactly the reviewed 11-ID upstream order."""
+
+    def setUp(self) -> None:
+        self.m = _load_helper()
+
+    def test_allowlist_matches_reviewed_order_exactly(self) -> None:
+        """Exact order + contents (tuple equality is order-sensitive)."""
+        self.assertEqual(self.m.ALLOWED_AUXILIARY_TASKS, EXPECTED_AUXILIARY_TASKS)
+
+    def test_accepts_each_allowlisted_task(self) -> None:
+        """Table-driven acceptance across all 11 task IDs."""
+        for task in EXPECTED_AUXILIARY_TASKS:
+            with self.subTest(task=task):
+                data = {
+                    "version": 1,
+                    "auxiliary": {
+                        task: {"provider": "some-provider", "model": "some-model"}
+                    },
+                }
+                self.assertEqual(self.m.validate_models_state(data), data)
+
+    def test_accepts_document_with_all_allowlisted_tasks(self) -> None:
+        aux = {
+            task: {"provider": f"p-{task}", "model": f"m-{task}"}
+            for task in EXPECTED_AUXILIARY_TASKS
+        }
+        data = {"version": 1, "auxiliary": aux}
+        self.assertEqual(self.m.validate_models_state(data), data)
+
+    def test_rejects_unknown_task_ids(self) -> None:
+        """Any task key outside the allowlist is rejected (case-sensitive)."""
+        for bad in ("unknown_task", "Vision", "webextract", "vision2", ""):
+            with self.subTest(task=bad):
+                with self.assertRaises(ValueError) as cm:
+                    self.m.validate_models_state(
+                        {
+                            "version": 1,
+                            "auxiliary": {
+                                bad: {"provider": "p", "model": "m"}
+                            },
+                        }
+                    )
+                self.assertIn("unknown key", str(cm.exception))
+
+    def test_rejects_forbidden_config_and_secret_keys_for_every_task(self) -> None:
+        """Config/secret sibling keys stay forbidden for all 11 task IDs."""
+        for task in EXPECTED_AUXILIARY_TASKS:
+            for bad_key, bad_value in (
+                ("base_url", "https://bad.example.com"),
+                ("api_key", "sk-secret"),
+                ("download_timeout", 120),
+            ):
+                with self.subTest(task=task, key=bad_key):
+                    entry = {"provider": "p", "model": "m", bad_key: bad_value}
+                    with self.assertRaises(ValueError):
+                        self.m.validate_models_state(
+                            {"version": 1, "auxiliary": {task: entry}}
+                        )
+
+
+class AuxiliaryAutoProviderRuleTests(unittest.TestCase):
+    """provider 'auto' requires model exactly ''; non-auto requires non-empty."""
+
+    def setUp(self) -> None:
+        self.m = _load_helper()
+
+    def test_auto_provider_rule_three_cases(self) -> None:
+        """The three auto-rule cases: auto+'', auto+nonempty, non-auto+model."""
+        cases = [
+            # (provider, model, expected_valid)
+            ("auto", "", True),  # auto + exactly empty model: valid
+            ("auto", "some-model", False),  # auto + non-empty model: rejected
+            ("ollama-cloud", "kimi-k2.7-code", True),  # non-auto + model: valid
+        ]
+        for provider, model, expected_valid in cases:
+            with self.subTest(provider=provider, model=model):
+                data = {
+                    "version": 1,
+                    "auxiliary": {"vision": {"provider": provider, "model": model}},
+                }
+                if expected_valid:
+                    self.assertEqual(self.m.validate_models_state(data), data)
+                else:
+                    with self.assertRaises(ValueError):
+                        self.m.validate_models_state(data)
+
+    def test_non_auto_provider_requires_nonempty_model(self) -> None:
+        """Concrete behavior unchanged: non-auto + blank model is rejected."""
+        for provider, model in (("x", ""), ("x", "   ")):
+            with self.subTest(provider=provider, model=model):
+                data = {
+                    "version": 1,
+                    "auxiliary": {"vision": {"provider": provider, "model": model}},
+                }
+                with self.assertRaises(ValueError) as cm:
+                    self.m.validate_models_state(data)
+                self.assertIn("non-empty string", str(cm.exception))
+
+    def test_model_key_required_even_for_auto(self) -> None:
+        """Auto rule requires model to be exactly '' — absent model is invalid."""
+        data = {"version": 1, "auxiliary": {"vision": {"provider": "auto"}}}
+        with self.assertRaises(ValueError):
+            self.m.validate_models_state(data)
+
+    def test_auto_rule_not_applied_to_root_fallback_cron(self) -> None:
+        """The auto/empty-model exemption is auxiliary-only."""
+        # Root selection: 'default' stays a required non-empty string even
+        # when the provider is literally 'auto'.
+        data = {"version": 1, "model": {"provider": "auto", "default": "deepseek-v4-pro"}}
+        self.assertEqual(self.m.validate_models_state(data), data)
+        # Fallback entries: non-empty model required regardless of provider.
+        data = {"version": 1, "fallback_providers": [{"provider": "auto", "model": "m"}]}
+        self.assertEqual(self.m.validate_models_state(data), data)
+        with self.assertRaises(ValueError):
+            self.m.validate_models_state(
+                {"version": 1, "fallback_providers": [{"provider": "x", "model": ""}]}
+            )
+        # Cron: blank model/model_provider remain allowed (inherit default)
+        # and are NOT forced empty/checked by the auto rule.
+        data = {"version": 1, "cron": {"model": "", "model_provider": "auto"}}
+        self.assertEqual(self.m.validate_models_state(data), data)
+
+
+class AuxiliaryNewTasksDeepMergeTests(unittest.TestCase):
+    """New allowlisted tasks deep-merge like vision: siblings preserved."""
+
+    def setUp(self) -> None:
+        self.m = _load_helper()
+
+    def test_apply_new_task_preserves_siblings(self) -> None:
+        """Apply updates provider/model only; runtime siblings are preserved."""
+        for task in NEW_AUXILIARY_TASKS:
+            with self.subTest(task=task):
+                config = {"auxiliary": {task: {
+                    "provider": "old", "model": "old-model",
+                    "api_key": "runtime-key",
+                    "download_timeout": 99,
+                    "base_url": "https://api.example.com",
+                }}}
+                models = {
+                    "version": 1,
+                    "auxiliary": {task: {"provider": "new", "model": "new-model"}},
+                }
+                self.m.apply_models_to_config(config, models)
+                entry = config["auxiliary"][task]
+                self.assertEqual(entry["provider"], "new")
+                self.assertEqual(entry["model"], "new-model")
+                self.assertEqual(entry["api_key"], "runtime-key")
+                self.assertEqual(entry["download_timeout"], 99)
+                self.assertEqual(entry["base_url"], "https://api.example.com")
+
+    def test_apply_creates_task_section_when_absent(self) -> None:
+        """Apply creates the task dict with only selection keys when absent."""
+        config = {}
+        models = {
+            "version": 1,
+            "auxiliary": {"web_extract": {"provider": "p", "model": "m"}},
+        }
+        self.m.apply_models_to_config(config, models)
+        self.assertEqual(
+            config["auxiliary"]["web_extract"], {"provider": "p", "model": "m"}
+        )
+
+
+class AuxiliaryNewTasksRollbackTests(unittest.TestCase):
+    """Rollback deletes/restores new-task selection keys, preserving siblings."""
+
+    def setUp(self) -> None:
+        self.m = _load_helper()
+
+    def test_rollback_restores_template_selection_preserving_siblings(self) -> None:
+        """Template defines the task: provider/model restored, siblings kept."""
+        for task in NEW_AUXILIARY_TASKS:
+            with self.subTest(task=task):
+                config = {"auxiliary": {task: {
+                    "provider": "op", "model": "op-model",
+                    "api_key": "runtime-key",
+                    "download_timeout": 99,
+                }}}
+                template = {"auxiliary": {task: {
+                    "provider": "tmpl", "model": "tmpl-model",
+                }}}
+                changed = self.m.restore_template_models_defaults(config, template)
+                self.assertTrue(changed)
+                entry = config["auxiliary"][task]
+                self.assertEqual(entry["provider"], "tmpl")
+                self.assertEqual(entry["model"], "tmpl-model")
+                # Runtime-only siblings preserved (NOT overwritten by template).
+                self.assertEqual(entry["api_key"], "runtime-key")
+                self.assertEqual(entry["download_timeout"], 99)
+
+    def test_rollback_deletes_selection_keys_when_template_lacks_task(self) -> None:
+        """Template lacks the task: provider/model removed, siblings kept."""
+        for task in NEW_AUXILIARY_TASKS:
+            with self.subTest(task=task):
+                config = {"auxiliary": {task: {
+                    "provider": "op", "model": "op-model",
+                    "download_timeout": 45,
+                }}}
+                template = {"auxiliary": {}}
+                self.m.restore_template_models_defaults(config, template)
+                entry = config["auxiliary"][task]
+                self.assertNotIn("provider", entry)
+                self.assertNotIn("model", entry)
+                self.assertEqual(entry["download_timeout"], 45)
+
+    def test_rollback_deletes_selection_keys_when_template_has_no_auxiliary(self) -> None:
+        """Template with no auxiliary section: selection keys removed, siblings kept."""
+        config = {
+            "auxiliary": {
+                "compression": {"provider": "op", "model": "op-model", "api_key": "k"},
+            },
+        }
+        template = {}
+        self.m.restore_template_models_defaults(config, template)
+        entry = config["auxiliary"]["compression"]
+        self.assertNotIn("provider", entry)
+        self.assertNotIn("model", entry)
+        self.assertEqual(entry["api_key"], "k")
+
+
+class HermesBaseImagePinTripwireTests(unittest.TestCase):
+    """Tripwire: the auxiliary allowlist is pinned to the reviewed Hermes image.
+
+    ALLOWED_AUXILIARY_TASKS mirrors the upstream auxiliary task configs of a
+    specific Hermes release. If the production base image pin changes, the
+    allowlist must be re-reviewed against that release before this tripwire
+    is updated. Static file-parse only: no network, Docker, or dynamic task
+    discovery.
+    """
+
+    def test_dockerfile_hermes_base_image_pin_and_allowlist(self) -> None:
+        dockerfile = REPO_ROOT / "Dockerfile.hermes"
+        self.assertTrue(dockerfile.exists(), "Dockerfile.hermes not found at repo root")
+        pin = None
+        for line in dockerfile.read_text(encoding="utf-8").splitlines():
+            match = re.match(r"^ARG\s+HERMES_BASE_IMAGE=(\S+)\s*$", line)
+            if match:
+                pin = match.group(1)
+                break
+        self.assertIsNotNone(pin, "ARG HERMES_BASE_IMAGE not found in Dockerfile.hermes")
+        self.assertEqual(
+            pin,
+            EXPECTED_HERMES_BASE_IMAGE,
+            "Dockerfile.hermes HERMES_BASE_IMAGE changed; re-review "
+            "ALLOWED_AUXILIARY_TASKS against the new upstream release, then "
+            "update EXPECTED_HERMES_BASE_IMAGE and EXPECTED_AUXILIARY_TASKS "
+            "together.",
+        )
+        m = _load_helper()
+        self.assertEqual(
+            m.ALLOWED_AUXILIARY_TASKS,
+            EXPECTED_AUXILIARY_TASKS,
+            "ALLOWED_AUXILIARY_TASKS must remain exactly the reviewed 11-ID "
+            "upstream dashboard order while the Hermes base image pin is "
+            f"{EXPECTED_HERMES_BASE_IMAGE}.",
+        )
 
 
 if __name__ == "__main__":

@@ -370,20 +370,40 @@ Josemar pins Hermes so the agent's model selections are backed by
 git-tracked state instead of the sensitive, untracked `/opt/data/config.yaml`.
 
 - **Canonical state file.** `agent-state/hermes/models.yaml` is the single
-  root-only configuration. There are no profiles or multiplexing in this PR.
+  root-only configuration. There are no profiles or multiplexing.
   The template ships a matching `templates/agent-state-template/hermes/models.yaml`.
 - **Strict selection-only v1 contract.** ONLY `provider`/`model` selection is
   allowed. The file carries exactly:
   - `model.{provider, default}` — default model for primary agent turns
   - `fallback_providers[].{provider, model}` — ordered fallback list
-  - `auxiliary.vision.{provider, model}` — vision/OCR task model routing
+  - `auxiliary.<task>.{provider, model}` — per-task model routing for exactly
+    the 11 allowlisted auxiliary tasks (upstream dashboard order): `vision`,
+    `web_extract`, `compression`, `skills_hub`, `approval`, `mcp`,
+    `title_generation`, `triage_specifier`, `kanban_decomposer`,
+    `profile_describer`, `curator`
   - `cron.{model, model_provider}` — fleet cron defaults (blank = inherit default)
   Individual cron job overrides remain in `cron/jobs.json` (per-job
   `model`/`provider` fields) and are NOT duplicated here.
+- **Auxiliary auto rule.** `provider` is required and non-empty. When
+  `provider` is exactly `auto`, `model` must be exactly `""` (upstream
+  selects the model); every other provider requires a non-empty `model`.
+  This rule applies only to auxiliary entries — root/fallback/cron keep
+  their own semantics.
+- **Sparse overlay; no auto-migration.** Only explicitly present entries
+  overlay the runtime config; absent entries never clear runtime keys.
+  Existing sparse v1 files that carry only a subset of the auxiliary slots
+  remain valid and are never auto-mutated or auto-expanded. Adopting new
+  slots is a manual edit: copy the desired entries from the template.
+  Rollback remains whole-file delete/revert (below).
 - **Forbidden in this file.** `base_url`, `api_mode`, `extra_body`, timeouts,
-  token limits, `fallback_chain`, credentials/secret keys, provider
-  definitions, deployment topology, or any other Hermes config. Those stay in
-  `config.yaml` / `.env` and are never versioned here.
+  token/context limits, `fallback_chain`, credentials/secret keys, provider
+  definitions, endpoints, security/deployment topology, or any other Hermes
+  config. Those stay in `config.yaml` / `.env` and are never versioned here.
+- **Ownership boundary (reassessed).** The full Hermes `config.yaml` was
+  reassessed and remains repo/operator/runtime-owned and unversioned: it
+  mixes operational, security, and deployment controls (credentials, provider
+  definitions, endpoints, security/topology settings). State ownership is
+  provider/model selection only.
 - **Validation.** State changes are validated before sync commit; invalid
   files (unknown keys, forbidden fields, or schema violations) are rejected
   and never reach the runtime config.
