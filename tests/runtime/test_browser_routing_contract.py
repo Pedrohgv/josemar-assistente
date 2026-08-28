@@ -27,8 +27,8 @@ This suite runs on ordinary ``make test`` and asserts:
      consume the connected endpoint.
   2. Patch-source shape: ``connected_browser_exec`` registration in the
      ``browser`` toolset (schema code/session/timeout_s, check_fn
-     ``is_connected_browser_configured``), the reserved ``__jc_0`` /
-     ``__jc_1_`` daemon namespace, the route-selector env scrub (``BU_*``
+     ``is_connected_browser_configured``), the reserved ``__jc_2_`` daemon
+     namespace, the route-selector env scrub (``BU_*``
      prefix loop + the provider/LLM credential tuple), the fixed CLI path
      invocation, NO ``use_connected_browser``, no ``uvx``/``_find_cli`` in
      the connected implementation, ``_OWN_TAB_PREAMBLE`` applied, upstream
@@ -37,7 +37,12 @@ This suite runs on ordinary ``make test`` and asserts:
   3. Session mapping: reserved names are deterministic, bounded (<=64),
      PASS the browser-harness ``\\A[A-Za-z0-9_-]{1,64}\\Z`` rule and FAIL the
      Hermes ``_SESSION_RE`` (mechanical disjointness), with no truncation
-     collisions.
+     collisions. The name is bound to BOTH the configured connected endpoint
+     (normalized only by stripping a trailing slash after the existing
+     validation) and the public session (NUL-delimited in the digest input):
+     the same public session at endpoints A/B has distinct names, and the
+     omitted public session is also endpoint-bound (no fixed cross-endpoint
+     default).
   4. Functional apply proof: the real patch applies to a minimal
      anchor/mechanics fixture of the pinned upstream shape (including the
      load-bearing upstream symbols asserted by ``assert_upstream_symbols``);
@@ -92,14 +97,18 @@ PUBLIC_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 # leading underscore valid.
 HARNESS_BU_NAME_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 
-# Reserved connected daemon namespace (rev-2): __jc_0 for the omitted public
-# session; __jc_1_ + full SHA-256 URL-safe base64 digest (43 chars) for named
-# sessions. Total 50 chars, inside the harness limit.
-CONNECTED_DAEMON_DEFAULT = "__jc_0"
-CONNECTED_DAEMON_NAMED_PREFIX = "__jc_1_"
+# Reserved connected daemon namespace (revision-2 R1 remediation): __jc_2_ + full SHA-256
+# URL-safe base64 digest (43 chars) of the NUL-delimited configured connected
+# endpoint + public session. Total 50 chars, inside the harness limit. The
+# endpoint is normalized only by stripping a trailing slash after the existing
+# validation, so the same public session at endpoints A/B has distinct names
+# and the omitted public session is also endpoint-bound (no fixed
+# cross-endpoint default).
+CONNECTED_DAEMON_PREFIX = "__jc_2_"
 SAMPLE_SESSION = "route-probe-s"
-SAMPLE_DIGEST = "npFcixDiIfy5H0YZYW4XB9sR2iBO2JTECAwC50qwEH0"
-SAMPLE_DAEMON_NAME = CONNECTED_DAEMON_NAMED_PREFIX + SAMPLE_DIGEST
+SAMPLE_ENDPOINT = "http://127.0.0.1:9222"
+SAMPLE_DIGEST = "8cXv_M66HQlxret8ilfXkoc0hXKWnuf1v-b_6WtR8w0"
+SAMPLE_DAEMON_NAME = CONNECTED_DAEMON_PREFIX + SAMPLE_DIGEST
 
 # The connected CLI constant the patched tool body depends on. The plan
 # requires the fixed build-owned CLI to be invoked by absolute path; the
@@ -122,18 +131,26 @@ SCRUBBED_ENV_KEYS = (
 )
 
 
-def connected_daemon_name(public_session: str) -> str:
-    """Deterministic reserved BU_NAME for connected sessions (rev-2)."""
-    if not public_session:
-        return CONNECTED_DAEMON_DEFAULT
+def connected_daemon_name(endpoint: str, public_session: str) -> str:
+    """Deterministic reserved BU_NAME for connected sessions (revision-2 R1 remediation).
+
+    Binds the harness name to BOTH the configured connected endpoint
+    (normalized only by stripping a trailing slash after the existing
+    validation) and the public session (NUL-delimited in the digest input),
+    so the same public session at endpoints A/B has distinct names and the
+    omitted public session is also endpoint-bound (no fixed cross-endpoint
+    default).
+    """
     digest = (
         base64.urlsafe_b64encode(
-            hashlib.sha256(public_session.encode("utf-8")).digest()
+            hashlib.sha256(
+                (endpoint.rstrip("/") + "\0" + public_session).encode("utf-8")
+            ).digest()
         )
         .decode("ascii")
         .rstrip("=")
     )
-    return CONNECTED_DAEMON_NAMED_PREFIX + digest
+    return CONNECTED_DAEMON_PREFIX + digest
 
 
 def top_level_block(text: str, key: str) -> str:
@@ -444,8 +461,7 @@ class BrowserRoutingPatchSourceContractTests(unittest.TestCase):
         self.assertIn("NO network/CDP probe during schema assembly", self.text)
 
     def test_patch_reserved_daemon_constants(self) -> None:
-        self.assertIn('_CONNECTED_DAEMON_DEFAULT = "__jc_0"', self.text)
-        self.assertIn('_CONNECTED_DAEMON_NAMED_PREFIX = "__jc_1_"', self.text)
+        self.assertIn('_CONNECTED_DAEMON_PREFIX = "__jc_2_"', self.text)
         self.assertIn("def _connected_daemon_name(", self.text)
         self.assertIn("def _connected_daemon_digest(", self.text)
 
@@ -456,7 +472,7 @@ class BrowserRoutingPatchSourceContractTests(unittest.TestCase):
             with self.subTest(env_key=key):
                 self.assertIn(f'"{key}",', self.text)
         # Only the preflighted ws and the reserved name are injected.
-        self.assertIn('env["BU_NAME"] = _connected_daemon_name(session)', self.text)
+        self.assertIn('env["BU_NAME"] = _connected_daemon_name(endpoint, session)', self.text)
         self.assertIn('env["BU_CDP_WS"] = ws_url', self.text)
         # Scrub is local-call-env only.
         self.assertIn("never os.environ", self.text)
@@ -552,13 +568,11 @@ class BrowserRoutingPatchSourceContractTests(unittest.TestCase):
 
 class BrowserRoutingSessionMappingTests(unittest.TestCase):
     """Reserved connected BU_NAME mapping: deterministic, bounded,
-    harness-valid, and mechanically disjoint from public session names."""
-
-    def test_default_session_maps_to_reserved_default(self) -> None:
-        self.assertEqual(connected_daemon_name(""), CONNECTED_DAEMON_DEFAULT)
+    harness-valid, mechanically disjoint from public session names, and bound
+    to BOTH the configured connected endpoint and the public session."""
 
     def test_named_session_digest_formula_and_length(self) -> None:
-        name = connected_daemon_name(SAMPLE_SESSION)
+        name = connected_daemon_name(SAMPLE_ENDPOINT, SAMPLE_SESSION)
         self.assertEqual(name, SAMPLE_DAEMON_NAME)
         self.assertEqual(len(SAMPLE_DIGEST), 43)
         self.assertEqual(len(name), 50)
@@ -570,27 +584,60 @@ class BrowserRoutingSessionMappingTests(unittest.TestCase):
         # valid public session name (and from every normal upstream daemon
         # BU_NAME, which equals the public session verbatim).
         for public in ("", "a", "session-1", "a" * 64):
-            internal = connected_daemon_name(public)
+            internal = connected_daemon_name(SAMPLE_ENDPOINT, public)
             with self.subTest(public=public[:16] or "<empty>", internal=internal):
                 self.assertIsNone(PUBLIC_SESSION_RE.match(internal))
 
     def test_reserved_names_pass_harness_rule(self) -> None:
-        for name in (CONNECTED_DAEMON_DEFAULT, connected_daemon_name(SAMPLE_SESSION)):
+        for name in (
+            connected_daemon_name(SAMPLE_ENDPOINT, ""),
+            connected_daemon_name(SAMPLE_ENDPOINT, SAMPLE_SESSION),
+        ):
             self.assertTrue(name.startswith("_"))
             self.assertRegex(name, HARNESS_BU_NAME_RE)
 
     def test_64_char_sessions_map_distinct_without_truncation(self) -> None:
         prefix = "a" * 60
-        first = connected_daemon_name(prefix + "XY")
-        second = connected_daemon_name(prefix + "XZ")
+        first = connected_daemon_name(SAMPLE_ENDPOINT, prefix + "XY")
+        second = connected_daemon_name(SAMPLE_ENDPOINT, prefix + "XZ")
         self.assertNotEqual(first, second, "same-prefix sessions must never collide")
         self.assertRegex(first, HARNESS_BU_NAME_RE)
         self.assertRegex(second, HARNESS_BU_NAME_RE)
 
     def test_mapping_is_bounded_and_deterministic(self) -> None:
         self.assertEqual(
-            connected_daemon_name(SAMPLE_SESSION),
-            connected_daemon_name(SAMPLE_SESSION),
+            connected_daemon_name(SAMPLE_ENDPOINT, SAMPLE_SESSION),
+            connected_daemon_name(SAMPLE_ENDPOINT, SAMPLE_SESSION),
+        )
+
+    def test_same_session_at_different_endpoints_has_distinct_names(self) -> None:
+        # The chosen invariant: the connected BU_NAME must deterministically
+        # include BOTH the configured connected endpoint and the public
+        # session, so the same public session at endpoints A/B has distinct
+        # harness names (no cross-endpoint daemon/state collision).
+        endpoint_b = "http://fixture-b:9222"
+        name_a = connected_daemon_name(SAMPLE_ENDPOINT, SAMPLE_SESSION)
+        name_b = connected_daemon_name(endpoint_b, SAMPLE_SESSION)
+        self.assertNotEqual(name_a, name_b)
+        self.assertRegex(name_a, HARNESS_BU_NAME_RE)
+        self.assertRegex(name_b, HARNESS_BU_NAME_RE)
+
+    def test_omitted_session_is_endpoint_bound(self) -> None:
+        # No fixed cross-endpoint default: the omitted public session must
+        # also be endpoint-bound, so endpoints A/B get distinct names.
+        endpoint_b = "http://fixture-b:9222"
+        default_a = connected_daemon_name(SAMPLE_ENDPOINT, "")
+        default_b = connected_daemon_name(endpoint_b, "")
+        self.assertNotEqual(default_a, default_b)
+        self.assertRegex(default_a, HARNESS_BU_NAME_RE)
+        self.assertRegex(default_b, HARNESS_BU_NAME_RE)
+
+    def test_endpoint_normalization_strips_only_trailing_slash(self) -> None:
+        # The endpoint is normalized only by stripping a trailing slash after
+        # the existing validation; a trailing slash must not change the name.
+        self.assertEqual(
+            connected_daemon_name("http://127.0.0.1:9222/", SAMPLE_SESSION),
+            connected_daemon_name("http://127.0.0.1:9222", SAMPLE_SESSION),
         )
 
 
@@ -770,8 +817,7 @@ class BrowserRoutingPatchApplyFunctionalTests(unittest.TestCase):
             "def connected_browser_exec(",
             "def _resolve_connected_cdp(",
             "def is_connected_browser_configured(",
-            '_CONNECTED_DAEMON_DEFAULT = "__jc_0"',
-            '_CONNECTED_DAEMON_NAMED_PREFIX = "__jc_1_"',
+            '_CONNECTED_DAEMON_PREFIX = "__jc_2_"',
             'name="connected_browser_exec",',
             'toolset="browser",',
             "CONNECTED_BROWSER_EXEC_SCHEMA = {",
@@ -779,7 +825,7 @@ class BrowserRoutingPatchApplyFunctionalTests(unittest.TestCase):
             "code = _OWN_TAB_PREAMBLE + code",
             "env = _base_subprocess_env()",
             "env[\"BU_CDP_WS\"] = ws_url",
-            "env[\"BU_NAME\"] = _connected_daemon_name(session)",
+            "env[\"BU_NAME\"] = _connected_daemon_name(endpoint, session)",
             "check_fn=is_connected_browser_configured,",
             'subprocess.run(\n            [_CONNECTED_BROWSER_CLI],',
         ):
@@ -926,7 +972,8 @@ class BrowserRoutingPatchApplyFunctionalTests(unittest.TestCase):
             with self.subTest(scrubbed=key):
                 self.assertNotIn(key, env)
         self.assertEqual(env.get("BU_CDP_WS"), ws_url)
-        self.assertEqual(env.get("BU_NAME"), connected_daemon_name(SAMPLE_SESSION))
+        endpoint = f"http://127.0.0.1:{server.server_address[1]}"
+        self.assertEqual(env.get("BU_NAME"), connected_daemon_name(endpoint, SAMPLE_SESSION))
         # Own-tab preamble must be prepended to the piped code.
         self.assertTrue(str(calls[0]["input"]).startswith("# Own-tab preamble"))
 
@@ -962,7 +1009,8 @@ class BrowserRoutingPatchApplyFunctionalTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         env = calls[0]["env"]
         self.assertEqual(env.get("BU_CDP_WS"), ws_url)
-        self.assertEqual(env.get("BU_NAME"), connected_daemon_name(SAMPLE_SESSION))
+        endpoint = f"http://127.0.0.1:{server.server_address[1]}"
+        self.assertEqual(env.get("BU_NAME"), connected_daemon_name(endpoint, SAMPLE_SESSION))
 
     def test_connected_unconfigured_fails_closed_generic(self) -> None:
         patched = self._load_patched("conn_unconfigured")

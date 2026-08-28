@@ -61,22 +61,25 @@ registered for the externally connected operator browser:
     leakage) with NO fallback to ordinary ``browser_*``, Browser Use cloud,
     Browserbase, or another browser. A connected subprocess failure is also
     surfaced generically.
-  - Session isolation: public ``session`` stays validated by the pinned
-    ``_SESSION_RE`` and is echoed back as the result's public ``session``.
-    Connected sessions map deterministically into a reserved UNDERSCORE-
-    LEADING ``BU_NAME`` namespace — ``__jc_0`` for the omitted public session
-    (distinct connected default), ``__jc_1_`` + the 43-char URL-safe base64
-    of the full SHA-256 digest of the public session for named sessions
-    (total 50 <= 64). The internal ``BU_NAME`` is consumed only by
-    browser-harness (rule ``\\A[A-Za-z0-9_-]{1,64}\\Z``, leading underscore
-    allowed) and never round-trips through Hermes ``_SESSION_RE`` (only the
-    public ``session`` argument is validated there). Because ``_SESSION_RE``
-    requires an ALPHANUMERIC first character
-    (``^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$``), the reserved underscore-leading
-    namespace is MECHANICALLY disjoint from every valid public session name —
-    and therefore from every normal upstream daemon BU_NAME (the ordinary
-    route's BU_NAME equals the public session verbatim) — with zero runtime
-    guards, so no cross-route daemon/state collision is possible.
+   - Session isolation: public ``session`` stays validated by the pinned
+     ``_SESSION_RE`` and is echoed back as the result's public ``session``.
+     Connected sessions map deterministically into a reserved UNDERSCORE-
+     LEADING ``BU_NAME`` namespace — ``__jc_2_`` + the 43-char URL-safe base64
+     of the full SHA-256 digest of the NUL-delimited configured connected
+     endpoint + public session (total 50 <= 64). The endpoint is normalized
+     only by stripping a trailing slash after the existing validation, so the
+     same public session at endpoints A/B has distinct harness names and the
+     omitted public session is also endpoint-bound (no fixed cross-endpoint
+     default). The internal ``BU_NAME`` is consumed only by browser-harness
+     (rule ``\\A[A-Za-z0-9_-]{1,64}\\Z``, leading underscore allowed) and never
+     round-trips through Hermes ``_SESSION_RE`` (only the public ``session``
+     argument is validated there). Because ``_SESSION_RE`` requires an
+     ALPHANUMERIC first character (``^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$``), the
+     reserved underscore-leading namespace is MECHANICALLY disjoint from every
+     valid public session name — and therefore from every normal upstream
+     daemon BU_NAME (the ordinary route's BU_NAME equals the public session
+     verbatim) — with zero runtime guards, so no cross-route daemon/state
+     collision is possible.
   - model_tools.py: the pinned session-level terminal gate (literal-name
     list) is extended so sessions without the ``terminal`` surface cannot
     regain host code execution through ``connected_browser_exec`` either.
@@ -210,7 +213,7 @@ def apply_patches(browser_use_cli_path: Path, model_tools_path: Path) -> None:
         '_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")\n'
         '\n'
         '# Reserved BU_NAME daemon namespace for connected_browser_exec\n'
-        '# (issue #136). The internal BU_NAME is consumed only by\n'
+        '# (issue #136 revision-2 R1 remediation). The internal BU_NAME is consumed only by\n'
         '# browser-harness (rule \\A[A-Za-z0-9_-]{1,64}\\Z, leading underscore\n'
         '# allowed) and never round-trips through Hermes _SESSION_RE — only\n'
         '# the public `session` argument is validated there, and it is echoed\n'
@@ -220,33 +223,45 @@ def apply_patches(browser_use_cli_path: Path, model_tools_path: Path) -> None:
         '# from every valid public session name — and therefore from every\n'
         '# normal upstream daemon BU_NAME (the ordinary route\'s BU_NAME equals\n'
         '# the public session verbatim) — with zero runtime guards:\n'
-        '#   public session omitted -> __jc_0 (distinct connected default)\n'
-        '#   public session "foo"   -> __jc_1_<43-char URL-safe base64 of the\n'
-        '#                             full SHA-256 digest of "foo">\n'
-        '# Named total length is 7 + 43 = 50 (<= 64), deterministic, and\n'
-        '# collision-safe against truncated/same-prefix public names.\n'
+        '#   BU_NAME = __jc_2_<43-char URL-safe base64 of the full SHA-256\n'
+        '#             digest of the NUL-delimited configured connected\n'
+        '#             endpoint + public session>\n'
+        '# The endpoint is normalized ONLY by stripping a trailing slash after\n'
+        '# the existing validation, so the same public session at endpoints A/B\n'
+        '# has distinct harness names and the omitted public session is also\n'
+        '# endpoint-bound (no fixed cross-endpoint default). Total length is\n'
+        '# 7 + 43 = 50 (<= 64), deterministic, and collision-safe against\n'
+        '# truncated/same-prefix public names.\n'
         '# Build-owned Browser Use CLI (absolute path; never _find_cli()/uvx).\n'
         '_CONNECTED_BROWSER_CLI = "/opt/josemar/browser-use/bin/browser-use"\n'
-        '_CONNECTED_DAEMON_DEFAULT = "__jc_0"\n'
-        '_CONNECTED_DAEMON_NAMED_PREFIX = "__jc_1_"\n'
+        '_CONNECTED_DAEMON_PREFIX = "__jc_2_"\n'
         '\n'
         '\n'
-        'def _connected_daemon_digest(public_session: str) -> str:\n'
-        '    """Full SHA-256 digest of a public session, URL-safe base64 (43 chars)."""\n'
+        'def _connected_daemon_digest(endpoint: str, public_session: str) -> str:\n'
+        '    """Full SHA-256 digest of the NUL-delimited endpoint + public\n'
+        '    session, URL-safe base64 (43 chars). The endpoint is normalized\n'
+        '    only by stripping a trailing slash after the existing validation.\n'
+        '    """\n'
         '    return (\n'
         '        base64.urlsafe_b64encode(\n'
-        '            hashlib.sha256(public_session.encode("utf-8")).digest()\n'
+        '            hashlib.sha256(\n'
+        '                (endpoint.rstrip("/") + "\\0" + public_session).encode("utf-8")\n'
+        '            ).digest()\n'
         '        )\n'
         '        .decode("ascii")\n'
         '        .rstrip("=")\n'
         '    )\n'
         '\n'
         '\n'
-        'def _connected_daemon_name(public_session: str) -> str:\n'
-        '    """Reserved, deterministic BU_NAME for a connected session."""\n'
-        '    if public_session:\n'
-        '        return _CONNECTED_DAEMON_NAMED_PREFIX + _connected_daemon_digest(public_session)\n'
-        '    return _CONNECTED_DAEMON_DEFAULT\n',
+        'def _connected_daemon_name(endpoint: str, public_session: str) -> str:\n'
+        '    """Reserved, deterministic BU_NAME for a connected session.\n'
+        '\n'
+        '    Binds the harness name to BOTH the configured connected endpoint\n'
+        '    and the public session, so the same public session at endpoints\n'
+        '    A/B has distinct names and the omitted public session is also\n'
+        '    endpoint-bound (no fixed cross-endpoint default).\n'
+        '    """\n'
+        '    return _CONNECTED_DAEMON_PREFIX + _connected_daemon_digest(endpoint, public_session)\n',
     )
 
     # 3. The connected tool implementation, inserted between browser_exec
@@ -396,7 +411,7 @@ def apply_patches(browser_use_cli_path: Path, model_tools_path: Path) -> None:
         '        "OPENAI_API_KEY",\n'
         '    ):\n'
         '        env.pop(key, None)\n'
-        '    env["BU_NAME"] = _connected_daemon_name(session)\n'
+        '    env["BU_NAME"] = _connected_daemon_name(endpoint, session)\n'
         '    env["BU_CDP_WS"] = ws_url\n'
         '    return None\n'
         '\n'

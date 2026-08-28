@@ -61,6 +61,15 @@ Evidence claims (each phase proves exactly what it says, nothing more):
      bounded timeout with a generic leak-free error.
   6. The Hermes container NEVER listens on 9222 in any phase; only the
      fixture does.
+  7. Revision-2 R1 endpoint-switch regression: two disposable fixtures A and B; the
+     disposable runtime config points at A; a connected action against A with
+     the shared public session leaves A healthy with its marker; the runtime
+     config is changed ONLY for browser.connected_cdp_url to B (A stays
+     healthy); the SAME public session is reused against B; the action marker
+     exists in B and NOT in A, and A remains healthy. This proves the
+     endpoint-bound BU_NAME invariant: the same public session at endpoints
+     A/B has distinct harness names, so no cross-endpoint daemon/state
+     collision occurs.
 
 If the pinned image cannot provide a piece of evidence (e.g. the W1 patch
 defect where _CONNECTED_BROWSER_CLI is referenced but not defined), the
@@ -584,6 +593,10 @@ print("COLD-START-OK")
 #   map      -> deterministic session mapping + namespace disjointness
 #   marker   -> own-tab safety: the fixture's pre-opened marker tab keeps
 #               its URL and stays open after a connected run
+#   open     -> open a supplied marker URL in the connected browser and
+#               assert it appears in the fixture's /json/list (used by the
+#               endpoint-switch regression to prove the action landed in the
+#               intended fixture)
 # Arguments: <mode> [fixture_host] [marker_url]
 RT_CONNECTED_SOURCE = r'''
 """Connected-route probe (rev-2) — REAL CLI, no fakes."""
@@ -641,17 +654,23 @@ def digest(name):
 
 
 if MODE == "map":
-    n1 = mod._connected_daemon_name(SESSION)
-    n2 = mod._connected_daemon_name(SESSION)
-    default = mod._connected_daemon_name("")
+    # The connected BU_NAME is bound to BOTH the configured endpoint and the
+    # public session (NUL-delimited in the digest input), so the same public
+    # session at endpoints A/B has distinct names and the omitted session is
+    # also endpoint-bound (no fixed cross-endpoint default).
+    endpoint = mod._connected_cdp_endpoint()
+    assert endpoint, "map mode needs a configured endpoint"
+    n1 = mod._connected_daemon_name(endpoint, SESSION)
+    n2 = mod._connected_daemon_name(endpoint, SESSION)
+    default = mod._connected_daemon_name(endpoint, "")
     assert n1 == n2, "connected daemon mapping not deterministic"
-    assert default == "__jc_0"
-    assert n1 == "__jc_1_" + digest(SESSION)
+    assert n1 == "__jc_2_" + digest(endpoint + "\0" + SESSION)
+    assert default == "__jc_2_" + digest(endpoint + "\0")
     assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", n1), "reserved name violates harness rule"
     assert mod._SESSION_RE.match(n1) is None, "reserved name collides with public namespace"
     assert mod._SESSION_RE.match(default) is None
     assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", default)
-    print(f"SESSION-MAP default={default} named_ok={n1 == '__jc_1_' + digest(SESSION)}")
+    print(f"SESSION-MAP default={default} named_ok={n1 == '__jc_2_' + digest(endpoint + '\\0' + SESSION)}")
     print("CONNECTED-MAP-OK")
     sys.exit(0)
 
@@ -673,12 +692,15 @@ if MODE == "env":
     for k in ambient:
         os.environ.pop(k, None)
     assert err is None, f"connected preflight failed: {err}"
-    assert env.get("BU_NAME") == "__jc_1_" + digest(SESSION), env.get("BU_NAME")
+    endpoint = mod._connected_cdp_endpoint()
+    assert endpoint, "env mode needs a configured endpoint"
+    expected = "__jc_2_" + digest(endpoint + "\0" + SESSION)
+    assert env.get("BU_NAME") == expected, env.get("BU_NAME")
     assert env.get("BU_CDP_WS", "").startswith("ws://"), env.get("BU_CDP_WS")
     for k in ambient:
         assert k not in env, f"ambient key survived the scrub: {k}"
     print(f"ENV-SCRUB ws_ok={env.get('BU_CDP_WS', '').startswith('ws://')} "
-          f"name_ok={env.get('BU_NAME') == '__jc_1_' + digest(SESSION)}")
+          f"name_ok={env.get('BU_NAME') == expected}")
     print("CONNECTED-ENV-OK")
     sys.exit(0)
 
@@ -758,6 +780,27 @@ if MODE == "marker":
     print("CONNECTED-MARKER-OK")
     sys.exit(0)
 
+if MODE == "open":
+    # Open a supplied marker URL in the connected browser and assert it
+    # appears in the fixture's /json/list. Used by the endpoint-switch
+    # regression to prove the action landed in the intended fixture.
+    assert FIXTURE_HOST, "open mode needs the fixture host"
+    assert MARKER_URL, "open mode needs a marker URL"
+    out = mod.connected_browser_exec(
+        f"new_tab({MARKER_URL!r})\nprint(page_info())", session=SESSION, timeout_s=60,
+    )
+    text = str(out)
+    if "Connected browser" in text or "error" in str(out).lower():
+        print(f"CONNECTED-OPEN-UNVERIFIED: {text[:400]}")
+        sys.exit(0)
+    resp = urllib.request.urlopen(f"http://{FIXTURE_HOST}:9222/json/list", timeout=10)
+    tabs = json.loads(resp.read().decode("utf-8"))
+    marker_tabs = [t for t in tabs if t.get("url") == MARKER_URL]
+    assert marker_tabs, f"marker URL not present in {FIXTURE_HOST} /json/list: {[t.get('url') for t in tabs]}"
+    print(f"CONNECTED-OPEN marker_present=True in={FIXTURE_HOST} total_tabs={len(tabs)}")
+    print("CONNECTED-OPEN-OK")
+    sys.exit(0)
+
 print(f"CONNECTED-{MODE.upper()}-UNVERIFIED: unknown mode")
 sys.exit(0)
 '''
@@ -786,18 +829,21 @@ class BrowserRoutingRuntimeTests(unittest.TestCase):
         self.runtime.env["HERMES_API_SERVER_PORT"] = "18642"
         self.runtime.env["HERMES_DASHBOARD_PORT"] = "19119"
         self._fixture: str | None = None
+        self._fixture_b: str | None = None
         self.addCleanup(self._cleanup_fixture)
         self.addCleanup(self.runtime.down)
         os.makedirs(DUMP_DIR, exist_ok=True)
         self.addCleanup(shutil.rmtree, DUMP_DIR, True)
 
     def _cleanup_fixture(self) -> None:
-        if self._fixture:
-            subprocess.run(
-                ["docker", "rm", "-f", self._fixture],
-                capture_output=True, text=True, check=False, timeout=120,
-            )
-            self._fixture = None
+        for name in (self._fixture, self._fixture_b):
+            if name:
+                subprocess.run(
+                    ["docker", "rm", "-f", name],
+                    capture_output=True, text=True, check=False, timeout=120,
+                )
+        self._fixture = None
+        self._fixture_b = None
 
     def _run(self, script: str, *, timeout: int = 300, check: bool = True) -> subprocess.CompletedProcess[str]:
         proc = self.runtime.exec(
@@ -852,7 +898,7 @@ class BrowserRoutingRuntimeTests(unittest.TestCase):
         proc = self._run("ps -eo args | grep -F 'gateway run' | grep -v grep | head -1", check=False, timeout=60)
         self.assertNotEqual(proc.stdout.strip(), "", "no gateway process visible in the container")
 
-    def _start_fixture(self) -> str:
+    def _start_fixture(self, *, second: bool = False) -> str:
         name = f"jc-br-fixture-{uuid.uuid4().hex[:12]}"
         ps = self.runtime.run("ps", "-q", "hermes", check=True, timeout=60)
         cid = ps.stdout.strip()
@@ -872,7 +918,10 @@ class BrowserRoutingRuntimeTests(unittest.TestCase):
         )
         if proc.returncode != 0:
             self.fail(f"CDP fixture container could not be started: {proc.stderr[-1500:]}")
-        self._fixture = name
+        if second:
+            self._fixture_b = name
+        else:
+            self._fixture = name
         return name
 
     def _wait_fixture_ready(self, name: str, timeout: int = 120) -> None:
@@ -933,6 +982,30 @@ class BrowserRoutingRuntimeTests(unittest.TestCase):
             "assert 'cloud_provider: local' in text, 'cloud_provider must stay local'\n"
             "print('CONFIG-SWAPPED-OK')\n"
             "PY".format(host=fixture_host),
+            timeout=60,
+        )
+
+    def _swap_connected_cdp_to(self, target_host: str) -> None:
+        """Replace ONLY the current browser.connected_cdp_url value in the
+        disposable RUNTIME config with the given target host, leaving every
+        other config line untouched. Used by the endpoint-switch regression to
+        move the connected route from fixture A to fixture B while A stays
+        healthy."""
+        self._run(
+            "python3 - <<'PY'\n"
+            "import re\n"
+            "path = '/opt/data/config.yaml'\n"
+            "text = open(path, encoding='utf-8').read()\n"
+            "new = '  connected_cdp_url: http://{host}:9222'\n"
+            "pat = re.compile(r'^  connected_cdp_url: .*$', re.M)\n"
+            "assert pat.search(text), 'connected_cdp_url line missing from runtime config'\n"
+            "text = pat.sub(new, text, count=1)\n"
+            "open(path, 'w', encoding='utf-8').write(text)\n"
+            "assert new in text, 'target URL not written'\n"
+            "assert \"backend: 'off'\" in text, 'backend must stay off'\n"
+            "assert 'cloud_provider: local' in text, 'cloud_provider must stay local'\n"
+            "print('CONFIG-SWAPPED-TO-OK')\n"
+            "PY".format(host=target_host),
             timeout=60,
         )
 
@@ -1060,6 +1133,86 @@ class BrowserRoutingRuntimeTests(unittest.TestCase):
 
         self.assertEqual(self._hermes_9222_listeners(), 0,
                          "Hermes must never listen on 9222; only the fixture does")
+
+    def test_endpoint_switch_regression(self) -> None:
+        """Revision-2 R1 endpoint-switch regression: connected BU_NAME is bound
+        to BOTH the configured endpoint and the public session, so the same
+        public session at endpoints A/B has distinct harness names and no
+        cross-endpoint daemon/state collision occurs.
+
+        Flow: fixture A + fixture B; disposable runtime config points at A; a
+        connected action against A with the shared public session leaves A
+        healthy with its marker; the runtime config is changed ONLY for
+        browser.connected_cdp_url to B (A stays healthy); the SAME public
+        session is reused against B; the action marker exists in B and NOT in
+        A, and A remains healthy.
+        """
+        self.runtime.up("hermes", timeout=1800)
+        self.runtime.wait_until_hermes_writable(timeout=120)
+        self._wait_runtime_config()
+        self._ship("rt-connected.py", RT_CONNECTED_SOURCE)
+
+        # Two disposable fixtures A and B on the isolated bridge network.
+        fixture_a = self._start_fixture()
+        self._wait_fixture_ready(fixture_a)
+        self._fixture_reachable_from_hermes(fixture_a)
+        fixture_b = self._start_fixture(second=True)
+        self._wait_fixture_ready(fixture_b)
+        self._fixture_reachable_from_hermes(fixture_b)
+        self.assertEqual(self._hermes_9222_listeners(), 0,
+                         "Hermes must never listen on 9222; only the fixtures do")
+
+        # Point the disposable runtime config at A.
+        self._swap_connected_cdp(fixture_a)
+
+        # A connected action against A with the shared public session: A is
+        # healthy and carries the marker.
+        marker_a = "data:text/html,<title>JC-ENDPOINT-A-MARKER</title>"
+        self._assert_probe_ok(
+            self._run_probe("rt-connected.py", "open", fixture_a, marker_a, timeout=300),
+            "CONNECTED-OPEN-OK", "endpoint A action",
+        )
+        self._assert_probe_ok(
+            self._run_probe("rt-connected.py", "marker", fixture_a, marker_a, timeout=120),
+            "CONNECTED-MARKER-OK", "endpoint A healthy after action",
+        )
+
+        # Change ONLY browser.connected_cdp_url to B; A stays healthy.
+        self._swap_connected_cdp_to(fixture_b)
+        self._assert_probe_ok(
+            self._run_probe("rt-connected.py", "marker", fixture_a, marker_a, timeout=120),
+            "CONNECTED-MARKER-OK", "endpoint A still healthy after config swap",
+        )
+
+        # Reuse the SAME public session against B: the marker lands in B and
+        # NOT in A, and A remains healthy.
+        marker_b = "data:text/html,<title>JC-ENDPOINT-B-MARKER</title>"
+        self._assert_probe_ok(
+            self._run_probe("rt-connected.py", "open", fixture_b, marker_b, timeout=300),
+            "CONNECTED-OPEN-OK", "endpoint B action with same session",
+        )
+        self._assert_probe_ok(
+            self._run_probe("rt-connected.py", "marker", fixture_b, marker_b, timeout=120),
+            "CONNECTED-MARKER-OK", "endpoint B carries the marker",
+        )
+        # The B marker must NOT appear in A (endpoint-bound namespace).
+        resp = subprocess.run(
+            ["docker", "exec", fixture_a, "python3", "-c",
+             "import urllib.request, json; "
+             "tabs=json.loads(urllib.request.urlopen('http://127.0.0.1:9222/json/list', timeout=5).read()); "
+             "print([t.get('url') for t in tabs])"],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        self.assertNotIn(marker_b, resp.stdout,
+                         f"endpoint B marker leaked into endpoint A: {resp.stdout}")
+        # A remains healthy with its own marker.
+        self._assert_probe_ok(
+            self._run_probe("rt-connected.py", "marker", fixture_a, marker_a, timeout=120),
+            "CONNECTED-MARKER-OK", "endpoint A healthy and marker intact after B action",
+        )
+
+        self.assertEqual(self._hermes_9222_listeners(), 0,
+                         "Hermes must never listen on 9222; only the fixtures do")
 
 
 if __name__ == "__main__":
