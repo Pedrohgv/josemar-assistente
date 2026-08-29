@@ -111,9 +111,22 @@ Used only when a Daily Note must be created:
 
 ## Canonical link semantics
 
-- Canonical line: `- [[<task-slug>|<task-title>]]`.
-- Ownership matching is by exact wikilink target slug on bullet-only lines
-  (`- [[slug|alias]]`), never by alias/title text and never prefix-matched.
+- Canonical line: `- [[<task-slug>|<display-alias>]]`; the task title
+  stays authoritative and unchanged in task Markdown.
+- Alias: a derived, serialized encoding of the title (not a rendered
+  title): deterministic, reversible percent encoding for structural
+  metacharacters only — `%` is encoded first as `%25`, then `[` as
+  `%5B`, `]` as `%5D`, and `|` as `%7C`; ordinary title text passes
+  through unchanged. Encoding `%` first keeps the mapping injective
+  (a literal `%5B` title becomes `%255B`, never colliding with an
+  encoded `[`), so the full enabled-mode TaskNotes title domain
+  projects without narrowing accepted titles or backslash escape
+  syntax. This serialization does not alter task Markdown or title
+  semantics.
+- Ownership matching is by exact wikilink target slug on bullet-only
+  lines, never by alias/title text and never prefix-matched; the alias
+  is never matched or compared, so normalization, dedup, and removal
+  stay idempotent regardless of the encoded alias.
 - Add: normalizes one existing exact-slug bullet to the canonical form
   (indentation preserved), removes duplicate exact-slug bullets, or appends
   one canonical line at the end of the section when absent.

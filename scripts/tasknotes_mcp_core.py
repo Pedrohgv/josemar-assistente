@@ -2970,7 +2970,14 @@ def _bullet_wikilink_matches_slug(line: str, slug: str) -> bool:
 
 
 def _validate_daily_link_title(title: str) -> str:
-    """Validate the display title used inside a canonical bullet wikilink."""
+    """Validate the display title used inside a canonical bullet wikilink.
+
+    The accepted domain mirrors :func:`validate_title` exactly (non-empty
+    printable title up to ``MAX_TITLE_LEN``): ``[``, ``]``, and ``|`` are
+    NOT rejected here. Structural safety inside the wikilink is provided
+    by :func:`encode_daily_note_link_alias`, not by narrowing the title
+    domain.
+    """
     if not isinstance(title, str) or not title.strip():
         raise ValidationError("daily note link title must be a non-empty string")
     if len(title) > MAX_TITLE_LEN:
@@ -2979,11 +2986,33 @@ def _validate_daily_link_title(title: str) -> str:
         raise ValidationError(
             "daily note link title must not contain control characters"
         )
-    if any(ch in title for ch in "[]|"):
-        raise ValidationError(
-            "daily note link title must not contain wikilink metacharacters"
-        )
     return title
+
+
+def encode_daily_note_link_alias(title: str) -> str:
+    """Derive the deterministic wikilink display alias from a task title.
+
+    The canonical link shape stays ``[[slug|display-alias]]``; the alias
+    is an explicit percent-encoded derivation of the (already validated)
+    title so the full ``validate_title`` domain — including ``[``,
+    ``]``, ``|`` — projects without narrowing. Encoding is ordered:
+    ``%`` becomes ``%25`` FIRST, then ``[`` → ``%5B``, ``]`` → ``%5D``,
+    and ``|`` → ``%7C``. Because every literal ``%`` encodes to ``%25``
+    first, a title containing the literal text ``%5B`` becomes
+    ``%255B`` and can never collide with an encoded ``[`` (``%5B``);
+    the mapping is deterministic, injective (reversible), and
+    structurally safe inside a wikilink. This is a derived alias
+    encoding only: the authoritative task title content is untouched.
+    Ordinary titles without the four encoded characters pass through
+    unchanged, and matching is never affected (ownership is by exact
+    wikilink target slug; the alias is never matched or compared).
+    """
+    return (
+        title.replace("%", "%25")
+        .replace("[", "%5B")
+        .replace("]", "%5D")
+        .replace("|", "%7C")
+    )
 
 
 def _daily_link_line(slug: str, title: str, indent: str = "") -> str:
@@ -3044,19 +3073,23 @@ def add_daily_note_task_link(body: str, *, slug: str, title: str) -> Tuple[str, 
 
     Exact task-slug bullet wikilinks (lines that are only a bullet plus a
     wikilink whose target is exactly ``slug``) are normalized to the
-    canonical ``- [[slug|title]]`` form and deduped: the first occurrence
+    canonical ``- [[slug|alias]]`` form and deduped: the first occurrence
     is rewritten in place (leading whitespace preserved), duplicates are
-    removed. When no exact-slug bullet exists, the canonical line is
-    appended at the end of the section. Bytes outside the section — and
-    similar-but-not-exact slugs or prose — are preserved verbatim.
-    Returns ``(new_body, changed)``.
+    removed. The alias is the deterministic percent-encoded derivation of
+    the title (:func:`encode_daily_note_link_alias`), so the full title
+    domain projects safely; ownership matching stays exact-slug and never
+    consults the alias. When no exact-slug bullet exists, the canonical
+    line is appended at the end of the section. Bytes outside the
+    section — and similar-but-not-exact slugs or prose — are preserved
+    verbatim. Returns ``(new_body, changed)``.
     """
     slug = validate_slug(slug)
     title = _validate_daily_link_title(title)
+    alias = encode_daily_note_link_alias(title)
     start, end = find_tasks_section(body)
     spans = _section_bullet_wikilink_spans(body, start, end, slug)
     if not spans:
-        canonical = _daily_link_line(slug, title)
+        canonical = _daily_link_line(slug, alias)
         prefix = ""
         if end == len(body) and body and not body.endswith("\n"):
             prefix = "\n"
@@ -3065,7 +3098,7 @@ def add_daily_note_task_link(body: str, *, slug: str, title: str) -> Tuple[str, 
     first_start, first_len = spans[0]
     matched = _DAILY_BULLET_WIKILINK_RE.match(body[first_start:first_start + first_len])
     assert matched is not None  # matched in _section_bullet_wikilink_spans
-    canonical = _daily_link_line(slug, title, indent=matched.group(1))
+    canonical = _daily_link_line(slug, alias, indent=matched.group(1))
     edits: List[Tuple[int, int, str]] = [
         (first_start, first_start + first_len, canonical)
     ]

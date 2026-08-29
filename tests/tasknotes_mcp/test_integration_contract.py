@@ -494,8 +494,19 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
         self.assertIn("only when a missing note is created", prose)
         # Canonical link semantics.
         self.assertIn("### Canonical link semantics", text)
-        self.assertIn("- [[<task-slug>|<task-title>]]", text)
+        self.assertIn("- [[<task-slug>|<display-alias>]]", text)
         self.assertIn("by exact wikilink target slug", prose)
+        # R6 (issue #140): the alias is a derived serialized encoding —
+        # reversible percent encoding of the structural metacharacters
+        # only (% first), never matched; title semantics unchanged.
+        for token in ("`%25`", "`%5B`", "`%5D`", "`%7C`"):
+            self.assertIn(token, text)
+        self.assertIn("derived, serialized encoding of the title", prose)
+        self.assertIn("deterministic, reversible percent encoding", prose)
+        self.assertIn("full enabled-mode TaskNotes title domain", prose)
+        self.assertIn("does not alter task Markdown or title semantics", prose)
+        self.assertIn("never by alias text", prose)
+        self.assertIn("idempotent regardless of the encoded alias", prose)
         # Transition matrix and ordering guarantees.
         self.assertIn("### Transition matrix", text)
         self.assertIn("add under D2 **first**, then remove from D1", text)
@@ -583,7 +594,18 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
             "existing frontmatter is never normalized or reserialized", prose
         )
         self.assertIn("only when a missing note is created", prose)
-        self.assertIn("- [[<task-slug>|<task-title>]]", text)
+        self.assertIn("- [[<task-slug>|<display-alias>]]", text)
+        # R6 (issue #140): derived serialized alias — reversible percent
+        # encoding of the structural metacharacters only (% first),
+        # never matched or compared; title semantics unchanged.
+        for token in ("`%25`", "`%5B`", "`%5D`", "`%7C`"):
+            self.assertIn(token, text)
+        self.assertIn("deterministic, reversible percent encoding", prose)
+        self.assertIn("keeps the mapping injective", prose)
+        self.assertIn("full enabled-mode TaskNotes title domain", prose)
+        self.assertIn("does not alter task Markdown or title semantics", prose)
+        self.assertIn("never matched or compared", prose)
+        self.assertIn("idempotent regardless of the encoded alias", prose)
         self.assertIn("add D2 **first**, then remove D1", text)
         self.assertIn("remove after **verified** deletion", text)
         # R4 (issue #140): plan composition by resolved target path.
@@ -762,6 +784,20 @@ class DailyProjectionCoreContract(unittest.TestCase):
                 ),
                 [(ensure, "2026-01-05"), (remove, "2026-02-20")],
             )
+
+    def test_link_alias_encoding_matches_documented_metacharacters(self) -> None:
+        """R6 (issue #140): the display alias is a deterministic,
+        reversible percent encoding of the structural metacharacters
+        only — `%` first as `%25`, then `[`/`]`/`|`; ordinary title text
+        is unchanged and ownership matching stays alias-independent."""
+        encode = self.core.encode_daily_note_link_alias
+        self.assertEqual(encode("plain title"), "plain title")
+        self.assertEqual(encode("a|b[c]d%e"), "a%7Cb%5Bc%5Dd%25e")
+        # `%` encodes first: a literal `%5B` title cannot collide with an
+        # encoded `[` (`%5B`) — the mapping is injective (reversible).
+        self.assertEqual(encode("%5B"), "%255B")
+        self.assertEqual(encode("["), "%5B")
+        self.assertNotEqual(encode("%5B"), encode("["))
 
     def test_projection_targets_in_task_or_archive_folders_rejected(self) -> None:
         """R5 (issue #140): a resolved Daily Note target under the

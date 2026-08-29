@@ -497,13 +497,24 @@ edited; nothing outside it (and no prose) is ever touched.
 
 ### Canonical link semantics
 
-The canonical generated line is `- [[<task-slug>|<task-title>]]`. Matching is
-by exact wikilink target slug on bullet-only lines, never by alias text.
-Adding deduplicates and normalizes any existing exact-slug bullet to the
-canonical form (preserving its indentation and unrelated section lines);
-removal deletes only exact-slug bullet lines and leaves the section and note
-in place even when empty. Similar-prefix slugs and prose mentions are never
-matched or modified.
+The canonical generated line is `- [[<task-slug>|<display-alias>]]`; the
+task title remains authoritative and unchanged. The alias is a derived,
+serialized encoding of the title, not a rendered title: it is a
+deterministic, reversible percent encoding applied only to the structural
+metacharacters — `%` first as `%25`, then `[` as `%5B`, `]` as `%5D`, and
+`|` as `%7C`; ordinary title text passes through unchanged. Encoding `%`
+first keeps the mapping injective (a title containing the literal text
+`%5B` becomes `%255B` and can never collide with an encoded `[`), so the
+full enabled-mode TaskNotes title domain projects without narrowing the
+accepted titles and without backslash escape syntax. This serialization
+does not alter task Markdown or title semantics. Matching is by exact
+wikilink target slug on bullet-only lines, never by alias text — so
+normalization, dedup, and removal stay idempotent regardless of the
+encoded alias. Adding deduplicates and normalizes any existing exact-slug
+bullet to the canonical form (preserving its indentation and unrelated
+section lines); removal deletes only exact-slug bullet lines and leaves
+the section and note in place even when empty. Similar-prefix slugs and
+prose mentions are never matched or modified.
 
 ### Transition matrix
 

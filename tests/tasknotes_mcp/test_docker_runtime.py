@@ -387,10 +387,23 @@ class TaskNotesDockerHarnessContractTests(unittest.TestCase):
         self.assertIn('deleted["daily_link_state"] == "applied_and_committed"', text)
         self.assertIn('"daily_link_state" not in alpha_done', text)
         self.assertIn('alpha_kept["daily_link_state"] == "not_applied"', text)
+        # R6 (issue #140): wikilink-metacharacter titles round-trip and the
+        # canonical link encodes exactly '[', ']', '|' (percent-encoding,
+        # uppercase hex) in the alias while the target stays the raw slug.
+        self.assertIn('delta_title = "Review [draft]"', text)
+        self.assertIn('delta2_title = "Compare A | B"', text)
+        self.assertIn('f"- [[{delta}|Review %5Bdraft%5D]]"', text)
+        self.assertIn('f"- [[{delta2}|Compare A %7C B]]"', text)
+        self.assertIn('assert "Review [draft]" not in note_24', text)
+        self.assertIn('delta_fetched["title"] == delta_title', text)
+        # Idempotent by exact slug; unrelated links survive removals.
+        self.assertIn('_read_daily_note("2026-07-24").count(delta_link) == 1', text)
+        self.assertIn('assert delta2_link in note_24_after', text)
+        self.assertIn('delta_deleted["daily_link_dates"] == ["2026-07-25"]', text)
         # Git evidence: exact projection-commit accounting; projection
         # commits stage only daily note paths, never the whole vault.
         self.assertIn(
-            'log.count("tasknotes-mcp: daily note projection") == 8', text
+            'log.count("tasknotes-mcp: daily note projection") == 12', text
         )
         self.assertIn('path.startswith(f"{DAILY_FOLDER}/")', text)
         # Native gbrain visibility after the incremental projection sync:

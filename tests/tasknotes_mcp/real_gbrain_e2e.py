@@ -833,6 +833,100 @@ async def daily_links_lifecycle(vault: Path, env: dict[str, str]) -> None:
             _assert_no_daily_link(_read_daily_note("2026-07-23"), gamma)
             assert _daily_note_path("2026-07-23").is_file()
 
+            # -- R6 (issue #140): wikilink-metacharacter titles ------------
+            # TaskNotes accepts task titles containing '[', ']', '|'. The
+            # daily link encodes exactly those bytes in the display alias
+            # (percent-encoding, uppercase hex, everything else untouched)
+            # while the wikilink target stays the exact task slug:
+            #   "Review [draft]"  -> "- [[<slug>|Review %5Bdraft%5D]]"
+            #   "Compare A | B"   -> "- [[<slug>|Compare A %7C B]]"
+            delta = "20260724t130000"
+            delta_title = "Review [draft]"
+            delta_link = f"- [[{delta}|Review %5Bdraft%5D]]"
+            delta_created = await call(
+                session,
+                "task_create",
+                {
+                    "slug": delta,
+                    "title": delta_title,
+                    "scheduled": "2026-07-24",
+                },
+            )
+            assert delta_created["state"] == "applied_and_committed", delta_created
+            assert (
+                delta_created["daily_link_state"] == "applied_and_committed"
+            ), delta_created
+            assert delta_created["daily_link_dates"] == ["2026-07-24"], delta_created
+            # The task mutation itself succeeds with the raw title intact.
+            delta_fetched = await call(session, "task_get", {"slug": delta})
+            assert delta_fetched["title"] == delta_title, delta_fetched
+            # The generated link is the deterministic encoded alias form.
+            note_24 = _read_daily_note("2026-07-24")
+            assert delta_link in note_24, note_24
+            assert "Review [draft]" not in note_24, note_24
+
+            # Idempotent by exact slug: an unchanged reschedule reports
+            # not_applied and never duplicates the encoded link.
+            delta_kept = await call(
+                session,
+                "task_update",
+                {"slug": delta, "scheduled": "2026-07-24"},
+            )
+            assert delta_kept["state"] == "applied_and_committed", delta_kept
+            assert delta_kept["daily_link_state"] == "not_applied", delta_kept
+            assert _read_daily_note("2026-07-24").count(delta_link) == 1
+
+            # A second metacharacter title shares the same date: the
+            # existing exact-slug link is untouched and the new encoded
+            # link lands alongside it.
+            delta2 = "20260724t133000"
+            delta2_title = "Compare A | B"
+            delta2_link = f"- [[{delta2}|Compare A %7C B]]"
+            delta2_created = await call(
+                session,
+                "task_create",
+                {
+                    "slug": delta2,
+                    "title": delta2_title,
+                    "scheduled": "2026-07-24",
+                },
+            )
+            assert delta2_created["state"] == "applied_and_committed", delta2_created
+            assert delta2_created["daily_link_dates"] == ["2026-07-24"], delta2_created
+            note_24 = _read_daily_note("2026-07-24")
+            assert delta_link in note_24, note_24
+            assert delta2_link in note_24, note_24
+
+            # Reschedule the first task: the D1 removal must preserve the
+            # unrelated second link (and every other byte) while the D2
+            # note gains the encoded link.
+            delta_moved = await call(
+                session,
+                "task_update",
+                {"slug": delta, "scheduled": "2026-07-25"},
+            )
+            assert delta_moved["state"] == "applied_and_committed", delta_moved
+            assert delta_moved["daily_link_dates"] == ["2026-07-25", "2026-07-24"], (
+                delta_moved
+            )
+            note_24_after = _read_daily_note("2026-07-24")
+            assert f"[[{delta}" not in note_24_after, note_24_after
+            assert delta2_link in note_24_after, note_24_after
+            note_25 = _read_daily_note("2026-07-25")
+            assert delta_link in note_25, note_25
+
+            # Delete cleanup: exact-slug removal only; the note remains.
+            delta_deleted = await call(session, "task_delete", {"slug": delta})
+            assert delta_deleted["state"] == "applied_and_committed", delta_deleted
+            assert delta_deleted["daily_link_state"] == "applied_and_committed", (
+                delta_deleted
+            )
+            assert delta_deleted["daily_link_dates"] == ["2026-07-25"], delta_deleted
+            assert not (vault / "tasks" / f"{delta}.md").exists()
+            note_25_after = _read_daily_note("2026-07-25")
+            assert f"[[{delta}" not in note_25_after, note_25_after
+            assert _daily_note_path("2026-07-25").is_file()
+
             # Final listing: both phases' tasks remain; gamma is gone.
             listed = await call(session, "task_list", {"max_results": 10})
             assert {item["slug"] for item in listed["result"]} == {
@@ -840,6 +934,7 @@ async def daily_links_lifecycle(vault: Path, env: dict[str, str]) -> None:
                 "20260720t090000",
                 alpha,
                 beta,
+                delta2,
             }, listed
 
 
@@ -854,16 +949,18 @@ def _assert_daily_evidence(vault: Path, env: dict[str, str]) -> None:
     clean = run(["git", "status", "--porcelain"], env=env, cwd=vault)
     assert clean.strip() == "", clean
     log = run(["git", "log", "--oneline"], env=env, cwd=vault)
-    # 8 task updates from the disabled-mode phase plus 10 daily-phase task
-    # updates (alpha create/unchanged-reschedule/complete/archive, beta
-    # create/reschedule/week, gamma create/backlog/reschedule).
-    assert log.count("tasknotes-mcp: task update") == 18, log
-    assert log.count("tasknotes-mcp: task delete") == 1, log
-    # One projection commit per mutation that CHANGED a daily target: alpha
-    # create; beta create/reschedule (two targets, one commit)/week cleanup;
-    # gamma create/backlog/reschedule/delete. The idempotent unchanged
-    # alpha reschedule and completion/archive commit nothing.
-    assert log.count("tasknotes-mcp: daily note projection") == 8, log
+    # 8 task updates from the disabled-mode phase plus 14 daily-phase task
+    # updates: alpha create/unchanged-reschedule/complete/archive, beta
+    # create/reschedule/week, gamma create/backlog/reschedule, and the R6
+    # delta create/unchanged-reschedule/reschedule plus delta2 create.
+    assert log.count("tasknotes-mcp: task update") == 22, log
+    assert log.count("tasknotes-mcp: task delete") == 2, log
+    # One projection commit per mutation that CHANGED a daily target:
+    # alpha create; beta create/reschedule (two targets, one commit)/week
+    # cleanup; gamma create/backlog/reschedule/delete; R6 delta
+    # create/reschedule (two targets, one commit)/delete and delta2 create.
+    # The idempotent unchanged reschedules (alpha and delta) commit nothing.
+    assert log.count("tasknotes-mcp: daily note projection") == 12, log
     # The fixture was committed between phases; nothing is ever pending.
     assert log.count("tasknotes-mcp: preflight sync") == 0, log
     projection_ids = [
@@ -871,7 +968,7 @@ def _assert_daily_evidence(vault: Path, env: dict[str, str]) -> None:
         for line in log.splitlines()
         if line.endswith("tasknotes-mcp: daily note projection")
     ]
-    assert len(projection_ids) == 8, projection_ids
+    assert len(projection_ids) == 12, projection_ids
     for commit_id in projection_ids:
         names = run(
             ["git", "show", "--name-only", "--pretty=format:", commit_id],
@@ -928,6 +1025,24 @@ def _assert_daily_evidence(vault: Path, env: dict[str, str]) -> None:
     body_20 = page_20.get("compiled_truth", "")
     assert "## Tasks" in body_20 and "Plan for the day." in body_20, body_20
     assert "[[20260722t110000" not in body_20, body_20
+    # R6 visibility: the encoded alias survives the projection sync into
+    # the real gbrain index; the deleted metacharacter task's link is gone.
+    page_24 = json.loads(
+        run(
+            [
+                GBRAIN_NATIVE,
+                "call",
+                "--source",
+                source_id,
+                "get_page",
+                json.dumps({"slug": f"{DAILY_FOLDER}/2026/07/24"}),
+            ],
+            env=env,
+        )
+    )
+    body_24 = page_24.get("compiled_truth", "")
+    assert "[[20260724t133000|Compare A %7C B]]" in body_24, body_24
+    assert "[[20260724t130000" not in body_24, body_24
 
 
 def _assert_fixed_contract_paths_used() -> None:

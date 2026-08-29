@@ -3815,12 +3815,26 @@ class DailyTasksSectionTests(unittest.TestCase):
                 "## Tasks\n", slug="Bad Slug", title="T"
             )
 
-    def test_add_rejects_wikilink_metacharacters_in_title(self) -> None:
-        for title in ("a]]b", "a|b", "a[b", "a]b", ""):
-            with self.assertRaises(self.core.ValidationError):
-                self.core.add_daily_note_task_link(
-                    "## Tasks\n", slug="task-1", title=title
-                )
+    def test_add_encodes_wikilink_metacharacters_in_title(self) -> None:
+        # R6 (issue #140): the full validate_title domain is preserved;
+        # wikilink metacharacters are percent-encoded deterministically
+        # in the derived alias instead of rejected.
+        for title, alias in (
+            ("Review [draft]", "Review %5Bdraft%5D"),
+            ("Compare A | B", "Compare A %7C B"),
+            ("a]b", "a%5Db"),
+            ("a]]b", "a%5D%5Db"),
+        ):
+            new_body, changed = self.core.add_daily_note_task_link(
+                "## Tasks\n", slug="task-1", title=title
+            )
+            self.assertTrue(changed)
+            self.assertTrue(new_body.endswith(f"- [[task-1|{alias}]]\n"))
+        # The empty title is still rejected (validate_title domain).
+        with self.assertRaises(self.core.ValidationError):
+            self.core.add_daily_note_task_link(
+                "## Tasks\n", slug="task-1", title=""
+            )
 
     def test_add_requires_tasks_section(self) -> None:
         with self.assertRaises(self.core.ValidationError):
@@ -3895,6 +3909,60 @@ class DailyTasksSectionTests(unittest.TestCase):
     def test_remove_rejects_invalid_slug(self) -> None:
         with self.assertRaises(self.core.PathError):
             self.core.remove_daily_note_task_link("## Tasks\n", slug="../x")
+
+
+class DailyLinkAliasEncodingTests(unittest.TestCase):
+    """R6 (issue #140): the display alias is a deterministic, reversible,
+    structurally safe percent-encoding of the title."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+
+    def test_ordinary_titles_pass_through_unchanged(self) -> None:
+        encode = self.core.encode_daily_note_link_alias
+        self.assertEqual(encode("My Task"), "My Task")
+        self.assertEqual(encode("Review draft 2026"), "Review draft 2026")
+        self.assertEqual(encode("日本語 タイトル"), "日本語 タイトル")
+
+    def test_ordered_percent_encoding(self) -> None:
+        encode = self.core.encode_daily_note_link_alias
+        self.assertEqual(encode("100%"), "100%25")
+        self.assertEqual(encode("a[b]c|d"), "a%5Bb%5Dc%7Cd")
+        # % is encoded FIRST: a literal "%25" in a title cannot
+        # double-encode into "%2525".
+        self.assertEqual(encode("a%25b"), "a%2525b")
+
+    def test_literal_percent_sequence_never_collides_with_encoded_bracket(self) -> None:
+        encode = self.core.encode_daily_note_link_alias
+        # A title containing the literal text "%5B" encodes its "%" first
+        # ("a%255Bb"), so it can never collide with a title containing a
+        # literal "[" ("a%5Bb").
+        self.assertNotEqual(encode("a%5Bb"), encode("a[b"))
+        self.assertEqual(encode("a%5Bb"), "a%255Bb")
+
+    def test_encoding_is_reversible(self) -> None:
+        encode = self.core.encode_daily_note_link_alias
+
+        def decode(alias: str) -> str:
+            out: List[str] = []
+            i = 0
+            while i < len(alias):
+                if alias[i] == "%":
+                    out.append(chr(int(alias[i + 1 : i + 3], 16)))
+                    i += 3
+                else:
+                    out.append(alias[i])
+                    i += 1
+            return "".join(out)
+
+        for title in (
+            "Review [draft]",
+            "Compare A | B",
+            "100% done",
+            "a%5Bb [c|d]",
+            "plain title",
+        ):
+            self.assertEqual(decode(encode(title)), title)
 
 
 class MutationResultDailyFieldsTests(unittest.TestCase):
@@ -5005,6 +5073,128 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertIsNone(untagged.daily_link_state)
         self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
         self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+
+    # -- aliased titles: percent-encoded display alias (R6) -------------------
+
+    def test_create_bracket_title_projects_encoded_alias(self) -> None:
+        result = self.engine.create("t1", "Review [draft]", scheduled=_D1, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        content = self._note(_D1).read_text(encoding="utf-8")
+        # Structurally valid exact line with the deterministic alias.
+        self.assertIn("- [[t1|Review %5Bdraft%5D]]", content)
+        self.assertNotIn("Review [draft]", content)
+        # Task Markdown/title semantics are untouched.
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fm["title"], "Review [draft]")
+        self.assertEqual(self._git("status", "--porcelain").strip(), "")
+
+    def test_pipe_title_encoded_on_create_and_reschedule(self) -> None:
+        result = self.engine.create("t1", "Compare A | B", scheduled=_D1, body="b")
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        self.assertIn(
+            "- [[t1|Compare A %7C B]]",
+            self._note(_D1).read_text(encoding="utf-8"),
+        )
+        moved = self.engine.update("t1", scheduled=_D2, body="b2")
+        self.assertEqual(moved.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(moved.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        self.assertEqual(moved.daily_link_dates, [_D2, _D1])
+        # The D2 ensure uses the encoded alias...
+        self.assertIn(
+            "- [[t1|Compare A %7C B]]",
+            self._note(_D2).read_text(encoding="utf-8"),
+        )
+        # ...and the D1 removal found the link by exact slug despite it.
+        d1_content = self._note(_D1).read_text(encoding="utf-8")
+        self.assertNotIn("[[t1", d1_content)
+        self.assertIn("## Tasks", d1_content)
+        fm, _ = self.core._parse_frontmatter(
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fm["title"], "Compare A | B")
+
+    def test_encoded_alias_ensure_is_idempotent_single_link(self) -> None:
+        self.engine.create("t1", "Review [draft]", scheduled=_D1, body="b")
+        content = self._note(_D1).read_text(encoding="utf-8")
+        self.assertEqual(content.count("[[t1|"), 1)
+        before = self._note(_D1).stat().st_mtime_ns
+        result = self.engine.update(
+            "t1", scheduled=_D1, priority="high", body="b2"
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_NOT_APPLIED)
+        self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
+        again = self._note(_D1).read_text(encoding="utf-8")
+        self.assertEqual(again.count("[[t1|"), 1)
+        self.assertIn("- [[t1|Review %5Bdraft%5D]]", again)
+        self.assertEqual(self._git("status", "--porcelain").strip(), "")
+
+    def test_encoded_alias_projection_preserves_unrelated_lines(self) -> None:
+        _write_note(
+            self._note(_D1),
+            "# Day\n\nprose with [[t1]] raw link\n\n"
+            "## Tasks\n- [[other|Other]]\n\n## Notes\nkeep\n",
+        )
+        result = self.engine.create("t1", "Review [draft]", scheduled=_D1, body="b")
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        content = self._note(_D1).read_text(encoding="utf-8")
+        self.assertIn("- [[t1|Review %5Bdraft%5D]]", content)
+        # Unrelated lines and similar-but-not-exact mentions are untouched.
+        self.assertIn("# Day", content)
+        self.assertIn("prose with [[t1]] raw link", content)
+        self.assertIn("- [[other|Other]]", content)
+        self.assertIn("## Notes\nkeep", content)
+
+    def test_literal_percent_sequence_does_not_collide_in_note(self) -> None:
+        self.engine.create("t1", "Review [draft]", scheduled=_D1, body="b")
+        result = self.engine.create(
+            "t2", "Literal %5B text", scheduled=_D1, body="b"
+        )
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        content = self._note(_D1).read_text(encoding="utf-8")
+        # Distinct titles yield distinct aliases in the same note; the
+        # literal "%5B" text is encoded as "%255B", never "%5B".
+        self.assertIn("- [[t1|Review %5Bdraft%5D]]", content)
+        self.assertIn("- [[t2|Literal %255B text]]", content)
+        # Idempotent re-ensure of t1 is unaffected by the look-alike alias.
+        before = self._note(_D1).stat().st_mtime_ns
+        again = self.engine.update("t1", scheduled=_D1, priority="high")
+        self.assertEqual(again.daily_link_state, self.core.DAILY_LINK_NOT_APPLIED)
+        self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
+        final = self._note(_D1).read_text(encoding="utf-8")
+        self.assertEqual(final.count("[[t1|"), 1)
+        self.assertIn("- [[t2|Literal %255B text]]", final)
+
+    def test_delete_removes_encoded_alias_link_by_exact_slug(self) -> None:
+        self.engine.create("t1", "Compare A | B", scheduled=_D1, body="b")
+        result = self.engine.delete("t1")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        content = self._note(_D1).read_text(encoding="utf-8")
+        self.assertNotIn("[[t1", content)
+        self.assertIn("## Tasks", content)
+        self._no_recovery_marker()
+
+    def test_disabled_mode_accepts_metacharacter_title_unchanged(self) -> None:
+        sub = self.tmpdir / "disabled_r6"
+        sub.mkdir()
+        engine, vault, _ = _make_daily_engine(
+            self.core, sub, daily_links_enabled=False
+        )
+        result = engine.create("t1", "Review [draft] | x", scheduled=_D1, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertIsNone(result.daily_link_state)
+        self.assertIsNone(result.daily_link_detail)
+        self.assertIsNone(result.daily_link_dates)
+        self.assertFalse((vault / "journal" / f"{_D1}.md").exists())
+        fm, _ = self.core._parse_frontmatter(
+            (vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fm["title"], "Review [draft] | x")
 
     # -- prevalidation and failure isolation ----------------------------------
 
