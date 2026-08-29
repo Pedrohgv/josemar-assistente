@@ -3291,13 +3291,17 @@ def _transform_daily_note_text(
     link_title: str,
     date: str,
     stem: str,
+    normalize_frontmatter: bool = False,
 ) -> Tuple[str, bool]:
-    """Apply the section transformer and frontmatter normalization to note text.
+    """Apply the section transformer (and, only on creation, normalization).
 
     The ``## Tasks`` requirement is enforced by the W1a transformer
-    (exactly one section). The original frontmatter bytes are preserved
-    verbatim unless normalization changed a value. Returns
-    ``(new_text, changed)``.
+    (exactly one section). Existing-note frontmatter is never normalized
+    or reserialized: every byte outside the ``## Tasks`` section is
+    preserved verbatim unless ``normalize_frontmatter`` is explicitly
+    requested — which happens only for missing-note/template creation,
+    where null/empty top-level ``date``/``title`` values are filled
+    before the note first exists. Returns ``(new_text, changed)``.
     """
     fm, raw_body = _parse_frontmatter(text)
     body_offset = len(text) - len(raw_body)
@@ -3307,6 +3311,8 @@ def _transform_daily_note_text(
         )
     else:
         new_body, body_changed = remove_daily_note_task_link(raw_body, slug=slug)
+    if not normalize_frontmatter:
+        return text[:body_offset] + new_body, body_changed
     normalized = normalize_daily_note_frontmatter(fm, date=date, title_stem=stem)
     fm_changed = normalized != fm
     if fm_changed:
@@ -3336,14 +3342,16 @@ def prepare_daily_note_projection(
     """Pre-read the target and compute the transformed bytes (no side effects).
 
     For a planned ensure/remove, reads the existing target no-follow and
-    bounded, requires exactly one ``## Tasks`` section, applies the W1a
-    section transformer and frontmatter normalization, and returns the
-    full transformed bytes before any task side effect. Missing notes:
-    ensure prepares a create from the valid configured template (rendered)
-    or the deterministic default body; remove is an idempotent no-op (no
-    note is created just to remove it). Raises typed core errors on
-    invalid input, unreadable/symlinked/oversized sources, or a missing/
-    duplicated ``## Tasks`` section.
+    bounded, requires exactly one ``## Tasks`` section, and applies the
+    W1a section transformer. Existing notes are never reserialized:
+    bytes outside the ``## Tasks`` section (including all frontmatter)
+    are preserved verbatim. Missing notes: ensure prepares a create from
+    the valid configured template (rendered, with null/empty top-level
+    ``date``/``title`` normalized) or the deterministic default body —
+    date/title normalization applies only during this creation; remove
+    is an idempotent no-op (no note is created just to remove it).
+    Raises typed core errors on invalid input, unreadable/symlinked/
+    oversized sources, or a missing/duplicated ``## Tasks`` section.
     """
     if not isinstance(config, DailyNotesConfig):
         raise ValidationError(
@@ -3384,6 +3392,10 @@ def prepare_daily_note_projection(
             link_title=title,
             date=date,
             stem=stem,
+            # Date/title normalization applies only during missing-note
+            # creation (template rendering); existing notes are never
+            # normalized or reserialized.
+            normalize_frontmatter=True,
         )
         return DailyNoteProjection(
             operation=operation,
@@ -3564,12 +3576,16 @@ def _apply_daily_projection_attempt(
     Creates/opens the parent directory no-follow, writes a sibling temp
     file (O_EXCL|O_NOFOLLOW), fsyncs the content, runs the final-check
     test seam, re-verifies the source fingerprint (or continued absence),
-    publishes with ``os.replace``, fsyncs the parent when supported, and
-    always cleans the temp file on failure. Never overwrites a source
-    that changed since prepare. OSError from the write/publish syscalls
-    is mapped to a typed content-free ``CoreError`` so it degrades into
-    the projection write-failure result instead of escaping after the
-    task has been committed.
+    publishes, fsyncs the parent when supported, and always cleans the
+    temp file on failure. Never overwrites a source that changed since
+    prepare. Publication is atomic and kind-aware: a replace projection
+    publishes with ``os.replace`` after fingerprint re-verification; a
+    create projection publishes with an atomic no-clobber ``os.link`` so
+    a target materialized at the actual publication boundary (EEXIST) is
+    never overwritten and becomes a retryable race instead. OSError from
+    the write/publish syscalls is mapped to a typed content-free
+    ``CoreError`` so it degrades into the projection write-failure
+    result instead of escaping after the task has been committed.
     """
     parts = projection.target_relative.split("/")
     name = parts[-1]
@@ -3649,16 +3665,38 @@ def _apply_daily_projection_attempt(
                 parent_fd, name, fingerprint
             ):
                 return None  # source changed since prepare: race
-        try:
-            os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        except OSError as exc:
-            # Publish-stage failures map to the same typed write-failure
-            # path; the temp file is cleaned up below and the target is
-            # never partially written.
-            raise CoreError(
-                "daily note projection write failed"
-            ) from exc
-        published = True
+        if kind == DAILY_NOTE_PROJECTION_CREATE:
+            # Atomic no-clobber publication: the absence check above is
+            # only advisory, so the target is created by hard-linking the
+            # fsynced sibling temp file. If a competing creator
+            # materializes the target at the actual publication boundary,
+            # ``os.link`` fails with EEXIST, the racing bytes are never
+            # overwritten, and the caller takes the bounded
+            # re-read/recompute/retry path.
+            try:
+                os.link(
+                    temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd
+                )
+            except FileExistsError:
+                return None  # created at the publication boundary: race
+            except OSError as exc:
+                raise CoreError(
+                    "daily note projection write failed"
+                ) from exc
+            # The temp name still exists (second hard link to the same
+            # inode); ``published`` stays False so the finally below
+            # removes it while the target keeps the published content.
+        else:
+            try:
+                os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            except OSError as exc:
+                # Publish-stage failures map to the same typed write-failure
+                # path; the temp file is cleaned up below and the target is
+                # never partially written.
+                raise CoreError(
+                    "daily note projection write failed"
+                ) from exc
+            published = True  # os.replace consumed the temp name
         try:
             os.fsync(parent_fd)
         except OSError:
@@ -3686,10 +3724,12 @@ def apply_daily_note_projection(
     transformation is recomputed (fresh strict read + transform) and the
     second — final — attempt is made. A persistent race returns the
     typed generic ``projection_conflict`` outcome and never overwrites
-    the racing content. OSError from the write/publish syscalls is
-    mapped to a typed content-free ``CoreError`` (write-failure path).
-    ``_final_check_hook`` is an internal test seam invoked immediately
-    before each final check.
+    the racing content. Creation is no-clobber at the actual publication
+    boundary: a target created concurrently there is never overwritten
+    (the EEXIST becomes a retryable race). OSError from the
+    write/publish syscalls is mapped to a typed content-free ``CoreError``
+    (write-failure path). ``_final_check_hook`` is an internal test seam
+    invoked immediately before each final check.
     """
     if not isinstance(config, DailyNotesConfig):
         raise ValidationError(
@@ -3791,11 +3831,17 @@ def git_commit_daily_projection_targets(
 #
 # Scheduled-driven Daily Notes projection for create/update/delete. The
 # final ACTUAL scheduling state (never caller intent) drives the link
-# transitions; the W1b prepare/apply primitives and the multi-target Git
-# helper do all the work. Only ``applied_and_committed`` task outcomes
-# are projected; projection-only failures degrade the optional daily
-# result fields and never change the authoritative task state, never
-# write task files, and never use the recovery marker.
+# transitions; plans are composed by resolved target path (a transition
+# collapsing onto one daily target emits exactly one ensure); resolved
+# targets inside the task/archive folders are rejected before any task
+# side effect. The Daily Notes config is loaded and validated at most
+# once per operation, before the task side effects, and the same
+# immutable snapshot is carried through the post-task apply/commit/sync
+# (no engine-lifetime caching). The W1b prepare/apply primitives and the
+# multi-target Git helper do all the work. Only ``applied_and_committed``
+# task outcomes are projected; projection-only failures degrade the
+# optional daily result fields and never change the authoritative task
+# state, never write task files, and never use the recovery marker.
 
 # Daily link projection result states (content-free).
 DAILY_LINK_APPLIED = "applied_and_committed"
@@ -3850,6 +3896,55 @@ def _daily_link_plan(
     if old is not None:
         return [(DAILY_PROJECTION_OP_REMOVE, old)]
     return None
+
+
+def _compose_daily_link_plan_by_target(
+    vault: Path,
+    config: DailyNotesConfig,
+    steps: List[Tuple[str, str]],
+) -> List[Tuple[str, str]]:
+    """Compose planned steps by resolved target path, not merely date.
+
+    ``steps`` are date-level ensure/remove steps in plan order (ensure
+    before remove). Steps whose dates resolve to the same Daily Note
+    target (e.g. a ``YYYY-MM`` format where D1 and D2 share one monthly
+    note) collapse to the first step: a D1 -> D2 transition resolving to
+    a single target emits exactly one ensure and never an ensure
+    followed by a remove of the same link.
+    """
+    composed: List[Tuple[str, str]] = []
+    seen: set = set()
+    for operation, date in steps:
+        target = resolve_daily_note_path(vault, config, date)
+        relative = target.relative_to(vault).as_posix()
+        if relative in seen:
+            continue
+        seen.add(relative)
+        composed.append((operation, date))
+    return composed
+
+
+def _reject_daily_projection_collision(
+    profile: TaskNotesProfile, target_relative: str
+) -> None:
+    """Reject a projection target inside task/archive Markdown folders.
+
+    Task Markdown is gbrain-only; the Daily Notes direct writer must
+    never mutate TaskNotes-managed files. Any resolved daily-note target
+    inside the configured ``tasksFolder`` — or inside the active archive
+    folder (relevant only when ``moveArchivedTasks`` is true and an
+    archive folder is configured) — is rejected deterministically
+    before any side effect.
+    """
+    protected = [profile.tasks_folder]
+    if profile.move_archived_tasks and profile.archive_folder:
+        protected.append(profile.archive_folder)
+    for folder in protected:
+        if target_relative == folder or target_relative.startswith(folder + "/"):
+            raise ValidationError(
+                "daily note projection target collides with the task or "
+                "archive folder"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -3924,9 +4019,11 @@ class TaskNotesEngine:
         self.recovery_marker = self.lock_dir / RECOVERY_MARKER_NAME
         self.tz = tz
         self.daily_links_enabled = daily_links_enabled
-        # Lazily loaded/validated Daily Notes config (issue #139). Never
-        # touched while daily_links_enabled is False.
-        self._daily_config: Optional[DailyNotesConfig] = None
+        # Daily Notes config is loaded and validated at most once per
+        # projection-bearing operation, before any task side effect, and
+        # the immutable snapshot is carried through the post-task
+        # apply/commit/sync (no engine-lifetime caching). Never touched
+        # while daily_links_enabled is False.
         self._gbrain_env = _build_gbrain_env(self.gbrain_home, self.vault)
         self._git_env = _build_git_env()
         # Test seam: callable invoked after get_page/reconstruct and before
@@ -4129,53 +4226,72 @@ class TaskNotesEngine:
 
     # -- daily link projection (issue #139, W2) ---------------------------
 
-    def _daily_config_lazy(self) -> DailyNotesConfig:
-        """Lazily load and validate the Daily Notes config (enabled mode only).
+    def _load_daily_config(self) -> DailyNotesConfig:
+        """Load and validate the Daily Notes config (no engine caching).
 
-        The validated config is cached for the engine (MCP process)
-        lifetime; editing ``daily-notes.json`` takes effect only after a
-        restart (single config source, no reload/watch path).
+        Called at most once per projection-bearing operation, before any
+        task side effect; the returned immutable snapshot is carried
+        through the post-task daily apply/commit/sync. Disabled mode
+        never calls this. A config edit therefore takes effect on the
+        next projection-bearing operation.
         """
-        if self._daily_config is None:
-            self._daily_config = load_daily_notes_config(self.vault)
-        return self._daily_config
+        return load_daily_notes_config(self.vault)
 
     def _prepare_daily_link_projections(
         self,
+        profile: TaskNotesProfile,
+        config: DailyNotesConfig,
         steps: List[Tuple[str, str]],
         slug: str,
         title: str,
     ) -> List[DailyNoteProjection]:
         """Pre-compute every needed projection target (no side effects).
 
-        Runs the W1b preparation (strict no-follow reads, structural
-        ``## Tasks`` validation, template rendering, frontmatter
-        normalization) so a deterministic failure raises BEFORE any task
-        or gbrain side effect.
+        Every resolved target is first rejected when it falls inside the
+        configured task folder or the active archive folder, so the
+        direct writer can never mutate task/archive Markdown. Runs the
+        W1b preparation (strict no-follow reads, structural ``## Tasks``
+        validation, template rendering for missing notes only) against
+        the operation's single validated ``config`` snapshot so a
+        deterministic failure raises BEFORE any task or gbrain side
+        effect.
         """
-        config = self._daily_config_lazy()
-        return [
-            prepare_daily_note_projection(
-                self.vault, config, operation, date, slug=slug, title=title
+        if not isinstance(config, DailyNotesConfig):
+            raise ValidationError(
+                "daily note projection requires a validated DailyNotesConfig"
             )
-            for operation, date in steps
-        ]
+        projections: List[DailyNoteProjection] = []
+        for operation, date in steps:
+            target = resolve_daily_note_path(self.vault, config, date)
+            _reject_daily_projection_collision(
+                profile, target.relative_to(self.vault).as_posix()
+            )
+            projections.append(
+                prepare_daily_note_projection(
+                    self.vault, config, operation, date, slug=slug, title=title
+                )
+            )
+        return projections
 
     def _run_daily_link_projection(
         self,
         profile: TaskNotesProfile,
+        config: DailyNotesConfig,
         projections: List[DailyNoteProjection],
     ) -> Tuple[str, Optional[str], Optional[List[str]]]:
         """Apply prepared projections, commit changed targets, sync (lock held).
 
-        Steps run in plan order (ensure before remove); the first failure
-        stops later steps so a failed ensure never loses the link. Changed
-        targets are committed with the W1 multi-target helper and synced
-        with the native source-scoped incremental sync. All failures are
-        content-free and never touch the recovery marker. Returns
+        Uses the same validated ``config`` snapshot that prevalidation
+        loaded before the task side effects. Steps run in plan order
+        (ensure before remove); the first failure stops later steps so a
+        failed ensure never loses the link. Every projection target is
+        re-checked against the task/archive folders immediately before
+        the direct write. Changed targets are committed with the W1
+        multi-target helper and synced with the native source-scoped
+        incremental sync. All failures are content-free and never touch
+        the recovery marker. Returns
         ``(daily_link_state, daily_link_detail, daily_link_dates)``.
         """
-        config = self._daily_config_lazy()
         dates: List[str] = [projection.date for projection in projections]
         changed: List[Path] = []
         failure: Optional[str] = None
@@ -4183,6 +4299,12 @@ class TaskNotesEngine:
             if failure is not None:
                 break
             try:
+                # Last-gate collision check: the direct writer must never
+                # mutate task/archive Markdown (belt-and-braces behind the
+                # prevalidation rejection).
+                _reject_daily_projection_collision(
+                    profile, projection.target_relative
+                )
                 outcome = apply_daily_note_projection(
                     self.vault, config, projection
                 )
@@ -4243,6 +4365,7 @@ class TaskNotesEngine:
         profile: TaskNotesProfile,
         result: MutationResult,
         projections: Optional[List[DailyNoteProjection]],
+        config: Optional[DailyNotesConfig],
     ) -> MutationResult:
         """Attach Daily Notes projection outcomes to a finished mutation.
 
@@ -4250,7 +4373,9 @@ class TaskNotesEngine:
         Projections run ONLY for ``applied_and_committed`` task outcomes;
         any other outcome keeps the task result authoritative and untouched.
         When enabled and no transition is required, reports
-        ``not_applicable``.
+        ``not_applicable``. ``config`` is the immutable snapshot loaded
+        once per operation before the task side effects; it is carried
+        unchanged into the post-task apply/commit/sync.
         """
         if not self.daily_links_enabled:
             return result
@@ -4259,7 +4384,13 @@ class TaskNotesEngine:
         if projections is None:
             result.daily_link_state = DAILY_LINK_NOT_APPLICABLE
             return result
-        state, detail, dates = self._run_daily_link_projection(profile, projections)
+        if config is None:
+            raise CoreError(
+                "daily link projection config snapshot missing"
+            )
+        state, detail, dates = self._run_daily_link_projection(
+            profile, config, projections
+        )
         result.daily_link_state = state
         result.daily_link_detail = detail
         result.daily_link_dates = dates
@@ -4346,12 +4477,21 @@ class TaskNotesEngine:
             expected_document = semantic_from_markdown(markdown, profile)
             gbrain_slug = resolve_gbrain_slug(profile, slug)
             # Daily link prevalidation (issue #139 W2): enabled mode with a
-            # scheduled create pre-computes the ensure target BEFORE any
-            # task side effect; a deterministic failure raises here.
+            # scheduled create loads and validates the Daily Notes config
+            # exactly once, resolves the ensure target, and pre-computes
+            # the projection BEFORE any task side effect; a deterministic
+            # failure raises here. The snapshot is carried through the
+            # post-task apply/commit/sync.
             daily_projections: Optional[List[DailyNoteProjection]] = None
+            daily_config: Optional[DailyNotesConfig] = None
             if self.daily_links_enabled and scheduled_v is not None:
+                daily_config = self._load_daily_config()
+                date_steps = _daily_link_plan(None, scheduled_v)
+                steps = _compose_daily_link_plan_by_target(
+                    self.vault, daily_config, date_steps or []
+                )
                 daily_projections = self._prepare_daily_link_projections(
-                    [(DAILY_PROJECTION_OP_ENSURE, scheduled_v)], slug, title
+                    profile, daily_config, steps, slug, title
                 )
             # CAPTURE-STARTED BOUNDARY: from here on, always return a MutationResult.
             try:
@@ -4368,7 +4508,9 @@ class TaskNotesEngine:
                 capture_result,
                 expected_document=expected_document,
             )
-            return self._finish_with_daily_links(profile, result, daily_projections)
+            return self._finish_with_daily_links(
+                profile, result, daily_projections, daily_config
+            )
 
     def get(self, slug: str) -> Dict[str, Any]:
         """Return one task by slug. Takes the shared lock (invokes gbrain)."""
@@ -4567,15 +4709,24 @@ class TaskNotesEngine:
             # scheduling state (current page state + applied updates,
             # never caller intent). Only updates that actually touch the
             # scheduled field drive a projection; a non-scheduling update
-            # projects nothing. Pre-computed before any task side effect;
-            # a deterministic failure raises here.
+            # projects nothing. The Daily Notes config is loaded and
+            # validated exactly once, BEFORE any task side effect, and
+            # the plan is composed by resolved target path (R4) so a
+            # transition collapsing onto one daily target emits exactly
+            # one ensure. Pre-computed before any task side effect; a
+            # deterministic failure raises here.
             daily_projections_update: Optional[List[DailyNoteProjection]] = None
+            daily_config_update: Optional[DailyNotesConfig] = None
             if self.daily_links_enabled and "scheduled" in updates:
                 final_scheduled = _daily_scheduled_date(updates["scheduled"])
-                steps = _daily_link_plan(current_scheduled, final_scheduled)
-                if steps is not None:
+                date_steps = _daily_link_plan(current_scheduled, final_scheduled)
+                if date_steps is not None:
+                    daily_config_update = self._load_daily_config()
+                    steps = _compose_daily_link_plan_by_target(
+                        self.vault, daily_config_update, date_steps
+                    )
                     daily_projections_update = self._prepare_daily_link_projections(
-                        steps, slug, decoded["title"]
+                        profile, daily_config_update, steps, slug, decoded["title"]
                     )
             markdown = reconstruct_markdown(
                 page, profile, updates, body_override=body_v
@@ -4604,7 +4755,7 @@ class TaskNotesEngine:
                 expected_document=expected_document,
             )
             return self._finish_with_daily_links(
-                profile, result, daily_projections_update
+                profile, result, daily_projections_update, daily_config_update
             )
 
     def complete(
@@ -4765,10 +4916,12 @@ class TaskNotesEngine:
 
             # Daily link prevalidation (issue #139 W2, D13 ordering): read
             # and decode the CURRENT page to retain the actual scheduled
-            # state and title, then pre-compute the removal projection —
-            # BEFORE the soft-delete gate. A deterministic failure raises
-            # here: the task and its daily link stay untouched.
+            # state and title, then load the Daily Notes config exactly
+            # once and pre-compute the removal projection — BEFORE the
+            # soft-delete gate. A deterministic failure raises here: the
+            # task and its daily link stay untouched.
             daily_projections_delete: Optional[List[DailyNoteProjection]] = None
+            daily_config_delete: Optional[DailyNotesConfig] = None
             if self.daily_links_enabled:
                 page = gbrain_get_page(
                     self.gbrain_bin, self._gbrain_env,
@@ -4779,8 +4932,15 @@ class TaskNotesEngine:
                     decoded_delete["frontmatter"].get(profile.mappings["scheduled"])
                 )
                 if old_scheduled is not None:
+                    daily_config_delete = self._load_daily_config()
+                    date_steps = _daily_link_plan(old_scheduled, None)
+                    steps = _compose_daily_link_plan_by_target(
+                        self.vault, daily_config_delete, date_steps or []
+                    )
                     daily_projections_delete = self._prepare_daily_link_projections(
-                        [(DAILY_PROJECTION_OP_REMOVE, old_scheduled)],
+                        profile,
+                        daily_config_delete,
+                        steps,
                         slug,
                         decoded_delete["title"],
                     )
@@ -4840,7 +5000,7 @@ class TaskNotesEngine:
             # the task outcome stays authoritative; the returned
             # commit_id remains the TASK deletion commit.
             return self._finish_with_daily_links(
-                profile, result, daily_projections_delete
+                profile, result, daily_projections_delete, daily_config_delete
             )
 
     def _validate_tag_value(self, tag: Any) -> str:

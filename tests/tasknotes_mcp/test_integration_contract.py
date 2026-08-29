@@ -453,6 +453,23 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
         self.assertIn("`format`", text)
         self.assertIn("`template`", text)
         self.assertIn("never read as a fallback", text)
+        # R1 (issue #140): config freshness is per-transaction — the
+        # config is read and strictly validated exactly once per
+        # projection-bearing task transaction, before task side effects,
+        # and the immutable snapshot carries through apply/commit/sync.
+        # No engine/MCP lifetime cache and no restart-to-apply claim.
+        self.assertIn("no engine or MCP lifetime cache", prose)
+        self.assertIn("exactly once, before any task side effect", prose)
+        self.assertIn("immutable snapshot", prose)
+        self.assertIn("next projection-bearing task operation", prose)
+        self.assertNotIn("lifetime of the TaskNotes MCP process", prose)
+        self.assertNotIn("only after an MCP restart", prose)
+        # R5 (issue #140): projection targets under the configured
+        # `tasksFolder` or the active archive folder are rejected before
+        # any task side effect (task Markdown is gbrain-only).
+        self.assertIn("`tasksFolder`", text)
+        self.assertIn("`archiveFolder`", text)
+        self.assertIn("active archive folder", prose)
         # Date-format subset: supported tokens, safe separators, rejection.
         self.assertIn("### Supported date-format subset", text)
         self.assertIn("`YYYY YY MM M DD D`", text)
@@ -467,6 +484,14 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
         self.assertIn("### Existing-note structural contract", text)
         self.assertIn("exactly one level-2 `## Tasks` heading", prose)
         self.assertIn("duplicated `## Tasks` section fails closed", prose)
+        # R2 (issue #140): existing notes retain all bytes outside the
+        # `## Tasks` transformation; frontmatter is never normalized or
+        # reserialized, and the null/empty date/title fill is
+        # creation-only.
+        self.assertIn(
+            "existing frontmatter is never normalized or reserialized", prose
+        )
+        self.assertIn("only when a missing note is created", prose)
         # Canonical link semantics.
         self.assertIn("### Canonical link semantics", text)
         self.assertIn("- [[<task-slug>|<task-title>]]", text)
@@ -478,10 +503,22 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
         self.assertIn("link retained while `scheduled` remains", text)
         self.assertIn("no future links pre-created", text)
         self.assertIn("never from caller intent alone", prose)
+        # R4 (issue #140): plans are composed by resolved target path —
+        # dates mapping to the same note perform one ensure, never
+        # ensure+remove of the same link.
+        self.assertIn("composed by resolved target path", prose)
+        self.assertIn(
+            "never an ensure followed by a remove of the same link", prose
+        )
         # Concurrency/atomicity/Git/reconciliation.
         self.assertIn("### Concurrency, atomicity, Git, and reconciliation", text)
         self.assertIn("two attempts total", prose)
         self.assertIn("instead of overwriting concurrent edits", prose)
+        # R3 (issue #140): missing-note creation publishes atomically
+        # with no-clobber semantics; a competing creator is never
+        # overwritten and the bounded retry follows.
+        self.assertIn("no-clobber", prose)
+        self.assertIn("is never overwritten", prose)
         self.assertIn("atomic `os.replace`", prose)
         self.assertIn("tasknotes-mcp: daily note projection", text)
         self.assertIn("staging only the affected Daily Note paths", prose)
@@ -518,6 +555,19 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
         self.assertIn("wrapper nesting", prose)
         self.assertIn("daily-notes.json", text)
         self.assertIn("Periodic Notes config is never read", prose)
+        # R1 (issue #140): per-transaction config read/validation — no
+        # engine/MCP lifetime cache and no restart-to-apply claim.
+        self.assertIn("no engine or MCP lifetime cache", prose)
+        self.assertIn("exactly once, before any task side effect", prose)
+        self.assertIn("immutable snapshot", prose)
+        self.assertIn("next projection-bearing task operation", prose)
+        self.assertNotIn("lifetime of the TaskNotes MCP process", prose)
+        self.assertNotIn("only after an MCP restart", prose)
+        # R5 (issue #140): task/archive folder targets are rejected
+        # before any task side effect (task Markdown is gbrain-only).
+        self.assertIn("`tasksFolder`", text)
+        self.assertIn("`archiveFolder`", text)
+        self.assertIn("active archive folder", prose)
         self.assertIn("`YYYY` (4-digit year)", prose)
         self.assertIn("`MM`/`M`", text)
         self.assertIn("`DD`/`D`", text)
@@ -527,10 +577,24 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
         self.assertIn("Templater/JavaScript is never executed", prose)
         self.assertIn("top-level `date` frontmatter key", prose)
         self.assertIn("exactly one `## Tasks` level-2 section", prose)
+        # R2 (issue #140): byte preservation outside the section and
+        # creation-only frontmatter fill.
+        self.assertIn(
+            "existing frontmatter is never normalized or reserialized", prose
+        )
+        self.assertIn("only when a missing note is created", prose)
         self.assertIn("- [[<task-slug>|<task-title>]]", text)
         self.assertIn("add D2 **first**, then remove D1", text)
         self.assertIn("remove after **verified** deletion", text)
+        # R4 (issue #140): plan composition by resolved target path.
+        self.assertIn("composed by resolved target path", prose)
+        self.assertIn(
+            "never an ensure followed by a remove of the same link", prose
+        )
         self.assertIn("two attempts total", prose)
+        # R3 (issue #140): atomic no-clobber creation publication.
+        self.assertIn("no-clobber", prose)
+        self.assertIn("is never overwritten", prose)
         self.assertIn("`os.replace`", text)
         self.assertIn("tasknotes-mcp: daily note projection", text)
         self.assertIn("at most 16 targets per commit", prose)
@@ -667,6 +731,76 @@ class DailyProjectionCoreContract(unittest.TestCase):
         self.assertEqual(plan("2026-01-01", None), [(remove, "2026-01-01")])
         # Backlog/week: no projection at all.
         self.assertIsNone(plan(None, None))
+
+    def test_transition_plan_composes_by_resolved_target_path(self) -> None:
+        """R4 (issue #140): date-level plans are composed by resolved
+        target path — dates mapping to the same Daily Note collapse to
+        the first step, so a reschedule whose old and new dates share one
+        note emits exactly one ensure and never an ensure followed by a
+        remove of the same link."""
+        compose = self.core._compose_daily_link_plan_by_target
+        ensure = self.core.DAILY_PROJECTION_OP_ENSURE
+        remove = self.core.DAILY_PROJECTION_OP_REMOVE
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = Path(tmp)
+            monthly = self.core.DailyNotesConfig(folder="", format="YYYY-MM")
+            # Same resolved target: single ensure, no remove of the link.
+            self.assertEqual(
+                compose(
+                    vault,
+                    monthly,
+                    [(ensure, "2026-01-05"), (remove, "2026-01-20")],
+                ),
+                [(ensure, "2026-01-05")],
+            )
+            # Distinct resolved targets: both steps kept in plan order.
+            self.assertEqual(
+                compose(
+                    vault,
+                    monthly,
+                    [(ensure, "2026-01-05"), (remove, "2026-02-20")],
+                ),
+                [(ensure, "2026-01-05"), (remove, "2026-02-20")],
+            )
+
+    def test_projection_targets_in_task_or_archive_folders_rejected(self) -> None:
+        """R5 (issue #140): a resolved Daily Note target under the
+        configured `tasksFolder` — or the active archive folder — is
+        rejected before any side effect; the archive folder is protected
+        only while `moveArchivedTasks` is true and the folder is set."""
+        def profile(**overrides: object) -> object:
+            values: dict = dict(
+                version="4.11.1",
+                tasks_folder="Tasks",
+                task_tag="task",
+                archive_tag="archive",
+                statuses=("open", "done"),
+                completed_status="done",
+                default_status="open",
+                priorities=("high", "normal"),
+                default_priority="normal",
+                mappings={"title": "title"},
+                brain_repo="/repo",
+                profile_hash="hash",
+                source_id="source",
+                raw_manifest={},
+                raw_data={},
+            )
+            values.update(overrides)
+            return self.core.TaskNotesProfile(**values)
+
+        reject = self.core._reject_daily_projection_collision
+        active = profile(move_archived_tasks=True, archive_folder="Archive")
+        with self.assertRaises(self.core.ValidationError):
+            reject(active, "Tasks/2026-01-05.md")
+        with self.assertRaises(self.core.ValidationError):
+            reject(active, "Archive/2026-01-05.md")
+        with self.assertRaises(self.core.ValidationError):
+            reject(active, "Tasks")
+        # Inactive archive folder is not protected; unrelated paths pass.
+        inactive = profile(move_archived_tasks=False, archive_folder="Archive")
+        reject(inactive, "Archive/2026-01-05.md")
+        reject(inactive, "Journal/2026-01-05.md")
 
     def test_format_subset_matches_documented_tokens(self) -> None:
         self.assertEqual(

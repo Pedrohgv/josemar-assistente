@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import errno
 import importlib.util
 import json
 import os
@@ -4083,18 +4084,70 @@ class DailyProjectionPrepareTests(unittest.TestCase):
         self.assertTrue(content.endswith("## Notes\nkeep me\n"))
         self.assertIn("- [[task-1|Task 1]]\n## Notes", content)
 
-    def test_ensure_existing_note_normalizes_empty_frontmatter(self) -> None:
-        _write_note(
-            self.vault / "journal" / "2026-08-28.md",
-            "---\ndate: \"\"\n---\n## Tasks\n",
-        )
+    def test_existing_note_empty_frontmatter_value_not_normalized(self) -> None:
+        # R2 (issue #140): existing notes are never normalized or
+        # reserialized; the empty ``date`` value is preserved verbatim.
+        original = "---\ndate: \"\"\n---\n## Tasks\n"
+        _write_note(self.vault / "journal" / "2026-08-28.md", original)
         proj = self.core.prepare_daily_note_projection(
             self.vault, self.cfg, "ensure", "2026-08-28",
             slug="task-1", title="Task 1",
         )
         self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_REPLACE)
-        fm, _body = self.core._parse_frontmatter(proj.content.decode("utf-8"))
-        self.assertEqual(fm["date"], "2026-08-28")
+        content = proj.content.decode("utf-8")
+        self.assertTrue(content.startswith('---\ndate: ""\n---\n'))
+        fm, _body = self.core._parse_frontmatter(content)
+        self.assertEqual(fm["date"], "")
+
+    def test_existing_note_frontmatter_bytes_preserved_verbatim(self) -> None:
+        # R2 (issue #140): with null/empty identity fields, unrelated
+        # keys, comments, and hand formatting, every byte outside the
+        # '## Tasks' section is byte-identical after projection.
+        original = (
+            "---\n"
+            "# editor formatting must survive\n"
+            "title: \n"
+            "date: ~\n"
+            "layout: compact\n"
+            "custom_key: keep me\n"
+            "tags:\n"
+            "  - daily\n"
+            "---\n"
+            "\n"
+            "intro prose\n"
+            "\n"
+            "## Tasks\n"
+            "- [[other|O]]\n"
+            "\n"
+            "## Notes\n"
+            "keep   this\n"
+        )
+        note = self.vault / "journal" / "2026-08-28.md"
+        _write_note(note, original)
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="Task 1",
+        )
+        self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_REPLACE)
+        content = proj.content.decode("utf-8")
+        start, end = self.core.find_tasks_section(original)
+        # Bytes outside the '## Tasks' section are byte-identical: the
+        # only change is the canonical link line inserted at the section
+        # end; prefix, frontmatter, and suffix are untouched.
+        self.assertEqual(content[:start], original[:start])
+        self.assertEqual(content[:end], original[:end])
+        self.assertEqual(content[end:], "- [[task-1|Task 1]]\n" + original[end:])
+        # No reserialization: comment, empty title, null date survive.
+        self.assertIn("# editor formatting must survive", content)
+        self.assertIn("title: \n", content)
+        self.assertIn("date: ~\n", content)
+        # The on-disk bytes match the same contract after apply.
+        outcome = self.core.apply_daily_note_projection(self.vault, self.cfg, proj)
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_APPLIED)
+        on_disk = note.read_text(encoding="utf-8")
+        self.assertEqual(on_disk[:start], original[:start])
+        self.assertEqual(on_disk[:end], original[:end])
+        self.assertEqual(on_disk[end:], "- [[task-1|Task 1]]\n" + original[end:])
 
     def test_ensure_canonical_note_is_noop(self) -> None:
         _write_note(
@@ -4465,6 +4518,60 @@ class DailyProjectionRaceTests(unittest.TestCase):
         self.assertIn("# Mine", content)
         self.assertIn("- [[task-1|New]]", content)
 
+    def test_create_race_at_publication_boundary_never_clobbers(self) -> None:
+        # R1 (issue #140): a competing creator that materializes the
+        # target AFTER the final absence check but BEFORE publication is
+        # never overwritten; its bytes survive and the intended link
+        # outcome is recomputed safely on the retry.
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="New",
+        )
+        competing = "# Mine\n\n## Tasks\n- [[task-1|User]]\n"
+        fired = {"n": 0}
+        real_check = self.core._daily_entry_exists
+
+        def boundary_race(parent_fd: int, name: str) -> bool:
+            if fired["n"] == 0:
+                fired["n"] += 1
+                _write_note(self._note(), competing)
+                return False  # stale absence answer past the check
+            return real_check(parent_fd, name)
+
+        with mock.patch.object(self.core, "_daily_entry_exists", boundary_race):
+            outcome = self.core.apply_daily_note_projection(
+                self.vault, self.cfg, proj
+            )
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_APPLIED)
+        self.assertEqual(outcome.attempts, 2)
+        self.assertFalse(outcome.created)  # retry was a replace, not a clobber
+        content = self._note().read_text(encoding="utf-8")
+        self.assertIn("# Mine", content)  # competing bytes survived
+        self.assertIn("- [[task-1|New]]", content)  # link outcome recomputed
+
+    def test_persistent_publication_eexist_conflicts_without_write(self) -> None:
+        # R1 (issue #140): a persistent EEXIST at the publication
+        # boundary exhausts the bounded retries into a conflict and never
+        # writes (or clobbers) anything.
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28",
+            slug="task-1", title="New",
+        )
+
+        def eexist_link(src, dst, **kwargs):
+            raise FileExistsError(errno.EEXIST, "injected publication race")
+
+        with mock.patch.object(os, "link", eexist_link):
+            outcome = self.core.apply_daily_note_projection(
+                self.vault, self.cfg, proj
+            )
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_CONFLICT)
+        self.assertEqual(outcome.attempts, self.core.DAILY_PROJECTION_MAX_ATTEMPTS)
+        self.assertFalse(self._note().exists())
+        self.assertEqual(
+            [p.name for p in (self.vault / "journal").iterdir()], []
+        )
+
     def test_persistent_create_race_conflicts_without_overwrite(self) -> None:
         proj = self.core.prepare_daily_note_projection(
             self.vault, self.cfg, "ensure", "2026-08-28",
@@ -4827,6 +4934,29 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertEqual(content.count("- [[t1|My Task]]"), 1)
         self.assertEqual(self._git("status", "--porcelain").strip(), "")
 
+    def test_same_resolved_target_transition_emits_single_ensure(self) -> None:
+        # R4 (issue #140): plans compose by resolved target path. With a
+        # monthly format, D1 -> D2 resolves to the same note, so the
+        # transition emits exactly one ensure and never an ensure
+        # followed by a remove of the same link.
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertTrue(self._note(_D1).exists())
+        # The format change between operations is also the R3 freshness
+        # regression: the second operation must use the new format.
+        _write_daily_config(
+            self.vault, {"folder": "journal", "format": "YYYY-MM"}
+        )
+        result = self.engine.update("t1", scheduled=_D2, body="b2")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        # Exactly one projection step (the ensure); no paired remove.
+        self.assertEqual(result.daily_link_dates, [_D2])
+        monthly = self.vault / "journal" / "2026-08.md"
+        self.assertTrue(monthly.exists())
+        content = monthly.read_text(encoding="utf-8")
+        self.assertEqual(content.count("- [[t1|My Task]]"), 1)
+        self._no_recovery_marker()
+
     def test_update_non_scheduling_does_not_project(self) -> None:
         self.engine.create("t1", "My Task", scheduled=_D1, body="b")
         before = self._note(_D1).stat().st_mtime_ns
@@ -4952,11 +5082,13 @@ class DailyLinkIntegrationTests(unittest.TestCase):
 
     # -- OSError containment after task commit (submit-gating remediation) ---
 
-    def test_writer_oserror_on_replace_maps_to_write_failed(self) -> None:
-        def failing_replace(src, dst, **kwargs):
-            raise OSError(28, "injected replace failure")
+    def test_writer_oserror_on_create_publish_maps_to_write_failed(self) -> None:
+        # R1: creation publishes via atomic no-clobber os.link; an OSError
+        # there maps to the typed write-failure path without side effects.
+        def failing_link(src, dst, **kwargs):
+            raise OSError(28, "injected publish failure")
 
-        with mock.patch.object(os, "replace", failing_replace):
+        with mock.patch.object(os, "link", failing_link):
             result = self.engine.create("t1", "My Task", scheduled=_D1, body="b")
         self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
         self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_WRITE_FAILED)
@@ -4969,6 +5101,36 @@ class DailyLinkIntegrationTests(unittest.TestCase):
             [p.name for p in (self.vault / "journal").iterdir()], []
         )
         self.assertTrue((self.vault / "tasks" / "t1.md").exists())
+        self._no_recovery_marker()
+
+    def test_writer_oserror_on_replace_maps_to_write_failed(self) -> None:
+        # Existing note WITHOUT the link: the ensure takes the replace
+        # path (fingerprint-verified os.replace); an OSError there maps
+        # to the typed write-failure path without partial writes.
+        self.engine.create("t1", "My Task", body="b")
+        _write_note(
+            self._note(_D1), "# Day\n\n## Tasks\n- [[other|O]]\n"
+        )
+        subprocess.run(["git", "add", "-A"], cwd=str(self.vault), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "note fixture"], cwd=str(self.vault), check=True, capture_output=True)
+
+        def failing_replace(src, dst, **kwargs):
+            raise OSError(28, "injected replace failure")
+
+        with mock.patch.object(os, "replace", failing_replace):
+            result = self.engine.update("t1", scheduled=_D1, body="b2")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_WRITE_FAILED)
+        self.assertEqual(
+            result.daily_link_detail, "daily note projection write failed"
+        )
+        self.assertEqual(result.daily_link_dates, [_D1])
+        content = self._note(_D1).read_text(encoding="utf-8")
+        self.assertNotIn("[[t1", content)  # never partially written
+        self.assertEqual(
+            [p.name for p in (self.vault / "journal").iterdir()],
+            [f"{_D1}.md"],
+        )
         self._no_recovery_marker()
 
     def test_writer_oserror_on_temp_write_maps_to_write_failed(self) -> None:
@@ -4987,9 +5149,13 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         )
         self._no_recovery_marker()
 
-    # -- config freshness (lazy load, cached for engine/process lifetime) -----
+    # -- config freshness (loaded once per operation, never cached) ---------
 
-    def test_daily_config_cached_for_engine_lifetime(self) -> None:
+    def test_daily_config_reloaded_per_operation_uses_new_folder(self) -> None:
+        # R3 (issue #140): no engine-lifetime caching; the config is
+        # loaded and validated exactly once per projection-bearing
+        # operation, so a mid-life config change is picked up by the
+        # next operation.
         read_counter = {"n": 0}
         real_load = self.core.load_daily_notes_config
 
@@ -5000,16 +5166,47 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         with mock.patch.object(self.core, "load_daily_notes_config", counting_load):
             self.engine.create("t1", "My Task", scheduled=_D1, body="b")
             self.assertEqual(read_counter["n"], 1)
-            # Mid-life config change is ignored until an MCP restart.
             _write_daily_config(self.vault, {"folder": "journal2"})
             result = self.engine.update("t1", scheduled=_D2, body="b2")
         self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
         self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
         self.assertEqual(result.daily_link_dates, [_D2, _D1])
-        # The projection used the cached config's folder, not the new one.
-        self.assertTrue((self.vault / "journal" / f"{_D2}.md").exists())
-        self.assertFalse((self.vault / "journal2").exists())
-        self.assertEqual(read_counter["n"], 1)
+        # The second operation resolved its ensure target with the NEW
+        # config folder; the removal step resolved with the same new
+        # snapshot (missing target there => idempotent no-op).
+        new_note = self.vault / "journal2" / f"{_D2}.md"
+        self.assertTrue(new_note.exists())
+        self.assertIn("- [[t1|My Task]]", new_note.read_text(encoding="utf-8"))
+        self.assertFalse((self.vault / "journal2" / f"{_D1}.md").exists())
+        self.assertEqual(read_counter["n"], 2)
+        self.assertEqual(self._git("status", "--porcelain").strip(), "")
+        self._no_recovery_marker()
+
+    def test_daily_config_template_change_picked_up_between_operations(self) -> None:
+        # R3 (issue #140): the second operation uses the new config's
+        # template, not a stale engine-cached one.
+        (self.vault / "templates").mkdir()
+        template = self.vault / "templates" / "daily.md"
+        template.write_text(
+            "---\ndate: \ntitle: \nmarker: v1\n---\n# {{date}}\n\n## Tasks\n",
+            encoding="utf-8",
+        )
+        _write_daily_config(
+            self.vault, {"folder": "journal", "template": "templates/daily.md"}
+        )
+        self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertIn("marker: v1", self._note(_D1).read_text(encoding="utf-8"))
+        template.write_text(
+            "---\ndate: \ntitle: \nmarker: v2\n---\n# {{date}}\n\n## Tasks\n",
+            encoding="utf-8",
+        )
+        result = self.engine.create("t2", "Other Task", scheduled=_D2, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        content2 = self._note(_D2).read_text(encoding="utf-8")
+        self.assertIn("marker: v2", content2)
+        self.assertIn("- [[t2|Other Task]]", content2)
+        self._no_recovery_marker()
 
     # -- D1 -> D2 add-before-remove degradation -------------------------------
 
@@ -5154,6 +5351,217 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertFalse((self.vault / "tasks" / "t1.md").exists())
         self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
         self._no_recovery_marker()
+
+
+@unittest.skipUnless(_has_yaml(), "PyYAML required")
+class DailyLinkPlanTargetComposeTests(unittest.TestCase):
+    """R4 (issue #140): plans compose by resolved target path."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_plan_compose_"))
+        self.vault = _make_plain_vault(self.tmpdir)
+        self.daily_cfg = self.core.DailyNotesConfig(folder="journal")
+        self.monthly_cfg = self.core.DailyNotesConfig(
+            folder="journal", format="YYYY-MM"
+        )
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_same_resolved_target_collapses_to_single_ensure(self) -> None:
+        steps = self.core._daily_link_plan(_D1, _D2)
+        composed = self.core._compose_daily_link_plan_by_target(
+            self.vault, self.monthly_cfg, steps
+        )
+        self.assertEqual(
+            composed, [(self.core.DAILY_PROJECTION_OP_ENSURE, _D2)]
+        )
+
+    def test_distinct_targets_keep_ensure_then_remove(self) -> None:
+        steps = self.core._daily_link_plan(_D1, _D2)
+        composed = self.core._compose_daily_link_plan_by_target(
+            self.vault, self.daily_cfg, steps
+        )
+        self.assertEqual(
+            composed,
+            [
+                (self.core.DAILY_PROJECTION_OP_ENSURE, _D2),
+                (self.core.DAILY_PROJECTION_OP_REMOVE, _D1),
+            ],
+        )
+
+    def test_single_step_plans_pass_through(self) -> None:
+        ensure_only = self.core._daily_link_plan(None, _D1)
+        self.assertEqual(
+            self.core._compose_daily_link_plan_by_target(
+                self.vault, self.daily_cfg, ensure_only
+            ),
+            ensure_only,
+        )
+        remove_only = self.core._daily_link_plan(_D1, None)
+        self.assertEqual(
+            self.core._compose_daily_link_plan_by_target(
+                self.vault, self.daily_cfg, remove_only
+            ),
+            remove_only,
+        )
+
+
+@unittest.skipUnless(_has_yaml(), "PyYAML required")
+class DailyProjectionCollisionTests(unittest.TestCase):
+    """R5 (issue #140): resolved projection targets inside the configured
+    tasks folder — or the active archive folder — are rejected
+    deterministically before any task side effect, so the direct writer
+    can never mutate task/archive Markdown."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_daily_collision_"))
+        self.collision_msg = (
+            "daily note projection target collides with the task or "
+            "archive folder"
+        )
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _engine(
+        self,
+        name: str,
+        *,
+        profile_data: Optional[dict] = None,
+        daily_folder: str = "tasks",
+    ):
+        sub = self.tmpdir / name
+        sub.mkdir()
+        vault = _make_vault(sub, name)
+        if profile_data is not None:
+            _write_profile(vault, data=profile_data)
+        _write_daily_config(vault, {"folder": daily_folder})
+        behavior = {"vault": str(vault)}
+        gbrain_bin = _write_fake_gbrain(sub, behavior)
+        gbrain_home = sub / "gbrain_home"
+        gbrain_home.mkdir()
+        engine = self.core.TaskNotesEngine(
+            vault=vault,
+            gbrain_bin=str(gbrain_bin),
+            gbrain_home=gbrain_home,
+            lock_dir=sub / "locks",
+            lock_timeout=2.0,
+            tz="UTC",
+            daily_links_enabled=True,
+        )
+        return engine, vault, sub
+
+    def _capture_calls(self, sub: Path) -> List[dict]:
+        return [c for c in _read_calls(sub) if c["argv"][0] == "capture"]
+
+    def test_target_inside_tasks_folder_rejected_before_side_effects(self) -> None:
+        engine, vault, sub = self._engine("inside_tasks", daily_folder="tasks")
+        with self.assertRaises(self.core.ValidationError) as ctx:
+            engine.create("t1", "My Task", scheduled=_D2, body="b")
+        self.assertEqual(str(ctx.exception), self.collision_msg)
+        # Zero task side effects: no task file, no capture, no daily note.
+        self.assertFalse((vault / "tasks" / "t1.md").exists())
+        self.assertFalse((vault / "tasks" / f"{_D2}.md").exists())
+        self.assertEqual(self._capture_calls(sub), [])
+
+    def test_collision_with_existing_task_markdown_preserves_bytes(self) -> None:
+        # An existing task file matches the resolved daily target and
+        # even contains a '## Tasks' section: the rejection must make it
+        # impossible for the direct writer to clobber it.
+        engine, vault, sub = self._engine("existing_task", daily_folder="tasks")
+        target = vault / "tasks" / f"{_D2}.md"
+        task_markdown = (
+            "---\n"
+            "type: note\n"
+            'title: "2026-08-28"\n'
+            "status: open\n"
+            "priority: normal\n"
+            "tags:\n"
+            "  - task\n"
+            "---\n"
+            "Work notes\n"
+            "\n"
+            "## Tasks\n"
+            "- inline item\n"
+        )
+        target.write_text(task_markdown, encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(vault), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "task fixture"], cwd=str(vault), check=True, capture_output=True)
+        with self.assertRaises(self.core.ValidationError) as ctx:
+            engine.create("t1", "My Task", scheduled=_D2, body="b")
+        self.assertEqual(str(ctx.exception), self.collision_msg)
+        # The task Markdown is byte-identical; nothing else was written.
+        self.assertEqual(target.read_text(encoding="utf-8"), task_markdown)
+        self.assertFalse((vault / "tasks" / "t1.md").exists())
+        self.assertEqual(self._capture_calls(sub), [])
+
+    def test_archive_folder_collision_only_when_active(self) -> None:
+        # Inactive archive (moveArchivedTasks false): the archive folder
+        # is irrelevant, so a top-level "archive" daily folder is allowed.
+        engine, vault, _ = self._engine("archive_inactive", daily_folder="archive")
+        result = engine.create("t1", "My Task", scheduled=_D2, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        self.assertTrue((vault / "archive" / f"{_D2}.md").exists())
+        # Active archive (moveArchivedTasks true + configured folder):
+        # the same daily folder now collides and is rejected.
+        active_data = dict(REAL_PROFILE_DATA)
+        active_data["moveArchivedTasks"] = True
+        active_data["archiveFolder"] = "archive"
+        engine2, vault2, sub2 = self._engine(
+            "archive_active", profile_data=active_data, daily_folder="archive"
+        )
+        with self.assertRaises(self.core.ValidationError) as ctx:
+            engine2.create("t1", "My Task", scheduled=_D2, body="b")
+        self.assertEqual(str(ctx.exception), self.collision_msg)
+        self.assertFalse((vault2 / "archive").exists())
+        self.assertEqual(self._capture_calls(sub2), [])
+
+    def test_update_transition_targets_all_rejected(self) -> None:
+        # Every resolved target of a transition is checked: retargeting
+        # the daily folder into the tasks folder makes both the ensure
+        # and the remove targets collide, before any task side effect.
+        engine, vault, sub = self._engine("update_collision", daily_folder="journal")
+        created = engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertEqual(created.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        captures_after_create = len(self._capture_calls(sub))
+        _write_daily_config(vault, {"folder": "tasks"})
+        with self.assertRaises(self.core.ValidationError) as ctx:
+            engine.update("t1", scheduled=_D2, body="b2")
+        self.assertEqual(str(ctx.exception), self.collision_msg)
+        # Task and existing link untouched; no capture ran for the update.
+        self.assertEqual(
+            len(self._capture_calls(sub)), captures_after_create
+        )
+        self.assertIn(
+            "- [[t1|My Task]]",
+            (vault / "journal" / f"{_D1}.md").read_text(encoding="utf-8"),
+        )
+        fm, _ = self.core._parse_frontmatter(
+            (vault / "tasks" / "t1.md").read_text(encoding="utf-8")
+        )
+        self.assertEqual(fm["scheduled"], _D1)
+
+    def test_delete_removal_target_collision_rejected(self) -> None:
+        engine, vault, sub = self._engine("delete_collision", daily_folder="journal")
+        created = engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertEqual(created.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        _write_daily_config(vault, {"folder": "tasks"})
+        with self.assertRaises(self.core.ValidationError) as ctx:
+            engine.delete("t1")
+        self.assertEqual(str(ctx.exception), self.collision_msg)
+        # The soft-delete gate never ran; task and link are intact.
+        self.assertTrue((vault / "tasks" / "t1.md").exists())
+        self.assertIn(
+            "- [[t1|My Task]]",
+            (vault / "journal" / f"{_D1}.md").read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            [c for c in _read_calls(sub) if c["argv"][0] == "delete"], []
+        )
 
 
 if __name__ == "__main__":

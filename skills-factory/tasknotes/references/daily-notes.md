@@ -17,6 +17,11 @@ the full bounded contract.
   filesystem-originated change with native incremental gbrain sync under the
   same lock. No concurrent PGLite open, no public `gbrain` wrapper nesting,
   no generic note-write tool/API.
+- Task Markdown is gbrain-only, so a resolved Daily Note target under the
+  configured `tasksFolder` — or under the active archive folder (when
+  `moveArchivedTasks` is true and `archiveFolder` is configured) — is
+  rejected before any task side effect; the projection writer must never
+  mutate TaskNotes-managed files.
 - The projection is derived state. The task is authoritative; `scheduled` is
   the sole projection driver. `due`, `planned_week`, recurrence metadata,
   status, archive state, and completion date never move links.
@@ -48,10 +53,12 @@ second folder/date/template setting anywhere in the adapter.
   compatibility). A missing config (or missing `.obsidian/`) when the feature
   is enabled and a projection is needed fails closed — defaults are never
   inferred.
-- Freshness: the validated config is loaded lazily on the first enabled
-  projection and cached for the lifetime of the TaskNotes MCP process;
-  editing `daily-notes.json` applies only after an MCP restart (single
-  config source, no reload or watch path).
+- Freshness: there is no engine or MCP lifetime cache. Each
+  projection-bearing task transaction reads and strictly validates the
+  config exactly once, before any task side effect; that immutable
+  snapshot is used through apply/commit/sync. Editing
+  `daily-notes.json` therefore applies to the next projection-bearing
+  task operation (single config source, no reload or watch path).
 - Path values must be relative, without backslashes, control characters, or
   `.`/`..` traversal segments, and existing components may not be symlinks.
   The template must be a `.md` file. Malformed/unsafe values fail closed
@@ -82,10 +89,10 @@ Used only when a Daily Note must be created:
   Note filename stem), `{{date:FORMAT}}` (same supported token subset).
   Any other `{{...}}` expression is rejected; Templater/JavaScript is never
   executed.
-- After rendering: a null/empty top-level `date` frontmatter key becomes the
-  scheduled date and a null/empty top-level `title` becomes the filename
-  stem; non-empty values are preserved verbatim and no provenance fields are
-  invented.
+- After rendering — only when a missing note is created — a null/empty
+  top-level `date` frontmatter key becomes the scheduled date and a
+  null/empty top-level `title` becomes the filename stem; non-empty
+  values are preserved verbatim and no provenance fields are invented.
 - The rendered note must contain exactly one `## Tasks` level-2 section or
   creation fails closed (ambiguous templates are never auto-restructured).
 
@@ -94,6 +101,10 @@ Used only when a Daily Note must be created:
 - Exactly one `## Tasks` (exact text, level-2) heading is required; the
   section ends at the next level-2 heading or EOF. Missing or duplicated
   `## Tasks` fails closed.
+- All bytes outside the section's transformation are retained verbatim;
+  existing frontmatter is never normalized or reserialized (the
+  null/empty `date`/`title` fill above applies only when a missing note
+  is created from the template/default body).
 - Only generated task-link bullet lines inside that section are edited;
   bytes outside the section are preserved as the bounded edit permits, and
   links/prose elsewhere in the note are never searched or rewritten.
@@ -135,6 +146,11 @@ never caller intent alone.
 
 Ordering guarantees:
 
+- Plans are composed by resolved target path, not merely by date: dates
+  that map to the same note (e.g. a `YYYY-MM` format) collapse to one
+  step — a reschedule whose old and new dates share one note performs a
+  single ensure for it, never an ensure followed by a remove of the same
+  link.
 - Reschedule: the new date's link is ensured before the old date's link is
   removed, so partial failure yields temporary duplication, never a task
   missing from both notes. Both changed notes are committed together when
@@ -152,7 +168,10 @@ Ordering guarantees:
   before an atomic `os.replace`.
 - A detected race triggers one recompute-and-retry (two attempts total); a
   persistent race returns `conflict` and never overwrites the concurrent
-  edit. Missing-note creation re-checks absence immediately before publish.
+  edit. Missing-note creation re-checks absence immediately before
+  publish and publishes atomically with no-clobber semantics: a competing
+  creator is never overwritten; its bytes trigger the same bounded
+  recompute-and-retry.
 - Writes use a sibling temp file created exclusive and no-follow, fsynced,
   mode-preserved, then atomically replaced; the parent directory fsync is
   best-effort and temp files are cleaned on every failure path. Existing

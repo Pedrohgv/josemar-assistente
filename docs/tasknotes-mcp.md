@@ -417,8 +417,12 @@ configured Daily Notes path for the task's exact `scheduled` date(s), then
 reconcile the filesystem-originated change through source-scoped native
 incremental gbrain sync under the same lock. It never opens PGLite
 concurrently and never routes through (or is invoked from) the public `gbrain`
-wrapper. This is not a generic Markdown writer: no tool, API, or arbitrary
-note path is exposed.
+wrapper. A resolved Daily Note target under the configured `tasksFolder` —
+or under the active archive folder (when `moveArchivedTasks` is true and
+`archiveFolder` is configured) — is rejected before any task side effect,
+because task Markdown is gbrain-only and the projection writer must never
+mutate TaskNotes-managed files. This is not a generic Markdown writer: no
+tool, API, or arbitrary note path is exposed.
 
 ### Feature flag (default off)
 
@@ -446,11 +450,13 @@ be a `.md` file. Malformed JSON, non-object roots, or unsafe paths fail
 closed before any task side effect. The Periodic Notes plugin configuration
 is never read as a fallback.
 
-Config freshness: the validated config is loaded lazily on the first
-enabled projection and then cached for the lifetime of the TaskNotes MCP
-process; editing `daily-notes.json` takes effect only after an MCP
-restart. This is deliberate — a single config source with no reload or
-watch path, consistent with the no-watcher v1 behavior below.
+Config freshness: there is no engine or MCP lifetime cache. Each
+projection-bearing task transaction reads and strictly validates
+`daily-notes.json` exactly once, before any task side effect, and that
+immutable snapshot is used through apply/commit/sync. Editing the file
+therefore applies to the next projection-bearing task operation — a
+single config source with no reload or watch path, consistent with the
+no-watcher v1 behavior below.
 
 ### Supported date-format subset
 
@@ -469,20 +475,25 @@ one `## Tasks` section). Only three core template expressions are supported:
 `{{date}}` (the scheduled `YYYY-MM-DD`), `{{title}}` (the Daily Note filename
 stem), and `{{date:FORMAT}}` (rendered with the same supported token subset).
 Any other `{{...}}` expression is rejected before the projection runs;
-Templater or JavaScript execution never happens. After rendering, a
-top-level `date` frontmatter value that is null/empty is set to the scheduled
-date and a null/empty top-level `title` becomes the filename stem; non-empty
-values are preserved and no provenance fields are invented. The rendered
-note must contain exactly one `## Tasks` section, otherwise the projection
-fails closed.
+Templater or JavaScript execution never happens. After rendering — only
+when a missing note is created — a top-level `date` frontmatter value
+that is null/empty is set to the scheduled date and a null/empty
+top-level `title` becomes the filename stem; non-empty values are
+preserved and no provenance fields are invented. The rendered note must
+contain exactly one `## Tasks` section, otherwise the projection fails
+closed.
 
 ### Existing-note structural contract
 
-An existing Daily Note must contain exactly one level-2 `## Tasks` heading;
-its section extends to the next level-2 heading or end of file. A missing or
-duplicated `## Tasks` section fails closed — the adapter never restructures
-a human-authored note. Only exact generated task-link bullet lines inside
-that section are edited; nothing outside it (and no prose) is ever touched.
+An existing Daily Note must contain exactly one level-2 `## Tasks`
+heading; its section extends to the next level-2 heading or end of file.
+All bytes outside that section's transformation are retained verbatim —
+in particular, existing frontmatter is never normalized or reserialized
+(the null/empty `date`/`title` fill above applies only to notes created
+from the template/default body). A missing or duplicated `## Tasks`
+section fails closed — the adapter never restructures a human-authored
+note. Only exact generated task-link bullet lines inside that section are
+edited; nothing outside it (and no prose) is ever touched.
 
 ### Canonical link semantics
 
@@ -513,9 +524,13 @@ matched or modified.
 | recurrence creation | no future links pre-created |
 
 Transitions are computed from the task's actual old and final scheduling
-state, never from caller intent alone. Rescheduling adds the new date's link
-before removing the old one, so a partial projection failure can duplicate
-visibility but never lose the task from both Daily Notes. `task_delete`
+state, never from caller intent alone. Plans are composed by resolved
+target path: when a date format maps the old and new dates to the same
+Daily Note (e.g. `YYYY-MM`), the transition performs one ensure for that
+note — never an ensure followed by a remove of the same link.
+Rescheduling adds the new date's link before removing the old one, so a
+partial projection failure can duplicate visibility but never lose the
+task from both Daily Notes. `task_delete`
 reads the current page and prevalidates the removal before the gbrain
 soft-delete gate, but only removes the link after task deletion is verified;
 a failed task deletion never touches the projection.
@@ -527,7 +542,11 @@ writer therefore transforms bytes in memory from a fingerprinted source
 (identity metadata plus content hash), re-verifies that fingerprint
 immediately before an atomic `os.replace`, retries once on a detected race
 (two attempts total), and reports a persistent conflict instead of
-overwriting concurrent edits. Writes go through a sibling temp file
+overwriting concurrent edits. Missing-note creation re-checks absence and
+publishes atomically with no-clobber semantics: a note created by a
+competing writer at the publication boundary is never overwritten and
+triggers the same bounded recompute-and-retry. Writes go through a
+sibling temp file
 (exclusive, no-follow) with fsync and cleanup on every failure path; note
 and template reads are bounded (1 MB) and no-follow. A successful projection
 is recorded as one content-free Git commit
