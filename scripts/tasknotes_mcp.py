@@ -33,7 +33,11 @@ TASKNOTES_GBRAIN_NATIVE = "/opt/josemar/libexec/gbrain-native"
 # Fixed deployment locations (issue #110): the vault, gbrain state, and the
 # shared lock never come from the caller's environment. Non-location
 # operational settings (TASKNOTES_LOCK_TIMEOUT, TZ,
-# TASKNOTES_DAILY_LINKS_ENABLED) remain env-driven.
+# TASKNOTES_DAILY_LINKS_ENABLED, TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED)
+# remain env-driven. Cross-system default propagation for the
+# reconciliation switch is issue #139 W4b; this surface parses it strictly
+# (case-insensitive true/false, invalid values fail closed) with an
+# intended default of enabled.
 TASKNOTES_VAULT = "/opt/data/obsidian"
 TASKNOTES_GBRAIN_HOME = "/opt/data"
 TASKNOTES_LOCK_DIR = "/opt/data/.locks"
@@ -105,6 +109,9 @@ def _get_engine() -> TaskNotesEngine:
             lock_timeout=_env_float("TASKNOTES_LOCK_TIMEOUT", 10.0),
             tz=os.environ.get("TZ", "UTC"),
             daily_links_enabled=_env_bool("TASKNOTES_DAILY_LINKS_ENABLED", False),
+            reconcile_enabled=_env_bool(
+                "TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED", True
+            ),
         )
     return _ENGINE
 

@@ -5,13 +5,14 @@ authoritative TaskNotes documentation is [tasknotes.dev](https://tasknotes.dev/)
 
 The adapter uses short-lived native gbrain CLI commands. It does not run
 `gbrain serve`, open PGLite directly, or write task files directly. Gbrain is
-the sole task-file writer. The adapter's only direct filesystem write — and
-the only sanctioned exception to gbrain-only task Markdown — is the opt-in,
-default-off Daily Note task-link projection (issue #139): a derived,
+the sole task-file writer. The adapter's only direct vault-file write — and
+the only sanctioned exception to gbrain-only task Markdown — is the default-on
+Daily Note task-link projection (issue #139): a derived,
 lock-held, vault-confined wikilink maintained in Obsidian core Daily Notes
 while the adapter owns its transaction lock, always followed by native
-incremental gbrain reconciliation. It is never a generic note writer. See
-"Daily Note task links (issue #139)" below. The MCP exposes only:
+incremental gbrain reconciliation. Its bounded reconciliation additionally
+keeps two private cursor/pending state files under `/opt/data/.gbrain` —
+structural metadata only, never task or note content. It is never a generic note writer. See "Daily Note task links (issue #139)" below. The MCP exposes only:
 
 - `task_create`
 - `task_get`
@@ -424,16 +425,73 @@ because task Markdown is gbrain-only and the projection writer must never
 mutate TaskNotes-managed files. This is not a generic Markdown writer: no
 tool, API, or arbitrary note path is exposed.
 
-### Feature flag (default off)
+### Feature flag (default on)
 
-The feature is controlled by the strict boolean
+The feature is controlled by the strict boolean master
 `TASKNOTES_DAILY_LINKS_ENABLED`, propagated deploy workflow → `.env` →
-Compose → Hermes TaskNotes MCP env → engine. Missing or empty resolves to
-disabled; only case-insensitive `true`/`false` are accepted and any other
-value fails closed at MCP initialization. When disabled, behavior is
-identical to previous TaskNotes releases: no Daily Notes config is read or
-required, no projection work runs, and mutation results carry no
-`daily_link_*` fields.
+Compose → Hermes TaskNotes MCP env → engine. The deploy workflow and
+Compose both default it to `true`. Missing or empty resolves to enabled.
+Only case-insensitive
+`true`/`false` are accepted and any other value fails closed at deploy
+validation before any deploy mutation and again at MCP initialization (if
+the deployment chain is bypassed entirely and no value reaches the engine,
+the master fails closed to disabled). Explicit `false` rolls back or opts
+out: no Daily Notes config is read or required, no projection work runs,
+reconciliation is fully inert (no cursor/pending I/O; the refresh cycle
+proceeds unchanged), and mutation results carry no `daily_link_*` fields.
+
+The slave `TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED` (default `true`) uses
+the same strict parse and propagation. It is effective only while the
+master is also `true` and gates both reconciliation lanes — the adapter's
+pre-mutation reconciliation AND the refresh-cycle lane (see below); with
+the master on and the slave `false`, projections still run at mutation
+time but both reconciliation lanes are inert.
+
+### Reconciliation (cursor/pending)
+
+Projection maintenance is not limited to mutation-time projections: the
+adapter also reconciles the derived links against actual task state, so
+drift — e.g. from direct Obsidian task edits — is repaired by the next
+locked reconciliation cycle. Reconciliation in either lane is active only
+while the master and slave flags are both `true`; when the master is
+`false` everything is inert, and with the master on but the slave off
+both lanes are inert too.
+State lives in two fixed private runtime files under `/opt/data/.gbrain`
+(never under the vault, never in the gbrain database): the reconcile
+cursor and its pending sibling. They hold structural metadata only —
+schema id/version, a reconciled HEAD SHA, the prior Daily Notes
+folder/format, and the projection format version — never titles, bodies,
+or any task/note content; task Markdown stays gbrain-only. A missing
+cursor bootstraps with an ensure-only pass for currently scheduled tasks
+(the first-enable backfill); a present-but-invalid document fails closed.
+
+Two locked lanes run the same bounded lifecycle with one validated
+`DailyNotesConfig` snapshot through prepare → apply → sync → finalize:
+
+- **MCP pre-mutation reconciliation (slave, default on).** For every
+  normal mutation (`task_create`, `task_update`, `task_complete`,
+  `task_archive`, `task_add_tag`, `task_remove_tag`) reconciliation runs
+  inside the transaction lock BEFORE the Git preflight and any mutation
+  side effect: a bounded prepare, then apply with one targeted commit
+  staging only the changed Daily Note paths (plus the tracked-and-dirty
+  `daily-notes.json` when the plan needs it), then a required native
+  source-scoped incremental gbrain sync, and only then the cursor
+  finalize. Any failure raises before the preflight/mutation: the
+  mutation is blocked and the cursor/pending state stays replayable by
+  the next locked attempt; the recovery marker is never touched.
+- **Refresh-cycle reconciliation.** `josemar-gbrain refresh` runs the
+  same cycle under the shared lock through a fixed-purpose CLI:
+  `reconcile` (prepare/apply/targeted commit) → the wrapper's native
+  sync → `finalize` strictly after that sync succeeded. Any failure
+   fails refresh without advancing the cursor (replayable). This lane is
+   gated by both flags — the master AND the slave — and is inert when
+   either flag is off.
+
+**Delete exception.** `task_delete` checks target cleanliness BEFORE any
+reconciliation: a dirty (uncommitted) delete target rejects with zero
+reconciliation I/O, so manual edits are never silently committed before a
+destructive operation. Once the target is Git-clean, reconciliation runs,
+then the preflight/delete lifecycle proceeds.
 
 ### Daily Notes configuration (dynamic, fail-closed)
 
@@ -456,7 +514,7 @@ projection-bearing task transaction reads and strictly validates
 immutable snapshot is used through apply/commit/sync. Editing the file
 therefore applies to the next projection-bearing task operation — a
 single config source with no reload or watch path, consistent with the
-no-watcher v1 behavior below.
+no-watcher behavior below.
 
 ### Supported date-format subset
 
@@ -497,24 +555,28 @@ edited; nothing outside it (and no prose) is ever touched.
 
 ### Canonical link semantics
 
-The canonical generated line is `- [[<task-slug>|<display-alias>]]`; the
-task title remains authoritative and unchanged. The alias is a derived,
-serialized encoding of the title, not a rendered title: it is a
-deterministic, reversible percent encoding applied only to the structural
-metacharacters — `%` first as `%25`, then `[` as `%5B`, `]` as `%5D`, and
-`|` as `%7C`; ordinary title text passes through unchanged. Encoding `%`
-first keeps the mapping injective (a title containing the literal text
-`%5B` becomes `%255B` and can never collide with an encoded `[`), so the
-full enabled-mode TaskNotes title domain projects without narrowing the
-accepted titles and without backslash escape syntax. This serialization
-does not alter task Markdown or title semantics. Matching is by exact
-wikilink target slug on bullet-only lines, never by alias text — so
-normalization, dedup, and removal stay idempotent regardless of the
-encoded alias. Adding deduplicates and normalizes any existing exact-slug
-bullet to the canonical form (preserving its indentation and unrelated
-section lines); removal deletes only exact-slug bullet lines and leaves
-the section and note in place even when empty. Similar-prefix slugs and
+The canonical generated line is exactly `- [[<task-slug>]]` — a bare
+wikilink with no display alias. The task title remains authoritative and
+unchanged in task Markdown and is never serialized into the projection,
+so the link cannot drift from the title. Matching is by exact wikilink
+target slug on bullet-only lines, never by the text after the target, so
+normalization, dedup, and removal stay idempotent regardless of any
+display text. Exact-slug ownership accepts legacy
+`- [[<task-slug>|<alias>]]` lines only as normalization/removal inputs:
+adding deduplicates exact-slug bullets and normalizes the first to the
+bare canonical form (preserving its indentation and unrelated section
+lines), removal deletes every exact-slug bullet line whether bare or
+aliased, and newly generated lines are always bare. The section and note
+remain even when the section becomes empty; similar-prefix slugs and
 prose mentions are never matched or modified.
+
+Display trade-off (TaskNotes 4.11.1): TaskNotes resolves task links
+against the linked task file and renders its authoritative frontmatter,
+so the title keeps surfacing in TaskNotes' own card rendering; plain
+Obsidian source/reading view shows only the bare target (the slug).
+Keeping the link bare avoids serializing a derived display copy of the
+title that could drift from the authoritative frontmatter on manual
+edits — the accepted revision-3 trade-off.
 
 ### Transition matrix
 
@@ -595,12 +657,14 @@ new link was committed but whose old-link removal failed).
 
 ### Disabling, manual edits, and v1 limitations
 
-Setting the flag to `false` stops future projection maintenance only; links
-already written are ordinary Markdown and are never bulk-removed. There is
-no watcher or backfill in v1: direct Obsidian edits to task files (including
-manual reschedules) are not re-projected until the next MCP scheduling
-transition touches that task, and already-scheduled tasks are not backfilled
-when the feature is first enabled. No Periodic Notes compatibility is
+Setting the master flag to `false` stops future projection maintenance and
+disables reconciliation entirely; links already written are ordinary
+Markdown and are never bulk-removed. There is no real-time watcher:
+changes to task files made outside the adapter — including direct Obsidian
+edits and manual reschedules — are repaired by the next locked
+reconciliation cycle (pre-mutation or refresh), not projected instantly.
+First enable bootstraps with an ensure-only pass for currently scheduled
+tasks. No Periodic Notes compatibility is
 provided — only the core Daily Notes plugin configuration is read.
 
 ## Current limitations
@@ -611,11 +675,12 @@ The adapter does not yet support:
 - **Rename/move, title edits, bulk operations, raw frontmatter,
   inline-task conversion**: these operations are not exposed via the MCP tools.
   Body edits are supported via `task_update`'s optional `body` field.
-- **Daily Note projection backfill/reconciliation (issue #139)**: when the
-  projection is enabled there is no watcher and no bulk backfill — direct
-  Obsidian task edits are not re-projected until the next MCP scheduling
-  transition touches that task, and disabling the flag stops future
-  maintenance without removing existing links.
+- **Daily Note projection watcher (issue #139)**: maintenance runs only
+  inside locked MCP mutations and locked reconciliation cycles — there is
+  no real-time watcher, so Daily Notes can drift from task state between
+  cycles; the next mutation or `josemar-gbrain refresh` reconciliation
+  repairs it. Disabling the master flag stops future maintenance (and
+  reconciliation) without removing existing links.
 
 For these operations, suggest Obsidian or native gbrain (for non-task pages).
 

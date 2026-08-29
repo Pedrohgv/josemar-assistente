@@ -50,6 +50,7 @@ jobs:
           MNEMOSYNE_DEPLOY_MODE_INPUT: ${{ vars.MNEMOSYNE_DEPLOY_MODE }}
           GBRAIN_EMBEDDINGS_ENABLED_INPUT: ${{ vars.GBRAIN_EMBEDDINGS_ENABLED }}
           TASKNOTES_DAILY_LINKS_ENABLED_INPUT: ${{ vars.TASKNOTES_DAILY_LINKS_ENABLED }}
+          TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED_INPUT: ${{ vars.TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED }}
           MNEMOSYNE_BACKUP_EXPORT_INTERVAL_INPUT: ${{ vars.MNEMOSYNE_BACKUP_EXPORT_INTERVAL }}
           RCLONE_CONFIG_B64_SECRET: ${{ secrets.RCLONE_CONFIG_B64 }}
         run: |
@@ -213,19 +214,35 @@ jobs:
             exit 1
           fi
 
-          # TaskNotes MCP daily-note task links (issue #139): strict
-          # default-off boolean, validated BEFORE any volume mutation or
-          # service teardown. Missing/empty disables; a nonempty value must be
-          # case-insensitive true/false and is normalized to lowercase for
-          # .env. The MCP server re-validates at engine init (fail-closed).
+          # TaskNotes MCP daily-note task links (issue #139 revision 3):
+          # strict default-on booleans, validated BEFORE any volume mutation
+          # or service teardown. Missing/empty enables; a nonempty value must
+          # be case-insensitive true/false and is normalized to lowercase for
+          # .env. The reconcile slave is effective only while the master
+          # daily-links switch is also true. The MCP server re-validates at
+          # engine init (fail-closed).
           TASKNOTES_DAILY_LINKS_ENABLED="$TASKNOTES_DAILY_LINKS_ENABLED_INPUT"
           if [ -z "$TASKNOTES_DAILY_LINKS_ENABLED" ]; then
-            TASKNOTES_DAILY_LINKS_ENABLED="false"
+            TASKNOTES_DAILY_LINKS_ENABLED="true"
           else
             TASKNOTES_DAILY_LINKS_ENABLED="$(printf '%s' "$TASKNOTES_DAILY_LINKS_ENABLED" | tr '[:upper:]' '[:lower:]')"
           fi
           if [ "$TASKNOTES_DAILY_LINKS_ENABLED" != "true" ] && [ "$TASKNOTES_DAILY_LINKS_ENABLED" != "false" ]; then
             echo "ERROR: TASKNOTES_DAILY_LINKS_ENABLED must be 'true' or 'false' (got: $TASKNOTES_DAILY_LINKS_ENABLED)"
+            exit 1
+          fi
+
+          # Reconcile slave: same strict validation and stable default-on.
+          # An explicit false rolls back reconciliation only; the master
+          # daily-links switch gates the whole projection either way.
+          TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED_INPUT"
+          if [ -z "$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED" ]; then
+            TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="true"
+          else
+            TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="$(printf '%s' "$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED" | tr '[:upper:]' '[:lower:]')"
+          fi
+          if [ "$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED" != "true" ] && [ "$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED" != "false" ]; then
+            echo "ERROR: TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED must be 'true' or 'false' (got: $TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED)"
             exit 1
           fi
 
@@ -279,6 +296,7 @@ jobs:
           echo "MNEMOSYNE_DEPLOY_MODE=$MNEMOSYNE_DEPLOY_MODE" >> "$GITHUB_ENV"
           echo "GBRAIN_EMBEDDINGS_ENABLED=$GBRAIN_EMBEDDINGS_ENABLED" >> "$GITHUB_ENV"
           echo "TASKNOTES_DAILY_LINKS_ENABLED=$TASKNOTES_DAILY_LINKS_ENABLED" >> "$GITHUB_ENV"
+          echo "TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED=$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED" >> "$GITHUB_ENV"
 
       - name: Vault-recovery portability proof (mandatory release gate)
         # The phase-1 vault-recovery feature is release-blocked on the
@@ -363,6 +381,7 @@ jobs:
           MNEMOSYNE_BACKUP_EXPORT_INTERVAL_INPUT: ${{ vars.MNEMOSYNE_BACKUP_EXPORT_INTERVAL }}
           GBRAIN_EMBEDDINGS_ENABLED_INPUT: ${{ vars.GBRAIN_EMBEDDINGS_ENABLED }}
           TASKNOTES_DAILY_LINKS_ENABLED_INPUT: ${{ vars.TASKNOTES_DAILY_LINKS_ENABLED }}
+          TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED_INPUT: ${{ vars.TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED }}
         run: |
           GBRAIN_EMBEDDINGS_ENABLED="${GBRAIN_EMBEDDINGS_ENABLED_INPUT:-false}"
           if [ "$GBRAIN_EMBEDDINGS_ENABLED" != "true" ] && [ "$GBRAIN_EMBEDDINGS_ENABLED" != "false" ]; then
@@ -370,18 +389,31 @@ jobs:
             exit 1
           fi
 
-          # TaskNotes MCP daily-note task links (issue #139): re-derive the
-          # strict default-off boolean from the repo variable and re-validate
-          # so the value written to .env is normalized lowercase true/false.
-          # No Daily Notes folder/date/template or vault path is env-driven.
+          # TaskNotes MCP daily-note task links (issue #139 revision 3):
+          # re-derive the strict default-on booleans from the repo variables
+          # and re-validate so the values written to .env are normalized
+          # lowercase true/false. The reconcile slave is effective only while
+          # the master daily-links switch is also true. No Daily Notes
+          # folder/date/template or vault path is env-driven.
           TASKNOTES_DAILY_LINKS_ENABLED="$TASKNOTES_DAILY_LINKS_ENABLED_INPUT"
           if [ -z "$TASKNOTES_DAILY_LINKS_ENABLED" ]; then
-            TASKNOTES_DAILY_LINKS_ENABLED="false"
+            TASKNOTES_DAILY_LINKS_ENABLED="true"
           else
             TASKNOTES_DAILY_LINKS_ENABLED="$(printf '%s' "$TASKNOTES_DAILY_LINKS_ENABLED" | tr '[:upper:]' '[:lower:]')"
           fi
           if [ "$TASKNOTES_DAILY_LINKS_ENABLED" != "true" ] && [ "$TASKNOTES_DAILY_LINKS_ENABLED" != "false" ]; then
             echo "ERROR: TASKNOTES_DAILY_LINKS_ENABLED must be 'true' or 'false' (got: $TASKNOTES_DAILY_LINKS_ENABLED)"
+            exit 1
+          fi
+
+          TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED_INPUT"
+          if [ -z "$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED" ]; then
+            TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="true"
+          else
+            TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="$(printf '%s' "$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED" | tr '[:upper:]' '[:lower:]')"
+          fi
+          if [ "$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED" != "true" ] && [ "$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED" != "false" ]; then
+            echo "ERROR: TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED must be 'true' or 'false' (got: $TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED)"
             exit 1
           fi
 
@@ -630,6 +662,7 @@ jobs:
           write_env VAULT_RECOVERY_RCLONE_REMOTE "vault-recovery-crypt"
           write_env GBRAIN_EMBEDDINGS_ENABLED "$GBRAIN_EMBEDDINGS_ENABLED"
           write_env TASKNOTES_DAILY_LINKS_ENABLED "$TASKNOTES_DAILY_LINKS_ENABLED"
+          write_env TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED "$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED"
 
           chmod 600 .env
           echo "COMPOSE_PROFILES=$COMPOSE_PROFILES_VALUE" >> "$GITHUB_ENV"

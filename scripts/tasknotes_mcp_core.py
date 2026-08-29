@@ -46,6 +46,15 @@ Design invariants (fixed, do not redesign):
      no-follow optimistic atomic writer. They only accept a validated
      ``DailyNotesConfig`` plus a resolved Daily Note target/operation,
      never write task files, and never invoke gbrain/PGLite.
+   - Daily-links reconciliation (issue #139 W2a/W2b) is internal-only
+     and never writes task Markdown, never invokes gbrain/PGLite, and
+     never uses the recovery marker. W2a added read-only foundations: a
+     structural cursor/pending pair at fixed runtime paths, bounded
+     no-follow atomic file primitives, a fixed-argv streamed Git object
+     reader, and bounded candidate enumeration/snapshots. W2b adds the
+     prepare/apply/targeted-commit/finalize lifecycle on those
+     foundations; only finalize advances the cursor, and only after the
+     caller confirms native sync success.
  """
 
 from __future__ import annotations
@@ -2969,54 +2978,9 @@ def _bullet_wikilink_matches_slug(line: str, slug: str) -> bool:
     return target == slug
 
 
-def _validate_daily_link_title(title: str) -> str:
-    """Validate the display title used inside a canonical bullet wikilink.
-
-    The accepted domain mirrors :func:`validate_title` exactly (non-empty
-    printable title up to ``MAX_TITLE_LEN``): ``[``, ``]``, and ``|`` are
-    NOT rejected here. Structural safety inside the wikilink is provided
-    by :func:`encode_daily_note_link_alias`, not by narrowing the title
-    domain.
-    """
-    if not isinstance(title, str) or not title.strip():
-        raise ValidationError("daily note link title must be a non-empty string")
-    if len(title) > MAX_TITLE_LEN:
-        raise ValidationError("daily note link title exceeds length bound")
-    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in title):
-        raise ValidationError(
-            "daily note link title must not contain control characters"
-        )
-    return title
-
-
-def encode_daily_note_link_alias(title: str) -> str:
-    """Derive the deterministic wikilink display alias from a task title.
-
-    The canonical link shape stays ``[[slug|display-alias]]``; the alias
-    is an explicit percent-encoded derivation of the (already validated)
-    title so the full ``validate_title`` domain — including ``[``,
-    ``]``, ``|`` — projects without narrowing. Encoding is ordered:
-    ``%`` becomes ``%25`` FIRST, then ``[`` → ``%5B``, ``]`` → ``%5D``,
-    and ``|`` → ``%7C``. Because every literal ``%`` encodes to ``%25``
-    first, a title containing the literal text ``%5B`` becomes
-    ``%255B`` and can never collide with an encoded ``[`` (``%5B``);
-    the mapping is deterministic, injective (reversible), and
-    structurally safe inside a wikilink. This is a derived alias
-    encoding only: the authoritative task title content is untouched.
-    Ordinary titles without the four encoded characters pass through
-    unchanged, and matching is never affected (ownership is by exact
-    wikilink target slug; the alias is never matched or compared).
-    """
-    return (
-        title.replace("%", "%25")
-        .replace("[", "%5B")
-        .replace("]", "%5D")
-        .replace("|", "%7C")
-    )
-
-
-def _daily_link_line(slug: str, title: str, indent: str = "") -> str:
-    return f"{indent}- [[{slug}|{title}]]"
+def _daily_link_line(slug: str, indent: str = "") -> str:
+    """The exact canonical task line: a bullet-only bare wikilink."""
+    return f"{indent}- [[{slug}]]"
 
 
 def _section_bullet_wikilink_spans(
@@ -3068,28 +3032,25 @@ def _apply_edits(body: str, edits: List[Tuple[int, int, str]]) -> str:
     return "".join(parts)
 
 
-def add_daily_note_task_link(body: str, *, slug: str, title: str) -> Tuple[str, bool]:
-    """Add or normalize the task's bullet wikilink in the ``## Tasks`` section.
+def add_daily_note_task_link(body: str, *, slug: str) -> Tuple[str, bool]:
+    """Add or normalize the task's bare bullet wikilink in ``## Tasks``.
 
-    Exact task-slug bullet wikilinks (lines that are only a bullet plus a
-    wikilink whose target is exactly ``slug``) are normalized to the
-    canonical ``- [[slug|alias]]`` form and deduped: the first occurrence
-    is rewritten in place (leading whitespace preserved), duplicates are
-    removed. The alias is the deterministic percent-encoded derivation of
-    the title (:func:`encode_daily_note_link_alias`), so the full title
-    domain projects safely; ownership matching stays exact-slug and never
-    consults the alias. When no exact-slug bullet exists, the canonical
+    The canonical task line is exactly ``- [[<slug>]]``. Any bullet-only
+    wikilink whose target is exactly ``slug`` — bare (``- [[slug]]``) or
+    carrying a prior display alias (``- [[slug|alias]]``) — inside the
+    exactly-one ``## Tasks`` section is owned: all such lines are
+    deduped, the first occurrence is normalized in place to the bare
+    canonical form (leading indentation preserved), and the duplicates
+    are removed. When no exact-slug bullet exists, the bare canonical
     line is appended at the end of the section. Bytes outside the
     section — and similar-but-not-exact slugs or prose — are preserved
     verbatim. Returns ``(new_body, changed)``.
     """
     slug = validate_slug(slug)
-    title = _validate_daily_link_title(title)
-    alias = encode_daily_note_link_alias(title)
     start, end = find_tasks_section(body)
     spans = _section_bullet_wikilink_spans(body, start, end, slug)
     if not spans:
-        canonical = _daily_link_line(slug, alias)
+        canonical = _daily_link_line(slug)
         prefix = ""
         if end == len(body) and body and not body.endswith("\n"):
             prefix = "\n"
@@ -3098,7 +3059,7 @@ def add_daily_note_task_link(body: str, *, slug: str, title: str) -> Tuple[str, 
     first_start, first_len = spans[0]
     matched = _DAILY_BULLET_WIKILINK_RE.match(body[first_start:first_start + first_len])
     assert matched is not None  # matched in _section_bullet_wikilink_spans
-    canonical = _daily_link_line(slug, alias, indent=matched.group(1))
+    canonical = _daily_link_line(slug, indent=matched.group(1))
     edits: List[Tuple[int, int, str]] = [
         (first_start, first_start + first_len, canonical)
     ]
@@ -3113,13 +3074,14 @@ def add_daily_note_task_link(body: str, *, slug: str, title: str) -> Tuple[str, 
 
 
 def remove_daily_note_task_link(body: str, *, slug: str) -> Tuple[str, bool]:
-    """Remove only exact-slug bullet wikilinks from the ``## Tasks`` section.
+    """Remove every exact-slug bullet wikilink from ``## Tasks``.
 
-    Every bullet line in the section that is exactly a wikilink targeting
-    ``slug`` is removed together with one adjacent newline. Similar slugs,
-    prose mentions, and bytes outside the section are preserved verbatim.
-    Returns ``(new_body, changed)``; unchanged bodies return
-    ``(body, False)``.
+    Every bullet-only line in the section whose wikilink targets exactly
+    ``slug`` — bare (``- [[slug]]``) or carrying a display alias
+    (``- [[slug|alias]]``) — is removed together with one adjacent
+    newline. Similar slugs, prose mentions, and bytes outside the
+    section are preserved verbatim. Returns ``(new_body, changed)``;
+    unchanged bodies return ``(body, False)``.
     """
     slug = validate_slug(slug)
     start, end = find_tasks_section(body)
@@ -3208,7 +3170,6 @@ class DailyNoteProjection:
     operation: str
     date: str
     slug: str
-    title: str
     target_relative: str
     kind: str
     content: Optional[bytes]
@@ -3321,7 +3282,6 @@ def _transform_daily_note_text(
     *,
     operation: str,
     slug: str,
-    link_title: str,
     date: str,
     stem: str,
     normalize_frontmatter: bool = False,
@@ -3339,9 +3299,7 @@ def _transform_daily_note_text(
     fm, raw_body = _parse_frontmatter(text)
     body_offset = len(text) - len(raw_body)
     if operation == DAILY_PROJECTION_OP_ENSURE:
-        new_body, body_changed = add_daily_note_task_link(
-            raw_body, slug=slug, title=link_title
-        )
+        new_body, body_changed = add_daily_note_task_link(raw_body, slug=slug)
     else:
         new_body, body_changed = remove_daily_note_task_link(raw_body, slug=slug)
     if not normalize_frontmatter:
@@ -3370,7 +3328,6 @@ def prepare_daily_note_projection(
     date: str,
     *,
     slug: str,
-    title: str = "",
 ) -> DailyNoteProjection:
     """Pre-read the target and compute the transformed bytes (no side effects).
 
@@ -3405,7 +3362,6 @@ def prepare_daily_note_projection(
                 operation=operation,
                 date=date,
                 slug=slug,
-                title=title,
                 target_relative=relative,
                 kind=DAILY_NOTE_PROJECTION_NONE,
                 content=None,
@@ -3422,7 +3378,6 @@ def prepare_daily_note_projection(
             base_text,
             operation=operation,
             slug=slug,
-            link_title=title,
             date=date,
             stem=stem,
             # Date/title normalization applies only during missing-note
@@ -3434,7 +3389,6 @@ def prepare_daily_note_projection(
             operation=operation,
             date=date,
             slug=slug,
-            title=title,
             target_relative=relative,
             kind=DAILY_NOTE_PROJECTION_CREATE,
             content=_validate_daily_note_content(new_text),
@@ -3445,7 +3399,6 @@ def prepare_daily_note_projection(
         text,
         operation=operation,
         slug=slug,
-        link_title=title,
         date=date,
         stem=stem,
     )
@@ -3454,7 +3407,6 @@ def prepare_daily_note_projection(
             operation=operation,
             date=date,
             slug=slug,
-            title=title,
             target_relative=relative,
             kind=DAILY_NOTE_PROJECTION_NONE,
             content=None,
@@ -3464,7 +3416,6 @@ def prepare_daily_note_projection(
         operation=operation,
         date=date,
         slug=slug,
-        title=title,
         target_relative=relative,
         kind=DAILY_NOTE_PROJECTION_REPLACE,
         content=_validate_daily_note_content(new_text),
@@ -3798,7 +3749,6 @@ def apply_daily_note_projection(
                 current.operation,
                 current.date,
                 slug=current.slug,
-                title=current.title,
             )
     return DailyNoteProjectionOutcome(
         state=DAILY_PROJECTION_CONFLICT,
@@ -3981,6 +3931,1752 @@ def _reject_daily_projection_collision(
 
 
 # ---------------------------------------------------------------------------
+# Daily-links reconciliation foundations (issue #139, W2a: read-only)
+# ---------------------------------------------------------------------------
+#
+# Private, read-only foundations for the future Daily Notes link
+# backfill/reconciliation (prepare/finalize lands in later phases on
+# these stable names). Nothing here advances the cursor, writes task
+# files, writes projections, invokes gbrain/PGLite, uses the public
+# gbrain wrapper, or touches the recovery marker.
+#
+# State lives in two fixed runtime files under ``/opt/data/.gbrain``
+# (never under the vault, never in the gbrain DB): the reconcile cursor
+# and its fixed pending sibling. Both hold only structural metadata —
+# schema id/version, a reconciled HEAD SHA, the prior Daily Notes
+# folder/format, and the projection format version — never titles, note
+# bodies, or any content. A missing cursor is the bootstrap signal; any
+# present-but-invalid document (malformed, oversized, schema- or
+# SHA-invalid) fails closed. File primitives are bounded, no-follow,
+# atomic (temp + fsync + replace), restrictive-mode, and content-free
+# on error. Git task objects are read via fixed-argv, no-shell,
+# streamed ``git show`` with a kill/reap hard cap aligned to
+# ``LIST_MAX_FILE_SIZE`` (not ``MAX_OUTPUT``); there is no custom Git
+# object/pack parser.
+
+# Fixed runtime paths (never vault-relative, never gbrain DB).
+DAILY_LINKS_RECONCILE_CURSOR_PATH = Path(
+    "/opt/data/.gbrain/josemar-tasknotes-daily-links-reconcile.json"
+)
+DAILY_LINKS_RECONCILE_PENDING_PATH = Path(
+    "/opt/data/.gbrain/josemar-tasknotes-daily-links-reconcile-pending.json"
+)
+
+# Cursor/pending schema identity. A version bump is a deliberate
+# migration event; readers reject every other version (fail closed).
+# The pending document gained its applied-routing pin while the format
+# was still unwired (no released writer exists), so the shared version
+# remains 1.
+DAILY_LINKS_RECONCILE_SCHEMA_ID = "josemar-tasknotes-daily-links-reconcile"
+DAILY_LINKS_RECONCILE_CURSOR_VERSION = 1
+
+# The projection link format version recorded by the cursor. A mismatch
+# means the cursor was produced for a different link format and later
+# reconciliation must not assume compatibility (the loader rejects it).
+DAILY_LINKS_PROJECTION_FORMAT_VERSION = 1
+
+# Cursor/pending documents are tiny structural JSON; this bound is a
+# corruption guard, not a storage budget.
+RECONCILE_CURSOR_MAX_FILE_SIZE = 64 * 1024
+RECONCILE_CURSOR_FILE_MODE = 0o600
+
+# Candidate classification constants (pure, deterministic).
+RECONCILE_CLASS_CANDIDATE = "candidate"
+RECONCILE_CLASS_NON_TASK = "non_task"
+RECONCILE_CLASS_MALFORMED = "malformed"
+
+# Candidate locations inside the snapshot.
+RECONCILE_LOCATION_TASKS = "tasks"
+RECONCILE_LOCATION_ARCHIVE = "archive"
+
+# Git object read states. ``missing`` is the typed no-before-state
+# result: the task path simply does not exist at the requested commit.
+GIT_OBJECT_PRESENT = "present"
+GIT_OBJECT_MISSING = "missing"
+
+# Exact key sets of the two reconcile documents (fail closed on both
+# missing and extra keys; the format is private and versioned).
+_RECONCILE_CURSOR_JSON_KEYS = frozenset(
+    {"schema", "version", "reconciled_head", "daily_folder", "daily_format",
+     "projection_format"}
+)
+_RECONCILE_PENDING_JSON_KEYS = frozenset(
+    {"schema", "version", "from_head", "to_head", "started_at",
+     "daily_folder", "daily_format"}
+)
+
+_GIT_SHA_HEX = frozenset("abcdef") | frozenset(str(value) for value in range(10))
+
+
+@dataclass(frozen=True)
+class DailyLinksReconcileCursor:
+    """Strict reconcile cursor (structural metadata only, never content).
+
+    ``reconciled_head`` is the full vault HEAD SHA through which all
+    Daily Notes links are considered reconciled. ``daily_folder``/``daily_format``
+    record the prior Daily Notes configuration so later phases can resolve
+    old targets after config changes. ``projection_format`` is the link
+    format version the reconciliation was performed with.
+    """
+
+    reconciled_head: str
+    daily_folder: str
+    daily_format: str
+    projection_format: int
+    version: int = DAILY_LINKS_RECONCILE_CURSOR_VERSION
+
+
+@dataclass(frozen=True)
+class DailyLinksReconcilePending:
+    """Strict in-flight reconciliation marker (fixed pending sibling).
+
+    ``daily_folder``/``daily_format`` structurally pin the applied Daily
+    Notes routing snapshot: the exact configuration representation the
+    applied cycle used, consumed by finalize identity verification and
+    by old-routing lookup when a later prepare replays an
+    applied-but-unfinalized cycle. Non-sensitive commit/routing
+    metadata only.
+    """
+
+    from_head: str
+    to_head: str
+    started_at: int
+    daily_folder: str
+    daily_format: str
+    version: int = DAILY_LINKS_RECONCILE_CURSOR_VERSION
+
+
+def is_valid_git_commit_sha(value: Any) -> bool:
+    """True for a full lowercase hexadecimal Git object id (SHA-1/SHA-256)."""
+    if not isinstance(value, str) or len(value) not in (40, 64):
+        return False
+    return all(ch in _GIT_SHA_HEX for ch in value)
+
+
+def validate_git_commit_sha(value: Any) -> str:
+    """Require a full lowercase hexadecimal Git object id (fail closed)."""
+    if not is_valid_git_commit_sha(value):
+        raise ValidationError(
+            "value must be a full lowercase hexadecimal Git object id"
+        )
+    return value
+
+
+def validate_git_task_object_path(value: Any) -> str:
+    """Validate a vault-relative task Markdown path for ``<sha>:<path>`` revs."""
+    _validate_relative_note_path(value)
+    if not value.endswith(".md"):
+        raise PathError("git object path must be a Markdown (.md) file")
+    return value
+
+
+def _require_reconcile_document_header(
+    data: Any, keys: frozenset
+) -> None:
+    """Strict common document checks: object root, exact keys, schema, version."""
+    if not isinstance(data, Mapping):
+        raise ValidationError("reconcile state document root must be an object")
+    if set(data.keys()) != keys:
+        raise ValidationError("reconcile state document schema is invalid")
+    if data["schema"] != DAILY_LINKS_RECONCILE_SCHEMA_ID:
+        raise ValidationError("reconcile state document schema id mismatch")
+    version = data["version"]
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != DAILY_LINKS_RECONCILE_CURSOR_VERSION
+    ):
+        raise ValidationError("reconcile state document version mismatch")
+
+
+def parse_daily_links_reconcile_cursor(
+    data: Mapping[str, Any]
+) -> DailyLinksReconcileCursor:
+    """Strictly validate a parsed cursor document (pure, fail closed).
+
+    Rejects missing/extra keys, schema id/version mismatch, SHA-invalid
+    heads, unsafe folders, invalid formats, and projection format
+    mismatch. Holds no titles or note bodies by construction.
+    """
+    _require_reconcile_document_header(data, _RECONCILE_CURSOR_JSON_KEYS)
+    head = validate_git_commit_sha(data["reconciled_head"])
+    folder = data["daily_folder"]
+    if not isinstance(folder, str):
+        raise ValidationError("reconcile cursor daily folder must be a string")
+    if folder:
+        _validate_relative_note_path(folder)
+    fmt = data["daily_format"]
+    if not isinstance(fmt, str):
+        raise ValidationError("reconcile cursor daily format must be a string")
+    validate_daily_note_format(fmt)
+    projection_format = data["projection_format"]
+    if isinstance(projection_format, bool) or not isinstance(projection_format, int):
+        raise ValidationError(
+            "reconcile cursor projection format must be an integer"
+        )
+    if projection_format != DAILY_LINKS_PROJECTION_FORMAT_VERSION:
+        raise ValidationError("reconcile cursor projection format mismatch")
+    return DailyLinksReconcileCursor(
+        reconciled_head=head,
+        daily_folder=folder,
+        daily_format=fmt,
+        projection_format=projection_format,
+        version=data["version"],
+    )
+
+
+def parse_daily_links_reconcile_pending(
+    data: Mapping[str, Any]
+) -> DailyLinksReconcilePending:
+    """Strictly validate a parsed pending document (pure, fail closed).
+
+    The applied-routing pin (``daily_folder``/``daily_format``) is
+    validated with the same strictness as the cursor's routing fields.
+    """
+    _require_reconcile_document_header(data, _RECONCILE_PENDING_JSON_KEYS)
+    from_head = validate_git_commit_sha(data["from_head"])
+    to_head = validate_git_commit_sha(data["to_head"])
+    started_at = data["started_at"]
+    if (
+        isinstance(started_at, bool)
+        or not isinstance(started_at, int)
+        or started_at <= 0
+    ):
+        raise ValidationError(
+            "reconcile pending started_at must be a positive integer"
+        )
+    folder = data["daily_folder"]
+    if not isinstance(folder, str):
+        raise ValidationError("reconcile pending daily folder must be a string")
+    if folder:
+        _validate_relative_note_path(folder)
+    fmt = data["daily_format"]
+    if not isinstance(fmt, str):
+        raise ValidationError("reconcile pending daily format must be a string")
+    validate_daily_note_format(fmt)
+    return DailyLinksReconcilePending(
+        from_head=from_head,
+        to_head=to_head,
+        started_at=started_at,
+        daily_folder=folder,
+        daily_format=fmt,
+        version=data["version"],
+    )
+
+
+def _daily_links_reconcile_cursor_payload(
+    cursor: DailyLinksReconcileCursor
+) -> Dict[str, Any]:
+    """Canonical (sorted-keys on dump) structural cursor payload."""
+    return {
+        "schema": DAILY_LINKS_RECONCILE_SCHEMA_ID,
+        "version": cursor.version,
+        "reconciled_head": cursor.reconciled_head,
+        "daily_folder": cursor.daily_folder,
+        "daily_format": cursor.daily_format,
+        "projection_format": cursor.projection_format,
+    }
+
+
+def _daily_links_reconcile_pending_payload(
+    pending: DailyLinksReconcilePending
+) -> Dict[str, Any]:
+    """Canonical (sorted-keys on dump) structural pending payload."""
+    return {
+        "schema": DAILY_LINKS_RECONCILE_SCHEMA_ID,
+        "version": pending.version,
+        "from_head": pending.from_head,
+        "to_head": pending.to_head,
+        "started_at": pending.started_at,
+        "daily_folder": pending.daily_folder,
+        "daily_format": pending.daily_format,
+    }
+
+
+def _read_reconcile_json_document(
+    path: Path, *, max_size: int
+) -> Optional[Mapping[str, Any]]:
+    """Read a bounded runtime JSON object no-follow; ``None`` when absent.
+
+    Any present-but-unreadable, symlinked, non-regular, oversized, or
+    non-JSON document fails closed with typed, content-free errors.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise PathError("reconcile state file is a symlink") from exc
+        raise PathError("cannot open reconcile state file") from exc
+    closed = False
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError as exc:
+            raise PathError("cannot inspect reconcile state file") from exc
+        if not stat_is_regular_mode(st.st_mode):
+            raise PathError("reconcile state file is not a regular file")
+        try:
+            data = _read_fd_bytes_bounded(fd, max_size)  # closes fd itself
+            closed = True
+        except CoreError:
+            raise CoreError("reconcile state file exceeds size bound") from None
+    finally:
+        if not closed:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValidationError("reconcile state file is not valid UTF-8") from exc
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValidationError("reconcile state file is not valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValidationError("reconcile state file root must be an object")
+    return parsed
+
+
+def _write_reconcile_json_document(
+    path: Path, payload: Mapping[str, Any]
+) -> None:
+    """Atomically publish a bounded runtime JSON document.
+
+    Creates the parent directory (runtime state area, never the vault),
+    writes a restrictive-mode ``O_EXCL|O_NOFOLLOW`` temp sibling, fsyncs
+    it, publishes with ``os.replace`` (no-follow by construction), and
+    best-effort fsyncs the parent. The temp file is always cleaned up on
+    failure. Errors are typed and content-free.
+    """
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    if len(encoded) > RECONCILE_CURSOR_MAX_FILE_SIZE:
+        raise ValidationError("reconcile state payload exceeds size bound")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise PathError("cannot prepare reconcile state directory") from exc
+    parent_fd = _open_directory_no_follow(path.parent)
+    name = path.name
+    temp_name: Optional[str] = None
+    temp_fd: Optional[int] = None
+    published = False
+    try:
+        for _ in range(8):
+            candidate = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+            try:
+                temp_fd = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise PathError(
+                        "reconcile state temp path is a symlink"
+                    ) from exc
+                raise CoreError(
+                    "cannot create reconcile state temp file"
+                ) from exc
+            temp_name = candidate
+            break
+        if temp_name is None or temp_fd is None:
+            raise CoreError("cannot create reconcile state temp file")
+        try:
+            view = memoryview(encoded)
+            while view:
+                written = os.write(temp_fd, view)
+                view = view[written:]
+            os.fsync(temp_fd)
+            os.fchmod(temp_fd, RECONCILE_CURSOR_FILE_MODE)
+        except OSError as exc:
+            raise CoreError("cannot write reconcile state file") from exc
+        finally:
+            os.close(temp_fd)
+            temp_fd = None
+        try:
+            os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            published = True
+        except OSError as exc:
+            raise CoreError("cannot publish reconcile state file") from exc
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            pass  # parent fsync is best-effort (not supported everywhere)
+    finally:
+        if temp_name is not None and not published:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        if temp_fd is not None:
+            try:
+                os.close(temp_fd)
+            except OSError:
+                pass
+        os.close(parent_fd)
+
+
+def load_daily_links_reconcile_cursor(
+    path: Optional[Path] = None,
+) -> Optional[DailyLinksReconcileCursor]:
+    """Load the reconcile cursor; ``None`` means bootstrap (no cursor yet).
+
+    A missing cursor is the bootstrap signal. Any present-but-invalid
+    document fails closed (typed ``CoreError`` subclasses).
+    """
+    cursor_path = DAILY_LINKS_RECONCILE_CURSOR_PATH if path is None else path
+    data = _read_reconcile_json_document(
+        cursor_path, max_size=RECONCILE_CURSOR_MAX_FILE_SIZE
+    )
+    if data is None:
+        return None
+    return parse_daily_links_reconcile_cursor(data)
+
+
+def write_daily_links_reconcile_cursor(
+    cursor: DailyLinksReconcileCursor,
+    path: Optional[Path] = None,
+) -> None:
+    """Validate and atomically publish the reconcile cursor."""
+    if not isinstance(cursor, DailyLinksReconcileCursor):
+        raise ValidationError(
+            "reconcile cursor write requires a DailyLinksReconcileCursor"
+        )
+    payload = _daily_links_reconcile_cursor_payload(cursor)
+    # Fail closed before touching the filesystem if the payload would
+    # not round-trip through the strict parser.
+    parse_daily_links_reconcile_cursor(payload)
+    cursor_path = DAILY_LINKS_RECONCILE_CURSOR_PATH if path is None else path
+    _write_reconcile_json_document(cursor_path, payload)
+
+
+def load_daily_links_reconcile_pending(
+    path: Optional[Path] = None,
+) -> Optional[DailyLinksReconcilePending]:
+    """Load the pending sibling; ``None`` when no reconciliation is in flight.
+
+    Any present-but-invalid document fails closed (typed ``CoreError``
+    subclasses); policy for stale pending state belongs to later phases.
+    """
+    pending_path = DAILY_LINKS_RECONCILE_PENDING_PATH if path is None else path
+    data = _read_reconcile_json_document(
+        pending_path, max_size=RECONCILE_CURSOR_MAX_FILE_SIZE
+    )
+    if data is None:
+        return None
+    return parse_daily_links_reconcile_pending(data)
+
+
+def write_daily_links_reconcile_pending(
+    pending: DailyLinksReconcilePending,
+    path: Optional[Path] = None,
+) -> None:
+    """Validate and atomically publish the pending sibling."""
+    if not isinstance(pending, DailyLinksReconcilePending):
+        raise ValidationError(
+            "reconcile pending write requires a DailyLinksReconcilePending"
+        )
+    payload = _daily_links_reconcile_pending_payload(pending)
+    parse_daily_links_reconcile_pending(payload)
+    pending_path = DAILY_LINKS_RECONCILE_PENDING_PATH if path is None else path
+    _write_reconcile_json_document(pending_path, payload)
+
+
+def clear_daily_links_reconcile_pending(path: Optional[Path] = None) -> bool:
+    """Unlink the pending sibling no-follow; True when it existed."""
+    pending_path = DAILY_LINKS_RECONCILE_PENDING_PATH if path is None else path
+    try:
+        os.unlink(str(pending_path))
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise PathError("cannot clear reconcile pending file") from exc
+
+
+@dataclass(frozen=True)
+class GitTaskObjectRead:
+    """Typed result of a bounded ``git show <sha>:<path>`` object read.
+
+    ``state`` is ``present`` (``text`` holds the strict-UTF-8 object
+    body) or ``missing`` — the typed no-before-state result for a task
+    path that does not exist at the requested commit.
+    """
+
+    state: str
+    text: Optional[str] = None
+
+
+def _run_git_show_bounded(
+    vault: Path,
+    git_env: Dict[str, str],
+    rev: str,
+    *,
+    max_size: int,
+    timeout: float,
+) -> bytes:
+    """Stream ``git show <rev>`` with a kill/reap hard size cap.
+
+    Mirrors the bounded subprocess runner: disk-backed capture files, a
+    polled size cap on both streams (``max_size`` for the object body —
+    deliberately ``LIST_MAX_FILE_SIZE``-aligned, not ``MAX_OUTPUT`` —
+    and ``MAX_OUTPUT`` for diagnostics), and process-group SIGKILL plus
+    reap on cap or timeout. Returns raw object bytes (never decoded
+    here).
+    """
+    argv = ["git"] + _GIT_BASE_ARGS + ["show", rev]
+    with (
+        tempfile.TemporaryFile() as stdout_file,
+        tempfile.TemporaryFile() as stderr_file,
+    ):
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                env=git_env,
+                cwd=str(vault),
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            raise SubprocessError("executable not found: git") from exc
+        except OSError as exc:
+            raise SubprocessError("cannot start subprocess") from exc
+        deadline = time.monotonic() + timeout
+        while proc.poll() is None:
+            if (
+                os.fstat(stdout_file.fileno()).st_size > max_size
+                or os.fstat(stderr_file.fileno()).st_size > MAX_OUTPUT
+            ):
+                _kill_reap(proc)
+                raise SubprocessError("git object exceeds size bound")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill_reap(proc)
+                raise SubprocessError("git object read timed out")
+            try:
+                proc.wait(timeout=min(0.01, remaining))
+            except subprocess.TimeoutExpired:
+                pass
+        if (
+            os.fstat(stdout_file.fileno()).st_size > max_size
+            or os.fstat(stderr_file.fileno()).st_size > MAX_OUTPUT
+        ):
+            raise SubprocessError("git object exceeds size bound")
+        if proc.returncode != 0:
+            stderr_file.seek(0)
+            err = stderr_file.read(MAX_OUTPUT + 1).decode("utf-8", errors="replace")
+            raise GitError(f"git show failed: {_redact(err)[:200]}")
+        stdout_file.seek(0)
+        data = stdout_file.read(max_size + 1)
+        if len(data) > max_size:
+            raise SubprocessError("git object exceeds size bound")
+        return data
+
+
+def read_git_task_object(
+    vault: Path,
+    sha: str,
+    rel_path: str,
+    git_env: Optional[Dict[str, str]] = None,
+    *,
+    max_size: int = LIST_MAX_FILE_SIZE,
+    timeout: float = GIT_TIMEOUT,
+) -> GitTaskObjectRead:
+    """Read ``git show <sha>:<vault-relative task path>`` bounded and no-shell.
+
+    Fixed argv only (the SHA and path are strictly validated before
+    interpolation), no shell, a minimal no-credential env, streamed
+    output with a kill/reap hard cap aligned to ``max_size`` (default
+    ``LIST_MAX_FILE_SIZE``, not ``MAX_OUTPUT``), and strict UTF-8
+    decoding. A task path absent at the commit is the typed ``missing``
+    state; an unknown commit, an unreadable repo, an oversized object,
+    or a non-UTF-8 object raise typed content-free errors. No custom
+    Git object/pack parsing: object membership is resolved through the
+    ``rev-parse``/``ls-tree`` plumbing and the body through ``git show``.
+    """
+    sha = validate_git_commit_sha(sha)
+    rel_path = validate_git_task_object_path(rel_path)
+    if git_env is None:
+        git_env = _build_git_env()
+    rev = f"{sha}:{rel_path}"
+    # The commit itself must exist: an unknown SHA is corruption from the
+    # reconciler's perspective (fail closed), never a "missing" state.
+    r = _run_git(
+        vault, git_env,
+        ["rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"],
+        timeout=timeout,
+    )
+    if r.returncode == 1:
+        raise GitError("git object reader: commit not found")
+    if r.returncode != 0:
+        raise GitError(f"git object reader failed: {_redact(r.stderr)[:200]}")
+    # Exact path membership in the commit tree (exit-code semantics only).
+    r = _run_git(vault, git_env, ["ls-tree", sha, "--", rel_path], timeout=timeout)
+    if r.returncode != 0:
+        raise GitError(f"git object reader failed: {_redact(r.stderr)[:200]}")
+    listing = r.stdout.strip()
+    if not listing:
+        return GitTaskObjectRead(state=GIT_OBJECT_MISSING, text=None)
+    fields = listing.splitlines()[0].split("\t", 1)[0].split()
+    if (
+        len(fields) < 3
+        or fields[1] != "blob"
+        or fields[0] not in ("100644", "100755")
+    ):
+        # Git reports committed symlinks as blobs (mode 120000 whose
+        # content is the link target): require an allowed regular-file
+        # mode so a symlink can never masquerade as task content.
+        raise CoreError("git object reader: path is not a regular blob")
+    data = _run_git_show_bounded(
+        vault, git_env, rev, max_size=max_size, timeout=timeout
+    )
+    try:
+        text = data.decode("utf-8")  # strict
+    except UnicodeDecodeError as exc:
+        raise CoreError("git object reader: object is not valid UTF-8") from exc
+    return GitTaskObjectRead(state=GIT_OBJECT_PRESENT, text=text)
+
+
+@dataclass(frozen=True)
+class ReconcileClassification:
+    """Pure classification of one candidate file's frontmatter.
+
+    ``candidate`` carries the task tag and a usable scheduled value;
+    ``non_task`` is confidently not a task; ``malformed`` is task-scope
+    ambiguity (unparsable tags, or a task with an unusable scheduled
+    value).
+    """
+
+    cls: str
+    scheduled: Optional[str] = None
+    archived: bool = False
+
+
+@dataclass(frozen=True)
+class ReconcileTaskCandidate:
+    """One valid task candidate in the reconciliation snapshot."""
+
+    slug: str
+    location: str
+    scheduled: Optional[str]
+    archived: bool = False
+
+
+@dataclass(frozen=True)
+class ReconcileSnapshot:
+    """Deterministic, read-only reconciliation input snapshot."""
+
+    head: str
+    candidates: Tuple[ReconcileTaskCandidate, ...]
+
+
+def reconcile_slug_from_filename(name: str) -> Optional[str]:
+    """``<slug>.md`` -> validated slug, else ``None`` (not a candidate name)."""
+    if not name.endswith(".md"):
+        return None
+    try:
+        return validate_slug(name[:-3])
+    except PathError:
+        return None
+
+
+def classify_reconcile_frontmatter(
+    frontmatter: Mapping[str, Any],
+    profile: TaskNotesProfile,
+) -> ReconcileClassification:
+    """Pure, deterministic classification of task-file frontmatter.
+
+    Built on the existing semantic parsing rules: only the configured
+    task tag makes a file a task; the scheduled value must be absent
+    (backlog), a plain ``YYYY-MM-DD`` date, or the gbrain-normalized
+    bare-date form. Anything ambiguous in task scope is ``malformed``.
+    """
+    if not isinstance(frontmatter, Mapping):
+        raise ValidationError("frontmatter must be a mapping")
+    tags = frontmatter.get("tags")
+    if tags is None:
+        tags = []  # absent or null tags: confidently not a task
+    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+        return ReconcileClassification(cls=RECONCILE_CLASS_MALFORMED)
+    tags_t = tuple(tags)
+    archived = profile.archive_tag in tags_t
+    if profile.task_tag not in tags_t:
+        return ReconcileClassification(
+            cls=RECONCILE_CLASS_NON_TASK, archived=archived
+        )
+    raw_scheduled = frontmatter.get(profile.mappings["scheduled"])
+    if raw_scheduled is None:
+        return ReconcileClassification(
+            cls=RECONCILE_CLASS_CANDIDATE, scheduled=None, archived=archived
+        )
+    scheduled = _daily_scheduled_date(raw_scheduled)
+    if scheduled is None:
+        return ReconcileClassification(cls=RECONCILE_CLASS_MALFORMED, archived=archived)
+    return ReconcileClassification(
+        cls=RECONCILE_CLASS_CANDIDATE, scheduled=scheduled, archived=archived
+    )
+
+
+def enumerate_reconcile_candidates(
+    vault: Path,
+    profile: TaskNotesProfile,
+    *,
+    max_files: int = LIST_MAX_FILES,
+    max_size: int = LIST_MAX_FILE_SIZE,
+) -> Tuple[ReconcileTaskCandidate, ...]:
+    """Enumerate valid task/archive candidates read-only and bounded.
+
+    Top-level ``.md`` entries of the tasks folder plus — only when the
+    archive is active (``moveArchivedTasks`` with a configured folder) —
+    the archive folder. No recursion and no symlink following: symlinked
+    or oversized task-scope entries fail closed, as does exceeding the
+    file bound. A slug present in both folders is an ambiguous pair and
+    fails closed. Malformed and non-task entries are classified and
+    excluded. Nothing is ever written and no gbrain/PGLite call is made.
+    """
+    folders: List[Tuple[str, str]] = [(RECONCILE_LOCATION_TASKS, profile.tasks_folder)]
+    if (
+        profile.move_archived_tasks
+        and profile.archive_folder
+        and profile.archive_folder != profile.tasks_folder
+    ):
+        folders.append((RECONCILE_LOCATION_ARCHIVE, profile.archive_folder))
+    seen: Dict[str, ReconcileTaskCandidate] = {}
+    scanned = 0
+    for location, folder in folders:
+        if location == RECONCILE_LOCATION_ARCHIVE and not target_exists_no_follow(
+            vault / folder
+        ):
+            continue  # the plugin creates the archive folder lazily
+        directory_fd = _open_relative_directory_no_follow(vault, folder)
+        try:
+            for name in sorted(os.listdir(directory_fd)):
+                if not name.endswith(".md"):
+                    continue
+                scanned += 1
+                if scanned > max_files:
+                    raise CoreError(
+                        "reconcile candidate enumeration exceeds file bound"
+                    )
+                try:
+                    text = _read_directory_entry_no_follow(
+                        directory_fd, name, max_size=max_size
+                    )
+                except (PathError, CoreError):
+                    # Symlinked/unreadable/oversized task-scope entries are
+                    # ambiguity, not absence: fail closed.
+                    raise
+                slug = reconcile_slug_from_filename(name)
+                if slug is None:
+                    continue  # non-slug .md name: not a candidate
+                try:
+                    fm, _body = _parse_frontmatter(text)
+                except Exception:
+                    # Unparsable frontmatter (invalid YAML etc.):
+                    # malformed, excluded.
+                    continue
+                classification = classify_reconcile_frontmatter(fm, profile)
+                if classification.cls != RECONCILE_CLASS_CANDIDATE:
+                    continue
+                candidate = ReconcileTaskCandidate(
+                    slug=slug,
+                    location=location,
+                    scheduled=classification.scheduled,
+                    archived=classification.archived,
+                )
+                if slug in seen:
+                    raise CoreError(
+                        "ambiguous task candidate in both task and archive folders"
+                    )
+                seen[slug] = candidate
+        finally:
+            os.close(directory_fd)
+    return tuple(sorted(seen.values(), key=lambda c: (c.slug, c.location)))
+
+
+def build_reconcile_snapshot(
+    vault: Path,
+    profile: TaskNotesProfile,
+    git_env: Optional[Dict[str, str]] = None,
+    *,
+    max_files: int = LIST_MAX_FILES,
+    max_size: int = LIST_MAX_FILE_SIZE,
+) -> ReconcileSnapshot:
+    """Build a deterministic read-only snapshot for later reconciliation.
+
+    Combines the validated current HEAD SHA with the bounded candidate
+    enumeration. Pure data in, pure data out: no cursor access, no
+    writes, no gbrain. Fails closed when HEAD is missing or invalid.
+    """
+    head = git_head_id(vault, git_env)
+    if head is None:
+        raise CoreError("reconcile snapshot requires a vault HEAD")
+    head = validate_git_commit_sha(head)
+    candidates = enumerate_reconcile_candidates(
+        vault, profile, max_files=max_files, max_size=max_size
+    )
+    return ReconcileSnapshot(head=head, candidates=candidates)
+
+
+# ---------------------------------------------------------------------------
+# Daily-links reconciliation lifecycle (issue #139, W2b: prepare/apply/
+# targeted-commit/finalize) — internal only
+# ---------------------------------------------------------------------------
+#
+# Stable core API called by later phases under their existing lock. The
+# lifecycle plans link transitions from the net external task changes
+# between the cursor's ``reconciled_head`` (read through the W2a
+# fixed-argv Git object reader) and the current committed HEAD +
+# worktree (W2a bounded snapshot), applies them with the existing safe
+# W1b Daily Note primitives (R1-R4), commits ONLY the actually changed
+# daily notes (plus the tracked-and-daily-notes config when a routing
+# change needs it) with explicit targeted staging — never ``git add -A``
+# — and finally advances the cursor.
+#
+# Hard rules (do not weaken):
+#   - Task Markdown is never written, staged, or rewritten by
+#     reconciliation; gbrain/PGLite/the public wrapper are never
+#     invoked; the recovery marker is never touched.
+#   - A missing cursor bootstraps (ensure-only for currently scheduled
+#     tasks); a corrupt established cursor fails closed; pending/replay
+#     is idempotent.
+#   - Transitions compose by ``(resolved daily target, slug)``: the
+#     final ensure wins (a coarse target collapse is one ensure), the
+#     destination is ensured before the old link is removed, old dates
+#     route through the cursor's prior folder/format and current dates
+#     through the current config, and every old/new target passes the
+#     R5 collision fence. A config folder/format routing change re-homes
+#     all currently scheduled tasks; a template-only change does not.
+#   - All bounded candidates are prepared before anything is applied;
+#     candidate/target overflow, source churn between prepare and
+#     apply, projection conflicts, and commit failures fail closed with
+#     no cursor advancement and no partial cursor. The targeted commit
+#     accepts at most ``MAX_DAILY_PROJECTION_TARGETS`` changed daily
+#     notes plus the single ``RECONCILE_CONFIG_RELPATH`` rider.
+#   - The pending sibling structurally pins the applied Daily Notes
+#     routing (folder/format). ``finalize_*`` requires the caller's
+#     native-sync-success signal, verifies pending/head identity and
+#     the pinned routing against its supplied config, then atomically
+#     advances the cursor and clears the pending sibling; failures
+#     leave both in place for replay. One crash window is idempotent:
+#     a cursor already advanced to the pending's head just clears the
+#     stale pending. Prepare resolves old-link routing through the
+#     pending's pinned routing when one is present (it supersedes the
+#     cursor's prior routing for an applied-but-unfinalized cycle).
+
+# Reconciliation modes.
+RECONCILE_MODE_BOOTSTRAP = "bootstrap"    # no cursor yet: ensure-only
+RECONCILE_MODE_RECONCILE = "reconcile"    # established cursor: net diff
+
+# Routing selection for a composed step.
+RECONCILE_ROUTING_CURRENT = "current"     # resolve via the current config
+RECONCILE_ROUTING_PRIOR = "prior"         # resolve via the cursor's prior routing
+
+# Net external change classes (per slug).
+RECONCILE_NET_ADDED = "added"             # not at reconciled_head, task now
+RECONCILE_NET_REMOVED = "removed"         # at reconciled_head, gone now
+RECONCILE_NET_TAG_LOSS = "tag_loss"       # file remains, task tag gone
+RECONCILE_NET_RESCHEDULED = "rescheduled"  # scheduled changed (either way)
+RECONCILE_NET_UNSCHEDULED = "unscheduled"  # scheduled cleared to backlog
+RECONCILE_NET_ARCHIVE_MOVE = "archive_move"  # same slug/date, folder moved
+RECONCILE_NET_UNCHANGED = "unchanged"     # incl. title/body-only edits
+
+# Generic content-free reconciliation commit message.
+RECONCILE_COMMIT_MSG = "tasknotes-mcp: daily links reconcile"
+
+# Vault-relative Daily Notes config path staged with a routing change.
+RECONCILE_CONFIG_RELPATH = f"{DAILY_NOTES_OBSIDIAN_DIR}/{DAILY_NOTES_CONFIG_NAME}"
+
+
+@dataclass(frozen=True)
+class ReconcileTaskState:
+    """One slug's task state on one side of the comparison.
+
+    ``present`` False models an absent file (all other fields then
+    meaningless); ``is_task`` False models a present file that is not a
+    managed task (e.g. task-tag loss).
+    """
+
+    slug: str
+    present: bool
+    is_task: bool = False
+    location: Optional[str] = None
+    scheduled: Optional[str] = None
+    archived: bool = False
+
+
+@dataclass(frozen=True)
+class ReconcileNetChange:
+    """Pure net external change for one slug, with planned link dates.
+
+    ``ensure_date``/``remove_date`` are link-level dates (prior routing
+    for the remove, current routing for the ensure — resolved later);
+    ``current_scheduled`` carries the task's current scheduled date so a
+    routing change can re-home otherwise-unchanged tasks.
+    """
+
+    cls: str
+    current_scheduled: Optional[str] = None
+    ensure_date: Optional[str] = None
+    remove_date: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ReconcileComposedStep:
+    """One composed transition, resolved to its daily-note target."""
+
+    operation: str
+    slug: str
+    date: str
+    routing: str
+    target_relative: str
+
+
+@dataclass(frozen=True)
+class ReconcileTransition:
+    """A composed step with its pre-prepared Daily Note projection."""
+
+    operation: str
+    slug: str
+    date: str
+    routing: str
+    target_relative: str
+    projection: DailyNoteProjection
+
+
+@dataclass(frozen=True)
+class ReconcilePlan:
+    """Everything needed to apply one reconciliation pass (no side effects yet).
+
+    ``from_head`` is the head the comparison was made against (the
+    cursor's ``reconciled_head``, or the current head for bootstrap);
+    ``to_head`` is the current head at prepare time. ``expected_states``
+    carries the current-side task states of every slug with a
+    transition so apply can recheck for source churn.
+    """
+
+    mode: str
+    cursor: Optional[DailyLinksReconcileCursor]
+    prior: Optional[DailyNotesConfig]
+    from_head: str
+    to_head: str
+    routing_changed: bool
+    transitions: Tuple[ReconcileTransition, ...]
+    net_classes: Tuple[Tuple[str, str], ...]
+    expected_states: Tuple[ReconcileTaskState, ...]
+    config_commit_needed: bool
+
+
+@dataclass(frozen=True)
+class ReconcileApplyOutcome:
+    """Structured outcome of an applied reconciliation plan."""
+
+    applied: int
+    changed_targets: Tuple[str, ...]
+    commit_created: bool
+    commit_id: Optional[str]
+    pending: DailyLinksReconcilePending
+
+
+def classify_reconcile_net_change(
+    old_state: Optional[ReconcileTaskState],
+    new_state: Optional[ReconcileTaskState],
+) -> ReconcileNetChange:
+    """Pure, deterministic classification of one slug's net external change.
+
+    ``old_state`` is the task state at the cursor's ``reconciled_head``
+    (``None`` = absent there), ``new_state`` the current worktree state.
+    A slug rename manifests naturally as ``removed``(old) +
+    ``added``(new), which composes to the correct remove+ensure pair.
+    Title/body-only edits and same-slug archive moves never change the
+    link, so they classify as ``unchanged``/``archive_move`` with no
+    transitions; titles are never projected.
+    """
+    for state in (old_state, new_state):
+        if state is not None and not isinstance(state, ReconcileTaskState):
+            raise ValidationError(
+                "reconcile net change requires ReconcileTaskState inputs"
+            )
+    # Normalize None to an absent state so the branch logic below is total.
+    old = old_state if old_state is not None else ReconcileTaskState(
+        slug="", present=False
+    )
+    new = new_state if new_state is not None else ReconcileTaskState(
+        slug="", present=False
+    )
+    if not old.present and not new.present:
+        return ReconcileNetChange(cls=RECONCILE_NET_UNCHANGED)
+    if not old.present:
+        if new.is_task:
+            return ReconcileNetChange(
+                cls=RECONCILE_NET_ADDED,
+                current_scheduled=new.scheduled,
+                ensure_date=new.scheduled,
+            )
+        return ReconcileNetChange(cls=RECONCILE_NET_UNCHANGED)
+    if not new.present:
+        return ReconcileNetChange(
+            cls=RECONCILE_NET_REMOVED,
+            remove_date=old.scheduled if old.is_task else None,
+        )
+    if old.is_task and not new.is_task:
+        return ReconcileNetChange(
+            cls=RECONCILE_NET_TAG_LOSS,
+            remove_date=old.scheduled,
+        )
+    if not old.is_task and new.is_task:
+        return ReconcileNetChange(
+            cls=RECONCILE_NET_ADDED,
+            current_scheduled=new.scheduled,
+            ensure_date=new.scheduled,
+        )
+    if not old.is_task and not new.is_task:
+        return ReconcileNetChange(cls=RECONCILE_NET_UNCHANGED)
+    # Both sides are managed tasks.
+    if old.scheduled != new.scheduled:
+        if old.scheduled is None:
+            return ReconcileNetChange(
+                cls=RECONCILE_NET_RESCHEDULED,
+                current_scheduled=new.scheduled,
+                ensure_date=new.scheduled,
+            )
+        if new.scheduled is None:
+            return ReconcileNetChange(
+                cls=RECONCILE_NET_UNSCHEDULED,
+                remove_date=old.scheduled,
+            )
+        return ReconcileNetChange(
+            cls=RECONCILE_NET_RESCHEDULED,
+            current_scheduled=new.scheduled,
+            ensure_date=new.scheduled,
+            remove_date=old.scheduled,
+        )
+    if old.location != new.location:
+        return ReconcileNetChange(
+            cls=RECONCILE_NET_ARCHIVE_MOVE,
+            current_scheduled=new.scheduled,
+        )
+    return ReconcileNetChange(
+        cls=RECONCILE_NET_UNCHANGED,
+        current_scheduled=new.scheduled,
+    )
+
+
+def compose_reconcile_steps(
+    vault: Path,
+    profile: TaskNotesProfile,
+    config: DailyNotesConfig,
+    prior: Optional[DailyNotesConfig],
+    nets: Mapping[str, ReconcileNetChange],
+) -> Tuple[ReconcileComposedStep, ...]:
+    """Compose net changes into ordered, target-resolved steps (pure).
+
+    Steps compose by ``(resolved daily target, slug)``: the final ensure
+    wins over a remove on the same physical target (a coarse target
+    collapse is one ensure), ensures are ordered before removes so a
+    partial failure never loses a link, and each group is sorted by
+    ``(target, slug)`` for determinism. Ensure dates resolve through the
+    current config; remove dates through the cursor's prior routing.
+    Every old/new target passes the R5 collision fence. Exceeding the
+    target bound fails closed.
+    """
+    if not isinstance(config, DailyNotesConfig):
+        raise ValidationError(
+            "reconcile composition requires a validated DailyNotesConfig"
+        )
+    if prior is not None and not isinstance(prior, DailyNotesConfig):
+        raise ValidationError(
+            "reconcile prior routing must be a DailyNotesConfig"
+        )
+    routing_changed = prior is not None and (
+        prior.folder,
+        prior.format,
+    ) != (config.folder, config.format)
+    raw: List[Tuple[str, str, str, str]] = []
+    for slug in sorted(nets):
+        net = nets[slug]
+        if not isinstance(net, ReconcileNetChange):
+            raise ValidationError(
+                "reconcile composition requires ReconcileNetChange values"
+            )
+        if net.ensure_date:
+            raw.append(
+                (DAILY_PROJECTION_OP_ENSURE, slug, net.ensure_date,
+                 RECONCILE_ROUTING_CURRENT)
+            )
+        if net.remove_date:
+            raw.append(
+                (DAILY_PROJECTION_OP_REMOVE, slug, net.remove_date,
+                 RECONCILE_ROUTING_PRIOR)
+            )
+        if (
+            routing_changed
+            and net.cls in (RECONCILE_NET_UNCHANGED, RECONCILE_NET_ARCHIVE_MOVE)
+            and net.current_scheduled
+        ):
+            # Config routing change: re-home this unchanged task directly.
+            raw.append(
+                (DAILY_PROJECTION_OP_REMOVE, slug, net.current_scheduled,
+                 RECONCILE_ROUTING_PRIOR)
+            )
+            raw.append(
+                (DAILY_PROJECTION_OP_ENSURE, slug, net.current_scheduled,
+                 RECONCILE_ROUTING_CURRENT)
+            )
+    ensures: Dict[Tuple[str, str], ReconcileComposedStep] = {}
+    removes: Dict[Tuple[str, str], ReconcileComposedStep] = {}
+    for operation, slug, date, routing in raw:
+        cfg = config if routing == RECONCILE_ROUTING_CURRENT else prior
+        if cfg is None:
+            raise ValidationError(
+                "reconcile remove requires a prior routing"
+            )
+        target = resolve_daily_note_path(vault, cfg, date)
+        target_relative = target.relative_to(vault).as_posix()
+        _reject_daily_projection_collision(profile, target_relative)
+        step = ReconcileComposedStep(
+            operation=operation,
+            slug=slug,
+            date=date,
+            routing=routing,
+            target_relative=target_relative,
+        )
+        key = (target_relative, slug)
+        if operation == DAILY_PROJECTION_OP_ENSURE:
+            ensures[key] = step
+        else:
+            removes[key] = step
+    ensure_steps = sorted(
+        ensures.values(), key=lambda s: (s.target_relative, s.slug)
+    )
+    remove_steps = sorted(
+        (s for k, s in removes.items() if k not in ensures),
+        key=lambda s: (s.target_relative, s.slug),
+    )
+    composed = ensure_steps + remove_steps
+    if len(composed) > MAX_DAILY_PROJECTION_TARGETS:
+        raise CoreError("reconcile transitions exceed target bound")
+    return tuple(composed)
+
+
+def list_git_tree_task_slugs(
+    vault: Path,
+    sha: str,
+    dir_rel: str,
+    git_env: Optional[Dict[str, str]] = None,
+    *,
+    timeout: float = GIT_TIMEOUT,
+    max_files: int = LIST_MAX_FILES,
+) -> Tuple[str, ...]:
+    """Enumerate top-level candidate slugs of one directory at a commit.
+
+    Read-only plumbing on ``git ls-tree <sha> -- <dir>/`` (non-recursive,
+    exit-code semantics only — no custom object/pack parsing). Missing
+    directories enumerate empty; symlinked or non-regular ``.md`` entries
+    and bound overruns fail closed with content-free errors.
+    """
+    sha = validate_git_commit_sha(sha)
+    _validate_relative_note_path(dir_rel)
+    if git_env is None:
+        git_env = _build_git_env()
+    r = _run_git(
+        vault, git_env, ["ls-tree", sha, "--", f"{dir_rel}/"], timeout=timeout
+    )
+    if r.returncode != 0:
+        raise GitError(f"git object reader failed: {_redact(r.stderr)[:200]}")
+    slugs: List[str] = []
+    count = 0
+    for line in r.stdout.splitlines():
+        if not line.strip():
+            continue
+        meta, tab, path = line.partition("\t")
+        fields = meta.split()
+        if not tab or len(fields) < 3:
+            raise CoreError("reconcile head enumeration: unexpected entry")
+        name = path.rsplit("/", 1)[-1]
+        if not name.endswith(".md"):
+            continue
+        count += 1
+        if count > max_files:
+            raise CoreError("reconcile head enumeration exceeds file bound")
+        if fields[0] not in ("100644", "100755"):
+            raise CoreError(
+                "reconcile head enumeration: entry is not a regular file"
+            )
+        slug = reconcile_slug_from_filename(name)
+        if slug is not None:
+            slugs.append(slug)
+    return tuple(sorted(set(slugs)))
+
+
+def _reconcile_probe_locations(profile: TaskNotesProfile) -> List[Tuple[str, str]]:
+    """Task/archive probe locations (location label, vault-relative path)."""
+    locations = [
+        (RECONCILE_LOCATION_TASKS, f"{profile.tasks_folder}/{{slug}}.md")
+    ]
+    if (
+        profile.move_archived_tasks
+        and profile.archive_folder
+        and profile.archive_folder != profile.tasks_folder
+    ):
+        locations.append(
+            (RECONCILE_LOCATION_ARCHIVE, f"{profile.archive_folder}/{{slug}}.md")
+        )
+    return locations
+
+
+def _classify_reconcile_probe(
+    slug: str,
+    location: str,
+    text: str,
+    profile: TaskNotesProfile,
+    *,
+    where: str,
+) -> ReconcileTaskState:
+    """Classify one probed task-file body; any ambiguity fails closed."""
+    try:
+        fm, _body = _parse_frontmatter(text)
+    except Exception as exc:
+        raise CoreError(f"reconcile probe: ambiguous task state ({where})") from exc
+    classification = classify_reconcile_frontmatter(fm, profile)
+    if classification.cls == RECONCILE_CLASS_MALFORMED:
+        raise CoreError(f"reconcile probe: ambiguous task state ({where})")
+    if classification.cls == RECONCILE_CLASS_NON_TASK:
+        return ReconcileTaskState(
+            slug=slug, present=True, is_task=False, location=location
+        )
+    return ReconcileTaskState(
+        slug=slug,
+        present=True,
+        is_task=True,
+        location=location,
+        scheduled=classification.scheduled,
+        archived=classification.archived,
+    )
+
+
+def _head_reconcile_task_state(
+    vault: Path,
+    profile: TaskNotesProfile,
+    sha: str,
+    slug: str,
+    git_env: Dict[str, str],
+    *,
+    max_size: int,
+) -> ReconcileTaskState:
+    """Read one slug's task state at a commit through the W2a Git reader.
+
+    Checks the tasks folder then the active archive folder; present in
+    both is an ambiguous pair (fail closed). Unparsable or malformed old
+    content is ambiguity (fail closed); an absent file is the absent
+    state.
+    """
+    found: List[Tuple[str, str]] = []
+    for location, template in _reconcile_probe_locations(profile):
+        rel = template.format(slug=slug)
+        result = read_git_task_object(
+            vault, sha, rel, git_env, max_size=max_size
+        )
+        if result.state == GIT_OBJECT_PRESENT:
+            found.append((location, result.text or ""))
+    if len(found) > 1:
+        raise CoreError("reconcile probe: ambiguous task state (head)")
+    if not found:
+        return ReconcileTaskState(slug=slug, present=False)
+    location, text = found[0]
+    return _classify_reconcile_probe(
+        slug, location, text, profile, where="head"
+    )
+
+
+def _current_reconcile_task_state(
+    vault: Path,
+    profile: TaskNotesProfile,
+    slug: str,
+    snapshot_map: Mapping[str, ReconcileTaskCandidate],
+    *,
+    max_size: int,
+) -> ReconcileTaskState:
+    """Read one slug's current task state from the bounded worktree view.
+
+    Snapshot candidates are used directly. A slug missing from the
+    snapshot is probed no-follow to distinguish an absent file from a
+    present non-task (task-tag loss); present in both task and archive
+    folders, unparsable, or malformed content is ambiguity (fail
+    closed).
+    """
+    candidate = snapshot_map.get(slug)
+    if candidate is not None:
+        return ReconcileTaskState(
+            slug=slug,
+            present=True,
+            is_task=True,
+            location=candidate.location,
+            scheduled=candidate.scheduled,
+            archived=candidate.archived,
+        )
+    found: List[Tuple[str, str]] = []
+    for location, template in _reconcile_probe_locations(profile):
+        rel = template.format(slug=slug)
+        if target_exists_no_follow(vault / rel):
+            found.append((location, rel))
+    if len(found) > 1:
+        raise CoreError("reconcile probe: ambiguous task state (worktree)")
+    if not found:
+        return ReconcileTaskState(slug=slug, present=False)
+    location, rel = found[0]
+    text = read_file_no_follow(vault / rel, max_size=max_size)
+    return _classify_reconcile_probe(
+        slug, location, text, profile, where="worktree"
+    )
+
+
+def _config_tracked_and_dirty(
+    vault: Path, git_env: Dict[str, str]
+) -> bool:
+    """True when the Daily Notes config is tracked AND has changes."""
+    r = _run_git(vault, git_env, ["ls-files", "--", RECONCILE_CONFIG_RELPATH])
+    if r.returncode != 0:
+        raise GitError(f"git ls-files failed: {_redact(r.stderr)[:200]}")
+    if not r.stdout.strip():
+        return False
+    r = _run_git(
+        vault, git_env, ["status", "--porcelain", "--", RECONCILE_CONFIG_RELPATH]
+    )
+    if r.returncode != 0:
+        raise GitError(f"git status failed: {_redact(r.stderr)[:200]}")
+    return r.stdout.strip() != ""
+
+
+def git_commit_reconcile_targets(
+    vault: Path,
+    targets: List[Path],
+    git_env: Optional[Dict[str, str]] = None,
+) -> bool:
+    """Stage only the provided reconciliation paths and commit iff staged.
+
+    Explicit targeted companion to the task Git helpers: it stages
+    exactly the given (already vault-confined) changed paths — never
+    ``git add -A`` — and creates one generic content-free reconciliation
+    commit. The allowed set is at most ``MAX_DAILY_PROJECTION_TARGETS``
+    daily-note (``.md``) targets plus the single validated
+    ``RECONCILE_CONFIG_RELPATH`` rider when a routing change needs it;
+    any other or excess path fails closed (a legal full bound of
+    ``MAX`` changed notes plus the config rider commits as one
+    17-path-max set). Targets are lexically validated to stay inside
+    the vault (relative, no traversal, no backslash). Hooks, signing,
+    gc, and maintenance are disabled command-locally. Never runs
+    checkout/reset/clean/merge/pull/push. Returns True if a commit was
+    created, False if nothing was staged. Unrelated dirty or staged
+    paths are untouched (the pathspec commit excludes them).
+    """
+    if git_env is None:
+        git_env = _build_git_env()
+    rels: List[str] = []
+    seen: set = set()
+    for target in targets:
+        path = Path(target)
+        if path.is_absolute():
+            try:
+                rel = path.relative_to(vault)
+            except ValueError as exc:
+                raise PathError(
+                    "reconcile commit target is not in the vault"
+                ) from exc
+        else:
+            rel = path
+        rel_str = rel.as_posix()
+        _validate_relative_note_path(rel_str)
+        if rel_str in seen:
+            continue
+        seen.add(rel_str)
+        rels.append(rel_str)
+    if not rels:
+        return False
+    note_targets = [r for r in rels if r != RECONCILE_CONFIG_RELPATH]
+    for rel in note_targets:
+        if not rel.endswith(".md"):
+            raise ValidationError("reconcile commit target is not a daily note")
+    if len(note_targets) > MAX_DAILY_PROJECTION_TARGETS:
+        raise ValidationError("reconcile commit targets exceed count bound")
+    r = _run_git(vault, git_env, ["add", "--"] + rels)
+    if r.returncode != 0:
+        raise GitError(f"git add reconcile targets failed: {_redact(r.stderr)[:200]}")
+    r = _run_git(vault, git_env, ["diff", "--cached", "--quiet"])
+    if r.returncode == 0:
+        return False
+    r = _run_git(
+        vault, git_env, ["commit", "-m", RECONCILE_COMMIT_MSG, "--"] + rels
+    )
+    if r.returncode != 0:
+        raise GitError(f"git reconcile commit failed: {_redact(r.stderr)[:200]}")
+    return True
+
+
+def prepare_daily_links_reconciliation(
+    vault: Path,
+    profile: TaskNotesProfile,
+    config: DailyNotesConfig,
+    git_env: Optional[Dict[str, str]] = None,
+    *,
+    cursor: Optional[DailyLinksReconcileCursor] = None,
+    cursor_path: Optional[Path] = None,
+    pending_path: Optional[Path] = None,
+    max_files: int = LIST_MAX_FILES,
+    max_size: int = LIST_MAX_FILE_SIZE,
+) -> ReconcilePlan:
+    """Plan one reconciliation pass (read-only, no side effects).
+
+    With a missing cursor (bootstrap), the plan is ensure-only for the
+    currently scheduled tasks. With an established cursor, each slug's
+    state at ``reconciled_head`` is read through the W2a Git object
+    reader and compared to the current committed HEAD + worktree
+    (W2a bounded snapshot plus targeted no-follow probes), producing
+    per-slug net classifications and composed transitions. A corrupt
+    established cursor fails closed (the loader raises). All bounded
+    candidates are prepared before anything is applied; overflow fails
+    closed. Task Markdown is never written and no gbrain/PGLite call is
+    made.
+
+    Old-routing lookup uses the applied routing pinned by an existing
+    pending sibling when one is present (an applied-but-unfinalized
+    cycle committed its links at that routing, superseding the
+    cursor's prior routing); a pending that matches neither the cursor
+    head nor the cursor's base fails closed as foreign state. The
+    effective prior routing is carried on the plan so apply re-uses
+    the identical routing for race recomputation.
+    """
+    if not isinstance(config, DailyNotesConfig):
+        raise ValidationError(
+            "reconcile prepare requires a validated DailyNotesConfig"
+        )
+    if git_env is None:
+        git_env = _build_git_env()
+    if cursor is None:
+        cursor = load_daily_links_reconcile_cursor(cursor_path)
+    pending = load_daily_links_reconcile_pending(pending_path)
+    snapshot = build_reconcile_snapshot(
+        vault, profile, git_env, max_files=max_files, max_size=max_size
+    )
+    head = snapshot.head
+    current_map = {c.slug: c for c in snapshot.candidates}
+    new_states: Dict[str, ReconcileTaskState] = {}
+    nets: Dict[str, ReconcileNetChange] = {}
+    prior: Optional[DailyNotesConfig] = None
+    if cursor is None:
+        mode = RECONCILE_MODE_BOOTSTRAP
+        from_head = head
+        for slug in sorted(current_map):
+            new_states[slug] = _current_reconcile_task_state(
+                vault, profile, slug, current_map, max_size=max_size
+            )
+            nets[slug] = classify_reconcile_net_change(None, new_states[slug])
+    else:
+        mode = RECONCILE_MODE_RECONCILE
+        from_head = cursor.reconciled_head
+        prior = DailyNotesConfig(
+            folder=cursor.daily_folder, format=cursor.daily_format
+        )
+        if pending is not None:
+            if (
+                pending.from_head != cursor.reconciled_head
+                and pending.to_head != cursor.reconciled_head
+            ):
+                raise CoreError(
+                    "reconcile pending does not match the established cursor"
+                )
+            # The applied-but-unfinalized cycle committed its links at
+            # the pending's pinned routing: it supersedes the cursor's
+            # prior routing for old-link lookup (identical when the
+            # cursor already advanced to the pending's head).
+            prior = DailyNotesConfig(
+                folder=pending.daily_folder, format=pending.daily_format
+            )
+        old_tasks = set(
+            list_git_tree_task_slugs(
+                vault, cursor.reconciled_head, profile.tasks_folder,
+                git_env, max_files=max_files,
+            )
+        )
+        old_archive: set = set()
+        if (
+            profile.move_archived_tasks
+            and profile.archive_folder
+            and profile.archive_folder != profile.tasks_folder
+        ):
+            old_archive = set(
+                list_git_tree_task_slugs(
+                    vault, cursor.reconciled_head, profile.archive_folder,
+                    git_env, max_files=max_files,
+                )
+            )
+        if old_tasks & old_archive:
+            raise CoreError("reconcile probe: ambiguous task state (head)")
+        for slug in sorted(old_tasks | old_archive | set(current_map)):
+            old_state = _head_reconcile_task_state(
+                vault, profile, cursor.reconciled_head, slug, git_env,
+                max_size=max_size,
+            )
+            new_state = _current_reconcile_task_state(
+                vault, profile, slug, current_map, max_size=max_size
+            )
+            new_states[slug] = new_state
+            nets[slug] = classify_reconcile_net_change(old_state, new_state)
+    routing_changed = prior is not None and (
+        prior.folder,
+        prior.format,
+    ) != (config.folder, config.format)
+    steps = compose_reconcile_steps(vault, profile, config, prior, nets)
+    transitions: List[ReconcileTransition] = []
+    for step in steps:
+        cfg = config if step.routing == RECONCILE_ROUTING_CURRENT else prior
+        if cfg is None:
+            raise ValidationError("reconcile remove requires a prior routing")
+        projection = prepare_daily_note_projection(
+            vault, cfg, step.operation, step.date, slug=step.slug
+        )
+        transitions.append(
+            ReconcileTransition(
+                operation=step.operation,
+                slug=step.slug,
+                date=step.date,
+                routing=step.routing,
+                target_relative=step.target_relative,
+                projection=projection,
+            )
+        )
+    transition_slugs = {t.slug for t in transitions}
+    expected_states = tuple(
+        sorted(
+            (new_states[slug] for slug in transition_slugs),
+            key=lambda s: s.slug,
+        )
+    )
+    config_commit_needed = False
+    if mode == RECONCILE_MODE_RECONCILE and routing_changed:
+        config_commit_needed = _config_tracked_and_dirty(vault, git_env)
+    return ReconcilePlan(
+        mode=mode,
+        cursor=cursor,
+        prior=prior,
+        from_head=from_head,
+        to_head=head,
+        routing_changed=routing_changed,
+        transitions=tuple(transitions),
+        net_classes=tuple(sorted((s, n.cls) for s, n in nets.items())),
+        expected_states=expected_states,
+        config_commit_needed=config_commit_needed,
+    )
+
+
+def _recheck_reconcile_sources(
+    vault: Path,
+    profile: TaskNotesProfile,
+    plan: ReconcilePlan,
+    git_env: Dict[str, str],
+    *,
+    max_files: int,
+    max_size: int,
+) -> None:
+    """Fail closed when task inputs or HEAD drifted since prepare."""
+    head = git_head_id(vault, git_env)
+    if head is None or not is_valid_git_commit_sha(head) or head != plan.to_head:
+        raise CoreError("reconcile source inputs changed before apply")
+    current_map = {
+        c.slug: c
+        for c in enumerate_reconcile_candidates(
+            vault, profile, max_files=max_files, max_size=max_size
+        )
+    }
+    for expected in plan.expected_states:
+        now = _current_reconcile_task_state(
+            vault, profile, expected.slug, current_map, max_size=max_size
+        )
+        if now != expected:
+            raise CoreError("reconcile source inputs changed before apply")
+
+
+def apply_daily_links_reconciliation(
+    vault: Path,
+    profile: TaskNotesProfile,
+    config: DailyNotesConfig,
+    plan: ReconcilePlan,
+    git_env: Optional[Dict[str, str]] = None,
+    *,
+    pending_path: Optional[Path] = None,
+    max_files: int = LIST_MAX_FILES,
+    max_size: int = LIST_MAX_FILE_SIZE,
+    _final_check_hook: Optional[Callable[[], None]] = None,
+) -> ReconcileApplyOutcome:
+    """Apply a prepared plan: projections, targeted commit, pending record.
+
+    Rechecks task source inputs (and HEAD) first — any churn fails
+    closed before a side effect. Applies every pre-prepared projection
+    with the existing safe W1b primitives (ensure projections route
+    through the current config, removes through the plan's prior
+    routing); a persistent projection conflict fails closed. Stages
+    ONLY the actually changed daily notes (plus the tracked-and-dirty
+    Daily Notes config when the plan needs it) and creates one targeted
+    commit — never ``git add -A``; unrelated dirty/staged paths are
+    untouched. On success writes the validated pending sibling after
+    the commit, structurally pinning the applied Daily Notes routing
+    (heads, timestamp, folder, format). The cursor is never advanced
+    here.
+    """
+    if not isinstance(config, DailyNotesConfig):
+        raise ValidationError(
+            "reconcile apply requires a validated DailyNotesConfig"
+        )
+    if not isinstance(plan, ReconcilePlan):
+        raise ValidationError("reconcile apply requires a prepared plan")
+    if git_env is None:
+        git_env = _build_git_env()
+    _recheck_reconcile_sources(
+        vault, profile, plan, git_env,
+        max_files=max_files, max_size=max_size,
+    )
+    prior = plan.prior
+    changed: List[str] = []
+    applied = 0
+    for transition in plan.transitions:
+        cfg = (
+            config
+            if transition.routing == RECONCILE_ROUTING_CURRENT
+            else prior
+        )
+        if cfg is None:
+            raise ValidationError("reconcile remove requires a prior routing")
+        outcome = apply_daily_note_projection(
+            vault, cfg, transition.projection,
+            _final_check_hook=_final_check_hook,
+        )
+        if outcome.state == DAILY_PROJECTION_CONFLICT:
+            raise CoreError(
+                "daily note projection conflict during reconcile apply"
+            )
+        if outcome.state == DAILY_PROJECTION_APPLIED:
+            applied += 1
+            changed.append(transition.target_relative)
+    stage = sorted(set(changed))
+    if plan.config_commit_needed and _config_tracked_and_dirty(vault, git_env):
+        stage.append(RECONCILE_CONFIG_RELPATH)
+        stage.sort()
+    commit_created = False
+    if stage:
+        commit_created = git_commit_reconcile_targets(
+            vault, [vault / rel for rel in stage], git_env
+        )
+    head_now = git_head_id(vault, git_env)
+    if head_now is None:
+        raise CoreError("reconcile apply requires a vault HEAD")
+    head_now = validate_git_commit_sha(head_now)
+    pending = DailyLinksReconcilePending(
+        from_head=plan.from_head,
+        to_head=head_now,
+        started_at=int(time.time()),
+        daily_folder=config.folder,
+        daily_format=config.format,
+    )
+    write_daily_links_reconcile_pending(pending, pending_path)
+    return ReconcileApplyOutcome(
+        applied=applied,
+        changed_targets=tuple(sorted(set(changed))),
+        commit_created=commit_created,
+        commit_id=head_now if commit_created else None,
+        pending=pending,
+    )
+
+
+def finalize_daily_links_reconciliation(
+    vault: Path,
+    config: DailyNotesConfig,
+    *,
+    sync_succeeded: bool,
+    git_env: Optional[Dict[str, str]] = None,
+    cursor: Optional[DailyLinksReconcileCursor] = None,
+    pending: Optional[DailyLinksReconcilePending] = None,
+    cursor_path: Optional[Path] = None,
+    pending_path: Optional[Path] = None,
+) -> DailyLinksReconcileCursor:
+    """Advance the cursor after the caller confirms native sync success.
+
+    Requires the caller's ``sync_succeeded`` signal and verifies the
+    pending/head identity (``to_head`` equals the current HEAD, and
+    ``from_head`` matches the established cursor when present) and the
+    pending's pinned applied routing (folder/format must equal the
+    supplied config) before atomically writing the advanced cursor
+    (current routing recorded) and clearing the pending sibling. A
+    config edit between apply and finalize therefore fails closed with
+    the old cursor and pending preserved for replay. One crash window
+    is idempotent: when the cursor was already advanced to the
+    pending's ``to_head`` (cursor-written, pending-not-cleared) and the
+    current HEAD matches, the stale pending is safely cleared and the
+    existing cursor returned. All other mismatches fail closed. Never
+    touches the recovery marker.
+    """
+    if not isinstance(sync_succeeded, bool):
+        raise ValidationError("sync_succeeded must be a boolean")
+    if not sync_succeeded:
+        raise CoreError(
+            "reconcile finalize requires a successful native sync"
+        )
+    if not isinstance(config, DailyNotesConfig):
+        raise ValidationError(
+            "reconcile finalize requires a validated DailyNotesConfig"
+        )
+    if git_env is None:
+        git_env = _build_git_env()
+    if cursor is None:
+        cursor = load_daily_links_reconcile_cursor(cursor_path)
+    if pending is None:
+        pending = load_daily_links_reconcile_pending(pending_path)
+    if pending is None:
+        raise CoreError("reconcile finalize requires a pending record")
+    if not isinstance(pending, DailyLinksReconcilePending):
+        raise ValidationError(
+            "reconcile finalize requires a pending record"
+        )
+    current = git_head_id(vault, git_env)
+    if current is None:
+        raise CoreError("reconcile finalize requires a vault HEAD")
+    current = validate_git_commit_sha(current)
+    if current != pending.to_head:
+        raise CoreError("reconcile pending head mismatch")
+    if cursor is not None and cursor.reconciled_head == pending.to_head:
+        # Crash window: the cursor was already advanced to this
+        # pending's head but the pending sibling was not cleared
+        # (identity verified above). Clear the stale pending and
+        # return the already-advanced cursor.
+        clear_daily_links_reconcile_pending(pending_path)
+        return cursor
+    if cursor is not None and pending.from_head != cursor.reconciled_head:
+        raise CoreError("reconcile pending base mismatch")
+    if (pending.daily_folder, pending.daily_format) != (
+        config.folder,
+        config.format,
+    ):
+        raise CoreError("reconcile pending routing mismatch")
+    advanced = DailyLinksReconcileCursor(
+        reconciled_head=pending.to_head,
+        daily_folder=config.folder,
+        daily_format=config.format,
+        projection_format=DAILY_LINKS_PROJECTION_FORMAT_VERSION,
+    )
+    write_daily_links_reconcile_cursor(advanced, cursor_path)
+    clear_daily_links_reconcile_pending(pending_path)
+    return advanced
+
+
+
+# ---------------------------------------------------------------------------
 # Mutation result
 # ---------------------------------------------------------------------------
 
@@ -4025,6 +5721,8 @@ class TaskNotesEngine:
     All operations that invoke gbrain (including get) take the shared
     lock. List is lock-free because it never invokes gbrain. Mutations
     verify the profile, verify the gbrain source under the lock, run
+    Daily-links reconciliation when enabled (issue #139 W4a, before
+    preflight; delete runs its Git-clean target guard first), run
     preflight (commit pending + incremental sync), re-check the profile
     immediately before capture, execute the gbrain capture, verify
     read-back against a strict disk parse, and commit the target path.
@@ -4040,9 +5738,14 @@ class TaskNotesEngine:
         lock_timeout: float = DEFAULT_LOCK_TIMEOUT,
         tz: str = "UTC",
         daily_links_enabled: bool = False,
+        reconcile_enabled: bool = False,
+        reconcile_cursor_path: Optional[Path] = None,
+        reconcile_pending_path: Optional[Path] = None,
     ) -> None:
         if not isinstance(daily_links_enabled, bool):
             raise ValidationError("daily_links_enabled must be a boolean")
+        if not isinstance(reconcile_enabled, bool):
+            raise ValidationError("reconcile_enabled must be a boolean")
         self.vault = Path(vault)
         self.gbrain_bin = gbrain_bin
         self.gbrain_home = Path(gbrain_home)
@@ -4052,6 +5755,23 @@ class TaskNotesEngine:
         self.recovery_marker = self.lock_dir / RECOVERY_MARKER_NAME
         self.tz = tz
         self.daily_links_enabled = daily_links_enabled
+        # Daily-links reconciliation (issue #139 W4a) is gated by BOTH
+        # the daily-links master switch and the reconciliation switch:
+        # with the master disabled it is fully inert (no cursor/pending
+        # I/O, no calls). The cursor/pending locations default to the
+        # fixed W2a runtime paths; tests inject temporary paths.
+        self.reconcile_enabled = reconcile_enabled
+        self._reconcile_active = daily_links_enabled and reconcile_enabled
+        self.reconcile_cursor_path = (
+            Path(reconcile_cursor_path)
+            if reconcile_cursor_path is not None
+            else DAILY_LINKS_RECONCILE_CURSOR_PATH
+        )
+        self.reconcile_pending_path = (
+            Path(reconcile_pending_path)
+            if reconcile_pending_path is not None
+            else DAILY_LINKS_RECONCILE_PENDING_PATH
+        )
         # Daily Notes config is loaded and validated at most once per
         # projection-bearing operation, before any task side effect, and
         # the immutable snapshot is carried through the post-task
@@ -4270,13 +5990,65 @@ class TaskNotesEngine:
         """
         return load_daily_notes_config(self.vault)
 
+    # -- daily-links reconciliation (issue #139, W4a: engine wiring) ------
+
+    def _run_reconciliation(self, profile: TaskNotesProfile) -> DailyNotesConfig:
+        """Run the W2 reconciliation lifecycle (shared lock already held).
+
+        prepare -> apply (targeted commit) -> required native gbrain
+        sync (source-routed internal CLI path; never the public gbrain
+        wrapper, no nested lock, no PGLite access) -> finalize. One
+        validated ``DailyNotesConfig`` snapshot is loaded here and that
+        same object passes through prepare, apply, and finalize. Any
+        failure raises a typed core error that skips all later
+        preflight/projection/mutation; cursor/pending semantics are
+        preserved for replay and the recovery marker is never touched.
+        """
+        config = self._load_daily_config()
+        plan = prepare_daily_links_reconciliation(
+            self.vault, profile, config, self._git_env,
+            cursor_path=self.reconcile_cursor_path,
+            pending_path=self.reconcile_pending_path,
+        )
+        apply_daily_links_reconciliation(
+            self.vault, profile, config, plan, self._git_env,
+            pending_path=self.reconcile_pending_path,
+        )
+        # Required native sync: finalize may only run after a verified
+        # sync, so a sync failure leaves cursor+pending intact for
+        # replay and skips the rest of the operation.
+        gbrain_sync_incremental(
+            self.gbrain_bin, self._gbrain_env, self.vault, profile.source_id  # type: ignore[arg-type]
+        )
+        finalize_daily_links_reconciliation(
+            self.vault, config,
+            sync_succeeded=True,
+            git_env=self._git_env,
+            cursor_path=self.reconcile_cursor_path,
+            pending_path=self.reconcile_pending_path,
+        )
+        return config
+
+    def _maybe_reconcile(self, profile: TaskNotesProfile) -> None:
+        """Reconcile Daily Notes links before preflight (lock held).
+
+        Inert unless the daily-links master AND the reconciliation
+        switch are both enabled: disabled mode performs no cursor or
+        pending I/O and makes no reconciliation calls. When active this
+        runs BEFORE the existing Git preflight and before any mutation
+        side effect; any failure propagates and skips everything that
+        follows.
+        """
+        if not self._reconcile_active:
+            return
+        self._run_reconciliation(profile)
+
     def _prepare_daily_link_projections(
         self,
         profile: TaskNotesProfile,
         config: DailyNotesConfig,
         steps: List[Tuple[str, str]],
         slug: str,
-        title: str,
     ) -> List[DailyNoteProjection]:
         """Pre-compute every needed projection target (no side effects).
 
@@ -4301,7 +6073,7 @@ class TaskNotesEngine:
             )
             projections.append(
                 prepare_daily_note_projection(
-                    self.vault, config, operation, date, slug=slug, title=title
+                    self.vault, config, operation, date, slug=slug
                 )
             )
         return projections
@@ -4493,6 +6265,9 @@ class TaskNotesEngine:
             profile = self._verify_source(profile)
             # Preflight.
             original_hash = profile.profile_hash
+            # W4a: reconcile Daily Notes links before preflight (lock
+            # already held); failure skips all later preflight/mutation.
+            self._maybe_reconcile(profile)
             self._preflight(profile)
             # Re-check profile stability.
             profile = self._verify_profile_stable(original_hash)
@@ -4524,7 +6299,7 @@ class TaskNotesEngine:
                     self.vault, daily_config, date_steps or []
                 )
                 daily_projections = self._prepare_daily_link_projections(
-                    profile, daily_config, steps, slug, title
+                    profile, daily_config, steps, slug
                 )
             # CAPTURE-STARTED BOUNDARY: from here on, always return a MutationResult.
             try:
@@ -4686,6 +6461,9 @@ class TaskNotesEngine:
             profile = self._verify_source(profile)
             # Preflight.
             original_hash = profile.profile_hash
+            # W4a: reconcile Daily Notes links before preflight (lock
+            # already held); failure skips all later preflight/mutation.
+            self._maybe_reconcile(profile)
             self._preflight(profile)
             # Re-check profile stability.
             profile = self._verify_profile_stable(original_hash)
@@ -4759,7 +6537,7 @@ class TaskNotesEngine:
                         self.vault, daily_config_update, date_steps
                     )
                     daily_projections_update = self._prepare_daily_link_projections(
-                        profile, daily_config_update, steps, slug, decoded["title"]
+                        profile, daily_config_update, steps, slug
                     )
             markdown = reconstruct_markdown(
                 page, profile, updates, body_override=body_v
@@ -4811,6 +6589,9 @@ class TaskNotesEngine:
             profile = self.load_profile()
             profile = self._verify_source(profile)
             original_hash = profile.profile_hash
+            # W4a: reconcile Daily Notes links before preflight (lock
+            # already held); failure skips all later preflight/mutation.
+            self._maybe_reconcile(profile)
             self._preflight(profile)
             profile = self._verify_profile_stable(original_hash)
             profile = self._verify_source(profile)
@@ -4862,6 +6643,9 @@ class TaskNotesEngine:
             profile = self.load_profile()
             profile = self._verify_source(profile)
             original_hash = profile.profile_hash
+            # W4a: reconcile Daily Notes links before preflight (lock
+            # already held); failure skips all later preflight/mutation.
+            self._maybe_reconcile(profile)
             self._preflight(profile)
             profile = self._verify_profile_stable(original_hash)
             profile = self._verify_source(profile)
@@ -4940,6 +6724,12 @@ class TaskNotesEngine:
                     f"target has uncommitted changes: {target}"
                 )
 
+            # W4a delete exception: the Git-clean guard above runs BEFORE
+            # any reconciliation side effect, so a dirty target yields
+            # zero reconciliation I/O and calls. Once clean, reconcile
+            # other pending changes, then the preflight/delete lifecycle.
+            self._maybe_reconcile(profile)
+
             # Now safe: preflight commits pending unrelated edits and syncs.
             self._preflight(profile)
             profile = self._verify_profile_stable(original_hash)
@@ -4949,10 +6739,10 @@ class TaskNotesEngine:
 
             # Daily link prevalidation (issue #139 W2, D13 ordering): read
             # and decode the CURRENT page to retain the actual scheduled
-            # state and title, then load the Daily Notes config exactly
-            # once and pre-compute the removal projection — BEFORE the
-            # soft-delete gate. A deterministic failure raises here: the
-            # task and its daily link stay untouched.
+            # state, then load the Daily Notes config exactly once and
+            # pre-compute the removal projection — BEFORE the soft-delete
+            # gate. A deterministic failure raises here: the task and its
+            # daily link stay untouched.
             daily_projections_delete: Optional[List[DailyNoteProjection]] = None
             daily_config_delete: Optional[DailyNotesConfig] = None
             if self.daily_links_enabled:
@@ -4975,7 +6765,6 @@ class TaskNotesEngine:
                         daily_config_delete,
                         steps,
                         slug,
-                        decoded_delete["title"],
                     )
 
             # Gbrain soft-delete: confirmation gate.
@@ -5063,6 +6852,9 @@ class TaskNotesEngine:
                 )
             profile = self._verify_source(profile)
             original_hash = profile.profile_hash
+            # W4a: reconcile Daily Notes links before preflight (lock
+            # already held); failure skips all later preflight/mutation.
+            self._maybe_reconcile(profile)
             self._preflight(profile)
             profile = self._verify_profile_stable(original_hash)
             profile = self._verify_source(profile)
@@ -5114,6 +6906,9 @@ class TaskNotesEngine:
                 )
             profile = self._verify_source(profile)
             original_hash = profile.profile_hash
+            # W4a: reconcile Daily Notes links before preflight (lock
+            # already held); failure skips all later preflight/mutation.
+            self._maybe_reconcile(profile)
             self._preflight(profile)
             profile = self._verify_profile_stable(original_hash)
             profile = self._verify_source(profile)

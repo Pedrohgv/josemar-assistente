@@ -173,15 +173,19 @@ class TaskNotesDockerRuntimeTests(unittest.TestCase):
         data_dir = Path(tempfile.mkdtemp(prefix="tasknotes-runtime-"))
         self.addCleanup(shutil.rmtree, data_dir, ignore_errors=True)
         _chown_data_dir(data_dir, uid, gid)
-        # The e2e now runs two lifecycle phases (disabled mode plus the
-        # issue #139 daily-links phase with Git/gbrain evidence), roughly
-        # doubling the mutation count; give it a doubled budget.
+        # The e2e now runs three lifecycle phases (disabled mode, the
+        # issue #139 daily-links phase with Git/gbrain evidence, and the
+        # revision-3 external-edit refresh reconciliation), roughly
+        # tripling the mutation count; give it a tripled budget.
         result = self._run_e2e_container(
-            data_dir, uid, gid, as_runtime_user=True, timeout=600
+            data_dir, uid, gid, as_runtime_user=True, timeout=900
         )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("real-gbrain disabled-mode lifecycle: PASS", result.stdout)
         self.assertIn("real-gbrain daily-links MCP lifecycle: PASS", result.stdout)
+        self.assertIn(
+            "real-gbrain external-edit refresh reconciliation: PASS", result.stdout
+        )
         self.assertIn("real-gbrain MCP lifecycle: PASS", result.stdout)
 
     def test_root_container_run_is_rejected(self) -> None:
@@ -387,15 +391,19 @@ class TaskNotesDockerHarnessContractTests(unittest.TestCase):
         self.assertIn('deleted["daily_link_state"] == "applied_and_committed"', text)
         self.assertIn('"daily_link_state" not in alpha_done', text)
         self.assertIn('alpha_kept["daily_link_state"] == "not_applied"', text)
-        # R6 (issue #140): wikilink-metacharacter titles round-trip and the
-        # canonical link encodes exactly '[', ']', '|' (percent-encoding,
-        # uppercase hex) in the alias while the target stays the raw slug.
+        # Issue #139 revision 3: special-character task titles round-trip
+        # while the canonical generated link is exactly the bare wikilink:
+        # only the exact slug is serialized, the title stays authoritative
+        # in the task file, and no percent-encoded alias is ever written.
         self.assertIn('delta_title = "Review [draft]"', text)
         self.assertIn('delta2_title = "Compare A | B"', text)
-        self.assertIn('f"- [[{delta}|Review %5Bdraft%5D]]"', text)
-        self.assertIn('f"- [[{delta2}|Compare A %7C B]]"', text)
+        self.assertIn('f"- [[{delta}]]"', text)
+        self.assertIn('f"- [[{delta2}]]"', text)
         self.assertIn('assert "Review [draft]" not in note_24', text)
         self.assertIn('delta_fetched["title"] == delta_title', text)
+        # The stale percent-encoded-alias expectations are gone.
+        self.assertNotIn("%5Bdraft%5D", text)
+        self.assertNotIn("%7C B", text)
         # Idempotent by exact slug; unrelated links survive removals.
         self.assertIn('_read_daily_note("2026-07-24").count(delta_link) == 1', text)
         self.assertIn('assert delta2_link in note_24_after', text)
@@ -412,8 +420,52 @@ class TaskNotesDockerHarnessContractTests(unittest.TestCase):
         self.assertIn('"get_page"', text)
         self.assertIn("compiled_truth", text)
         self.assertIn(
-            '"[[20260721t100000|Disposable daily-link task alpha]]" in body_19', text
+            '"[[20260721t100000]]" in body_19', text
         )
+
+    def test_e2e_external_edit_reconciliation_contract(self) -> None:
+        """Issue #139 revision 3 W3: the e2e must prove the approved
+        refresh lane reconciles an external (non-MCP) manual task
+        reschedule under the runtime lock — the old link gone, the new link
+        exactly once, the task still gbrain-visible through the required
+        committed incremental sync, and the cursor advanced with no pending
+        sibling. It must route through the real wrapper, never the MCP."""
+        text = self._e2e_text()
+        # The approved W3 refresh lane is the real wrapper (no MCP mutation).
+        self.assertIn('GBRAIN_WRAPPER = "/usr/local/bin/josemar-gbrain"', text)
+        self.assertIn('[GBRAIN_WRAPPER, "refresh"]', text)
+        # Fixed cursor/pending state under /opt/data/.gbrain.
+        self.assertIn(
+            'RECONCILE_CURSOR_PATH = Path(\n'
+            '    "/opt/data/.gbrain/josemar-tasknotes-daily-links-reconcile.json"',
+            text,
+        )
+        self.assertIn(
+            'RECONCILE_PENDING_PATH = Path(\n'
+            '    "/opt/data/.gbrain/'
+            'josemar-tasknotes-daily-links-reconcile-pending.json"',
+            text,
+        )
+        # Both strict flags are passed so the refresh lane is active.
+        self.assertIn('TASKNOTES_DAILY_LINKS_ENABLED="true"', text)
+        self.assertIn('TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="true"', text)
+        # The external edit is a direct task-file rewrite + commit, never a
+        # task_* MCP call.
+        self.assertIn('"external manual reschedule"', text)
+        self.assertIn('text.replace(f"scheduled: \'{old_date}\'",', text)
+        # Old link gone; new link exactly once.
+        self.assertIn('f"- [[{old_task}]]" not in note_old_after', text)
+        self.assertIn('note_new.count(f"- [[{old_task}]]") == 1', text)
+        # Task stays gbrain-visible through the committed incremental sync
+        # and the reconcile cycle created exactly one targeted commit.
+        self.assertIn("_gbrain_task_visible", text)
+        self.assertIn('"tasknotes-mcp: daily links reconcile"', text)
+        self.assertIn("log.count", text)
+        # Cursor/pending final state: advanced to the new HEAD, pending gone.
+        self.assertIn('cursor["reconciled_head"] == head_after', text)
+        self.assertIn('cursor["daily_folder"] == DAILY_FOLDER', text)
+        self.assertIn('cursor["daily_format"] == DAILY_FORMAT', text)
+        self.assertIn("not RECONCILE_PENDING_PATH.exists()", text)
 
     @staticmethod
     def _harness_env_passthrough() -> str:

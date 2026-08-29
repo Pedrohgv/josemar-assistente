@@ -393,15 +393,16 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
                 "AGENTS.md ownership bullet",
                 self.agents,
                 (
-                    "default-off Daily Note task-link projection (issue #139)",
+                    "default-on Daily Note task-link projection (issue #139)",
                     "never a generic note writer and never nests the public `gbrain` wrapper",
+                    "`/opt/data/.gbrain`",
                 ),
             ),
             (
                 "AGENTS.md non-negotiable 6",
                 self.agents,
                 (
-                    "filesystem exception (issue #139",
+                    "vault-file exception (issue #139",
                     "mandatory native incremental gbrain reconciliation",
                     "generic note-write tool",
                 ),
@@ -430,11 +431,12 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
         self.assertIn("the sole projection source", self.runbook)
 
     def test_runbook_documents_daily_note_projection_contract(self) -> None:
-        """The runbook must document the default-off flag, dynamic core
+        """The runbook must document the default-on flag, dynamic core
         Daily Notes config, the bounded date/template subset, structural
         `## Tasks` rules, canonical links, the transition matrix, ordering
         guarantees, concurrency/atomic/Git/sync behavior, projection-only
-        outcome states, disabling behavior, and the v1 limitations."""
+        outcome states, disabling behavior, and the reconciliation
+        contract."""
         text = self.runbook
         # Prose assertions run against whitespace-normalized text so
         # Markdown line wrapping cannot mask a wording change.
@@ -442,8 +444,9 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
         # Section + flag contract.
         self.assertIn("## Daily Note task links (issue #139)", text)
         self.assertIn("TASKNOTES_DAILY_LINKS_ENABLED", text)
-        self.assertIn("### Feature flag (default off)", text)
-        self.assertIn("Missing or empty resolves to disabled", prose)
+        self.assertIn("TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED", text)
+        self.assertIn("### Feature flag (default on)", text)
+        self.assertIn("Missing or empty resolves to enabled", prose)
         self.assertIn("carry no `daily_link_*` fields", prose)
         # Dynamic core config, fail-closed, no second config source,
         # no Periodic Notes fallback.
@@ -492,21 +495,20 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
             "existing frontmatter is never normalized or reserialized", prose
         )
         self.assertIn("only when a missing note is created", prose)
-        # Canonical link semantics.
+        # Canonical link semantics (issue #139 revision 3): the canonical
+        # generated line is exactly the bare wikilink; the title is never
+        # serialized; legacy alias lines are normalization/removal inputs
+        # only; the TaskNotes 4.11.1 overlay/source-mode trade-off is
+        # documented.
         self.assertIn("### Canonical link semantics", text)
-        self.assertIn("- [[<task-slug>|<display-alias>]]", text)
+        self.assertIn("- [[<task-slug>]]", text)
         self.assertIn("by exact wikilink target slug", prose)
-        # R6 (issue #140): the alias is a derived serialized encoding —
-        # reversible percent encoding of the structural metacharacters
-        # only (% first), never matched; title semantics unchanged.
-        for token in ("`%25`", "`%5B`", "`%5D`", "`%7C`"):
-            self.assertIn(token, text)
-        self.assertIn("derived, serialized encoding of the title", prose)
-        self.assertIn("deterministic, reversible percent encoding", prose)
-        self.assertIn("full enabled-mode TaskNotes title domain", prose)
-        self.assertIn("does not alter task Markdown or title semantics", prose)
-        self.assertIn("never by alias text", prose)
-        self.assertIn("idempotent regardless of the encoded alias", prose)
+        self.assertIn("never serialized into the projection", prose)
+        self.assertIn("only as normalization/removal inputs", prose)
+        self.assertIn("newly generated lines are always bare", prose)
+        self.assertIn("TaskNotes 4.11.1", prose)
+        self.assertNotIn("- [[<task-slug>|<display-alias>]]", text)
+        self.assertNotIn("percent encoding", prose)
         # Transition matrix and ordering guarantees.
         self.assertIn("### Transition matrix", text)
         self.assertIn("add under D2 **first**, then remove from D1", text)
@@ -547,11 +549,58 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
             "never create the TaskNotes global recovery marker", prose
         )
         self.assertIn("`committed_sync_failed`", text)
-        # Disabling behavior and v1 limitations.
+        # Disabling behavior and limitations.
         self.assertIn("### Disabling, manual edits, and v1 limitations", text)
-        self.assertIn("no watcher or backfill in v1", prose)
+        self.assertIn("no real-time watcher", prose)
         self.assertIn("are never bulk-removed", prose)
         self.assertIn("No Periodic Notes compatibility is", prose)
+
+    def test_runbook_documents_reconciliation_contract(self) -> None:
+        """Issue #139 W4: the runbook must document the default-on
+        master/slave switches, the pre-preflight reconciliation lifecycle
+        (bounded targeted commit -> native sync -> cursor finalize), the
+        replayable cursor/pending state, master-off inertness, and the
+        delete exception."""
+        text = self.runbook
+        prose = " ".join(text.split())
+        # Master/slave defaults and gating.
+        self.assertIn("### Reconciliation (cursor/pending)", text)
+        self.assertIn("TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED", text)
+        self.assertIn("default `true`", prose)
+        self.assertIn("effective only while the master is also `true`", prose)
+        self.assertIn("when the master is `false` everything is inert", prose)
+        # Cursor/pending are bounded private runtime state, not content.
+        self.assertIn("`/opt/data/.gbrain`", text)
+        self.assertIn("structural metadata only", prose)
+        self.assertIn("task Markdown stays gbrain-only", prose)
+        # Pre-preflight ordering and lifecycle.
+        self.assertIn("BEFORE the Git preflight", prose)
+        self.assertIn("one targeted commit", prose)
+        self.assertIn("native source-scoped incremental gbrain sync", prose)
+        self.assertIn("cursor finalize", prose)
+        # Failure blocks the mutation and leaves replayable state.
+        self.assertIn("mutation is blocked", prose)
+        self.assertIn("stays replayable", prose)
+        self.assertIn("recovery marker is never touched", prose)
+        # Refresh lane and delete exception.
+        self.assertIn("`josemar-gbrain refresh`", text)
+        self.assertIn("gated by both flags", prose)
+        self.assertIn("inert when either flag is off", prose)
+        self.assertNotIn("gated by the master flag only", prose)
+        self.assertIn("**Delete exception.**", text)
+        self.assertIn("zero reconciliation I/O", prose)
+
+    def test_workflow_agents_documents_slave_switch(self) -> None:
+        """Issue #139 W4b: the deploy variable table must list the slave
+        switch and describe both switches as default-on strict booleans."""
+        text = (REPO_ROOT / ".github" / "workflows" / "AGENTS.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("`TASKNOTES_DAILY_LINKS_ENABLED`", text)
+        self.assertIn("`TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED`", text)
+        self.assertIn("default `true`", text)
+        self.assertIn("effective only while `TASKNOTES_DAILY_LINKS_ENABLED` is also `true`", text)
+        self.assertNotIn("default-off switch", text)
 
     def test_daily_notes_reference_documents_bounded_contract(self) -> None:
         """The deep-dive reference must carry the full bounded contract and
@@ -560,7 +609,9 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
         prose = " ".join(text.split())
         self.assertIn("# Daily Note task-link projection (issue #139)", text)
         self.assertIn("TASKNOTES_DAILY_LINKS_ENABLED", text)
-        self.assertIn("default `false`", text)
+        self.assertIn("TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED", text)
+        self.assertIn("default `true`", text)
+        self.assertIn("Effective only while the master is also `true`", prose)
         self.assertIn("/opt/data/.locks/tasknotes.lock", text)
         self.assertIn("Task files remain gbrain-only", prose)
         self.assertIn("wrapper nesting", prose)
@@ -594,18 +645,18 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
             "existing frontmatter is never normalized or reserialized", prose
         )
         self.assertIn("only when a missing note is created", prose)
-        self.assertIn("- [[<task-slug>|<display-alias>]]", text)
-        # R6 (issue #140): derived serialized alias — reversible percent
-        # encoding of the structural metacharacters only (% first),
-        # never matched or compared; title semantics unchanged.
-        for token in ("`%25`", "`%5B`", "`%5D`", "`%7C`"):
-            self.assertIn(token, text)
-        self.assertIn("deterministic, reversible percent encoding", prose)
-        self.assertIn("keeps the mapping injective", prose)
-        self.assertIn("full enabled-mode TaskNotes title domain", prose)
-        self.assertIn("does not alter task Markdown or title semantics", prose)
+        # Issue #139 revision 3: bare canonical link — the title is never
+        # serialized; legacy alias lines are normalization/removal inputs
+        # only; matching stays exact-slug and the TaskNotes 4.11.1
+        # overlay/source-mode trade-off is documented.
+        self.assertIn("- [[<task-slug>]]", text)
+        self.assertIn("never serialized into the projection", prose)
         self.assertIn("never matched or compared", prose)
-        self.assertIn("idempotent regardless of the encoded alias", prose)
+        self.assertIn("normalization/removal inputs", prose)
+        self.assertIn("Newly generated lines are always bare", prose)
+        self.assertIn("TaskNotes 4.11.1", prose)
+        self.assertNotIn("- [[<task-slug>|<display-alias>]]", text)
+        self.assertNotIn("percent encoding", prose)
         self.assertIn("add D2 **first**, then remove D1", text)
         self.assertIn("remove after **verified** deletion", text)
         # R4 (issue #140): plan composition by resolved target path.
@@ -625,27 +676,42 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
         self.assertIn(
             "never create the global TaskNotes recovery marker", prose
         )
-        self.assertIn("No watcher, cron, or bulk backfill in v1", prose)
+        self.assertIn("no real-time watcher", prose)
         self.assertIn("never bulk-removed", prose)
         self.assertIn("No Periodic Notes compatibility", prose)
+        # W4: reconciliation section — pre-preflight lifecycle, replayable
+        # cursor/pending, master-off inertness, delete exception.
+        self.assertIn("## Reconciliation (cursor/pending, issue #139 W2–W4)", text)
+        self.assertIn("BEFORE the Git preflight", prose)
+        self.assertIn("one targeted commit", prose)
+        self.assertIn("cursor finalize", prose)
+        self.assertIn("stays replayable", prose)
+        self.assertIn("recovery marker is never touched", prose)
+        self.assertIn("gated by both flags", prose)
+        self.assertIn("inert when either flag is off", prose)
+        self.assertNotIn("gated by the master flag only", prose)
+        self.assertIn("**Delete exception:**", text)
+        self.assertIn("zero reconciliation I/O", prose)
+        self.assertIn("first-enable backfill", prose)
         # Cross-pointers.
         self.assertIn("`SKILL.md`", text)
         self.assertIn("`docs/tasknotes-mcp.md`", text)
 
     def test_skill_documents_daily_note_projection_boundary(self) -> None:
         """The always-loaded skill must present the concise boundary: the
-        projection is adapter-owned, opt-in/default-off, never manually
-        maintained during task workflows, with the deep-dive pointer —
-        while keeping the skill under the organization line limit."""
+        projection is adapter-owned, default-on, never manually maintained
+        during task workflows, with the deep-dive pointer — while keeping
+        the skill under the organization line limit."""
         text = self.skill
         prose = " ".join(text.split())
-        self.assertIn("## Daily Note links (opt-in)", text)
+        self.assertIn("## Daily Note links", text)
         self.assertIn("TASKNOTES_DAILY_LINKS_ENABLED", text)
-        self.assertIn("default off", text)
+        self.assertIn("default on", prose)
         self.assertIn("Never edit a projected link manually", prose)
-        self.assertIn("`- [[slug|title]]`", text)
+        self.assertIn("`- [[slug]]`", text)
+        self.assertIn("never serialized into the link", prose)
         self.assertIn("`## Tasks`", text)
-        self.assertIn("direct Obsidian task edits are not re-projected", prose)
+        self.assertIn("repairs drift from direct Obsidian task edits", prose)
         self.assertIn("Backlog and week-planned tasks are never projected", prose)
         self.assertIn("`references/daily-notes.md`", text)
         self.assertLess(len(text.splitlines()), 160)
@@ -664,7 +730,7 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
         )
         self.assertIn("## Current limitations", text)
         self.assertIn(
-            "Daily Note projection backfill/reconciliation (issue #139)", text
+            "Daily Note projection watcher (issue #139)", text
         )
 
 
@@ -785,19 +851,39 @@ class DailyProjectionCoreContract(unittest.TestCase):
                 [(ensure, "2026-01-05"), (remove, "2026-02-20")],
             )
 
-    def test_link_alias_encoding_matches_documented_metacharacters(self) -> None:
-        """R6 (issue #140): the display alias is a deterministic,
-        reversible percent encoding of the structural metacharacters
-        only — `%` first as `%25`, then `[`/`]`/`|`; ordinary title text
-        is unchanged and ownership matching stays alias-independent."""
-        encode = self.core.encode_daily_note_link_alias
-        self.assertEqual(encode("plain title"), "plain title")
-        self.assertEqual(encode("a|b[c]d%e"), "a%7Cb%5Bc%5Dd%25e")
-        # `%` encodes first: a literal `%5B` title cannot collide with an
-        # encoded `[` (`%5B`) — the mapping is injective (reversible).
-        self.assertEqual(encode("%5B"), "%255B")
-        self.assertEqual(encode("["), "%5B")
-        self.assertNotEqual(encode("%5B"), encode("["))
+    def test_daily_link_line_is_bare_canonical_with_legacy_alias_inputs(self) -> None:
+        """Issue #139 revision 3: the canonical generated line is exactly
+        the bare bullet wikilink ``- [[slug]]``; the alias encoder is
+        gone, the title is not serialized, and legacy ``[[slug|alias]]``
+        lines are accepted only as normalization/removal inputs by exact
+        slug."""
+        # Bare canonical line, with and without indentation.
+        self.assertEqual(self.core._daily_link_line("task-1"), "- [[task-1]]")
+        self.assertEqual(
+            self.core._daily_link_line("task-1", indent="  "), "  - [[task-1]]"
+        )
+        # The percent-encoding alias helpers no longer exist.
+        self.assertFalse(hasattr(self.core, "encode_daily_note_link_alias"))
+        self.assertFalse(hasattr(self.core, "_validate_daily_link_title"))
+        # Legacy aliased bullet: add normalizes it to the bare canonical
+        # form (never serializing a title) and remove deletes it by
+        # exact slug.
+        body = "## Tasks\n- [[task-1|Stale Display]]\n"
+        added, changed = self.core.add_daily_note_task_link(body, slug="task-1")
+        self.assertTrue(changed)
+        self.assertEqual(added, "## Tasks\n- [[task-1]]\n")
+        removed, removed_any = self.core.remove_daily_note_task_link(
+            body, slug="task-1"
+        )
+        self.assertTrue(removed_any)
+        self.assertEqual(removed, "## Tasks\n")
+        # A bare exact-slug bullet is already canonical: add is a no-op.
+        bare = "## Tasks\n- [[task-1]]\n"
+        unchanged, changed_bare = self.core.add_daily_note_task_link(
+            bare, slug="task-1"
+        )
+        self.assertFalse(changed_bare)
+        self.assertEqual(unchanged, bare)
 
     def test_projection_targets_in_task_or_archive_folders_rejected(self) -> None:
         """R5 (issue #140): a resolved Daily Note target under the

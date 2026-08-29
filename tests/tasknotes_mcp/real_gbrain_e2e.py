@@ -23,6 +23,15 @@ Two lifecycle phases run against the same disposable vault (issue #139 W4):
    cleanups, delete cleanup, and completion/archive link retention into the
    Daily Notes, commits them as content-free Git commits, syncs them under
    the shared lock, and makes them visible to the real gbrain index.
+3. External-edit refresh reconciliation (issue #139 revision 3 W3): an
+   established scheduled task with its bare canonical Daily Note link is
+   rescheduled externally (direct task-file edit + commit, no MCP mutation);
+   ``josemar-gbrain refresh`` then runs the approved W3 lane under the
+   runtime lock (reconcile CLI prepare/apply/targeted commit, native
+   committed incremental sync, then finalize). The old link is gone, the
+   new link appears exactly once, the task stays gbrain-visible through the
+   required committed incremental sync, and the cursor advances to the new
+   HEAD with no pending sibling.
 
 The script never deletes anything under /opt/data: the outer host test
 fixture owns the fresh temporary directory and removes it after the
@@ -60,6 +69,25 @@ HARNESS_INTERPRETER = "/opt/hermes/.venv/bin/python3"
 # TaskNotes invokes the private native gbrain CLI at a fixed path; the
 # harness pins the same fixed constant — no executable override.
 GBRAIN_NATIVE = "/opt/josemar/libexec/gbrain-native"
+
+# Issue #139 revision 3 W3: the approved refresh/reconciliation path is the
+# fixed-purpose reconcile CLI installed into the built image and invoked
+# through the ``josemar-gbrain refresh`` wrapper under the runtime lock. The
+# wrapper's production constants all resolve to the harness mount at
+# /opt/data, so invoking the real wrapper here IS the production path (the
+# image ships the W3 CLI next to the TaskNotes core; its absence fails the
+# refresh, which is exactly the Docker contract we are proving).
+GBRAIN_WRAPPER = "/usr/local/bin/josemar-gbrain"
+
+# Fixed reconcile cursor/pending state under /opt/data/.gbrain (structural
+# metadata only; never vault content). These alias the core's W2a fixed
+# paths so the harness proves the exact finalize state the engine leaves.
+RECONCILE_CURSOR_PATH = Path(
+    "/opt/data/.gbrain/josemar-tasknotes-daily-links-reconcile.json"
+)
+RECONCILE_PENDING_PATH = Path(
+    "/opt/data/.gbrain/josemar-tasknotes-daily-links-reconcile-pending.json"
+)
 
 # Hard upper bound for uid/gid sanity validation (2**32 - 2); 0 (root) is
 # always rejected because the MCP and the harness refuse root execution.
@@ -706,7 +734,7 @@ async def daily_links_lifecycle(vault: Path, env: dict[str, str]) -> None:
             assert "daily_link_state" not in alpha_archived, alpha_archived
 
             note_19 = _read_daily_note(PREEXISTING_DAILY_NOTE_DATE)
-            assert f"- [[{alpha}|{alpha_title}]]" in note_19, note_19
+            assert f"- [[{alpha}]]" in note_19, note_19
             # Non-empty identity and unrelated content preserved verbatim.
             assert "date: 2026-07-19" in note_19, note_19
             assert "title: July 19 planning" in note_19, note_19
@@ -743,7 +771,7 @@ async def daily_links_lifecycle(vault: Path, env: dict[str, str]) -> None:
             stem_20 = re.escape(_daily_note_path("2026-07-20").stem)
             assert re.search(rf"(?m)^date: '?2026-07-20'?$", fm_20), fm_20
             assert re.search(rf"(?m)^title: '?{stem_20}'?$", fm_20), fm_20
-            assert f"- [[{beta}|{beta_title}]]" in note_20, note_20
+            assert f"- [[{beta}]]" in note_20, note_20
 
             # D1 -> D2 reschedule: the new date's link is ensured before the
             # old one is removed (dates report the plan order).
@@ -761,7 +789,7 @@ async def daily_links_lifecycle(vault: Path, env: dict[str, str]) -> None:
             )
             _assert_no_daily_link(_read_daily_note("2026-07-20"), beta)
             note_21 = _read_daily_note("2026-07-21")
-            assert f"- [[{beta}|{beta_title}]]" in note_21, note_21
+            assert f"- [[{beta}]]" in note_21, note_21
 
             # D2 -> planned_week cleanup: link removed, note retained.
             monday = "2026-07-27"  # verified Monday (ISO week start)
@@ -822,7 +850,7 @@ async def daily_links_lifecycle(vault: Path, env: dict[str, str]) -> None:
                 rescheduled_gamma
             )
             note_23 = _read_daily_note("2026-07-23")
-            assert f"- [[{gamma}|{gamma_title}]]" in note_23, note_23
+            assert f"- [[{gamma}]]" in note_23, note_23
 
             deleted = await call(session, "task_delete", {"slug": gamma})
             assert deleted["state"] == "applied_and_committed", deleted
@@ -833,16 +861,17 @@ async def daily_links_lifecycle(vault: Path, env: dict[str, str]) -> None:
             _assert_no_daily_link(_read_daily_note("2026-07-23"), gamma)
             assert _daily_note_path("2026-07-23").is_file()
 
-            # -- R6 (issue #140): wikilink-metacharacter titles ------------
+            # -- Issue #139 revision 3: special-character task titles ------
             # TaskNotes accepts task titles containing '[', ']', '|'. The
-            # daily link encodes exactly those bytes in the display alias
-            # (percent-encoding, uppercase hex, everything else untouched)
-            # while the wikilink target stays the exact task slug:
-            #   "Review [draft]"  -> "- [[<slug>|Review %5Bdraft%5D]]"
-            #   "Compare A | B"   -> "- [[<slug>|Compare A %7C B]]"
+            # daily link is the bare canonical wikilink: only the exact
+            # slug is serialized and the title is never written into the
+            # Daily Note — it stays authoritative in the task's
+            # frontmatter:
+            #   "Review [draft]"  -> "- [[<slug>]]"
+            #   "Compare A | B"   -> "- [[<slug>]]"
             delta = "20260724t130000"
             delta_title = "Review [draft]"
-            delta_link = f"- [[{delta}|Review %5Bdraft%5D]]"
+            delta_link = f"- [[{delta}]]"
             delta_created = await call(
                 session,
                 "task_create",
@@ -860,13 +889,14 @@ async def daily_links_lifecycle(vault: Path, env: dict[str, str]) -> None:
             # The task mutation itself succeeds with the raw title intact.
             delta_fetched = await call(session, "task_get", {"slug": delta})
             assert delta_fetched["title"] == delta_title, delta_fetched
-            # The generated link is the deterministic encoded alias form.
+            # The generated line is the bare canonical link; the title is
+            # not serialized into the Daily Note.
             note_24 = _read_daily_note("2026-07-24")
             assert delta_link in note_24, note_24
             assert "Review [draft]" not in note_24, note_24
 
             # Idempotent by exact slug: an unchanged reschedule reports
-            # not_applied and never duplicates the encoded link.
+            # not_applied and never duplicates the bare link.
             delta_kept = await call(
                 session,
                 "task_update",
@@ -876,12 +906,12 @@ async def daily_links_lifecycle(vault: Path, env: dict[str, str]) -> None:
             assert delta_kept["daily_link_state"] == "not_applied", delta_kept
             assert _read_daily_note("2026-07-24").count(delta_link) == 1
 
-            # A second metacharacter title shares the same date: the
-            # existing exact-slug link is untouched and the new encoded
-            # link lands alongside it.
+            # A second special-character title shares the same date: the
+            # existing exact-slug link is untouched and the new bare link
+            # lands alongside it.
             delta2 = "20260724t133000"
             delta2_title = "Compare A | B"
-            delta2_link = f"- [[{delta2}|Compare A %7C B]]"
+            delta2_link = f"- [[{delta2}]]"
             delta2_created = await call(
                 session,
                 "task_create",
@@ -899,7 +929,7 @@ async def daily_links_lifecycle(vault: Path, env: dict[str, str]) -> None:
 
             # Reschedule the first task: the D1 removal must preserve the
             # unrelated second link (and every other byte) while the D2
-            # note gains the encoded link.
+            # note gains the bare link.
             delta_moved = await call(
                 session,
                 "task_update",
@@ -951,13 +981,14 @@ def _assert_daily_evidence(vault: Path, env: dict[str, str]) -> None:
     log = run(["git", "log", "--oneline"], env=env, cwd=vault)
     # 8 task updates from the disabled-mode phase plus 14 daily-phase task
     # updates: alpha create/unchanged-reschedule/complete/archive, beta
-    # create/reschedule/week, gamma create/backlog/reschedule, and the R6
-    # delta create/unchanged-reschedule/reschedule plus delta2 create.
+    # create/reschedule/week, gamma create/backlog/reschedule, and the
+    # delta create/unchanged-reschedule/reschedule plus delta2 create
+    # (special-character titles; bare canonical links).
     assert log.count("tasknotes-mcp: task update") == 22, log
     assert log.count("tasknotes-mcp: task delete") == 2, log
     # One projection commit per mutation that CHANGED a daily target:
     # alpha create; beta create/reschedule (two targets, one commit)/week
-    # cleanup; gamma create/backlog/reschedule/delete; R6 delta
+    # cleanup; gamma create/backlog/reschedule/delete; delta
     # create/reschedule (two targets, one commit)/delete and delta2 create.
     # The idempotent unchanged reschedules (alpha and delta) commit nothing.
     assert log.count("tasknotes-mcp: daily note projection") == 12, log
@@ -1007,7 +1038,7 @@ def _assert_daily_evidence(vault: Path, env: dict[str, str]) -> None:
         )
     )
     body_19 = page_19.get("compiled_truth", "")
-    assert "[[20260721t100000|Disposable daily-link task alpha]]" in body_19, body_19
+    assert "[[20260721t100000]]" in body_19, body_19
     assert "[[20260718t090000|Preexisting unrelated link]]" in body_19, body_19
     page_20 = json.loads(
         run(
@@ -1025,8 +1056,9 @@ def _assert_daily_evidence(vault: Path, env: dict[str, str]) -> None:
     body_20 = page_20.get("compiled_truth", "")
     assert "## Tasks" in body_20 and "Plan for the day." in body_20, body_20
     assert "[[20260722t110000" not in body_20, body_20
-    # R6 visibility: the encoded alias survives the projection sync into
-    # the real gbrain index; the deleted metacharacter task's link is gone.
+    # Bare-link visibility: the special-character-title task's bare
+    # canonical link survives the projection sync into the real gbrain
+    # index; the deleted task's link is gone.
     page_24 = json.loads(
         run(
             [
@@ -1041,8 +1073,153 @@ def _assert_daily_evidence(vault: Path, env: dict[str, str]) -> None:
         )
     )
     body_24 = page_24.get("compiled_truth", "")
-    assert "[[20260724t133000|Compare A %7C B]]" in body_24, body_24
+    assert "[[20260724t133000]]" in body_24, body_24
     assert "[[20260724t130000" not in body_24, body_24
+
+
+def _reconcile_refresh_source_id(env: dict[str, str]) -> str:
+    """Return the single vault source id for source-routed native reads.
+
+    Same single-default-source limitation as the projection evidence: the
+    disposable harness provisions exactly one source. The exact
+    ``--source <id>`` argv routing contract is additionally pinned by the
+    focused unit test ``test_capture_routes_with_source``.
+    """
+    sources = json.loads(run([GBRAIN_NATIVE, "sources", "list", "--json"], env=env))
+    matching = [
+        source for source in sources["sources"] if source.get("local_path") == str(VAULT)
+    ]
+    assert len(matching) == 1, sources
+    return matching[0]["id"]
+
+
+def _gbrain_task_visible(source_id: str, slug: str, env: dict[str, str]) -> str:
+    """Read a task's compiled body from the real gbrain index (read-only).
+
+    TaskNotes resolves a task's gbrain slug to ``tasks/<slug>``. A missing
+    page is reported as ``{"error": "page_not_found"}``; a present page
+    returns a page object. Asserting the page is present (no error) proves
+    the task is still visible through the required committed incremental
+    sync that the approved refresh runs. The compiled body may be empty for
+    a body-less task, so presence is the visibility signal, not content.
+    """
+    page = json.loads(
+        run(
+            [
+                GBRAIN_NATIVE,
+                "call",
+                "--source",
+                source_id,
+                "get_page",
+                json.dumps({"slug": f"tasks/{slug}"}),
+            ],
+            env=env,
+        )
+    )
+    assert "error" not in page, page
+    return page.get("compiled_truth", "")
+
+
+def _external_reconcile_phase(vault: Path, env: dict[str, str]) -> None:
+    """Issue #139 revision 3 W3: prove the refresh lane reconciles an
+    external (non-MCP) manual task reschedule against the Daily Notes.
+
+    Every task mutation here goes DIRECTLY to the task file and git — never
+    through the MCP. Scenario:
+
+      1. ``old_task`` is committed at ``old_date`` and its bare canonical
+         Daily Note link is already committed and synced into gbrain (the
+         W4 projection phase left both the link and the reconcile cursor at
+         the then-HEAD).
+      2. The task is edited externally to a NEW scheduled date and the
+         change is committed (a manual Obsidian edit the next refresh must
+         pick up).
+      3. ``josemar-gbrain refresh`` runs the approved W3 lane under the
+         runtime lock: the fixed reconcile CLI prepare/apply + one targeted
+         commit, the wrapper's native committed incremental sync/extract,
+         then finalize.
+      4. We assert the old date's link is gone, the new date's link is
+         exactly once, the task remains gbrain-visible through that
+         committed incremental sync, and the cursor/pending reflect the
+         advanced reconciled HEAD with no pending sibling.
+    """
+    old_task = "20260724t133000"  # delta2, still scheduled from the W4 phase
+    old_date = "2026-07-24"
+    new_date = "2026-07-26"
+
+    # The bare link is live from the projection phase (exactly once).
+    note_old = _read_daily_note(old_date)
+    assert note_old.count(f"- [[{old_task}]]") == 1, note_old
+    # The new date's note does not exist yet (no link to remove).
+    assert not _daily_note_path(new_date).is_file(), _daily_note_path(new_date)
+
+    # External manual edit (never through the MCP): rewrite the task's
+    # scheduled date and commit it. The worktree then matches HEAD, so the
+    # reconcile's head reader vs. worktree snapshot sees the reschedule.
+    task_path = vault / "tasks" / f"{old_task}.md"
+    assert task_path.is_file(), task_path
+    text = task_path.read_text(encoding="utf-8")
+    assert f"scheduled: '{old_date}'" in text, text
+    task_path.write_text(
+        text.replace(f"scheduled: '{old_date}'", f"scheduled: '{new_date}'"),
+        encoding="utf-8",
+    )
+    run(["git", "add", "-A"], env=env, cwd=vault)
+    run(["git", "commit", "-q", "-m", "external manual reschedule"], env=env, cwd=vault)
+    head_before = run(["git", "rev-parse", "HEAD"], env=env, cwd=vault).strip()
+
+    # Approved W3 refresh lane under the runtime lock: the real wrapper
+    # (self-acquires the shared lock through the lock-runner chain and
+    # invokes the real fixed reconcile CLI inside it) reconciles, syncs,
+    # then finalizes.
+    refresh = run(
+        [GBRAIN_WRAPPER, "refresh"],
+        env=dict(
+            env,
+            TASKNOTES_DAILY_LINKS_ENABLED="true",
+            TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="true",
+        ),
+    )
+    assert '"success": true' in refresh, refresh
+
+    # Old link gone; new link exactly once.
+    note_old_after = _read_daily_note(old_date)
+    assert f"- [[{old_task}]]" not in note_old_after, note_old_after
+    note_new = _read_daily_note(new_date)
+    assert note_new.count(f"- [[{old_task}]]") == 1, note_new
+
+    # Task remains gbrain-visible through the refresh's committed
+    # incremental sync (the page is present, not page_not_found).
+    _gbrain_task_visible(_reconcile_refresh_source_id(env), old_task, env)
+
+    # Git accounting: the W3 refresh lane created exactly one targeted
+    # reconcile commit AFTER the external edit (the W4 phase's pre-mutation
+    # reconcile commits precede it); the tree is clean (nothing pending
+    # after the sync).
+    log = run(["git", "log", "--oneline"], env=env, cwd=vault)
+    lines = log.splitlines()
+    external_idx = next(
+        i for i, line in enumerate(lines) if line.endswith("external manual reschedule")
+    )
+    reconcile_after = [
+        line
+        for line in lines[:external_idx]
+        if line.endswith("tasknotes-mcp: daily links reconcile")
+    ]
+    assert len(reconcile_after) == 1, reconcile_after
+    clean = run(["git", "status", "--porcelain"], env=env, cwd=vault)
+    assert clean.strip() == "", clean
+
+    # Cursor/pending final state: cursor advanced to the new HEAD, pending
+    # sibling cleared (finalize succeeded only after the committed sync).
+    head_after = run(["git", "rev-parse", "HEAD"], env=env, cwd=vault).strip()
+    assert head_after != head_before, head_after
+    assert RECONCILE_CURSOR_PATH.is_file(), RECONCILE_CURSOR_PATH
+    cursor = json.loads(RECONCILE_CURSOR_PATH.read_text(encoding="utf-8"))
+    assert cursor["reconciled_head"] == head_after, cursor
+    assert cursor["daily_folder"] == DAILY_FOLDER, cursor
+    assert cursor["daily_format"] == DAILY_FORMAT, cursor
+    assert not RECONCILE_PENDING_PATH.exists(), RECONCILE_PENDING_PATH
 
 
 def _assert_fixed_contract_paths_used() -> None:
@@ -1076,6 +1253,12 @@ def main() -> None:
     _assert_daily_evidence(vault, env)
     _assert_fixed_contract_paths_used()
     print("real-gbrain daily-links MCP lifecycle: PASS")
+    # Phase 3 — issue #139 revision 3 W3: the approved refresh lane
+    # reconciles an external (non-MCP) manual task reschedule under the
+    # runtime lock and finalizes the cursor/pending state.
+    _external_reconcile_phase(vault, env)
+    _assert_fixed_contract_paths_used()
+    print("real-gbrain external-edit refresh reconciliation: PASS")
     print("real-gbrain MCP lifecycle: PASS")
 
 

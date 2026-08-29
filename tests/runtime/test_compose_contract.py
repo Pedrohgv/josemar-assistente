@@ -229,15 +229,30 @@ class ComposeContractTests(unittest.TestCase):
         self.assertNotIn("GBRAIN_QUERY_MAX_LIMIT", block)
         self.assertNotIn("GBRAIN_CONTENT_MAX_CHARS", block)
 
-    def test_tasknotes_daily_links_env_default_off_and_no_extra_config(self) -> None:
-        """Issue #139: the hermes service carries exactly one strict
-        default-off boolean for TaskNotes daily-note task links; no Daily
-        Notes folder/date/template config and no vault path is env-driven."""
+    def test_tasknotes_daily_links_env_defaults_on_and_no_extra_config(self) -> None:
+        """Issue #139 revision 3 (W4b): the hermes service carries exactly
+        the two strict default-on booleans for TaskNotes daily-note task
+        links (master + reconcile slave); no Daily Notes folder/date/template
+        config and no vault path is env-driven, and no parallel TaskNotes
+        config source exists."""
         block = service_block(self.text, "hermes")
         self.assertIn(
-            "- TASKNOTES_DAILY_LINKS_ENABLED=${TASKNOTES_DAILY_LINKS_ENABLED:-false}",
+            "- TASKNOTES_DAILY_LINKS_ENABLED=${TASKNOTES_DAILY_LINKS_ENABLED:-true}",
             block,
         )
+        self.assertIn(
+            "- TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="
+            "${TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED:-true}",
+            block,
+        )
+        # Exactly one propagation path: only these two TaskNotes env lines
+        # exist in the service (no parallel/secondary config source).
+        tasknotes_env_lines = [
+            line
+            for line in block.splitlines()
+            if line.strip().startswith("- TASKNOTES_")
+        ]
+        self.assertEqual(len(tasknotes_env_lines), 2)
         for forbidden in (
             "TASKNOTES_DAILY_NOTES_FOLDER",
             "TASKNOTES_DAILY_NOTES_FORMAT",

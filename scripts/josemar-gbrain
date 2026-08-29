@@ -11,7 +11,11 @@
 #             healthy existing; then config, sync, extract, extract links,
 #             schema sync (if custom pack), git safe.directory.
 #   refresh - recurring lightweight reconciliation for manual Obsidian edits:
-#             sync, extract stale content, extract links. No init/schema work.
+#             Daily-links reconciliation cycle first (issue #139 W3: the
+#             fixed reconciliation CLI runs prepare/apply/targeted commit,
+#             then the native sync/extract below, then finalize only after
+#             that sync returned success; the CLI is inert when the master
+#             reconcile flag is disabled). No init/schema work.
 #   embed-backfill - operator-only one-shot embedding backfill (issue #65).
 #             Requires GBRAIN_EMBEDDING_MODEL and GBRAIN_EMBEDDING_DIMENSIONS,
 #             acquires the tasknotes lock, runs `gbrain embed --stale
@@ -118,6 +122,14 @@ ID_BIN="/usr/bin/id"
 # validates the inherited fd and protects the whole chain with a bounded
 # process group. The runner ships at a fixed path in the image.
 TASKNOTES_LOCK_RUNNER="/opt/josemar/scripts/tasknotes_lock_run.py"
+
+# Fixed-purpose Daily-links reconciliation CLI (issue #139 W3). Installed
+# at a fixed image path next to the TaskNotes MCP core (never
+# env-overridable: it executes code). It validates the master reconcile
+# flag strictly (inert when disabled), refuses root, requires the
+# INHERITED shared tasknotes flock (this wrapper's), never acquires a lock
+# itself, and never invokes the public gbrain wrapper.
+TASKNOTES_RECONCILE_CLI="/opt/josemar/scripts/tasknotes_daily_links_reconcile.py"
 
 # Manual/direct runs are unbounded by default (operator Ctrl-C is forwarded
 # by the runner); cron invocations pass their own bounded --timeout.
@@ -1053,7 +1065,44 @@ do_refresh() {
     mkdir -p "$GBRAIN_STATE_DIR"
     mark_brain_repo_safe_directory
 
+    # Issue #139 W3: Daily-links reconciliation cycle under the inherited
+    # shared lock, in the required order: prepare/apply/targeted commit
+    # (fixed CLI) -> native sync/extract -> finalize ONLY after that sync
+    # returned success. Any failure fails refresh without advancing the
+    # cursor (the W2 cursor/pending stay replayable). The fixed CLI
+    # validates the master reconcile flag strictly and is completely
+    # inert when the feature is disabled (default).
+    reconcile_output=$("$PYTHON_BIN" -I "$TASKNOTES_RECONCILE_CLI" reconcile 2>&1) || {
+        emit_json "$("$PYTHON_BIN" -I - "$reconcile_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "action": "refresh",
+    "error": "daily_links_reconcile_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
+        return 1
+    }
+
     run_sync_extract_links || {
+        return 1
+    }
+
+    finalize_output=$("$PYTHON_BIN" -I "$TASKNOTES_RECONCILE_CLI" finalize 2>&1) || {
+        emit_json "$("$PYTHON_BIN" -I - "$finalize_output" <<'PY'
+import json, sys
+out = sys.argv[1]
+print(json.dumps({
+    "success": False,
+    "action": "refresh",
+    "error": "daily_links_finalize_failed",
+    "message": out[:4000],
+}, ensure_ascii=False))
+PY
+)"
         return 1
     }
 

@@ -49,17 +49,19 @@ Every task is in exactly one of three effective planning states:
 Profile configuration, legacy `scheduled_week` migration, and effective-week
 Base setup: see `references/custom-fields.md` and `docs/tasknotes-mcp.md`.
 
-## Daily Note links (opt-in)
+## Daily Note links
 
-When the operator enables `TASKNOTES_DAILY_LINKS_ENABLED` (default off),
-scheduling mutations own the Daily Note projection: `task_create`,
-`task_update`, and `task_delete` automatically maintain exactly one
-`- [[slug|title]]` line in the matching date's Daily Note `## Tasks`
-section — reschedules move it; clearing scheduling or deleting the task
-removes it. Never edit a projected link manually: the adapter owns it, and
-direct Obsidian task edits are not re-projected. Backlog and week-planned
-tasks are never projected; completion and archive keep the link. Flag off
-(default) means unchanged behavior.
+When the operator keeps `TASKNOTES_DAILY_LINKS_ENABLED` enabled (default on), scheduling mutations own the Daily Note projection: `task_create`,
+`task_update`, and `task_delete` automatically maintain exactly one bare
+`- [[slug]]` line in the matching date's Daily Note `## Tasks` section —
+reschedules move it; clearing scheduling or deleting the task removes it.
+The title is never serialized into the link; it stays authoritative in
+the task's frontmatter. Never edit a projected link manually: the adapter
+owns it, and a bounded reconciliation (before each locked mutation and in
+the `josemar-gbrain refresh` cycle) repairs drift from direct Obsidian
+task edits. Backlog and week-planned tasks are never projected;
+completion and archive keep the link. Setting the flag to `false` makes
+the projection and its reconciliation fully inert.
 
 **Details:** `references/daily-notes.md` and `docs/tasknotes-mcp.md`.
 

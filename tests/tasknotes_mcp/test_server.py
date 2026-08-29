@@ -412,6 +412,7 @@ class ServerContractTests(unittest.TestCase):
             lock_timeout=3.5,
             tz="America/Sao_Paulo",
             daily_links_enabled=False,
+            reconcile_enabled=True,
         )
 
     def test_engine_fixed_locations_ignore_forged_env(self) -> None:
@@ -438,6 +439,7 @@ class ServerContractTests(unittest.TestCase):
             lock_timeout=3.5,
             tz="America/Sao_Paulo",
             daily_links_enabled=False,
+            reconcile_enabled=True,
         )
 
     def test_engine_refuses_to_run_as_root(self) -> None:
@@ -568,6 +570,79 @@ class ServerContractTests(unittest.TestCase):
                                 "'true' or 'false'",
                             ):
                                 self.server.task_get("t1")
+                self.assertIsNone(self.server._ENGINE)
+                engine_class.assert_not_called()
+
+    # --- TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED strict switch (W4a) ---
+
+    def _get_engine_with_reconcile_env(self, raw: str | None) -> mock.Mock:
+        """Construct the engine (TaskNotesEngine mocked) with the
+        reconciliation switch pinned to ``raw`` (None = key absent) in a
+        deterministic clear environment, returning the mocked engine
+        class."""
+        setattr(self.server, "_ENGINE", None)
+        env = {"TASKNOTES_LOCK_TIMEOUT": "10", "TZ": "UTC"}
+        if raw is not None:
+            env["TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED"] = raw
+        with mock.patch.object(self.server.os, "geteuid", return_value=10000):
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.object(
+                    self.server, "TaskNotesEngine"
+                ) as engine_class:
+                    self.server._get_engine()
+        return engine_class
+
+    def test_reconcile_env_forwards_both_valid_values_case_insensitively(
+        self,
+    ) -> None:
+        for raw, expected in (
+            ("true", True),
+            ("TRUE", True),
+            ("True", True),
+            ("false", False),
+            ("FALSE", False),
+            ("False", False),
+        ):
+            with self.subTest(raw=raw):
+                engine_class = self._get_engine_with_reconcile_env(raw)
+                self.assertIs(
+                    engine_class.call_args.kwargs["reconcile_enabled"], expected
+                )
+
+    def test_reconcile_env_missing_or_empty_defaults_enabled(self) -> None:
+        """Missing/empty MUST default to enabled (intended default true);
+        cross-system default propagation remains W4b."""
+        for raw in (None, "", "   "):
+            with self.subTest(raw=repr(raw)):
+                engine_class = self._get_engine_with_reconcile_env(raw)
+                self.assertIs(
+                    engine_class.call_args.kwargs["reconcile_enabled"], True
+                )
+
+    def test_reconcile_env_invalid_rejected_at_engine_init(self) -> None:
+        """Any nonempty value other than case-insensitive true/false is
+        rejected at engine init (fail-closed, no coercion); the engine is
+        never constructed and the invalid value never reaches it."""
+        for bad in ("yes", "1", "0", "on", "enabled", " true extra"):
+            with self.subTest(bad=bad):
+                setattr(self.server, "_ENGINE", None)
+                with mock.patch.object(
+                    self.server.os, "geteuid", return_value=10000
+                ):
+                    with mock.patch.dict(
+                        os.environ,
+                        {"TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED": bad},
+                        clear=False,
+                    ):
+                        with mock.patch.object(
+                            self.server, "TaskNotesEngine"
+                        ) as engine_class:
+                            with self.assertRaisesRegex(
+                                self.server.ValidationError,
+                                "TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED must "
+                                "be 'true' or 'false'",
+                            ):
+                                self.server._get_engine()
                 self.assertIsNone(self.server._ENGINE)
                 engine_class.assert_not_called()
 

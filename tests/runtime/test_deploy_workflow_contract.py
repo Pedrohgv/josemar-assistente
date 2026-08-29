@@ -1509,7 +1509,7 @@ class DeployWorkflowContractTests(unittest.TestCase):
 
     # --- TaskNotes MCP daily-note task links (issue #139) ---
 
-    def test_tasknotes_daily_links_variable_is_strict_default_off_before_mutation(
+    def test_tasknotes_daily_links_variable_is_strict_default_on_before_mutation(
         self,
     ) -> None:
         validate = _step_text(self.workflow, "Validate required repository variables")
@@ -1523,9 +1523,9 @@ class DeployWorkflowContractTests(unittest.TestCase):
             'TASKNOTES_DAILY_LINKS_ENABLED="$TASKNOTES_DAILY_LINKS_ENABLED_INPUT"',
             validate,
         )
-        # Missing/empty normalizes to disabled.
+        # Missing/empty normalizes to enabled (stable default-on).
         self.assertIn('if [ -z "$TASKNOTES_DAILY_LINKS_ENABLED" ]; then', validate)
-        self.assertIn('TASKNOTES_DAILY_LINKS_ENABLED="false"', validate)
+        self.assertIn('TASKNOTES_DAILY_LINKS_ENABLED="true"', validate)
         # Nonempty values are case-insensitive true/false, normalized to
         # lowercase for .env; anything else is rejected before any mutation.
         self.assertIn("tr '[:upper:]' '[:lower:]'", validate)
@@ -1567,6 +1567,83 @@ class DeployWorkflowContractTests(unittest.TestCase):
         self.assertIn(
             'write_env TASKNOTES_DAILY_LINKS_ENABLED "$TASKNOTES_DAILY_LINKS_ENABLED"',
             env,
+        )
+
+    def _tasknotes_validation_block(self, step: str, flag: str) -> str:
+        """Return the contiguous validation paragraph for a TaskNotes flag.
+
+        Both preflight steps derive each flag from its ``<flag>_INPUT``
+        repository variable, validate, and continue with a blank line, so
+        slicing from the derivation to the next blank line isolates the
+        exact strict-boolean block.
+        """
+        start = step.index(f'{flag}="${flag}_INPUT"')
+        return step[start : step.index("\n\n", start)]
+
+    def test_tasknotes_daily_links_flags_validation_matrix(self) -> None:
+        """Issue #139 revision 3 (W4b) flag matrix: master
+        (TASKNOTES_DAILY_LINKS_ENABLED) and reconcile slave
+        (TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED) each get, in BOTH
+        preflight steps (validation + .env write): a stable default-on
+        resolution for missing/empty, case-insensitive true/false
+        normalization that preserves an explicit false (rollout/rollback
+        override), and fail-closed rejection of any invalid value. Both
+        flags flow through the single propagation path (repo variable ->
+        validation -> GITHUB_ENV/.env -> Compose -> hermes-config); there
+        is no parallel config source."""
+        flags = (
+            "TASKNOTES_DAILY_LINKS_ENABLED",
+            "TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED",
+        )
+        for flag in flags:
+            with self.subTest(flag=flag):
+                # The repository variable feeds both preflight steps.
+                self.assertIn(
+                    f"{flag}_INPUT: ${{{{ vars.{flag} }}}}",
+                    self.text,
+                )
+                for step_name in (
+                    "Validate required repository variables",
+                    "Create .env file",
+                ):
+                    step = _step_text(self.workflow, step_name)
+                    block = self._tasknotes_validation_block(step, flag)
+                    # Default: missing/empty resolves to enabled (true).
+                    self.assertIn(f'if [ -z "${flag}" ]; then', block)
+                    self.assertIn(f'{flag}="true"', block)
+                    # Nonempty values: case-insensitive true/false only;
+                    # the lowercased value flows through unchanged, so an
+                    # explicit FALSE/True stays a real false/true override.
+                    self.assertIn("tr '[:upper:]' '[:lower:]'", block)
+                    # Invalid values fail closed before any mutation.
+                    self.assertIn(
+                        f"ERROR: {flag} must be 'true' or 'false'",
+                        block,
+                    )
+                    self.assertIn("exit 1", block)
+                # Validation still precedes any service teardown.
+                self.assertLess(
+                    _step_index(
+                        self.workflow, "Validate required repository variables"
+                    ),
+                    _step_index(self.workflow, "Stop existing services"),
+                )
+                # Single .env write path (no parallel config source): the
+                # normalized value is persisted exactly once, unchanged.
+                env = _step_text(self.workflow, "Create .env file")
+                self.assertEqual(env.count(f"write_env {flag} "), 1)
+                self.assertIn(
+                    f'write_env {flag} "${flag}"',
+                    env,
+                )
+
+        # The reconcile slave is validated/exported alongside the master in
+        # the validation step's persistence block.
+        validate = _step_text(self.workflow, "Validate required repository variables")
+        self.assertIn(
+            'echo "TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED='
+            '$TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED" >> "$GITHUB_ENV"',
+            validate,
         )
 
     def test_post_start_embeddings_presence_health_check(self) -> None:

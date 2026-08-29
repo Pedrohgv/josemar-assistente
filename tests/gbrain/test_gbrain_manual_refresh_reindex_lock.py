@@ -27,6 +27,25 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRAPPER = REPO_ROOT / "scripts" / "josemar-gbrain"
 RUNNER = REPO_ROOT / "scripts" / "tasknotes_lock_run.py"
+RECONCILE_CLI = REPO_ROOT / "scripts" / "tasknotes_daily_links_reconcile.py"
+
+
+def default_reconcile_cli(tmp: Path) -> Path:
+    """Inert stub for the fixed Daily-links reconciliation CLI (issue #139
+    W3): the locking tests exercise the wrapper's lock behavior, not the
+    reconciliation, so the fixture wrapper is pointed at a stub that
+    succeeds without touching anything. Must be a Python script because
+    the wrapper invokes it through the fixed isolated interpreter."""
+    script = tmp / "reconcile-cli-stub"
+    script.write_text(
+        f"""#!{sys.executable}
+import sys
+sys.exit(0)
+""",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
 
 
 def patched_wrapper(
@@ -34,6 +53,7 @@ def patched_wrapper(
     fake_gbrain: Path,
     lock_path: Path,
     preflight_patch: tuple[str, str] | None = None,
+    reconcile_cli: Path | None = None,
 ) -> Path:
     """Fixture copy of the production wrapper with the fixed production
     literals substituted for local equivalents (no production env seam).
@@ -45,7 +65,13 @@ def patched_wrapper(
     a normal tempdir cannot reliably reproduce (child-stat EACCES/EIO cannot
     be forced portably, and root CI makes chmod unreliable). It never
     touches the production wrapper.
+
+    Optional `reconcile_cli` points the fixture wrapper's fixed Daily-links
+    reconciliation CLI literal at a test stub (default: an inert
+    exit-0 stub — see default_reconcile_cli).
     """
+    if reconcile_cli is None:
+        reconcile_cli = default_reconcile_cli(tmp)
     src = WRAPPER.read_text(encoding="utf-8")
     patched = (
         src.replace('GBRAIN_BIN="/opt/josemar/libexec/gbrain-native"', f'GBRAIN_BIN="{fake_gbrain}"')
@@ -73,6 +99,10 @@ def patched_wrapper(
         .replace(
             'TASKNOTES_LOCK_RUNNER="/opt/josemar/scripts/tasknotes_lock_run.py"',
             f'TASKNOTES_LOCK_RUNNER="{RUNNER}"',
+        )
+        .replace(
+            'TASKNOTES_RECONCILE_CLI="/opt/josemar/scripts/tasknotes_daily_links_reconcile.py"',
+            f'TASKNOTES_RECONCILE_CLI="{reconcile_cli}"',
         )
     )
     if preflight_patch is not None:
@@ -1141,6 +1171,252 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
             any(c.startswith("config set search.mcp_keyword_only") for c in calls),
             "the existing branch must not write keyword mode",
         )
+
+
+class DailyLinksReconcileSlaveFlagTests(unittest.TestCase):
+    """Issue #139 W3: the fixed Daily-links reconciliation CLI strictly parses
+    the slave flag ``TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED`` with the same
+    semantics as the master flag. Reconciliation is fully inert unless BOTH
+    flags are enabled, and the slave is parsed before any lock/cursor/pending/
+    vault access. These tests run the real CLI directly (no wrapper, no vault,
+    no lock) because the disabled and invalid-slave paths exit before any
+    lifecycle access."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="gbrain-w3-slave-")
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def run_cli(self, verb: str, **env_extra) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env.update(env_extra)
+        return subprocess.run(
+            [sys.executable, str(RECONCILE_CLI), verb],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+            env=env,
+        )
+
+    def test_slave_false_is_inert_even_when_master_true(self) -> None:
+        """Slave false + master true: the CLI is completely inert — it exits
+        successfully with the disabled envelope and never reaches the lock,
+        cursor, pending, or vault access (no root refusal, no lock check)."""
+        for verb in ("reconcile", "finalize"):
+            with self.subTest(verb=verb):
+                result = self.run_cli(
+                    verb,
+                    TASKNOTES_DAILY_LINKS_ENABLED="true",
+                    TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="false",
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('"status": "disabled"', result.stdout)
+                self.assertIn('"success": true', result.stdout)
+                self.assertNotIn("tasknotes_lock_not_held", result.stdout)
+                self.assertNotIn("runtime_identity_refused", result.stdout)
+
+    def test_slave_missing_is_inert_even_when_master_true(self) -> None:
+        """Slave missing (runtime absent) is conservative false: inert disabled
+        envelope, no lifecycle/lock access."""
+        result = self.run_cli(
+            "reconcile",
+            TASKNOTES_DAILY_LINKS_ENABLED="true",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"status": "disabled"', result.stdout)
+        self.assertNotIn("tasknotes_lock_not_held", result.stdout)
+
+    def test_slave_empty_is_inert_even_when_master_true(self) -> None:
+        """Slave empty is conservative false: inert disabled envelope."""
+        result = self.run_cli(
+            "reconcile",
+            TASKNOTES_DAILY_LINKS_ENABLED="true",
+            TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="   ",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"status": "disabled"', result.stdout)
+
+    def test_invalid_slave_fails_closed_before_lifecycle_access(self) -> None:
+        """An invalid slave value fails closed with the structured flag error
+        BEFORE any lock/cursor/pending/vault access: no lock-not-held error, no
+        root refusal, no disabled envelope, nonzero exit."""
+        for bad in ("banana", "1", "yes", "on"):
+            with self.subTest(bad=bad):
+                result = self.run_cli(
+                    "reconcile",
+                    TASKNOTES_DAILY_LINKS_ENABLED="true",
+                    TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED=bad,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("daily_links_flag_invalid", result.stdout)
+                self.assertIn("TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED", result.stdout)
+                self.assertNotIn('"status": "disabled"', result.stdout)
+                self.assertNotIn("tasknotes_lock_not_held", result.stdout)
+                self.assertNotIn("runtime_identity_refused", result.stdout)
+
+    def test_invalid_slave_fails_closed_even_when_master_false(self) -> None:
+        """Strict dual flags: an invalid slave value fails closed with the
+        structured flag error even when the master flag is false. Both flags
+        are parsed and validated unconditionally (no master short-circuit);
+        only the AND-combined values gate the inert run, so a malformed slave
+        never silently disables into a disabled envelope."""
+        result = self.run_cli(
+            "reconcile",
+            TASKNOTES_DAILY_LINKS_ENABLED="false",
+            TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="banana",
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("daily_links_flag_invalid", result.stdout)
+        self.assertIn("TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED", result.stdout)
+        self.assertNotIn('"status": "disabled"', result.stdout)
+        self.assertNotIn("tasknotes_lock_not_held", result.stdout)
+
+    def test_both_false_is_inert(self) -> None:
+        """Strict dual flags: master false + slave false (both parsed as
+        valid false) is fully inert — successful disabled envelope, no
+        lifecycle/lock access."""
+        for verb in ("reconcile", "finalize"):
+            with self.subTest(verb=verb):
+                result = self.run_cli(
+                    verb,
+                    TASKNOTES_DAILY_LINKS_ENABLED="false",
+                    TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="false",
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('"status": "disabled"', result.stdout)
+                self.assertIn('"success": true', result.stdout)
+                self.assertNotIn("tasknotes_lock_not_held", result.stdout)
+                self.assertNotIn("runtime_identity_refused", result.stdout)
+
+    def test_both_missing_is_inert(self) -> None:
+        """Strict dual flags: both flags missing (runtime absent) is fully
+        inert — successful disabled envelope, no lifecycle/lock access."""
+        result = self.run_cli("reconcile")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"status": "disabled"', result.stdout)
+        self.assertIn('"success": true', result.stdout)
+        self.assertNotIn("tasknotes_lock_not_held", result.stdout)
+
+    def test_slave_true_case_insensitive_passes_flag_gate(self) -> None:
+        """Slave true (case-insensitive) with master true passes the flag gate
+        and proceeds to the lifecycle preconditions (here: the lock check,
+        which fails because no inherited lock is held — proving the slave gate
+        did not short-circuit into a disabled run)."""
+        for slave in ("true", "TRUE", "True"):
+            with self.subTest(slave=slave):
+                result = self.run_cli(
+                    "reconcile",
+                    TASKNOTES_DAILY_LINKS_ENABLED="true",
+                    TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED=slave,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn('"status": "disabled"', result.stdout)
+                self.assertIn("tasknotes_lock_not_held", result.stdout)
+
+
+def _cli_function_body(src: str, name: str) -> str:
+    """Extract the source body of a top-level ``def name(...)`` from the CLI,
+    delimited by the next top-level ``def`` at the same indentation (0). This
+    lets a test assert properties of one phase's implementation in isolation,
+    even though the same symbol may be used elsewhere (e.g. the reconcile
+    phase still reads vault config while finalize must not)."""
+    needle = f"def {name}("
+    start = src.index(needle)
+    body = src[start:]
+    end = len(body)
+    for idx, line in enumerate(body.splitlines(keepends=True)[1:], start=1):
+        if line.startswith("def ") and not line.startswith("    "):
+            end = sum(len(l) for l in body.splitlines(keepends=True)[:idx])
+            break
+    return body[:end]
+
+
+class DailyLinksReconcileFinalizeSourceContractTests(unittest.TestCase):
+    """Issue #139 W3 audit fix #2: the finalize phase must NOT re-read the
+    mutable vault Daily Notes config after native sync. It reconstructs the
+    exact applied ``DailyNotesConfig`` snapshot from the validated private
+    pending record's pinned ``daily_folder``/``daily_format`` (via the W2
+    public core pending reader) and passes that to finalize. Absent/invalid
+    pending fails closed. These static-source assertions pin the exact
+    finalize implementation (the reconcile phase legitimately still reads
+    vault config, so the whole-file assertion would be wrong)."""
+
+    def setUp(self) -> None:
+        self.src = RECONCILE_CLI.read_text(encoding="utf-8")
+        self.finalize_src = _cli_function_body(self.src, "_run_finalize")
+
+    def test_finalize_uses_pending_routing_not_vault_config(self) -> None:
+        """Finalize loads the validated pending record and builds the applied
+        DailyNotesConfig from its pinned routing — never from vault config."""
+        self.assertIn(
+            "load_daily_links_reconcile_pending(RECONCILE_PENDING_PATH)",
+            self.finalize_src,
+        )
+        self.assertIn(
+            "config = DailyNotesConfig(\n"
+            "        folder=pending.daily_folder,\n"
+            "        format=pending.daily_format,\n"
+            "    )",
+            self.finalize_src,
+        )
+
+    def test_finalize_never_reads_vault_daily_notes_config(self) -> None:
+        """No ``load_daily_notes_config`` call may exist in the finalize
+        implementation (it would be a mutable vault config read after native
+        sync, breaking the applied-snapshot guarantee)."""
+        self.assertNotIn("load_daily_notes_config", self.finalize_src)
+
+    def test_finalize_fails_closed_on_absent_pending(self) -> None:
+        """An absent pending record (no reconciliation in flight) fails closed
+        before any cursor write, preserving cursor semantics."""
+        self.assertIn("if pending is None:", self.finalize_src)
+        self.assertIn("reconcile finalize requires a pending record",
+                      self.finalize_src)
+        # The pending loader (public core reader) itself fails closed on an
+        # invalid/present-but-corrupt record before config construction.
+        self.assertIn(
+            "load_daily_links_reconcile_pending(RECONCILE_PENDING_PATH)",
+            self.finalize_src,
+        )
+
+    def test_finalize_still_uses_approved_w2_finalize_core(self) -> None:
+        """Finalize still hands off to the approved W2 core finalize and never
+        reimplements cursor advancement or routing verification."""
+        self.assertIn(
+            "finalize_daily_links_reconciliation(", self.finalize_src
+        )
+        self.assertIn("sync_succeeded=True", self.finalize_src)
+
+
+class DailyLinksReconcileStrictDualFlagSourceContractTests(unittest.TestCase):
+    """Issue #139 W3 audit fix #1: the master and slave flags are BOTH parsed
+    and validated unconditionally (no short-circuit); only the AND-combined
+    values gate the inert run. Static-source pinning complements the
+    behavioral slave-flag tests above."""
+
+    def setUp(self) -> None:
+        self.src = RECONCILE_CLI.read_text(encoding="utf-8")
+        self.step_src = _cli_function_body(self.src, "_run_step")
+
+    def test_both_flags_parsed_and_validated_unconditionally(self) -> None:
+        """Each flag is assigned to its own strictly-parsed variable BEFORE the
+        combined gate, so an invalid value can never be skipped by the other
+        flag's value (no ``and`` short-circuit around parsing)."""
+        self.assertIn("master_enabled = _master_flag_enabled()", self.step_src)
+        self.assertIn("slave_enabled = _slave_flag_enabled()", self.step_src)
+        self.assertIn("enabled = master_enabled and slave_enabled", self.step_src)
+        # Parsing happens inside the try so a CoreError fails closed.
+        self.assertIn("_fail(action, \"daily_links_flag_invalid\", exc)",
+                      self.step_src)
+
+    def test_inert_gate_combines_both_values(self) -> None:
+        """The inert gate is the AND of both parsed values, preserving the
+        fully-inert-when-either-disabled guarantee."""
+        self.assertIn("if not enabled:", self.step_src)
+        self.assertIn('"status": "disabled"', self.step_src)
 
 
 if __name__ == "__main__":

@@ -3356,6 +3356,112 @@ class DailyNotesConfigTests(unittest.TestCase):
             self.core.load_daily_notes_config(self.vault)
 
 
+class DailyNotesConfigVarianceTests(unittest.TestCase):
+    """D13 core config variance: folder roots, nesting, formats, rejections.
+
+    Covers the config-shape matrix the projection must survive: root/
+    named/nested folders, a non-directory component on the configured
+    path, the documented format subset (including same-target monthly
+    composition), and locale/week/traversal rejection.
+    """
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_daily_var_"))
+        self.vault = _make_plain_vault(self.tmpdir)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    # -- root folder variance -------------------------------------------------
+
+    def test_folder_key_missing_defaults_to_vault_root(self) -> None:
+        _write_daily_config(self.vault, {"format": "YYYY-MM-DD"})
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.folder, "")
+        path = self.core.resolve_daily_note_path(self.vault, cfg, "2026-08-28")
+        self.assertEqual(path, self.vault / "2026-08-28.md")
+
+    # -- named and nested folders ----------------------------------------------
+
+    def test_single_named_folder_accepted(self) -> None:
+        _write_daily_config(self.vault, {"folder": "Daily"})
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.folder, "Daily")
+        path = self.core.resolve_daily_note_path(self.vault, cfg, "2026-08-28")
+        self.assertEqual(path, self.vault / "Daily" / "2026-08-28.md")
+
+    def test_nested_folder_path_accepted(self) -> None:
+        _write_daily_config(self.vault, {"folder": "Journal/Daily"})
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.folder, "Journal/Daily")
+        path = self.core.resolve_daily_note_path(self.vault, cfg, "2026-08-28")
+        self.assertEqual(
+            path, self.vault / "Journal" / "Daily" / "2026-08-28.md"
+        )
+
+    def test_non_directory_folder_component_rejected(self) -> None:
+        # An existing regular file occupies a configured folder component;
+        # the strict loader rejects it fail-closed (symlink components are
+        # covered by DailyNotesConfigTests).
+        (self.vault / "Journal").write_text("not a dir\n", encoding="utf-8")
+        _write_daily_config(self.vault, {"folder": "Journal/Daily"})
+        with self.assertRaises(self.core.PathError):
+            self.core.load_daily_notes_config(self.vault)
+
+    # -- documented format subset ------------------------------------------------
+
+    def test_documented_formats_resolve_expected_filenames(self) -> None:
+        cases = {
+            "YYYY-MM-DD": "2026-08-28.md",
+            "DD.MM.YY": "28.08.26.md",
+            "YYYY_M_D": "2026_8_28.md",
+            "YYYY/MM/DD": "2026/08/28.md",
+        }
+        for fmt, expected in cases.items():
+            cfg = self.core.DailyNotesConfig(folder="journal", format=fmt)
+            path = self.core.resolve_daily_note_path(self.vault, cfg, "2026-08-28")
+            self.assertEqual(
+                path,
+                self.vault.joinpath(*("journal", *expected.split("/"))),
+                msg=f"format {fmt!r}",
+            )
+
+    def test_monthly_format_resolves_same_target_for_sibling_days(self) -> None:
+        # Same-target basis (R4): YYYY-MM maps sibling days of one month
+        # onto a single note path, so a D1 -> D2 transition composes to
+        # exactly one ensure.
+        cfg = self.core.DailyNotesConfig(folder="journal", format="YYYY-MM")
+        d1 = self.core.resolve_daily_note_path(self.vault, cfg, "2026-08-27")
+        d2 = self.core.resolve_daily_note_path(self.vault, cfg, "2026-08-28")
+        self.assertEqual(d1, d2)
+        self.assertEqual(d1, self.vault / "journal" / "2026-08.md")
+        steps = self.core._daily_link_plan("2026-08-27", "2026-08-28")
+        composed = self.core._compose_daily_link_plan_by_target(
+            self.vault, cfg, steps
+        )
+        self.assertEqual(
+            composed,
+            [(self.core.DAILY_PROJECTION_OP_ENSURE, "2026-08-28")],
+        )
+
+    # -- unsupported locale/week/traversal rejection ------------------------------
+
+    def test_locale_and_week_tokens_rejected(self) -> None:
+        for fmt in ("MMMM", "MMM YYYY", "wo", "YYYY [w] wo", "dddd DD MM"):
+            _write_daily_config(self.vault, {"format": fmt})
+            with self.assertRaises(self.core.ValidationError):
+                self.core.load_daily_notes_config(self.vault)
+
+    def test_traversal_format_rejected_at_resolution(self) -> None:
+        # The format literal set permits '.', so a traversal-shaped
+        # format is rejected at path resolution: the resolved relative
+        # path must never contain '..' segments.
+        cfg = self.core.DailyNotesConfig(folder="journal", format="YYYY/../../MM")
+        with self.assertRaises(self.core.PathError):
+            self.core.resolve_daily_note_path(self.vault, cfg, "2026-08-28")
+
+
 class DailyNoteTemplateReadTests(unittest.TestCase):
     """No-follow bounded template reading."""
 
@@ -3695,78 +3801,98 @@ class DailyTasksSectionTests(unittest.TestCase):
     def test_add_appends_to_empty_section(self) -> None:
         body = "## Tasks\n"
         new_body, changed = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="Task 1"
+            body, slug="task-1"
         )
         self.assertTrue(changed)
-        self.assertEqual(new_body, "## Tasks\n- [[task-1|Task 1]]\n")
+        self.assertEqual(new_body, "## Tasks\n- [[task-1]]\n")
 
     def test_add_appends_before_next_h2(self) -> None:
         body = "# Day\n\n## Tasks\n\n## Notes\n"
         new_body, changed = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="Task 1"
+            body, slug="task-1"
         )
         self.assertTrue(changed)
         self.assertEqual(
-            new_body, "# Day\n\n## Tasks\n\n- [[task-1|Task 1]]\n## Notes\n"
+            new_body, "# Day\n\n## Tasks\n\n- [[task-1]]\n## Notes\n"
         )
 
     def test_add_appends_at_eof_without_trailing_newline(self) -> None:
         body = "# Day\n## Tasks"
         new_body, changed = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="Task 1"
+            body, slug="task-1"
         )
         self.assertTrue(changed)
-        self.assertEqual(new_body, "# Day\n## Tasks\n- [[task-1|Task 1]]\n")
+        self.assertEqual(new_body, "# Day\n## Tasks\n- [[task-1]]\n")
 
     def test_add_preserves_bytes_outside_section(self) -> None:
         prefix = "# Day\n\nintro prose\n"
         suffix = "\n## Notes\nkeep me\n"
         body = prefix + "## Tasks\n- [[other|Other]]\n" + suffix
         new_body, changed = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="Task 1"
+            body, slug="task-1"
         )
         self.assertTrue(changed)
         self.assertTrue(new_body.startswith(prefix))
         self.assertTrue(new_body.endswith(suffix))
         self.assertIn("- [[other|Other]]", new_body)
 
-    def test_add_normalizes_bare_link(self) -> None:
+    def test_add_bare_link_is_already_canonical(self) -> None:
+        # Revision 3 W1: the bare form IS the canonical line, so an
+        # existing exact bare bullet link is a no-op.
         body = "## Tasks\n- [[task-1]]\n"
         new_body, changed = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="Task 1"
+            body, slug="task-1"
+        )
+        self.assertFalse(changed)
+        self.assertEqual(new_body, body)
+
+    def test_add_normalizes_aliased_link_to_bare(self) -> None:
+        # Revision 3 W1: a prior ``[[slug|alias]]`` form is recognized by
+        # exact slug and normalized to the bare canonical line.
+        body = "## Tasks\n- [[task-1|Stale Display]]\n"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1"
         )
         self.assertTrue(changed)
-        self.assertEqual(new_body, "## Tasks\n- [[task-1|Task 1]]\n")
+        self.assertEqual(new_body, "## Tasks\n- [[task-1]]\n")
 
     def test_add_normalizes_alt_bullet_and_stale_display(self) -> None:
         body = "## Tasks\n* [[task-1|Old Title]]\n"
-        new_body, _ = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="New Title"
-        )
-        self.assertEqual(new_body, "## Tasks\n- [[task-1|New Title]]\n")
+        new_body, _ = self.core.add_daily_note_task_link(body, slug="task-1")
+        self.assertEqual(new_body, "## Tasks\n- [[task-1]]\n")
 
     def test_add_preserves_indent_of_existing_link(self) -> None:
-        body = "## Tasks\n  - [[task-1]]\n"
+        body = "## Tasks\n  - [[task-1|Old]]\n"
         new_body, changed = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="Task 1"
+            body, slug="task-1"
         )
         self.assertTrue(changed)
-        self.assertEqual(new_body, "## Tasks\n  - [[task-1|Task 1]]\n")
+        self.assertEqual(new_body, "## Tasks\n  - [[task-1]]\n")
+
+    def test_add_preserves_indent_of_existing_bare_link(self) -> None:
+        body = "## Tasks\n\t- [[task-1]]\n"
+        new_body, changed = self.core.add_daily_note_task_link(
+            body, slug="task-1"
+        )
+        self.assertFalse(changed)
+        self.assertEqual(new_body, body)
 
     def test_add_dedupes_multiple_occurrences(self) -> None:
+        # All exact-slug forms (bare and aliased) dedupe onto one bare
+        # canonical line; the first occurrence survives in place.
         body = "## Tasks\n- [[task-1]]\n- [[task-1|Again]]\ntext\n- [[task-1|Third]]\n"
         new_body, changed = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="Task 1"
+            body, slug="task-1"
         )
         self.assertTrue(changed)
         self.assertEqual(
-            new_body, "## Tasks\n- [[task-1|Task 1]]\ntext\n"
+            new_body, "## Tasks\n- [[task-1]]\ntext\n"
         )
 
     def test_add_idempotent(self) -> None:
-        body = "## Tasks\n- [[task-1|Task 1]]\n"
+        body = "## Tasks\n- [[task-1]]\n"
         new_body, changed = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="Task 1"
+            body, slug="task-1"
         )
         self.assertFalse(changed)
         self.assertEqual(new_body, body)
@@ -3774,36 +3900,36 @@ class DailyTasksSectionTests(unittest.TestCase):
     def test_add_ignores_similar_slugs(self) -> None:
         body = "## Tasks\n- [[task-1x|Similar]]\n- [[task-12]]\n- [[ task-1 ]]\n"
         new_body, changed = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="Task 1"
+            body, slug="task-1"
         )
         self.assertTrue(changed)
         self.assertIn("- [[task-1x|Similar]]", new_body)
         self.assertIn("- [[task-12]]", new_body)
         self.assertIn("- [[ task-1 ]]", new_body)
-        self.assertIn("\n- [[task-1|Task 1]]\n", new_body)
+        self.assertIn("\n- [[task-1]]\n", new_body)
 
     def test_add_ignores_prose_mention(self) -> None:
         body = "## Tasks\nsee [[task-1]] for details\n"
         new_body, changed = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="Task 1"
+            body, slug="task-1"
         )
         self.assertTrue(changed)
         self.assertIn("see [[task-1]] for details", new_body)
-        self.assertTrue(new_body.endswith("- [[task-1|Task 1]]\n"))
+        self.assertTrue(new_body.endswith("- [[task-1]]\n"))
 
     def test_add_ignores_checkbox_line(self) -> None:
         body = "## Tasks\n- [ ] [[task-1]]\n"
         new_body, changed = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="Task 1"
+            body, slug="task-1"
         )
         self.assertTrue(changed)
         self.assertIn("- [ ] [[task-1]]", new_body)
-        self.assertTrue(new_body.endswith("- [[task-1|Task 1]]\n"))
+        self.assertTrue(new_body.endswith("- [[task-1]]\n"))
 
     def test_add_preserves_outside_section_slugs(self) -> None:
         body = "- [[task-1]] before\n\n## Tasks\n\n## Notes\n- [[task-1]] after\n"
         new_body, changed = self.core.add_daily_note_task_link(
-            body, slug="task-1", title="Task 1"
+            body, slug="task-1"
         )
         self.assertTrue(changed)
         self.assertTrue(new_body.startswith("- [[task-1]] before\n"))
@@ -3811,41 +3937,18 @@ class DailyTasksSectionTests(unittest.TestCase):
 
     def test_add_rejects_invalid_slug(self) -> None:
         with self.assertRaises(self.core.PathError):
-            self.core.add_daily_note_task_link(
-                "## Tasks\n", slug="Bad Slug", title="T"
-            )
-
-    def test_add_encodes_wikilink_metacharacters_in_title(self) -> None:
-        # R6 (issue #140): the full validate_title domain is preserved;
-        # wikilink metacharacters are percent-encoded deterministically
-        # in the derived alias instead of rejected.
-        for title, alias in (
-            ("Review [draft]", "Review %5Bdraft%5D"),
-            ("Compare A | B", "Compare A %7C B"),
-            ("a]b", "a%5Db"),
-            ("a]]b", "a%5D%5Db"),
-        ):
-            new_body, changed = self.core.add_daily_note_task_link(
-                "## Tasks\n", slug="task-1", title=title
-            )
-            self.assertTrue(changed)
-            self.assertTrue(new_body.endswith(f"- [[task-1|{alias}]]\n"))
-        # The empty title is still rejected (validate_title domain).
-        with self.assertRaises(self.core.ValidationError):
-            self.core.add_daily_note_task_link(
-                "## Tasks\n", slug="task-1", title=""
-            )
+            self.core.add_daily_note_task_link("## Tasks\n", slug="Bad Slug")
 
     def test_add_requires_tasks_section(self) -> None:
         with self.assertRaises(self.core.ValidationError):
-            self.core.add_daily_note_task_link(
-                "# no tasks here\n", slug="task-1", title="T"
-            )
+            self.core.add_daily_note_task_link("# no tasks here\n", slug="task-1")
 
     # -- remove_daily_note_task_link ---------------------------------------
 
-    def test_remove_removes_exact_link_only(self) -> None:
-        body = "## Tasks\n- [[task-1|Task 1]]\n- [[other|Other]]\n"
+    def test_remove_removes_every_exact_slug_form(self) -> None:
+        # Revision 3 W1: remove deletes every exact-slug bullet-only
+        # form — bare and aliased alike.
+        body = "## Tasks\n- [[task-1]]\n- [[task-1|T]]\n- [[other|Other]]\n"
         new_body, changed = self.core.remove_daily_note_task_link(
             body, slug="task-1"
         )
@@ -3909,60 +4012,6 @@ class DailyTasksSectionTests(unittest.TestCase):
     def test_remove_rejects_invalid_slug(self) -> None:
         with self.assertRaises(self.core.PathError):
             self.core.remove_daily_note_task_link("## Tasks\n", slug="../x")
-
-
-class DailyLinkAliasEncodingTests(unittest.TestCase):
-    """R6 (issue #140): the display alias is a deterministic, reversible,
-    structurally safe percent-encoding of the title."""
-
-    def setUp(self) -> None:
-        self.core = _load_core()
-
-    def test_ordinary_titles_pass_through_unchanged(self) -> None:
-        encode = self.core.encode_daily_note_link_alias
-        self.assertEqual(encode("My Task"), "My Task")
-        self.assertEqual(encode("Review draft 2026"), "Review draft 2026")
-        self.assertEqual(encode("日本語 タイトル"), "日本語 タイトル")
-
-    def test_ordered_percent_encoding(self) -> None:
-        encode = self.core.encode_daily_note_link_alias
-        self.assertEqual(encode("100%"), "100%25")
-        self.assertEqual(encode("a[b]c|d"), "a%5Bb%5Dc%7Cd")
-        # % is encoded FIRST: a literal "%25" in a title cannot
-        # double-encode into "%2525".
-        self.assertEqual(encode("a%25b"), "a%2525b")
-
-    def test_literal_percent_sequence_never_collides_with_encoded_bracket(self) -> None:
-        encode = self.core.encode_daily_note_link_alias
-        # A title containing the literal text "%5B" encodes its "%" first
-        # ("a%255Bb"), so it can never collide with a title containing a
-        # literal "[" ("a%5Bb").
-        self.assertNotEqual(encode("a%5Bb"), encode("a[b"))
-        self.assertEqual(encode("a%5Bb"), "a%255Bb")
-
-    def test_encoding_is_reversible(self) -> None:
-        encode = self.core.encode_daily_note_link_alias
-
-        def decode(alias: str) -> str:
-            out: List[str] = []
-            i = 0
-            while i < len(alias):
-                if alias[i] == "%":
-                    out.append(chr(int(alias[i + 1 : i + 3], 16)))
-                    i += 3
-                else:
-                    out.append(alias[i])
-                    i += 1
-            return "".join(out)
-
-        for title in (
-            "Review [draft]",
-            "Compare A | B",
-            "100% done",
-            "a%5Bb [c|d]",
-            "plain title",
-        ):
-            self.assertEqual(decode(encode(title)), title)
 
 
 class MutationResultDailyFieldsTests(unittest.TestCase):
@@ -4090,15 +4139,14 @@ class DailyProjectionPrepareTests(unittest.TestCase):
 
     def test_ensure_missing_note_creates_from_default_body(self) -> None:
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="Task 1",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_CREATE)
         self.assertIsNone(proj.fingerprint)
         self.assertIsNotNone(proj.content)
         content = proj.content.decode("utf-8")
         self.assertEqual(
-            content, "# 2026-08-28\n\n## Tasks\n- [[task-1|Task 1]]\n"
+            content, "# 2026-08-28\n\n## Tasks\n- [[task-1]]\n"
         )
         self.assertFalse((self.vault / "journal" / "2026-08-28.md").exists())
 
@@ -4112,8 +4160,7 @@ class DailyProjectionPrepareTests(unittest.TestCase):
             folder="journal", template="templates/daily.md"
         )
         proj = self.core.prepare_daily_note_projection(
-            self.vault, cfg, "ensure", "2026-08-28",
-            slug="task-1", title="Task 1",
+            self.vault, cfg, "ensure", "2026-08-28", slug="task-1",
         )
         self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_CREATE)
         content = proj.content.decode("utf-8")
@@ -4121,7 +4168,7 @@ class DailyProjectionPrepareTests(unittest.TestCase):
         self.assertEqual(fm["date"], "2026-08-28")
         self.assertEqual(fm["title"], "2026-08-28")
         self.assertEqual(fm["tags"], ["day"])
-        self.assertIn("- [[task-1|Task 1]]", body)
+        self.assertIn("- [[task-1]]", body)
 
     def test_ensure_template_missing_tasks_section_rejected_before_write(self) -> None:
         (self.vault / "templates").mkdir()
@@ -4133,8 +4180,7 @@ class DailyProjectionPrepareTests(unittest.TestCase):
         )
         with self.assertRaises(self.core.ValidationError):
             self.core.prepare_daily_note_projection(
-                self.vault, cfg, "ensure", "2026-08-28",
-                slug="task-1", title="Task 1",
+                self.vault, cfg, "ensure", "2026-08-28", slug="task-1",
             )
         self.assertFalse((self.vault / "journal").exists())
 
@@ -4142,15 +4188,14 @@ class DailyProjectionPrepareTests(unittest.TestCase):
         original = "# Day\n\nintro\n\n## Tasks\n\n## Notes\nkeep me\n"
         _write_note(self.vault / "journal" / "2026-08-28.md", original)
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="Task 1",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_REPLACE)
         self.assertIsNotNone(proj.fingerprint)
         content = proj.content.decode("utf-8")
         self.assertTrue(content.startswith("# Day\n\nintro\n\n## Tasks\n"))
         self.assertTrue(content.endswith("## Notes\nkeep me\n"))
-        self.assertIn("- [[task-1|Task 1]]\n## Notes", content)
+        self.assertIn("- [[task-1]]\n## Notes", content)
 
     def test_existing_note_empty_frontmatter_value_not_normalized(self) -> None:
         # R2 (issue #140): existing notes are never normalized or
@@ -4158,8 +4203,7 @@ class DailyProjectionPrepareTests(unittest.TestCase):
         original = "---\ndate: \"\"\n---\n## Tasks\n"
         _write_note(self.vault / "journal" / "2026-08-28.md", original)
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="Task 1",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_REPLACE)
         content = proj.content.decode("utf-8")
@@ -4193,18 +4237,17 @@ class DailyProjectionPrepareTests(unittest.TestCase):
         note = self.vault / "journal" / "2026-08-28.md"
         _write_note(note, original)
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="Task 1",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_REPLACE)
         content = proj.content.decode("utf-8")
         start, end = self.core.find_tasks_section(original)
         # Bytes outside the '## Tasks' section are byte-identical: the
-        # only change is the canonical link line inserted at the section
-        # end; prefix, frontmatter, and suffix are untouched.
+        # only change is the bare canonical link line inserted at the
+        # section end; prefix, frontmatter, and suffix are untouched.
         self.assertEqual(content[:start], original[:start])
         self.assertEqual(content[:end], original[:end])
-        self.assertEqual(content[end:], "- [[task-1|Task 1]]\n" + original[end:])
+        self.assertEqual(content[end:], "- [[task-1]]\n" + original[end:])
         # No reserialization: comment, empty title, null date survive.
         self.assertIn("# editor formatting must survive", content)
         self.assertIn("title: \n", content)
@@ -4215,20 +4258,33 @@ class DailyProjectionPrepareTests(unittest.TestCase):
         on_disk = note.read_text(encoding="utf-8")
         self.assertEqual(on_disk[:start], original[:start])
         self.assertEqual(on_disk[:end], original[:end])
-        self.assertEqual(on_disk[end:], "- [[task-1|Task 1]]\n" + original[end:])
+        self.assertEqual(on_disk[end:], "- [[task-1]]\n" + original[end:])
 
     def test_ensure_canonical_note_is_noop(self) -> None:
         _write_note(
             self.vault / "journal" / "2026-08-28.md",
-            "## Tasks\n- [[task-1|Task 1]]\n",
+            "## Tasks\n- [[task-1]]\n",
         )
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="Task 1",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_NONE)
         self.assertIsNone(proj.content)
         self.assertIsNotNone(proj.fingerprint)
+
+    def test_ensure_existing_aliased_link_prepares_bare_normalization(self) -> None:
+        # Revision 3 W1: a prior aliased form is owned by exact slug and
+        # the prepared bytes normalize it to the bare canonical line.
+        _write_note(
+            self.vault / "journal" / "2026-08-28.md",
+            "## Tasks\n- [[task-1|Stale]]\n",
+        )
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
+        )
+        self.assertEqual(proj.kind, self.core.DAILY_NOTE_PROJECTION_REPLACE)
+        content = proj.content.decode("utf-8")
+        self.assertEqual(content, "## Tasks\n- [[task-1]]\n")
 
     def test_remove_missing_note_is_idempotent_noop(self) -> None:
         proj = self.core.prepare_daily_note_projection(
@@ -4268,8 +4324,7 @@ class DailyProjectionPrepareTests(unittest.TestCase):
         )
         with self.assertRaises(self.core.ValidationError):
             self.core.prepare_daily_note_projection(
-                self.vault, self.cfg, "ensure", "2026-08-28",
-                slug="task-1", title="T",
+                self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
             )
 
     def test_oversized_existing_note_rejected_bounded(self) -> None:
@@ -4284,22 +4339,16 @@ class DailyProjectionPrepareTests(unittest.TestCase):
         for date in ("28-08-2026", "not-a-date"):
             with self.assertRaises(self.core.ValidationError):
                 self.core.prepare_daily_note_projection(
-                    self.vault, self.cfg, "ensure", date,
-                    slug="task-1", title="T",
+                    self.vault, self.cfg, "ensure", date, slug="task-1",
                 )
         with self.assertRaises(self.core.PathError):
             self.core.prepare_daily_note_projection(
                 self.vault, self.cfg, "ensure", "2026-08-28",
-                slug="Bad Slug", title="T",
+                slug="Bad Slug",
             )
         with self.assertRaises(self.core.ValidationError):
             self.core.prepare_daily_note_projection(
-                self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
-            )
-        with self.assertRaises(self.core.ValidationError):
-            self.core.prepare_daily_note_projection(
-                self.vault, self.cfg, "rename", "2026-08-28",
-                slug="task-1", title="T",
+                self.vault, self.cfg, "rename", "2026-08-28", slug="task-1",
             )
 
     def test_symlinked_note_rejected(self) -> None:
@@ -4308,8 +4357,7 @@ class DailyProjectionPrepareTests(unittest.TestCase):
         os.symlink("real.md", str(self.vault / "journal" / "2026-08-28.md"))
         with self.assertRaises(self.core.PathError):
             self.core.prepare_daily_note_projection(
-                self.vault, self.cfg, "ensure", "2026-08-28",
-                slug="task-1", title="T",
+                self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
             )
 
     def test_symlinked_folder_component_rejected(self) -> None:
@@ -4317,8 +4365,7 @@ class DailyProjectionPrepareTests(unittest.TestCase):
         os.symlink("real-dir", str(self.vault / "journal"))
         with self.assertRaises(self.core.PathError):
             self.core.prepare_daily_note_projection(
-                self.vault, self.cfg, "ensure", "2026-08-28",
-                slug="task-1", title="T",
+                self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
             )
 
 
@@ -4343,8 +4390,7 @@ class DailyProjectionWriterTests(unittest.TestCase):
         os.umask(mask)
         try:
             proj = self.core.prepare_daily_note_projection(
-                self.vault, self.cfg, "ensure", "2026-08-28",
-                slug="task-1", title="Task 1",
+                self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
             )
             outcome = self.core.apply_daily_note_projection(
                 self.vault, self.cfg, proj
@@ -4357,7 +4403,7 @@ class DailyProjectionWriterTests(unittest.TestCase):
         self.assertEqual(outcome.attempts, 1)
         self.assertEqual(
             self._note().read_text(encoding="utf-8"),
-            "# 2026-08-28\n\n## Tasks\n- [[task-1|Task 1]]\n",
+            "# 2026-08-28\n\n## Tasks\n- [[task-1]]\n",
         )
         expected_mode = 0o644 & ~mask
         self.assertEqual(os.stat(self._note()).st_mode & 0o777, expected_mode)
@@ -4367,21 +4413,19 @@ class DailyProjectionWriterTests(unittest.TestCase):
             self._note(), "## Tasks\n- [[task-1|Old]]\n", mode=0o640
         )
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="New",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         outcome = self.core.apply_daily_note_projection(self.vault, self.cfg, proj)
         self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_APPLIED)
         self.assertFalse(outcome.created)
         self.assertTrue(outcome.changed)
         self.assertEqual(os.stat(self._note()).st_mode & 0o777, 0o640)
-        self.assertIn("- [[task-1|New]]", self._note().read_text(encoding="utf-8"))
+        self.assertIn("- [[task-1]]", self._note().read_text(encoding="utf-8"))
 
     def test_apply_create_missing_parents_safely(self) -> None:
         cfg = self.core.DailyNotesConfig(folder="journal", format="YYYY/MM/DD")
         proj = self.core.prepare_daily_note_projection(
-            self.vault, cfg, "ensure", "2026-08-28",
-            slug="task-1", title="T",
+            self.vault, cfg, "ensure", "2026-08-28", slug="task-1",
         )
         outcome = self.core.apply_daily_note_projection(self.vault, cfg, proj)
         self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_APPLIED)
@@ -4390,10 +4434,22 @@ class DailyProjectionWriterTests(unittest.TestCase):
         )
         self.assertTrue((self.vault / "journal" / "2026" / "08" / "28.md").exists())
 
+    def test_apply_create_nested_folder_parents_safely(self) -> None:
+        # D13 variance: a multi-segment configured folder creates every
+        # missing parent on first projection.
+        cfg = self.core.DailyNotesConfig(folder="Journal/Daily")
+        proj = self.core.prepare_daily_note_projection(
+            self.vault, cfg, "ensure", "2026-08-28", slug="task-1",
+        )
+        outcome = self.core.apply_daily_note_projection(self.vault, cfg, proj)
+        self.assertEqual(outcome.state, self.core.DAILY_PROJECTION_APPLIED)
+        note = self.vault / "Journal" / "Daily" / "2026-08-28.md"
+        self.assertTrue(note.exists())
+        self.assertIn("- [[task-1]]", note.read_text(encoding="utf-8"))
+
     def test_apply_parent_component_is_file_rejected(self) -> None:
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="T",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         # A regular file occupies the configured folder between
         # prepare and apply; the writer must reject it (no clobber).
@@ -4404,8 +4460,7 @@ class DailyProjectionWriterTests(unittest.TestCase):
 
     def test_apply_parent_component_symlink_rejected(self) -> None:
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="T",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         # A symlink swap occupies the configured folder between
         # prepare and apply; the writer must not traverse it.
@@ -4426,10 +4481,9 @@ class DailyProjectionWriterTests(unittest.TestCase):
         self.assertFalse((self.vault / "journal").exists())
 
     def test_apply_canonical_ensure_is_not_applied(self) -> None:
-        _write_note(self._note(), "## Tasks\n- [[task-1|Task 1]]\n")
+        _write_note(self._note(), "## Tasks\n- [[task-1]]\n")
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="Task 1",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         before = os.stat(self._note()).st_mtime_ns
         outcome = self.core.apply_daily_note_projection(self.vault, self.cfg, proj)
@@ -4455,8 +4509,7 @@ class DailyProjectionWriterTests(unittest.TestCase):
 
     def test_temp_cleanup_on_failure(self) -> None:
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="T",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
 
         def boom() -> None:
@@ -4471,7 +4524,7 @@ class DailyProjectionWriterTests(unittest.TestCase):
 
     def test_apply_rejects_replace_projection_without_content(self) -> None:
         broken = self.core.DailyNoteProjection(
-            operation="ensure", date="2026-08-28", slug="task-1", title="T",
+            operation="ensure", date="2026-08-28", slug="task-1",
             target_relative="journal/2026-08-28.md",
             kind=self.core.DAILY_NOTE_PROJECTION_REPLACE,
             content=None, fingerprint=None,
@@ -4502,8 +4555,7 @@ class DailyProjectionRaceTests(unittest.TestCase):
             "# Day\n\n## Tasks\n- [[task-1|Old]]\n\n## Notes\nkeep\n",
         )
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="New",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         fired = {"n": 0}
 
@@ -4524,7 +4576,7 @@ class DailyProjectionRaceTests(unittest.TestCase):
         content = self._note().read_text(encoding="utf-8")
         # The recomputed transformation preserved the racing edit.
         self.assertIn("user edit", content)
-        self.assertIn("- [[task-1|New]]", content)
+        self.assertIn("- [[task-1]]", content)
         self.assertIn("## Notes", content)
 
     def test_persistent_race_conflicts_without_overwrite(self) -> None:
@@ -4532,8 +4584,7 @@ class DailyProjectionRaceTests(unittest.TestCase):
             self._note(), "# v0\n\n## Tasks\n- [[task-1|Old]]\n"
         )
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="New",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         counter = {"n": 0}
 
@@ -4554,7 +4605,7 @@ class DailyProjectionRaceTests(unittest.TestCase):
             self._note().read_text(encoding="utf-8"),
             f"# v{counter['n']}\n\n## Tasks\n- [[task-1|Old]]\n",
         )
-        self.assertNotIn("[[task-1|New]]", self._note().read_text(encoding="utf-8"))
+        self.assertNotIn("- [[task-1]]\n", self._note().read_text(encoding="utf-8"))
         # Temp files are cleaned up after the conflict.
         self.assertEqual(
             [p.name for p in (self.vault / "journal").iterdir()],
@@ -4563,8 +4614,7 @@ class DailyProjectionRaceTests(unittest.TestCase):
 
     def test_create_race_recomputes_to_replace_and_applies(self) -> None:
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="New",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         fired = {"n": 0}
 
@@ -4584,7 +4634,7 @@ class DailyProjectionRaceTests(unittest.TestCase):
         self.assertFalse(outcome.created)  # second attempt was a replace
         content = self._note().read_text(encoding="utf-8")
         self.assertIn("# Mine", content)
-        self.assertIn("- [[task-1|New]]", content)
+        self.assertIn("- [[task-1]]", content)
 
     def test_create_race_at_publication_boundary_never_clobbers(self) -> None:
         # R1 (issue #140): a competing creator that materializes the
@@ -4592,8 +4642,7 @@ class DailyProjectionRaceTests(unittest.TestCase):
         # never overwritten; its bytes survive and the intended link
         # outcome is recomputed safely on the retry.
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="New",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         competing = "# Mine\n\n## Tasks\n- [[task-1|User]]\n"
         fired = {"n": 0}
@@ -4615,15 +4664,14 @@ class DailyProjectionRaceTests(unittest.TestCase):
         self.assertFalse(outcome.created)  # retry was a replace, not a clobber
         content = self._note().read_text(encoding="utf-8")
         self.assertIn("# Mine", content)  # competing bytes survived
-        self.assertIn("- [[task-1|New]]", content)  # link outcome recomputed
+        self.assertIn("- [[task-1]]", content)  # link outcome recomputed
 
     def test_persistent_publication_eexist_conflicts_without_write(self) -> None:
         # R1 (issue #140): a persistent EEXIST at the publication
         # boundary exhausts the bounded retries into a conflict and never
         # writes (or clobbers) anything.
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="New",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
 
         def eexist_link(src, dst, **kwargs):
@@ -4642,8 +4690,7 @@ class DailyProjectionRaceTests(unittest.TestCase):
 
     def test_persistent_create_race_conflicts_without_overwrite(self) -> None:
         proj = self.core.prepare_daily_note_projection(
-            self.vault, self.cfg, "ensure", "2026-08-28",
-            slug="task-1", title="New",
+            self.vault, self.cfg, "ensure", "2026-08-28", slug="task-1",
         )
         counter = {"n": 0}
 
@@ -4663,7 +4710,7 @@ class DailyProjectionRaceTests(unittest.TestCase):
             self._note().read_text(encoding="utf-8"),
             f"# v{counter['n']}\n\n## Tasks\n- [[task-1|User]]\n",
         )
-        self.assertNotIn("[[task-1|New]]", self._note().read_text(encoding="utf-8"))
+        self.assertNotIn("- [[task-1]]\n", self._note().read_text(encoding="utf-8"))
 
 
 class DailyProjectionGitTests(unittest.TestCase):
@@ -4776,6 +4823,9 @@ def _make_daily_engine(
     behavior: Optional[dict] = None,
     *,
     daily_links_enabled: bool = True,
+    reconcile_enabled: bool = False,
+    reconcile_cursor_path: Optional[Path] = None,
+    reconcile_pending_path: Optional[Path] = None,
 ):
     """Engine vault with a valid Daily Notes config + journal folder."""
     vault = _make_vault(tmpdir)
@@ -4797,6 +4847,9 @@ def _make_daily_engine(
         lock_timeout=2.0,
         tz="UTC",
         daily_links_enabled=daily_links_enabled,
+        reconcile_enabled=reconcile_enabled,
+        reconcile_cursor_path=reconcile_cursor_path,
+        reconcile_pending_path=reconcile_pending_path,
     )
     return engine, vault, gbrain_bin
 
@@ -4919,7 +4972,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertIsNone(result.daily_link_detail)
         self.assertEqual(result.daily_link_dates, [_D1])
         content = self._note(_D1).read_text(encoding="utf-8")
-        self.assertIn("- [[t1|My Task]]", content)
+        self.assertIn("- [[t1]]", content)
         self.assertEqual(self._git("status", "--porcelain").strip(), "")
         syncs = [c for c in _read_calls(self.tmpdir) if c["argv"][0] == "sync"]
         self.assertGreaterEqual(len(syncs), 2)  # preflight + post-commit
@@ -4949,7 +5002,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
         self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
         self.assertEqual(result.daily_link_dates, [_D1])
-        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+        self.assertIn("- [[t1]]", self._note(_D1).read_text(encoding="utf-8"))
         self.assertEqual(self._git("status", "--porcelain").strip(), "")
 
     def test_update_scheduled_d1_to_d2_ensures_then_removes(self) -> None:
@@ -4959,7 +5012,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
         # Ensure D2 first, then remove D1.
         self.assertEqual(result.daily_link_dates, [_D2, _D1])
-        self.assertIn("- [[t1|My Task]]", self._note(_D2).read_text(encoding="utf-8"))
+        self.assertIn("- [[t1]]", self._note(_D2).read_text(encoding="utf-8"))
         d1_content = self._note(_D1).read_text(encoding="utf-8")
         self.assertNotIn("[[t1", d1_content)
         self.assertIn("## Tasks", d1_content)
@@ -4999,7 +5052,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertEqual(result.daily_link_dates, [_D1])
         self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
         content = self._note(_D1).read_text(encoding="utf-8")
-        self.assertEqual(content.count("- [[t1|My Task]]"), 1)
+        self.assertEqual(content.count("- [[t1]]"), 1)
         self.assertEqual(self._git("status", "--porcelain").strip(), "")
 
     def test_same_resolved_target_transition_emits_single_ensure(self) -> None:
@@ -5022,7 +5075,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         monthly = self.vault / "journal" / "2026-08.md"
         self.assertTrue(monthly.exists())
         content = monthly.read_text(encoding="utf-8")
-        self.assertEqual(content.count("- [[t1|My Task]]"), 1)
+        self.assertEqual(content.count("- [[t1]]"), 1)
         self._no_recovery_marker()
 
     def test_update_non_scheduling_does_not_project(self) -> None:
@@ -5033,7 +5086,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_NOT_APPLICABLE)
         self.assertIsNone(result.daily_link_dates)
         self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
-        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+        self.assertIn("- [[t1]]", self._note(_D1).read_text(encoding="utf-8"))
 
     # -- scheduled is the sole source -----------------------------------------
 
@@ -5072,17 +5125,19 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         untagged = self.engine.remove_tag("t1", "custom")
         self.assertIsNone(untagged.daily_link_state)
         self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
-        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+        self.assertIn("- [[t1]]", self._note(_D1).read_text(encoding="utf-8"))
 
-    # -- aliased titles: percent-encoded display alias (R6) -------------------
+    # -- title-free projection (revision 3 W1) --------------------------------
 
-    def test_create_bracket_title_projects_encoded_alias(self) -> None:
+    def test_create_metacharacter_title_projects_bare_line(self) -> None:
+        # R6: any valid task title is accepted; the projected line is the
+        # bare canonical form and never carries the title.
         result = self.engine.create("t1", "Review [draft]", scheduled=_D1, body="b")
         self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
         self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
         content = self._note(_D1).read_text(encoding="utf-8")
-        # Structurally valid exact line with the deterministic alias.
-        self.assertIn("- [[t1|Review %5Bdraft%5D]]", content)
+        self.assertIn("- [[t1]]", content)
+        self.assertNotIn("[[t1|", content)
         self.assertNotIn("Review [draft]", content)
         # Task Markdown/title semantics are untouched.
         fm, _ = self.core._parse_frontmatter(
@@ -5091,23 +5146,23 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertEqual(fm["title"], "Review [draft]")
         self.assertEqual(self._git("status", "--porcelain").strip(), "")
 
-    def test_pipe_title_encoded_on_create_and_reschedule(self) -> None:
+    def test_pipe_title_projects_bare_line_on_create_and_reschedule(self) -> None:
         result = self.engine.create("t1", "Compare A | B", scheduled=_D1, body="b")
         self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
         self.assertIn(
-            "- [[t1|Compare A %7C B]]",
+            "- [[t1]]",
             self._note(_D1).read_text(encoding="utf-8"),
         )
         moved = self.engine.update("t1", scheduled=_D2, body="b2")
         self.assertEqual(moved.state, self.core.APPLIED_AND_COMMITTED)
         self.assertEqual(moved.daily_link_state, self.core.DAILY_LINK_APPLIED)
         self.assertEqual(moved.daily_link_dates, [_D2, _D1])
-        # The D2 ensure uses the encoded alias...
+        # The D2 ensure writes the bare canonical line...
         self.assertIn(
-            "- [[t1|Compare A %7C B]]",
+            "- [[t1]]",
             self._note(_D2).read_text(encoding="utf-8"),
         )
-        # ...and the D1 removal found the link by exact slug despite it.
+        # ...and the D1 removal found the link by exact slug.
         d1_content = self._note(_D1).read_text(encoding="utf-8")
         self.assertNotIn("[[t1", d1_content)
         self.assertIn("## Tasks", d1_content)
@@ -5116,10 +5171,10 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(fm["title"], "Compare A | B")
 
-    def test_encoded_alias_ensure_is_idempotent_single_link(self) -> None:
+    def test_ensure_is_idempotent_single_bare_link(self) -> None:
         self.engine.create("t1", "Review [draft]", scheduled=_D1, body="b")
         content = self._note(_D1).read_text(encoding="utf-8")
-        self.assertEqual(content.count("[[t1|"), 1)
+        self.assertEqual(content.count("- [[t1]]"), 1)
         before = self._note(_D1).stat().st_mtime_ns
         result = self.engine.update(
             "t1", scheduled=_D1, priority="high", body="b2"
@@ -5128,11 +5183,11 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_NOT_APPLIED)
         self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
         again = self._note(_D1).read_text(encoding="utf-8")
-        self.assertEqual(again.count("[[t1|"), 1)
-        self.assertIn("- [[t1|Review %5Bdraft%5D]]", again)
+        self.assertEqual(again.count("- [[t1]]"), 1)
+        self.assertNotIn("[[t1|", again)
         self.assertEqual(self._git("status", "--porcelain").strip(), "")
 
-    def test_encoded_alias_projection_preserves_unrelated_lines(self) -> None:
+    def test_projection_preserves_unrelated_lines(self) -> None:
         _write_note(
             self._note(_D1),
             "# Day\n\nprose with [[t1]] raw link\n\n"
@@ -5141,14 +5196,14 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         result = self.engine.create("t1", "Review [draft]", scheduled=_D1, body="b")
         self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
         content = self._note(_D1).read_text(encoding="utf-8")
-        self.assertIn("- [[t1|Review %5Bdraft%5D]]", content)
+        self.assertIn("- [[t1]]", content)
         # Unrelated lines and similar-but-not-exact mentions are untouched.
         self.assertIn("# Day", content)
         self.assertIn("prose with [[t1]] raw link", content)
         self.assertIn("- [[other|Other]]", content)
         self.assertIn("## Notes\nkeep", content)
 
-    def test_literal_percent_sequence_does_not_collide_in_note(self) -> None:
+    def test_two_tasks_project_distinct_bare_lines(self) -> None:
         self.engine.create("t1", "Review [draft]", scheduled=_D1, body="b")
         result = self.engine.create(
             "t2", "Literal %5B text", scheduled=_D1, body="b"
@@ -5156,20 +5211,18 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
         self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
         content = self._note(_D1).read_text(encoding="utf-8")
-        # Distinct titles yield distinct aliases in the same note; the
-        # literal "%5B" text is encoded as "%255B", never "%5B".
-        self.assertIn("- [[t1|Review %5Bdraft%5D]]", content)
-        self.assertIn("- [[t2|Literal %255B text]]", content)
-        # Idempotent re-ensure of t1 is unaffected by the look-alike alias.
+        self.assertIn("- [[t1]]", content)
+        self.assertIn("- [[t2]]", content)
+        # Idempotent re-ensure of t1 leaves both links alone.
         before = self._note(_D1).stat().st_mtime_ns
         again = self.engine.update("t1", scheduled=_D1, priority="high")
         self.assertEqual(again.daily_link_state, self.core.DAILY_LINK_NOT_APPLIED)
         self.assertEqual(self._note(_D1).stat().st_mtime_ns, before)
         final = self._note(_D1).read_text(encoding="utf-8")
-        self.assertEqual(final.count("[[t1|"), 1)
-        self.assertIn("- [[t2|Literal %255B text]]", final)
+        self.assertEqual(final.count("- [[t1]]"), 1)
+        self.assertEqual(final.count("- [[t2]]"), 1)
 
-    def test_delete_removes_encoded_alias_link_by_exact_slug(self) -> None:
+    def test_delete_removes_bare_link_by_exact_slug(self) -> None:
         self.engine.create("t1", "Compare A | B", scheduled=_D1, body="b")
         result = self.engine.delete("t1")
         self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
@@ -5248,7 +5301,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
             "daily note projection committed but sync failed",
         )
         self.assertEqual(result.daily_link_dates, [_D1])
-        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+        self.assertIn("- [[t1]]", self._note(_D1).read_text(encoding="utf-8"))
         self.assertEqual(self._git("status", "--porcelain").strip(), "")
         self._no_recovery_marker()
 
@@ -5266,7 +5319,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertEqual(
             result.daily_link_detail, "daily note projection commit failed"
         )
-        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+        self.assertIn("- [[t1]]", self._note(_D1).read_text(encoding="utf-8"))
         self.assertIn("journal", self._git("status", "--porcelain"))
         self._no_recovery_marker()
 
@@ -5366,7 +5419,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         # snapshot (missing target there => idempotent no-op).
         new_note = self.vault / "journal2" / f"{_D2}.md"
         self.assertTrue(new_note.exists())
-        self.assertIn("- [[t1|My Task]]", new_note.read_text(encoding="utf-8"))
+        self.assertIn("- [[t1]]", new_note.read_text(encoding="utf-8"))
         self.assertFalse((self.vault / "journal2" / f"{_D1}.md").exists())
         self.assertEqual(read_counter["n"], 2)
         self.assertEqual(self._git("status", "--porcelain").strip(), "")
@@ -5395,7 +5448,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
         content2 = self._note(_D2).read_text(encoding="utf-8")
         self.assertIn("marker: v2", content2)
-        self.assertIn("- [[t2|Other Task]]", content2)
+        self.assertIn("- [[t2]]", content2)
         self._no_recovery_marker()
 
     # -- D1 -> D2 add-before-remove degradation -------------------------------
@@ -5421,8 +5474,8 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         self.assertEqual(result.daily_link_dates, [_D2, _D1])
         # D2 ensure survived (committed + synced); D1 removal failed but
         # the D1 file was never clobbered.
-        self.assertIn("- [[t1|My Task]]", self._note(_D2).read_text(encoding="utf-8"))
-        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+        self.assertIn("- [[t1]]", self._note(_D2).read_text(encoding="utf-8"))
+        self.assertIn("- [[t1]]", self._note(_D1).read_text(encoding="utf-8"))
         self.assertEqual(self._git("status", "--porcelain").strip(), "")
         self._no_recovery_marker()
 
@@ -5446,7 +5499,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
             "daily note projection partially applied; "
             "applied targets committed and synced",
         )
-        self.assertIn("- [[t1|My Task]]", self._note(_D2).read_text(encoding="utf-8"))
+        self.assertIn("- [[t1]]", self._note(_D2).read_text(encoding="utf-8"))
         self._no_recovery_marker()
 
     # -- delete (D13 ordering) --------------------------------------------------
@@ -5507,7 +5560,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
                 engine.delete("t1")
         self.assertEqual(apply_calls, [])
         self.assertTrue((vault / "tasks" / "t1.md").exists())
-        self.assertIn("- [[t1|My Task]]", (vault / "journal" / f"{_D1}.md").read_text(encoding="utf-8"))
+        self.assertIn("- [[t1]]", (vault / "journal" / f"{_D1}.md").read_text(encoding="utf-8"))
 
     def test_delete_runs_projection_only_after_verified_deletion(self) -> None:
         self.engine.create("t1", "My Task", scheduled=_D1, body="b")
@@ -5539,7 +5592,7 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         )
         # Task deletion is authoritative; the link removal failed cleanly.
         self.assertFalse((self.vault / "tasks" / "t1.md").exists())
-        self.assertIn("- [[t1|My Task]]", self._note(_D1).read_text(encoding="utf-8"))
+        self.assertIn("- [[t1]]", self._note(_D1).read_text(encoding="utf-8"))
         self._no_recovery_marker()
 
 
@@ -5727,7 +5780,7 @@ class DailyProjectionCollisionTests(unittest.TestCase):
             len(self._capture_calls(sub)), captures_after_create
         )
         self.assertIn(
-            "- [[t1|My Task]]",
+            "- [[t1]]",
             (vault / "journal" / f"{_D1}.md").read_text(encoding="utf-8"),
         )
         fm, _ = self.core._parse_frontmatter(
@@ -5746,12 +5799,2329 @@ class DailyProjectionCollisionTests(unittest.TestCase):
         # The soft-delete gate never ran; task and link are intact.
         self.assertTrue((vault / "tasks" / "t1.md").exists())
         self.assertIn(
-            "- [[t1|My Task]]",
+            "- [[t1]]",
             (vault / "journal" / f"{_D1}.md").read_text(encoding="utf-8"),
         )
         self.assertEqual(
             [c for c in _read_calls(sub) if c["argv"][0] == "delete"], []
         )
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation foundations (issue #139, W2a: read-only)
+# ---------------------------------------------------------------------------
+
+_RECONCILE_HEAD_A = "a" * 40
+_RECONCILE_HEAD_B = "b" * 40
+
+
+class ReconcileCursorStoreTests(unittest.TestCase):
+    """Fixed-path cursor document: bootstrap, fail-closed, atomic publish."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_reconcile_cursor_"))
+        self.cursor_path = self.tmpdir / "state" / "cursor.json"
+        self.cursor_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _cursor(self, **overrides):
+        params = dict(
+            reconciled_head=_RECONCILE_HEAD_A,
+            daily_folder="journal",
+            daily_format="YYYY-MM-DD",
+            projection_format=1,
+        )
+        params.update(overrides)
+        return self.core.DailyLinksReconcileCursor(**params)
+
+    def _valid_document(self, **overrides) -> dict:
+        doc = {
+            "schema": self.core.DAILY_LINKS_RECONCILE_SCHEMA_ID,
+            "version": 1,
+            "reconciled_head": _RECONCILE_HEAD_A,
+            "daily_folder": "journal",
+            "daily_format": "YYYY-MM-DD",
+            "projection_format": 1,
+        }
+        doc.update(overrides)
+        return doc
+
+    def test_fixed_runtime_paths_and_schema_identity(self) -> None:
+        self.assertEqual(
+            str(self.core.DAILY_LINKS_RECONCILE_CURSOR_PATH),
+            "/opt/data/.gbrain/josemar-tasknotes-daily-links-reconcile.json",
+        )
+        self.assertEqual(
+            str(self.core.DAILY_LINKS_RECONCILE_PENDING_PATH),
+            "/opt/data/.gbrain/josemar-tasknotes-daily-links-reconcile-pending.json",
+        )
+        self.assertEqual(
+            self.core.DAILY_LINKS_RECONCILE_SCHEMA_ID,
+            "josemar-tasknotes-daily-links-reconcile",
+        )
+        self.assertEqual(self.core.DAILY_LINKS_RECONCILE_CURSOR_VERSION, 1)
+        self.assertEqual(self.core.DAILY_LINKS_PROJECTION_FORMAT_VERSION, 1)
+
+    def test_missing_cursor_is_bootstrap_signal(self) -> None:
+        self.assertIsNone(
+            self.core.load_daily_links_reconcile_cursor(self.cursor_path)
+        )
+
+    def test_cursor_roundtrip_atomic_restrictive_structural(self) -> None:
+        cursor = self._cursor()
+        self.core.write_daily_links_reconcile_cursor(cursor, self.cursor_path)
+        loaded = self.core.load_daily_links_reconcile_cursor(self.cursor_path)
+        self.assertEqual(loaded, cursor)
+        # Restrictive file mode, single published file, no temp leftovers.
+        st = self.cursor_path.stat()
+        self.assertEqual(st.st_mode & 0o777, self.core.RECONCILE_CURSOR_FILE_MODE)
+        self.assertEqual(
+            [p.name for p in self.cursor_path.parent.iterdir()],
+            ["cursor.json"],
+        )
+        # Structural metadata only: exact key set, no titles/bodies.
+        payload = json.loads(self.cursor_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(payload.keys()),
+            {"schema", "version", "reconciled_head", "daily_folder",
+             "daily_format", "projection_format"},
+        )
+
+    def test_cursor_rewrite_replaces_atomically(self) -> None:
+        self.core.write_daily_links_reconcile_cursor(
+            self._cursor(daily_folder="old"), self.cursor_path
+        )
+        self.core.write_daily_links_reconcile_cursor(
+            self._cursor(daily_folder="new"), self.cursor_path
+        )
+        loaded = self.core.load_daily_links_reconcile_cursor(self.cursor_path)
+        self.assertEqual(loaded.daily_folder, "new")
+        self.assertEqual(
+            [p.name for p in self.cursor_path.parent.iterdir()],
+            ["cursor.json"],
+        )
+
+    def test_cursor_write_failure_keeps_original_and_cleans_temp(self) -> None:
+        self.core.write_daily_links_reconcile_cursor(self._cursor(), self.cursor_path)
+        original = self.cursor_path.read_bytes()
+
+        def boom(*args, **kwargs):
+            raise OSError("injected replace failure")
+
+        with mock.patch.object(self.core.os, "replace", side_effect=boom):
+            with self.assertRaises(self.core.CoreError):
+                self.core.write_daily_links_reconcile_cursor(
+                    self._cursor(daily_folder="z"), self.cursor_path
+                )
+        self.assertEqual(self.cursor_path.read_bytes(), original)
+        self.assertEqual(
+            [p.name for p in self.cursor_path.parent.iterdir()],
+            ["cursor.json"],
+        )
+
+    def test_cursor_write_over_symlink_replaces_link_safely(self) -> None:
+        victim = self.tmpdir / "victim.json"
+        victim.write_text("{}", encoding="utf-8")
+        self.cursor_path.symlink_to(victim)
+        self.core.write_daily_links_reconcile_cursor(self._cursor(), self.cursor_path)
+        self.assertFalse(self.cursor_path.is_symlink())
+        loaded = self.core.load_daily_links_reconcile_cursor(self.cursor_path)
+        self.assertEqual(loaded, self._cursor())
+        # The symlink target is untouched.
+        self.assertEqual(victim.read_text(encoding="utf-8"), "{}")
+
+    def test_corrupt_and_schema_invalid_cursor_fails_closed(self) -> None:
+        cases = [
+            "{not json",
+            json.dumps(["not", "an", "object"]),
+            json.dumps({}),  # missing keys
+            json.dumps(self._valid_document(extra_key=1)),  # extra keys
+            json.dumps(self._valid_document(schema="other-schema")),
+            json.dumps(self._valid_document(version=2)),
+            json.dumps(self._valid_document(version=True)),
+            json.dumps(self._valid_document(reconciled_head="a" * 39)),
+            json.dumps(self._valid_document(reconciled_head="A" * 40)),
+            json.dumps(self._valid_document(reconciled_head="g" * 40)),
+            json.dumps(self._valid_document(daily_folder="../escape")),
+            json.dumps(self._valid_document(daily_folder="/abs")),
+            json.dumps(self._valid_document(daily_folder=5)),
+            json.dumps(self._valid_document(daily_format="")),
+            json.dumps(self._valid_document(daily_format="YYYY$MM")),
+            json.dumps(self._valid_document(projection_format=2)),
+            json.dumps(self._valid_document(projection_format=True)),
+        ]
+        for payload in cases:
+            self.cursor_path.write_text(payload, encoding="utf-8")
+            with self.assertRaises(
+                self.core.CoreError,
+                msg=f"expected fail-closed for: {payload[:60]}",
+            ):
+                self.core.load_daily_links_reconcile_cursor(self.cursor_path)
+
+    def test_valid_cursor_variants_accepted(self) -> None:
+        # Empty folder (vault root), alternate format, SHA-256-length head.
+        self.cursor_path.write_text(
+            json.dumps(self._valid_document(
+                daily_folder="",
+                daily_format="YYYY/MM/DD",
+                reconciled_head=_RECONCILE_HEAD_B,
+            )),
+            encoding="utf-8",
+        )
+        loaded = self.core.load_daily_links_reconcile_cursor(self.cursor_path)
+        self.assertEqual(loaded.daily_folder, "")
+        self.assertEqual(loaded.daily_format, "YYYY/MM/DD")
+        self.assertEqual(loaded.reconciled_head, _RECONCILE_HEAD_B)
+
+    def test_oversized_cursor_fails_closed(self) -> None:
+        self.cursor_path.write_text(
+            "x" * (self.core.RECONCILE_CURSOR_MAX_FILE_SIZE + 1), encoding="utf-8"
+        )
+        with self.assertRaises(self.core.CoreError):
+            self.core.load_daily_links_reconcile_cursor(self.cursor_path)
+
+    def test_symlinked_cursor_fails_closed(self) -> None:
+        target = self.tmpdir / "elsewhere.json"
+        target.write_text("{}", encoding="utf-8")
+        self.cursor_path.symlink_to(target)
+        with self.assertRaises(self.core.PathError):
+            self.core.load_daily_links_reconcile_cursor(self.cursor_path)
+
+    def test_non_regular_cursor_fails_closed(self) -> None:
+        self.cursor_path.mkdir()
+        with self.assertRaises(self.core.PathError):
+            self.core.load_daily_links_reconcile_cursor(self.cursor_path)
+
+    def test_cursor_write_requires_cursor_type(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.write_daily_links_reconcile_cursor(
+                {"schema": "x"}, self.cursor_path
+            )
+
+
+class ReconcilePendingStoreTests(unittest.TestCase):
+    """Fixed pending sibling: validation and clear semantics."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_reconcile_pending_"))
+        self.pending_path = self.tmpdir / "state" / "pending.json"
+        self.pending_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _pending(self, **overrides):
+        params = dict(
+            from_head=_RECONCILE_HEAD_A,
+            to_head=_RECONCILE_HEAD_B,
+            started_at=1_700_000_000,
+            daily_folder="journal",
+            daily_format="YYYY-MM-DD",
+        )
+        params.update(overrides)
+        return self.core.DailyLinksReconcilePending(**params)
+
+    def _valid_document(self, **overrides) -> dict:
+        doc = {
+            "schema": self.core.DAILY_LINKS_RECONCILE_SCHEMA_ID,
+            "version": 1,
+            "from_head": _RECONCILE_HEAD_A,
+            "to_head": _RECONCILE_HEAD_B,
+            "started_at": 1_700_000_000,
+            "daily_folder": "journal",
+            "daily_format": "YYYY-MM-DD",
+        }
+        doc.update(overrides)
+        return doc
+
+    def test_missing_pending_is_none(self) -> None:
+        self.assertIsNone(
+            self.core.load_daily_links_reconcile_pending(self.pending_path)
+        )
+
+    def test_pending_roundtrip(self) -> None:
+        pending = self._pending()
+        self.core.write_daily_links_reconcile_pending(pending, self.pending_path)
+        loaded = self.core.load_daily_links_reconcile_pending(self.pending_path)
+        self.assertEqual(loaded, pending)
+        self.assertEqual(
+            self.pending_path.stat().st_mode & 0o777,
+            self.core.RECONCILE_CURSOR_FILE_MODE,
+        )
+        payload = json.loads(self.pending_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(payload.keys()),
+            {"schema", "version", "from_head", "to_head", "started_at",
+             "daily_folder", "daily_format"},
+        )
+
+    def test_pending_invalid_documents_fail_closed(self) -> None:
+        cases = [
+            "{not json",
+            json.dumps([]),
+            json.dumps({}),
+            json.dumps(self._valid_document(extra_key=None)),
+            json.dumps(self._valid_document(schema="wrong")),
+            json.dumps(self._valid_document(version=99)),
+            json.dumps(self._valid_document(from_head="a" * 7)),
+            json.dumps(self._valid_document(to_head="zzz")),
+            json.dumps(self._valid_document(started_at=0)),
+            json.dumps(self._valid_document(started_at=-5)),
+            json.dumps(self._valid_document(started_at="not-a-timestamp")),
+            json.dumps(self._valid_document(started_at=True)),
+            # Applied-routing pin is validated like the cursor routing.
+            json.dumps(self._valid_document(daily_folder="../escape")),
+            json.dumps(self._valid_document(daily_folder=5)),
+            json.dumps(self._valid_document(daily_format="bad")),
+            json.dumps(self._valid_document(daily_format=None)),
+        ]
+        for payload in cases:
+            self.pending_path.write_text(payload, encoding="utf-8")
+            with self.assertRaises(
+                self.core.CoreError,
+                msg=f"expected fail-closed for: {payload[:60]}",
+            ):
+                self.core.load_daily_links_reconcile_pending(self.pending_path)
+
+    def test_pending_routing_pin_variants_accepted(self) -> None:
+        # Empty folder (vault root) and an alternate format are valid.
+        self.pending_path.write_text(
+            json.dumps(self._valid_document(daily_folder="", daily_format="YYYY/MM")),
+            encoding="utf-8",
+        )
+        pending = self.core.load_daily_links_reconcile_pending(self.pending_path)
+        self.assertEqual(pending.daily_folder, "")
+        self.assertEqual(pending.daily_format, "YYYY/MM")
+
+    def test_pending_clear_semantics(self) -> None:
+        self.assertFalse(
+            self.core.clear_daily_links_reconcile_pending(self.pending_path)
+        )
+        self.core.write_daily_links_reconcile_pending(
+            self._pending(), self.pending_path
+        )
+        self.assertTrue(
+            self.core.clear_daily_links_reconcile_pending(self.pending_path)
+        )
+        self.assertFalse(self.pending_path.exists())
+        self.assertIsNone(
+            self.core.load_daily_links_reconcile_pending(self.pending_path)
+        )
+
+    def test_pending_write_requires_pending_type(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.write_daily_links_reconcile_pending(
+                {"from_head": "x"}, self.pending_path
+            )
+
+
+class GitTaskObjectReaderTests(unittest.TestCase):
+    """Fixed-argv/no-shell Git object reader: args, cap, missing, UTF-8."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_gitobj_"))
+        self.vault = _make_plain_git_vault(self.tmpdir)
+        (self.vault / "tasks").mkdir()
+        self.marker = "SECRETMARKER-body-content"
+        self.task_text = f"---\ntitle: t1\n---\n{self.marker}\n"
+        (self.vault / "tasks" / "t1.md").write_text(
+            self.task_text, encoding="utf-8"
+        )
+        subprocess.run(
+            ["git", "add", "-A"], cwd=str(self.vault), check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "task"], cwd=str(self.vault),
+            check=True, capture_output=True,
+        )
+        self.head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(self.vault),
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _commit_file(self, rel: str, data: bytes) -> str:
+        target = self.vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        subprocess.run(
+            ["git", "add", "-A"], cwd=str(self.vault), check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "add"], cwd=str(self.vault),
+            check=True, capture_output=True,
+        )
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(self.vault),
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    def test_present_object_roundtrip(self) -> None:
+        result = self.core.read_git_task_object(
+            self.vault, self.head, "tasks/t1.md"
+        )
+        self.assertEqual(result.state, self.core.GIT_OBJECT_PRESENT)
+        self.assertEqual(result.text, self.task_text)
+
+    def test_fixed_argv_no_shell(self) -> None:
+        real_popen = subprocess.Popen
+        calls: List[Any] = []
+
+        class RecordingPopen:
+            def __init__(self, argv, **kwargs):
+                calls.append((list(argv), dict(kwargs)))
+                self._proc = real_popen(argv, **kwargs)
+
+            def poll(self):
+                return self._proc.poll()
+
+            def wait(self, timeout=None):
+                return self._proc.wait(timeout=timeout)
+
+            @property
+            def returncode(self):
+                return self._proc.returncode
+
+            @property
+            def pid(self):
+                return self._proc.pid
+
+        with mock.patch.object(self.core.subprocess, "Popen", RecordingPopen):
+            result = self.core.read_git_task_object(
+                self.vault, self.head, "tasks/t1.md"
+            )
+        self.assertEqual(result.state, self.core.GIT_OBJECT_PRESENT)
+        self.assertTrue(calls)
+        show_calls = [
+            (argv, kwargs) for argv, kwargs in calls if "show" in argv
+        ]
+        self.assertEqual(len(show_calls), 1)
+        argv, kwargs = show_calls[0]
+        self.assertEqual(
+            argv,
+            ["git"] + self.core._GIT_BASE_ARGS + ["show", f"{self.head}:tasks/t1.md"],
+        )
+        for argv, kwargs in calls:
+            self.assertIsInstance(argv, list)  # never a shell string
+            self.assertFalse(kwargs.get("shell", False))
+            self.assertTrue(kwargs.get("start_new_session"))
+
+    def test_missing_path_is_typed_no_before_state(self) -> None:
+        result = self.core.read_git_task_object(
+            self.vault, self.head, "tasks/absent.md"
+        )
+        self.assertEqual(result.state, self.core.GIT_OBJECT_MISSING)
+        self.assertIsNone(result.text)
+
+    def test_committed_symlink_fails_closed(self) -> None:
+        # Git records a symlink as a mode-120000 "blob" whose content is
+        # the link target: the ls-tree probe must require an allowed
+        # regular-file mode so it can never masquerade as task content.
+        self._commit_file("tasks/real_target.md", b"real\n")
+        os.symlink("real_target.md", self.vault / "tasks" / "linked.md")
+        subprocess.run(
+            ["git", "add", "-A"], cwd=str(self.vault), check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "link"], cwd=str(self.vault),
+            check=True, capture_output=True,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(self.vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        with self.assertRaises(self.core.CoreError) as ctx:
+            self.core.read_git_task_object(
+                self.vault, head, "tasks/linked.md"
+            )
+        self.assertNotIn("real_target.md", str(ctx.exception))
+
+    def test_unknown_commit_fails_closed(self) -> None:
+        with self.assertRaises(self.core.GitError):
+            self.core.read_git_task_object(
+                self.vault, "0" * 40, "tasks/t1.md"
+            )
+
+    def test_invalid_inputs_rejected_before_subprocess(self) -> None:
+        for bad_sha in ("", "a" * 39, "A" * 40, "g" * 40, 123):
+            with self.assertRaises(self.core.ValidationError, msg=repr(bad_sha)):
+                self.core.read_git_task_object(
+                    self.vault, bad_sha, "tasks/t1.md"
+                )
+        for bad_path in ("/etc/passwd", "a/../b.md", "tasks/t1.txt", "../x.md", ""):
+            with self.assertRaises(
+                (self.core.PathError, self.core.ValidationError),
+                msg=repr(bad_path),
+            ):
+                self.core.read_git_task_object(
+                    self.vault, self.head, bad_path
+                )
+
+    def test_object_at_size_cap_reads_and_over_cap_fails(self) -> None:
+        cap = self.core.LIST_MAX_FILE_SIZE
+        at_cap = self._commit_file("tasks/at_cap.md", b"a" * cap)
+        result = self.core.read_git_task_object(
+            self.vault, at_cap, "tasks/at_cap.md"
+        )
+        self.assertEqual(result.state, self.core.GIT_OBJECT_PRESENT)
+        self.assertEqual(len(result.text), cap)
+        # Deliberately aligned to LIST_MAX_FILE_SIZE, not MAX_OUTPUT: a
+        # 100 KB object is over the 64 KB subprocess diagnostic cap but
+        # under the object cap.
+        under = self._commit_file("tasks/under_64k.md", b"b" * 100_000)
+        result = self.core.read_git_task_object(
+            self.vault, under, "tasks/under_64k.md"
+        )
+        self.assertEqual(result.state, self.core.GIT_OBJECT_PRESENT)
+        over = self._commit_file(
+            "tasks/over_cap.md", b"c" * (cap + 1)
+        )
+        with self.assertRaises(self.core.SubprocessError) as ctx:
+            self.core.read_git_task_object(self.vault, over, "tasks/over_cap.md")
+        self.assertNotIn("cccccc", str(ctx.exception))
+
+    def test_oversized_object_error_is_content_free(self) -> None:
+        cap = self.core.LIST_MAX_FILE_SIZE
+        unit = self.marker.encode("utf-8")
+        payload = (unit * (cap // len(unit) + 2))[: cap + 1]
+        over = self._commit_file("tasks/secret_big.md", payload)
+        with self.assertRaises(self.core.SubprocessError) as ctx:
+            self.core.read_git_task_object(
+                self.vault, over, "tasks/secret_big.md"
+            )
+        self.assertNotIn(self.marker, str(ctx.exception))
+
+    def test_strict_utf8_decode(self) -> None:
+        text = "---\ntitle: caf\u00e9\n---\ncaf\u00e9 \u2615\n"
+        sha = self._commit_file("tasks/unicode.md", text.encode("utf-8"))
+        result = self.core.read_git_task_object(
+            self.vault, sha, "tasks/unicode.md"
+        )
+        self.assertEqual(result.text, text)
+        bad = self._commit_file(
+            "tasks/binary.md", b"---\ntitle: x\n---\n\xff\xfe bad\n"
+        )
+        with self.assertRaises(self.core.CoreError) as ctx:
+            self.core.read_git_task_object(self.vault, bad, "tasks/binary.md")
+        self.assertNotIn("\xff", str(ctx.exception))
+
+    def test_non_repo_failure_is_typed_and_content_free(self) -> None:
+        bare = self.tmpdir / "not_a_repo"
+        bare.mkdir()
+        with self.assertRaises(self.core.GitError) as ctx:
+            self.core.read_git_task_object(
+                bare, self.head, "tasks/t1.md"
+            )
+        self.assertNotIn(self.marker, str(ctx.exception))
+
+
+@unittest.skipUnless(_has_yaml(), "PyYAML required")
+class ReconcileEnumerationTests(unittest.TestCase):
+    """Bounded no-follow candidate enumeration and pure classification."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_reconcile_enum_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _vault(self, name: str, *, move_archived: bool = False):
+        sub = self.tmpdir / name
+        sub.mkdir()
+        vault = _make_vault(sub, name)
+        if move_archived:
+            data = dict(REAL_PROFILE_DATA)
+            data["moveArchivedTasks"] = True
+            data["archiveFolder"] = "archive"
+            _write_profile(vault, data=data)
+        return vault, self.core.load_profile(vault, vault)
+
+    def _write_task(
+        self,
+        vault: Path,
+        folder: str,
+        slug: str,
+        *,
+        scheduled: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        raw: Optional[str] = None,
+    ) -> None:
+        path = vault / folder / f"{slug}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if raw is not None:
+            path.write_text(raw, encoding="utf-8")
+            return
+        all_tags = list(tags if tags is not None else ["task"])
+        lines = [
+            "---",
+            "type: note",
+            f"title: {slug}",
+            "status: open",
+            "priority: normal",
+            "tags:",
+        ]
+        lines += [f"  - {t}" for t in all_tags]
+        if scheduled is not None:
+            lines.append(f"scheduled: '{scheduled}'")
+        lines += ["---", f"body of {slug}", ""]
+        path.write_text("\n".join(lines), encoding="utf-8")
+
+    def test_archive_inactive_excludes_archive_folder(self) -> None:
+        vault, profile = self._vault("inactive")
+        self._write_task(vault, "tasks", "t1", scheduled=_D1)
+        self._write_task(vault, "archive", "t2", scheduled=_D2)
+        candidates = self.core.enumerate_reconcile_candidates(vault, profile)
+        self.assertEqual(
+            [(c.slug, c.location) for c in candidates], [("t1", "tasks")]
+        )
+
+    def test_archive_active_enumerates_both_folders(self) -> None:
+        vault, profile = self._vault("active", move_archived=True)
+        self._write_task(vault, "tasks", "t1", scheduled=_D1)
+        self._write_task(vault, "archive", "t2", scheduled=_D2, tags=["task", "archived"])
+        candidates = self.core.enumerate_reconcile_candidates(vault, profile)
+        self.assertEqual(
+            [(c.slug, c.location) for c in candidates],
+            [("t1", "tasks"), ("t2", "archive")],
+        )
+        archived_flags = {c.slug: c.archived for c in candidates}
+        self.assertFalse(archived_flags["t1"])
+        self.assertTrue(archived_flags["t2"])
+
+    def test_archive_active_with_missing_folder_tolerated(self) -> None:
+        vault, profile = self._vault("missing_archive", move_archived=True)
+        self._write_task(vault, "tasks", "t1", scheduled=_D1)
+        candidates = self.core.enumerate_reconcile_candidates(vault, profile)
+        self.assertEqual([c.slug for c in candidates], ["t1"])
+
+    def test_archive_folder_equal_to_tasks_folder_not_duplicated(self) -> None:
+        vault, profile = self._vault("same_folder")
+        data = dict(REAL_PROFILE_DATA)
+        data["moveArchivedTasks"] = True
+        data["archiveFolder"] = "tasks"
+        _write_profile(vault, data=data)
+        profile = self.core.load_profile(vault, vault)
+        self._write_task(vault, "tasks", "t1", scheduled=_D1)
+        candidates = self.core.enumerate_reconcile_candidates(vault, profile)
+        self.assertEqual([(c.slug, c.location) for c in candidates], [("t1", "tasks")])
+
+    def test_ambiguous_same_slug_pair_fails_closed(self) -> None:
+        vault, profile = self._vault("ambiguous", move_archived=True)
+        self._write_task(vault, "tasks", "t1", scheduled=_D1)
+        self._write_task(vault, "archive", "t1", scheduled=_D2)
+        with self.assertRaises(self.core.CoreError):
+            self.core.enumerate_reconcile_candidates(vault, profile)
+
+    def test_enumeration_bound_fails_closed(self) -> None:
+        vault, profile = self._vault("bounds")
+        for slug in ("t1", "t2", "t3"):
+            self._write_task(vault, "tasks", slug, scheduled=_D1)
+        with self.assertRaises(self.core.CoreError):
+            self.core.enumerate_reconcile_candidates(vault, profile, max_files=2)
+        # Under the bound the same vault enumerates fine.
+        candidates = self.core.enumerate_reconcile_candidates(
+            vault, profile, max_files=3
+        )
+        self.assertEqual(len(candidates), 3)
+
+    def test_symlinked_task_entry_fails_closed(self) -> None:
+        vault, profile = self._vault("symlink")
+        self._write_task(vault, "tasks", "real", scheduled=_D1)
+        (vault / "tasks" / "t1.md").symlink_to(vault / "tasks" / "real.md")
+        with self.assertRaises(self.core.PathError):
+            self.core.enumerate_reconcile_candidates(vault, profile)
+
+    def test_non_task_and_non_candidate_names_skipped(self) -> None:
+        vault, profile = self._vault("nontask")
+        self._write_task(vault, "tasks", "t1", scheduled=_D1)
+        # Plain note without the task tag.
+        self._write_task(vault, "tasks", "note1", tags=["journal"], scheduled=_D1)
+        # Non-slug .md names and non-markdown entries.
+        (vault / "tasks" / "My Note.md").write_text("x\n", encoding="utf-8")
+        (vault / "tasks" / "scratch.txt").write_text("x\n", encoding="utf-8")
+        candidates = self.core.enumerate_reconcile_candidates(vault, profile)
+        self.assertEqual([c.slug for c in candidates], ["t1"])
+
+    def test_malformed_entries_classified_and_excluded(self) -> None:
+        vault, profile = self._vault("malformed")
+        self._write_task(vault, "tasks", "t1", scheduled=_D1)
+        # Task with an unusable scheduled value: malformed, excluded.
+        self._write_task(vault, "tasks", "bad_date", scheduled="not-a-date")
+        # Task with non-string-list tags: malformed, excluded.
+        self._write_task(
+            vault, "tasks", "bad_tags",
+            raw="---\ntype: note\ntitle: x\ntags: 5\n---\nbody\n",
+        )
+        # Unparsable YAML frontmatter: malformed, excluded.
+        self._write_task(
+            vault, "tasks", "bad_yaml",
+            raw="---\ntags: [unclosed\n---\nbody\n",
+        )
+        candidates = self.core.enumerate_reconcile_candidates(vault, profile)
+        self.assertEqual([c.slug for c in candidates], ["t1"])
+
+    def test_classification_pure_deterministic(self) -> None:
+        _vault, profile = self._vault("classify")
+        classify = self.core.classify_reconcile_frontmatter
+        # Candidate: backlog.
+        c = classify({"tags": ["task"]}, profile)
+        self.assertEqual(c.cls, self.core.RECONCILE_CLASS_CANDIDATE)
+        self.assertIsNone(c.scheduled)
+        self.assertFalse(c.archived)
+        # Candidate: plain date and gbrain-normalized bare date collapse.
+        c = classify({"tags": ["task"], "scheduled": _D2}, profile)
+        self.assertEqual((c.cls, c.scheduled), (self.core.RECONCILE_CLASS_CANDIDATE, _D2))
+        c = classify(
+            {"tags": ["task"], "scheduled": f"{_D2}T00:00:00.000Z"}, profile
+        )
+        self.assertEqual((c.cls, c.scheduled), (self.core.RECONCILE_CLASS_CANDIDATE, _D2))
+        # Candidate with archive tag.
+        c = classify({"tags": ["task", "archived"], "scheduled": _D1}, profile)
+        self.assertEqual(c.cls, self.core.RECONCILE_CLASS_CANDIDATE)
+        self.assertTrue(c.archived)
+        # Non-task: confidently not ours.
+        c = classify({"tags": ["journal"]}, profile)
+        self.assertEqual(c.cls, self.core.RECONCILE_CLASS_NON_TASK)
+        # Malformed: broken tags or unusable scheduled on a task.
+        self.assertEqual(
+            classify({"tags": "task"}, profile).cls,
+            self.core.RECONCILE_CLASS_MALFORMED,
+        )
+        self.assertEqual(
+            classify({"tags": [5]}, profile).cls,
+            self.core.RECONCILE_CLASS_MALFORMED,
+        )
+        self.assertEqual(
+            classify({"tags": ["task"], "scheduled": "junk"}, profile).cls,
+            self.core.RECONCILE_CLASS_MALFORMED,
+        )
+        # Deterministic: identical inputs give identical results.
+        fm = {"tags": ["task"], "scheduled": _D1}
+        self.assertEqual(classify(fm, profile), classify(fm, profile))
+
+    def test_slug_from_filename(self) -> None:
+        f = self.core.reconcile_slug_from_filename
+        self.assertEqual(f("t1.md"), "t1")
+        self.assertEqual(f("2026-08-28-143000-buy.md"), "2026-08-28-143000-buy")
+        self.assertIsNone(f("My Note.md"))
+        self.assertIsNone(f("t1.txt"))
+        self.assertIsNone(f(".md"))
+        self.assertIsNone(f("../escape.md"))
+
+    def test_enumeration_is_read_only(self) -> None:
+        vault, profile = self._vault("readonly")
+        self._write_task(vault, "tasks", "t1", scheduled=_D1)
+        before = {
+            p: p.read_bytes() for p in sorted((vault / "tasks").iterdir())
+        }
+        self.core.enumerate_reconcile_candidates(vault, profile)
+        after = {
+            p: p.read_bytes() for p in sorted((vault / "tasks").iterdir())
+        }
+        self.assertEqual(before, after)
+
+
+@unittest.skipUnless(_has_yaml(), "PyYAML required")
+class ReconcileSnapshotTests(unittest.TestCase):
+    """Deterministic read-only snapshots for later reconciliation phases."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_reconcile_snap_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _vault(self, name: str):
+        sub = self.tmpdir / name
+        sub.mkdir()
+        vault = _make_vault(sub, name)
+        return vault, self.core.load_profile(vault, vault)
+
+    def _write_task(self, vault: Path, slug: str, scheduled: Optional[str]) -> None:
+        lines = [
+            "---",
+            "type: note",
+            f"title: {slug}",
+            "status: open",
+            "priority: normal",
+            "tags:",
+            "  - task",
+        ]
+        if scheduled is not None:
+            lines.append(f"scheduled: '{scheduled}'")
+        lines += ["---", "body", ""]
+        (vault / "tasks" / f"{slug}.md").write_text("\n".join(lines), encoding="utf-8")
+
+    def test_snapshot_deterministic_and_sorted(self) -> None:
+        vault, profile = self._vault("snap")
+        self._write_task(vault, "zebra", _D2)
+        self._write_task(vault, "alpha", _D1)
+        self._write_task(vault, "backlog", None)
+        snap1 = self.core.build_reconcile_snapshot(vault, profile)
+        snap2 = self.core.build_reconcile_snapshot(vault, profile)
+        self.assertEqual(snap1, snap2)
+        self.assertEqual(
+            [c.slug for c in snap1.candidates], ["alpha", "backlog", "zebra"]
+        )
+        self.assertEqual(
+            snap1.candidates[0].scheduled, _D1
+        )
+        self.assertIsNone(snap1.candidates[1].scheduled)
+        self.assertEqual(snap1.candidates[0].location, self.core.RECONCILE_LOCATION_TASKS)
+
+    def test_snapshot_head_matches_rev_parse(self) -> None:
+        vault, profile = self._vault("head")
+        snap = self.core.build_reconcile_snapshot(vault, profile)
+        expected = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault),
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(snap.head, expected)
+        self.assertTrue(self.core.is_valid_git_commit_sha(snap.head))
+
+    def test_snapshot_requires_head(self) -> None:
+        vault, profile = self._vault("nohead")
+        headless = self.tmpdir / "headless"
+        headless.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(headless), check=True)
+        with self.assertRaises(self.core.CoreError):
+            self.core.build_reconcile_snapshot(headless, profile)
+
+    def test_snapshot_is_frozen(self) -> None:
+        vault, profile = self._vault("frozen")
+        self._write_task(vault, "t1", _D1)
+        snap = self.core.build_reconcile_snapshot(vault, profile)
+        self.assertTrue(snap.candidates)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            snap.head = "x" * 40  # type: ignore[misc]
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            snap.candidates[0].slug = "other"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation lifecycle (issue #139, W2b: prepare/apply/commit/finalize)
+# ---------------------------------------------------------------------------
+
+_WR_D1 = "2026-09-01"
+_WR_D2 = "2026-09-02"
+_WR_D3 = "2026-09-03"
+
+
+def _reconcile_write_task(
+    vault: Path,
+    slug: str,
+    *,
+    scheduled: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    folder: str = "tasks",
+    text: Optional[str] = None,
+) -> Path:
+    """Write a task-shaped markdown file (or raw text) into the vault."""
+    path = vault / folder / f"{slug}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if text is not None:
+        path.write_text(text, encoding="utf-8")
+        return path
+    all_tags = list(tags if tags is not None else ["task"])
+    lines = [
+        "---",
+        "type: note",
+        f"title: {slug}",
+        "status: open",
+        "priority: normal",
+        "tags:",
+    ]
+    lines += [f"  - {t}" for t in all_tags]
+    if scheduled is not None:
+        lines.append(f"scheduled: '{scheduled}'")
+    lines += ["---", f"body {slug}", ""]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _reconcile_commit(vault: Path, message: str = "external") -> str:
+    subprocess.run(
+        ["git", "add", "-A"], cwd=str(vault), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", message], cwd=str(vault),
+        check=True, capture_output=True,
+    )
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _reconcile_note(vault: Path, relative: str) -> str:
+    return (vault / relative).read_text(encoding="utf-8")
+
+
+class ReconcileNetClassificationTests(unittest.TestCase):
+    """Pure net-change classification (add/remove/tag-loss/reschedule/...)."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+
+    def _state(self, slug="t1", *, present=True, is_task=True, location="tasks",
+               scheduled=None, archived=False):
+        return self.core.ReconcileTaskState(
+            slug=slug, present=present, is_task=is_task, location=location,
+            scheduled=scheduled, archived=archived,
+        )
+
+    def test_added(self) -> None:
+        change = self.core.classify_reconcile_net_change(
+            None, self._state(scheduled=_WR_D1)
+        )
+        self.assertEqual(change.cls, self.core.RECONCILE_NET_ADDED)
+        self.assertEqual(change.ensure_date, _WR_D1)
+        self.assertIsNone(change.remove_date)
+        # A file that appears as a non-task never links.
+        change = self.core.classify_reconcile_net_change(
+            None, self._state(is_task=False)
+        )
+        self.assertEqual(change.cls, self.core.RECONCILE_NET_UNCHANGED)
+
+    def test_removed(self) -> None:
+        change = self.core.classify_reconcile_net_change(
+            self._state(scheduled=_WR_D1), None
+        )
+        self.assertEqual(change.cls, self.core.RECONCILE_NET_REMOVED)
+        self.assertEqual(change.remove_date, _WR_D1)
+        # A former backlog task was never linked.
+        change = self.core.classify_reconcile_net_change(
+            self._state(scheduled=None), None
+        )
+        self.assertEqual(change.cls, self.core.RECONCILE_NET_REMOVED)
+        self.assertIsNone(change.remove_date)
+
+    def test_tag_loss(self) -> None:
+        change = self.core.classify_reconcile_net_change(
+            self._state(scheduled=_WR_D1),
+            self._state(is_task=False, location="tasks"),
+        )
+        self.assertEqual(change.cls, self.core.RECONCILE_NET_TAG_LOSS)
+        self.assertEqual(change.remove_date, _WR_D1)
+
+    def test_became_task(self) -> None:
+        change = self.core.classify_reconcile_net_change(
+            self._state(is_task=False, location="tasks"),
+            self._state(scheduled=_WR_D2),
+        )
+        self.assertEqual(change.cls, self.core.RECONCILE_NET_ADDED)
+        self.assertEqual(change.ensure_date, _WR_D2)
+
+    def test_reschedule_and_unschedule(self) -> None:
+        change = self.core.classify_reconcile_net_change(
+            self._state(scheduled=None), self._state(scheduled=_WR_D1)
+        )
+        self.assertEqual(change.cls, self.core.RECONCILE_NET_RESCHEDULED)
+        self.assertEqual(change.ensure_date, _WR_D1)
+        self.assertIsNone(change.remove_date)
+        change = self.core.classify_reconcile_net_change(
+            self._state(scheduled=_WR_D1), self._state(scheduled=_WR_D2)
+        )
+        self.assertEqual(change.cls, self.core.RECONCILE_NET_RESCHEDULED)
+        self.assertEqual(
+            (change.ensure_date, change.remove_date), (_WR_D2, _WR_D1)
+        )
+        change = self.core.classify_reconcile_net_change(
+            self._state(scheduled=_WR_D1), self._state(scheduled=None)
+        )
+        self.assertEqual(change.cls, self.core.RECONCILE_NET_UNSCHEDULED)
+        self.assertEqual(change.remove_date, _WR_D1)
+        self.assertIsNone(change.ensure_date)
+
+    def test_archive_move_and_unchanged(self) -> None:
+        change = self.core.classify_reconcile_net_change(
+            self._state(scheduled=_WR_D1, location="tasks"),
+            self._state(scheduled=_WR_D1, location="archive", archived=True),
+        )
+        self.assertEqual(change.cls, self.core.RECONCILE_NET_ARCHIVE_MOVE)
+        self.assertIsNone(change.ensure_date)
+        self.assertIsNone(change.remove_date)
+        # Title/body-only edits: identical scheduling state.
+        change = self.core.classify_reconcile_net_change(
+            self._state(scheduled=_WR_D1), self._state(scheduled=_WR_D1)
+        )
+        self.assertEqual(change.cls, self.core.RECONCILE_NET_UNCHANGED)
+        self.assertEqual(change.current_scheduled, _WR_D1)
+        change = self.core.classify_reconcile_net_change(None, None)
+        self.assertEqual(change.cls, self.core.RECONCILE_NET_UNCHANGED)
+
+    def test_invalid_inputs_rejected(self) -> None:
+        with self.assertRaises(self.core.ValidationError):
+            self.core.classify_reconcile_net_change("x", None)
+        with self.assertRaises(self.core.ValidationError):
+            self.core.classify_reconcile_net_change(None, {"slug": "t"})
+
+
+class ReconcileComposeTests(unittest.TestCase):
+    """Pure composition: final-ensure-wins, ordering, re-home, fences."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_reconcile_comp_"))
+        sub = self.tmpdir / "s"
+        sub.mkdir()
+        self.vault = _make_vault(sub, "vault")
+        self.profile = self.core.load_profile(self.vault, self.vault)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _config(self, folder="journal", fmt="YYYY-MM-DD"):
+        return self.core.DailyNotesConfig(folder=folder, format=fmt)
+
+    def _net(self, cls, *, current=None, ensure=None, remove=None):
+        return self.core.ReconcileNetChange(
+            cls=cls, current_scheduled=current,
+            ensure_date=ensure, remove_date=remove,
+        )
+
+    def _steps(self, nets, *, config=None, prior=None):
+        return self.core.compose_reconcile_steps(
+            self.vault, self.profile, config or self._config(), prior, nets
+        )
+
+    def test_ensure_before_remove(self) -> None:
+        nets = {"t1": self._net(
+            self.core.RECONCILE_NET_RESCHEDULED,
+            current=_WR_D2, ensure=_WR_D2, remove=_WR_D1,
+        )}
+        steps = self._steps(nets, prior=self._config())
+        self.assertEqual(
+            [(s.operation, s.slug, s.target_relative) for s in steps],
+            [
+                ("ensure", "t1", f"journal/{_WR_D2}.md"),
+                ("remove", "t1", f"journal/{_WR_D1}.md"),
+            ],
+        )
+
+    def test_final_ensure_wins_coarse_same_target(self) -> None:
+        # YYYY-MM coarse format: a reschedule within the month resolves
+        # both dates to one physical target — exactly one ensure.
+        config = self._config(folder="monthly", fmt="YYYY-MM")
+        prior = self._config(folder="monthly", fmt="YYYY-MM")
+        nets = {"t1": self._net(
+            self.core.RECONCILE_NET_RESCHEDULED,
+            current="2026-11-02", ensure="2026-11-02", remove="2026-11-01",
+        )}
+        steps = self._steps(nets, config=config, prior=prior)
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].operation, "ensure")
+        self.assertEqual(steps[0].target_relative, "monthly/2026-11.md")
+        # Ensure wins even when it must overwrite a composed remove.
+        nets = {"t1": self._net(
+            self.core.RECONCILE_NET_RESCHEDULED,
+            current=_WR_D1, ensure=_WR_D1, remove=_WR_D1,
+        )}
+        steps = self._steps(nets, config=config, prior=prior)
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].operation, "ensure")
+
+    def test_routing_change_rehomes_unchanged_tasks(self) -> None:
+        config = self._config(folder="new")
+        prior = self._config(folder="old")
+        nets = {
+            "t1": self._net(
+                self.core.RECONCILE_NET_UNCHANGED, current=_WR_D1
+            ),
+            "t2": self._net(self.core.RECONCILE_NET_UNCHANGED),  # backlog
+        }
+        steps = self._steps(nets, config=config, prior=prior)
+        self.assertEqual(
+            [(s.operation, s.slug, s.routing, s.target_relative) for s in steps],
+            [
+                ("ensure", "t1", "current", f"new/{_WR_D1}.md"),
+                ("remove", "t1", "prior", f"old/{_WR_D1}.md"),
+            ],
+        )
+
+    def test_template_only_change_does_not_rehome(self) -> None:
+        # Identical folder/format routing (template differences are not
+        # routing): unchanged tasks produce no transitions.
+        config = self._config(folder="journal")
+        prior = self._config(folder="journal")
+        nets = {"t1": self._net(
+            self.core.RECONCILE_NET_UNCHANGED, current=_WR_D1
+        )}
+        steps = self._steps(nets, config=config, prior=prior)
+        self.assertEqual(steps, ())
+
+    def test_config_plus_reschedule_goes_directly_old_to_final(self) -> None:
+        config = self._config(folder="new")
+        prior = self._config(folder="old")
+        nets = {"t1": self._net(
+            self.core.RECONCILE_NET_RESCHEDULED,
+            current=_WR_D2, ensure=_WR_D2, remove=_WR_D1,
+        )}
+        steps = self._steps(nets, config=config, prior=prior)
+        self.assertEqual(
+            [(s.operation, s.routing, s.target_relative) for s in steps],
+            [
+                ("ensure", "current", f"new/{_WR_D2}.md"),
+                ("remove", "prior", f"old/{_WR_D1}.md"),
+            ],
+        )
+
+    def test_r5_collision_fence_on_new_and_old_targets(self) -> None:
+        # New target inside the tasks folder.
+        nets = {"t1": self._net(
+            self.core.RECONCILE_NET_ADDED, current=_WR_D1, ensure=_WR_D1
+        )}
+        with self.assertRaises(self.core.ValidationError):
+            self._steps(nets, config=self._config(folder="tasks"))
+        # Old (prior routing) target inside the active archive folder.
+        data = dict(REAL_PROFILE_DATA)
+        data["moveArchivedTasks"] = True
+        data["archiveFolder"] = "archive"
+        _write_profile(self.vault, data=data)
+        profile = self.core.load_profile(self.vault, self.vault)
+        nets = {"t1": self._net(
+            self.core.RECONCILE_NET_UNSCHEDULED, remove=_WR_D1
+        )}
+        with self.assertRaises(self.core.ValidationError):
+            self.core.compose_reconcile_steps(
+                self.vault, profile, self._config(),
+                self._config(folder="archive"), nets,
+            )
+
+    def test_remove_requires_prior_routing(self) -> None:
+        nets = {"t1": self._net(
+            self.core.RECONCILE_NET_REMOVED, remove=_WR_D1
+        )}
+        with self.assertRaises(self.core.ValidationError):
+            self._steps(nets, prior=None)
+
+    def test_target_overflow_fails_closed(self) -> None:
+        nets = {
+            f"t{i:02d}": self._net(
+                self.core.RECONCILE_NET_ADDED,
+                current=f"2026-12-{i + 1:02d}",
+                ensure=f"2026-12-{i + 1:02d}",
+            )
+            for i in range(self.core.MAX_DAILY_PROJECTION_TARGETS + 1)
+        }
+        with self.assertRaises(self.core.CoreError):
+            self._steps(nets)
+
+
+class ReconcileGitTreeTests(unittest.TestCase):
+    """Head-side candidate enumeration via git ls-tree plumbing."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_reconcile_tree_"))
+        self.vault = _make_plain_git_vault(self.tmpdir)
+        (self.vault / "tasks").mkdir()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _head(self) -> str:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(self.vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+
+    def test_sorted_slugs_ignores_non_task_names_and_missing_dirs(self) -> None:
+        _reconcile_write_task(self.vault, "zebra", scheduled=_WR_D1)
+        _reconcile_write_task(self.vault, "alpha", scheduled=_WR_D1)
+        (self.vault / "tasks" / "My Note.md").write_text("x\n", encoding="utf-8")
+        (self.vault / "tasks" / "scratch.txt").write_text("x\n", encoding="utf-8")
+        _reconcile_commit(self.vault)
+        slugs = self.core.list_git_tree_task_slugs(
+            self.vault, self._head(), "tasks"
+        )
+        self.assertEqual(slugs, ("alpha", "zebra"))
+        self.assertEqual(
+            self.core.list_git_tree_task_slugs(
+                self.vault, self._head(), "does-not-exist"
+            ),
+            (),
+        )
+
+    def test_symlink_entry_fails_closed(self) -> None:
+        _reconcile_write_task(self.vault, "real", scheduled=_WR_D1)
+        os.symlink("real.md", self.vault / "tasks" / "linked.md")
+        _reconcile_commit(self.vault)
+        with self.assertRaises(self.core.CoreError):
+            self.core.list_git_tree_task_slugs(
+                self.vault, self._head(), "tasks"
+            )
+
+    def test_bound_fails_closed(self) -> None:
+        _reconcile_write_task(self.vault, "t1", scheduled=_WR_D1)
+        _reconcile_write_task(self.vault, "t2", scheduled=_WR_D1)
+        _reconcile_commit(self.vault)
+        with self.assertRaises(self.core.CoreError):
+            self.core.list_git_tree_task_slugs(
+                self.vault, self._head(), "tasks", max_files=1
+            )
+
+
+class ReconcileLifecycleTests(unittest.TestCase):
+    """Full prepare/apply/targeted-commit/finalize lifecycle under tmp paths."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_reconcile_life_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _setup(
+        self,
+        name: str,
+        *,
+        daily: Optional[dict] = None,
+        move_archived: bool = False,
+    ):
+        sub = self.tmpdir / name
+        sub.mkdir()
+        vault = _make_vault(sub, name)
+        if move_archived:
+            data = dict(REAL_PROFILE_DATA)
+            data["moveArchivedTasks"] = True
+            data["archiveFolder"] = "archive"
+            _write_profile(vault, data=data)
+        _write_daily_config(vault, daily if daily is not None else {"folder": "journal"})
+        (vault / "journal").mkdir(exist_ok=True)
+        _reconcile_commit(vault, "init")
+        profile = self.core.load_profile(vault, vault)
+        config = self.core.load_daily_notes_config(vault)
+        runtime = sub / "runtime"
+        runtime.mkdir()
+        return vault, sub, profile, runtime / "cursor.json", runtime / "pending.json"
+
+    def _run(self, vault, profile, config, cursor_path, pending_path):
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config,
+            cursor_path=cursor_path, pending_path=pending_path,
+        )
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config, plan, pending_path=pending_path
+        )
+        cursor = self.core.finalize_daily_links_reconciliation(
+            vault, config, sync_succeeded=True,
+            cursor_path=cursor_path, pending_path=pending_path,
+        )
+        return plan, outcome, cursor
+
+    def test_bootstrap_root_and_nested_layouts(self) -> None:
+        # Root layout (folder "").
+        vault, sub, profile, cur, pend = self._setup(
+            "root", daily={"folder": ""}
+        )
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_write_task(vault, "backlog")  # no scheduled: never linked
+        _reconcile_commit(vault)
+        plan, outcome, cursor = self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        self.assertEqual(plan.mode, self.core.RECONCILE_MODE_BOOTSTRAP)
+        self.assertEqual(
+            [(t.slug, t.operation) for t in plan.transitions],
+            [("t1", "ensure")],
+        )
+        self.assertIn("- [[t1]]", _reconcile_note(vault, f"{_WR_D1}.md"))
+        self.assertNotIn("- [[backlog]]", _reconcile_note(vault, f"{_WR_D1}.md"))
+        self.assertEqual(cursor.daily_folder, "")
+        self.assertEqual(cursor.reconciled_head, outcome.pending.to_head)
+        self.assertFalse(pend.exists())
+        # Nested layout.
+        vault2, _sub2, profile2, cur2, pend2 = self._setup(
+            "nested", daily={"folder": "journal/deep"}
+        )
+        _reconcile_write_task(vault2, "t1", scheduled=_WR_D2)
+        _reconcile_commit(vault2)
+        plan2, _out2, cursor2 = self._run(
+            vault2, profile2, self.core.load_daily_notes_config(vault2), cur2, pend2
+        )
+        self.assertEqual(
+            plan2.transitions[0].target_relative, f"journal/deep/{_WR_D2}.md"
+        )
+        self.assertIn(
+            "- [[t1]]",
+            _reconcile_note(vault2, f"journal/deep/{_WR_D2}.md"),
+        )
+        self.assertEqual(cursor2.daily_folder, "journal/deep")
+
+    def test_external_add_reschedule_unschedule_delete(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("diffs")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        # External: reschedule t1, add t2, delete t3 (never existed → n/a),
+        # delete t4 (linked backlog... use a linked task instead).
+        _reconcile_write_task(vault, "t4", scheduled=_WR_D2)
+        _reconcile_commit(vault)
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        # External change set: t1 -> D2, t2 added at D1, t4 deleted.
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D2)
+        _reconcile_write_task(vault, "t2", scheduled=_WR_D1)
+        (vault / "tasks" / "t4.md").unlink()
+        _reconcile_commit(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, self.core.load_daily_notes_config(vault),
+            cursor_path=cur,
+        )
+        classes = dict(plan.net_classes)
+        self.assertEqual(classes["t1"], self.core.RECONCILE_NET_RESCHEDULED)
+        self.assertEqual(classes["t2"], self.core.RECONCILE_NET_ADDED)
+        self.assertEqual(classes["t4"], self.core.RECONCILE_NET_REMOVED)
+        steps = [(t.slug, t.operation, t.target_relative) for t in plan.transitions]
+        self.assertIn(("t1", "ensure", f"journal/{_WR_D2}.md"), steps)
+        self.assertIn(("t1", "remove", f"journal/{_WR_D1}.md"), steps)
+        self.assertIn(("t2", "ensure", f"journal/{_WR_D1}.md"), steps)
+        self.assertIn(("t4", "remove", f"journal/{_WR_D2}.md"), steps)
+        # Ensure destination before old remove.
+        ops = [t.operation for t in plan.transitions]
+        self.assertEqual(ops.index("ensure") < ops.index("remove"), True)
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, self.core.load_daily_notes_config(vault),
+            plan, pending_path=pend,
+        )
+        self.assertTrue(outcome.commit_created)
+        self.core.finalize_daily_links_reconciliation(
+            vault, self.core.load_daily_notes_config(vault),
+            sync_succeeded=True, cursor_path=cur, pending_path=pend,
+        )
+        d1 = _reconcile_note(vault, f"journal/{_WR_D1}.md")
+        self.assertIn("- [[t2]]", d1)
+        self.assertNotIn("- [[t1]]", d1)
+        d2 = _reconcile_note(vault, f"journal/{_WR_D2}.md")
+        self.assertIn("- [[t1]]", d2)
+        self.assertNotIn("- [[t4]]", d2)
+        # External unschedule: t2 cleared to backlog → link removed.
+        _reconcile_write_task(vault, "t2", scheduled=None)
+        _reconcile_commit(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, self.core.load_daily_notes_config(vault),
+            cursor_path=cur,
+        )
+        self.assertEqual(
+            dict(plan.net_classes)["t2"], self.core.RECONCILE_NET_UNSCHEDULED
+        )
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        d1 = _reconcile_note(vault, f"journal/{_WR_D1}.md")
+        self.assertNotIn("- [[t2]]", d1)
+
+    def test_move_rename_and_tag_loss(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup(
+            "moves", move_archived=True
+        )
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_write_task(vault, "t2", scheduled=_WR_D2)
+        _reconcile_write_task(vault, "t3", scheduled=_WR_D3)
+        _reconcile_commit(vault)
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        # Same-slug archive move: no transitions, link unchanged.
+        (vault / "archive").mkdir()
+        (vault / "tasks" / "t1.md").rename(vault / "archive" / "t1.md")
+        _reconcile_commit(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, self.core.load_daily_notes_config(vault),
+            cursor_path=cur,
+        )
+        self.assertEqual(
+            dict(plan.net_classes)["t1"], self.core.RECONCILE_NET_ARCHIVE_MOVE
+        )
+        self.assertEqual(plan.transitions, ())
+        # Slug rename: remove+ensure pair on the same note, once.
+        (vault / "tasks" / "t2.md").rename(vault / "tasks" / "t2r.md")
+        path = vault / "tasks" / "t2r.md"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("title: t2", "title: t2r"),
+            encoding="utf-8",
+        )
+        _reconcile_commit(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, self.core.load_daily_notes_config(vault),
+            cursor_path=cur,
+        )
+        classes = dict(plan.net_classes)
+        self.assertEqual(classes["t2"], self.core.RECONCILE_NET_REMOVED)
+        self.assertEqual(classes["t2r"], self.core.RECONCILE_NET_ADDED)
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        d2 = _reconcile_note(vault, f"journal/{_WR_D2}.md")
+        self.assertEqual(d2.count("- [[t2r]]"), 1)
+        self.assertNotIn("- [[t2]]", d2)
+        # Task-tag loss: link removed, file remains.
+        _reconcile_write_task(
+            vault, "t3", scheduled=_WR_D3, tags=["journal"],
+        )
+        _reconcile_commit(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, self.core.load_daily_notes_config(vault),
+            cursor_path=cur,
+        )
+        self.assertEqual(
+            dict(plan.net_classes)["t3"], self.core.RECONCILE_NET_TAG_LOSS
+        )
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        d3 = _reconcile_note(vault, f"journal/{_WR_D3}.md")
+        self.assertNotIn("- [[t3]]", d3)
+        self.assertTrue((vault / "tasks" / "t3.md").exists())
+
+    def test_title_only_edit_never_projects(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("titleonly")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        before = _reconcile_note(vault, f"journal/{_WR_D1}.md")
+        head_before = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault),
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        task_path = vault / "tasks" / "t1.md"
+        task_path.write_text(
+            task_path.read_text(encoding="utf-8").replace(
+                "title: t1", "title: Renamed Title"
+            ),
+            encoding="utf-8",
+        )
+        _reconcile_commit(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, self.core.load_daily_notes_config(vault),
+            cursor_path=cur,
+        )
+        self.assertEqual(
+            dict(plan.net_classes)["t1"], self.core.RECONCILE_NET_UNCHANGED
+        )
+        self.assertEqual(plan.transitions, ())
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, self.core.load_daily_notes_config(vault),
+            plan, pending_path=pend,
+        )
+        self.assertFalse(outcome.commit_created)
+        self.core.finalize_daily_links_reconciliation(
+            vault, self.core.load_daily_notes_config(vault),
+            sync_succeeded=True, cursor_path=cur, pending_path=pend,
+        )
+        self.assertEqual(_reconcile_note(vault, f"journal/{_WR_D1}.md"), before)
+        head_after = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault),
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(head_after, outcome.pending.to_head)
+
+    def test_cursor_lag_replay_batches_changes(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("lag")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        lagged_head = self.core.load_daily_links_reconcile_cursor(cur).reconciled_head
+        # Two external commits while the cursor lags.
+        _reconcile_write_task(vault, "t2", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D2)
+        _reconcile_commit(vault)
+        self.assertEqual(
+            self.core.load_daily_links_reconcile_cursor(cur).reconciled_head,
+            lagged_head,
+        )
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, self.core.load_daily_notes_config(vault),
+            cursor_path=cur,
+        )
+        self.assertEqual(plan.from_head, lagged_head)
+        classes = dict(plan.net_classes)
+        self.assertEqual(classes["t1"], self.core.RECONCILE_NET_RESCHEDULED)
+        self.assertEqual(classes["t2"], self.core.RECONCILE_NET_ADDED)
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        d1 = _reconcile_note(vault, f"journal/{_WR_D1}.md")
+        self.assertIn("- [[t2]]", d1)
+        self.assertNotIn("- [[t1]]", d1)
+        d2 = _reconcile_note(vault, f"journal/{_WR_D2}.md")
+        self.assertIn("- [[t1]]", d2)
+        cursor = self.core.load_daily_links_reconcile_cursor(cur)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault),
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(cursor.reconciled_head, head)
+
+    def test_corrupt_established_cursor_fails_closed(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("corrupt")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        cur.write_text("{corrupt", encoding="utf-8")
+        with self.assertRaises(self.core.CoreError):
+            self.core.prepare_daily_links_reconciliation(
+                vault, profile, self.core.load_daily_notes_config(vault),
+                cursor_path=cur,
+            )
+        self.assertFalse(pend.exists())
+
+    def test_finalize_guards_and_replay_convergence(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("guards")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur
+        )
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config, plan, pending_path=pend
+        )
+        # Sync-failure signal: no finalize, cursor/pending intact.
+        with self.assertRaises(self.core.CoreError):
+            self.core.finalize_daily_links_reconciliation(
+                vault, config, sync_succeeded=False,
+                cursor_path=cur, pending_path=pend,
+            )
+        self.assertFalse(cur.exists())
+        self.assertTrue(pend.exists())
+        # Head moved after apply: pending identity mismatch, no finalize.
+        _reconcile_write_task(vault, "t9", scheduled=_WR_D3)
+        _reconcile_commit(vault)
+        with self.assertRaises(self.core.CoreError):
+            self.core.finalize_daily_links_reconciliation(
+                vault, config, sync_succeeded=True,
+                cursor_path=cur, pending_path=pend,
+            )
+        self.assertFalse(cur.exists())
+        # Replay converges: bootstrap re-plans (t1 link exists → no-op;
+        # the externally added t9 is ensure-only), then finalize succeeds.
+        note = _reconcile_note(vault, f"journal/{_WR_D1}.md")
+        plan, outcome, cursor = self._run(vault, profile, config, cur, pend)
+        self.assertEqual(
+            [(t.slug, t.projection.kind) for t in plan.transitions],
+            [("t1", "none"), ("t9", "create")],
+        )
+        self.assertTrue(outcome.commit_created)
+        self.assertEqual(
+            _reconcile_note(vault, f"journal/{_WR_D1}.md"), note
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault),
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(cursor.reconciled_head, head)
+        self.assertFalse(pend.exists())
+
+    def test_crash_after_apply_replays_without_duplicates(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("crash")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        # Apply + commit, then "crash" before finalize (cursor missing).
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur
+        )
+        self.core.apply_daily_links_reconciliation(
+            vault, profile, config, plan, pending_path=pend
+        )
+        self.assertTrue(pend.exists())
+        self.assertFalse(cur.exists())
+        # Replay: ensure becomes a no-op, still converges, one link only.
+        plan, outcome, cursor = self._run(vault, profile, config, cur, pend)
+        self.assertEqual(
+            [t.projection.kind for t in plan.transitions], ["none"]
+        )
+        self.assertFalse(outcome.commit_created)
+        note = _reconcile_note(vault, f"journal/{_WR_D1}.md")
+        self.assertEqual(note.count("- [[t1]]"), 1)
+        self.assertFalse(pend.exists())
+
+    def test_source_churn_fails_closed_before_side_effects(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("churn")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur
+        )
+        # Uncommitted external edit between prepare and apply.
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D2)
+        with self.assertRaises(self.core.CoreError):
+            self.core.apply_daily_links_reconciliation(
+                vault, profile, config, plan, pending_path=pend
+            )
+        self.assertFalse(pend.exists())
+        self.assertFalse((vault / "journal" / f"{_WR_D1}.md").exists())
+        # HEAD drift is also churn.
+        (vault / "tasks" / "t1.md").write_text(
+            (vault / "tasks" / "t1.md").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        _reconcile_commit(vault)
+        with self.assertRaises(self.core.CoreError):
+            self.core.apply_daily_links_reconciliation(
+                vault, profile, config, plan, pending_path=pend
+            )
+        self.assertFalse(pend.exists())
+
+    def test_commit_failure_leaves_no_pending_and_replays(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("commitfail")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur
+        )
+
+        def boom(*args, **kwargs):
+            raise self.core.GitError("injected commit failure")
+
+        with mock.patch.object(
+            self.core, "git_commit_reconcile_targets", side_effect=boom
+        ):
+            with self.assertRaises(self.core.GitError):
+                self.core.apply_daily_links_reconciliation(
+                    vault, profile, config, plan, pending_path=pend
+                )
+        self.assertFalse(pend.exists())
+        self.assertFalse(cur.exists())
+        # Replay converges from the dirty worktree.
+        _plan, outcome, cursor = self._run(vault, profile, config, cur, pend)
+        self.assertFalse(outcome.commit_created)
+        self.assertEqual(
+            _reconcile_note(vault, f"journal/{_WR_D1}.md").count("- [[t1]]"), 1
+        )
+        self.assertFalse(pend.exists())
+
+    def test_projection_conflict_fails_closed(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("conflict")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur
+        )
+        # Persistent concurrent mutation: every final check sees drift.
+        def churn() -> None:
+            note = vault / "journal" / f"{_WR_D1}.md"
+            with note.open("a", encoding="utf-8") as fh:
+                fh.write("x\n")
+
+        with self.assertRaises(self.core.CoreError):
+            self.core.apply_daily_links_reconciliation(
+                vault, profile, config, plan, pending_path=pend,
+                _final_check_hook=churn,
+            )
+        self.assertFalse(pend.exists())
+        self.assertFalse(cur.exists())
+
+    def test_targeted_staging_exact_paths_and_unrelated_preserved(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("staging")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        # Unrelated dirty file and unrelated pre-staged file.
+        (vault / "unrelated.txt").write_text("dirty\n", encoding="utf-8")
+        (vault / "staged.txt").write_text("staged\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "staged.txt"], cwd=str(vault), check=True,
+            capture_output=True,
+        )
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur
+        )
+        git_calls: List[List[str]] = []
+        real_run_git = self.core._run_git
+
+        def spy(env_vault, env, args, **kwargs):
+            git_calls.append(list(args))
+            return real_run_git(env_vault, env, args, **kwargs)
+
+        with mock.patch.object(self.core, "_run_git", side_effect=spy):
+            outcome = self.core.apply_daily_links_reconciliation(
+                vault, profile, config, plan, pending_path=pend
+            )
+        self.assertTrue(outcome.commit_created)
+        # Exact commit contents: only the changed daily note.
+        shown = subprocess.run(
+            ["git", "show", "--name-only", "--format=", "HEAD"],
+            cwd=str(vault), check=True, capture_output=True, text=True,
+        ).stdout.split()
+        self.assertEqual(shown, [f"journal/{_WR_D1}.md"])
+        # No `git add -A`: every add is explicit and pathspec-scoped.
+        for args in git_calls:
+            if args[:1] == ["add"]:
+                self.assertEqual(args[1], "--")
+                self.assertNotIn("-A", args)
+                self.assertNotIn("-a", args)
+        commit_calls = [a for a in git_calls if a[:1] == ["commit"]]
+        self.assertEqual(len(commit_calls), 1)
+        self.assertIn("--", commit_calls[0])
+        self.assertIn(f"journal/{_WR_D1}.md", commit_calls[0])
+        # Unrelated dirty/staged entries untouched.
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=str(vault),
+            check=True, capture_output=True, text=True,
+        ).stdout.splitlines()
+        self.assertTrue(any(l.endswith("unrelated.txt") for l in status))
+        self.assertTrue(
+            any(
+                l[:2] in ("M ", "A ") and l.endswith("staged.txt")
+                for l in status
+            )
+        )
+        subprocess.run(["git", "reset", "-q"], cwd=str(vault), capture_output=True)
+        self.core.finalize_daily_links_reconciliation(
+            vault, config, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+
+    def test_routing_change_rehomes_and_stages_dirty_config(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("reroute")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        # Dirty (uncommitted) routing change: root + format → nested.
+        _write_daily_config(
+            vault, {"folder": "nested", "format": "YYYY/MM"}
+        )
+        config2 = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config2, cursor_path=cur
+        )
+        self.assertTrue(plan.routing_changed)
+        self.assertTrue(plan.config_commit_needed)
+        steps = [(t.slug, t.operation, t.routing) for t in plan.transitions]
+        self.assertIn(("t1", "ensure", "current"), steps)
+        self.assertIn(("t1", "remove", "prior"), steps)
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config2, plan, pending_path=pend
+        )
+        self.assertTrue(outcome.commit_created)
+        shown = subprocess.run(
+            ["git", "show", "--name-only", "--format=", "HEAD"],
+            cwd=str(vault), check=True, capture_output=True, text=True,
+        ).stdout.split()
+        self.assertEqual(
+            sorted(shown),
+            sorted([
+                ".obsidian/daily-notes.json",
+                f"journal/{_WR_D1}.md",
+                "nested/2026/09.md",  # YYYY/MM format: year/month nested path
+            ]),
+        )
+        self.core.finalize_daily_links_reconciliation(
+            vault, config2, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+        cursor = self.core.load_daily_links_reconcile_cursor(cur)
+        self.assertEqual(cursor.daily_folder, "nested")
+        self.assertEqual(cursor.daily_format, "YYYY/MM")
+        self.assertIn(
+            "- [[t1]]", _reconcile_note(vault, "nested/2026/09.md")
+        )
+        self.assertNotIn(
+            "- [[t1]]", _reconcile_note(vault, f"journal/{_WR_D1}.md")
+        )
+
+    def test_routing_change_with_committed_config_skips_config_staging(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("reroute2")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        _write_daily_config(vault, {"folder": "nested"})
+        _reconcile_commit(vault, "config change")
+        config2 = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config2, cursor_path=cur
+        )
+        self.assertTrue(plan.routing_changed)
+        self.assertFalse(plan.config_commit_needed)
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config2, plan, pending_path=pend
+        )
+        shown = subprocess.run(
+            ["git", "show", "--name-only", "--format=", "HEAD"],
+            cwd=str(vault), check=True, capture_output=True, text=True,
+        ).stdout.split()
+        self.assertNotIn(".obsidian/daily-notes.json", shown)
+        self.core.finalize_daily_links_reconciliation(
+            vault, config2, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+
+    def test_prepare_overflow_fails_closed_no_partial_cursor(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("overflow")
+        for i in range(self.core.MAX_DAILY_PROJECTION_TARGETS + 1):
+            _reconcile_write_task(
+                vault, f"t{i:02d}", scheduled=f"2026-12-{i + 1:02d}"
+            )
+        _reconcile_commit(vault)
+        with self.assertRaises(self.core.CoreError):
+            self.core.prepare_daily_links_reconciliation(
+                vault, profile, self.core.load_daily_notes_config(vault),
+                cursor_path=cur,
+            )
+        self.assertFalse(cur.exists())
+        self.assertFalse(pend.exists())
+
+    def test_head_dual_location_ambiguous_fails_closed(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup(
+            "dual", move_archived=True
+        )
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        (vault / "archive").mkdir()
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1, folder="archive")
+        _reconcile_commit(vault)
+        with self.assertRaises(self.core.CoreError):
+            self.core.prepare_daily_links_reconciliation(
+                vault, profile, self.core.load_daily_notes_config(vault),
+                cursor_path=cur,
+            )
+        self.assertFalse(pend.exists())
+
+    def test_pending_record_is_structural_and_identity_checked(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("pending")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur
+        )
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config, plan, pending_path=pend
+        )
+        pending = self.core.load_daily_links_reconcile_pending(pend)
+        self.assertEqual(pending.from_head, plan.from_head)
+        self.assertEqual(pending.to_head, outcome.pending.to_head)
+        self.assertGreater(pending.started_at, 0)
+        # The pending structurally pins the applied routing snapshot.
+        self.assertEqual(pending.daily_folder, config.folder)
+        self.assertEqual(pending.daily_format, config.format)
+        payload = json.loads(pend.read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(payload.keys()),
+            {"schema", "version", "from_head", "to_head", "started_at",
+             "daily_folder", "daily_format"},
+        )
+        cursor = self.core.finalize_daily_links_reconciliation(
+            vault, config, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+        self.assertEqual(cursor.reconciled_head, pending.to_head)
+        self.assertEqual(
+            cursor.projection_format,
+            self.core.DAILY_LINKS_PROJECTION_FORMAT_VERSION,
+        )
+        self.assertFalse(pend.exists())
+
+    def test_finalize_rejects_config_changed_after_apply_then_converges(
+        self,
+    ) -> None:
+        vault, _sub, profile, cur, pend = self._setup("reroute3")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        # Routing-change cycle applied: pending pins the applied routing.
+        _write_daily_config(vault, {"folder": "nested"})
+        config_nested = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config_nested, cursor_path=cur
+        )
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config_nested, plan, pending_path=pend
+        )
+        pending = self.core.load_daily_links_reconcile_pending(pend)
+        self.assertEqual(pending.daily_folder, "nested")
+        cursor_before = self.core.load_daily_links_reconcile_cursor(cur)
+        # Finalize with the stale pre-apply config: routing mismatch,
+        # old cursor and pending preserved.
+        stale_config = self.core.DailyNotesConfig(
+            folder="journal", format=config_nested.format
+        )
+        with self.assertRaises(self.core.CoreError):
+            self.core.finalize_daily_links_reconciliation(
+                vault, stale_config, sync_succeeded=True,
+                cursor_path=cur, pending_path=pend,
+            )
+        self.assertEqual(
+            self.core.load_daily_links_reconcile_cursor(cur), cursor_before
+        )
+        self.assertEqual(
+            self.core.load_daily_links_reconcile_pending(pend), pending
+        )
+        # Config edited again before finalize: still a routing mismatch.
+        _write_daily_config(vault, {"folder": "other"})
+        config_other = self.core.load_daily_notes_config(vault)
+        with self.assertRaises(self.core.CoreError):
+            self.core.finalize_daily_links_reconciliation(
+                vault, config_other, sync_succeeded=True,
+                cursor_path=cur, pending_path=pend,
+            )
+        self.assertEqual(
+            self.core.load_daily_links_reconcile_cursor(cur), cursor_before
+        )
+        self.assertEqual(
+            self.core.load_daily_links_reconcile_pending(pend), pending
+        )
+        # A fresh prepare/apply/finalize under the actual current config
+        # converges: old-link routing comes from the pending's pinned
+        # routing, so the link is re-homed exactly once with no
+        # duplicate or lost bare link.
+        plan, outcome, cursor = self._run(
+            vault, profile, config_other, cur, pend
+        )
+        self.assertEqual(cursor.daily_folder, "other")
+        self.assertFalse(pend.exists())
+        self.assertIn(
+            "- [[t1]]", _reconcile_note(vault, f"other/{_WR_D1}.md")
+        )
+        self.assertNotIn(
+            "- [[t1]]", _reconcile_note(vault, f"nested/{_WR_D1}.md")
+        )
+        self.assertNotIn(
+            "- [[t1]]", _reconcile_note(vault, f"journal/{_WR_D1}.md")
+        )
+
+    def test_finalize_stale_pending_after_cursor_advance_clears(self) -> None:
+        vault, _sub, profile, cur, pend = self._setup("stale")
+        base_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        self._run(vault, profile, config, cur, pend)
+        cursor = self.core.load_daily_links_reconcile_cursor(cur)
+        # Simulate the cursor-written/pending-not-cleared crash window:
+        # a pending whose to_head already equals the advanced cursor.
+        stale = self.core.DailyLinksReconcilePending(
+            from_head=base_head,
+            to_head=cursor.reconciled_head,
+            started_at=1_700_000_000,
+            daily_folder=config.folder,
+            daily_format=config.format,
+        )
+        self.core.write_daily_links_reconcile_pending(stale, pend)
+        advanced = self.core.finalize_daily_links_reconciliation(
+            vault, config, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+        # Success: stale pending cleared, cursor unchanged.
+        self.assertEqual(advanced, cursor)
+        self.assertFalse(pend.exists())
+        # Move HEAD past the cursor head so a "lagged cursor" state
+        # exists for the base-identity case below.
+        _reconcile_write_task(vault, "t9", scheduled=_WR_D3)
+        _reconcile_commit(vault)
+        # Every other mismatch still fails closed: a pending that
+        # matches neither the current HEAD nor the cursor head.
+        foreign_to = "c" * 40
+        foreign = self.core.DailyLinksReconcilePending(
+            from_head=base_head,
+            to_head=foreign_to,
+            started_at=1_700_000_001,
+            daily_folder=config.folder,
+            daily_format=config.format,
+        )
+        self.core.write_daily_links_reconcile_pending(foreign, pend)
+        with self.assertRaises(self.core.CoreError):
+            self.core.finalize_daily_links_reconciliation(
+                vault, config, sync_succeeded=True,
+                cursor_path=cur, pending_path=pend,
+            )
+        self.assertEqual(
+            self.core.load_daily_links_reconcile_cursor(cur), cursor
+        )
+        self.assertTrue(pend.exists())
+        # A head-matching pending with a foreign base (and the cursor
+        # lagging) also still fails the base identity check.
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertNotEqual(head, cursor.reconciled_head)
+        lagged = self.core.DailyLinksReconcilePending(
+            from_head="d" * 40,
+            to_head=head,
+            started_at=1_700_000_002,
+            daily_folder=config.folder,
+            daily_format=config.format,
+        )
+        self.core.write_daily_links_reconcile_pending(lagged, pend)
+        with self.assertRaises(self.core.CoreError):
+            self.core.finalize_daily_links_reconciliation(
+                vault, config, sync_succeeded=True,
+                cursor_path=cur, pending_path=pend,
+            )
+        self.assertTrue(pend.exists())
+
+    def test_commit_helper_allows_max_notes_plus_config_rider(self) -> None:
+        vault, _sub, _profile, _cur, _pend = self._setup("commitbound")
+        notes = []
+        for i in range(self.core.MAX_DAILY_PROJECTION_TARGETS):
+            rel = f"journal/2026-06-{i + 1:02d}.md"
+            (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+            (vault / rel).write_text("x\n", encoding="utf-8")
+            notes.append(rel)
+        # Make the tracked config genuinely dirty so the rider has a
+        # change to stage (identical bytes would stage nothing).
+        (vault / ".obsidian" / "daily-notes.json").write_text(
+            '{"folder": "journal", "format": "YYYY-MM-DD"}',
+            encoding="utf-8",
+        )
+        # Exactly MAX note targets plus the single config rider: legal.
+        created = self.core.git_commit_reconcile_targets(
+            vault,
+            [vault / rel for rel in notes]
+            + [vault / self.core.RECONCILE_CONFIG_RELPATH],
+        )
+        self.assertTrue(created)
+        shown = subprocess.run(
+            ["git", "show", "--name-only", "--format=", "HEAD"],
+            cwd=str(vault), check=True, capture_output=True, text=True,
+        ).stdout.split()
+        self.assertEqual(len(shown), self.core.MAX_DAILY_PROJECTION_TARGETS + 1)
+        self.assertIn(self.core.RECONCILE_CONFIG_RELPATH, shown)
+        # One note target more than the bound fails closed.
+        (vault / "journal" / "2026-07-01.md").write_text("x\n", encoding="utf-8")
+        with self.assertRaises(self.core.ValidationError):
+            self.core.git_commit_reconcile_targets(
+                vault,
+                [vault / rel for rel in notes]
+                + [vault / "journal" / "2026-07-01.md"]
+                + [vault / self.core.RECONCILE_CONFIG_RELPATH],
+            )
+        # A non-note, non-config path is rejected outright.
+        (vault / "other.txt").write_text("x\n", encoding="utf-8")
+        with self.assertRaises(self.core.ValidationError):
+            self.core.git_commit_reconcile_targets(
+                vault, [vault / "other.txt"]
+            )
+
+    def test_routing_change_full_bound_commits_16_notes_plus_config(
+        self,
+    ) -> None:
+        vault, _sub, profile, cur, pend = self._setup("bound17")
+        dates = [f"2026-08-{i + 1:02d}" for i in range(8)]
+        for i, date in enumerate(dates):
+            _reconcile_write_task(vault, f"t{i}", scheduled=date)
+        _reconcile_commit(vault)
+        self._run(
+            vault, profile, self.core.load_daily_notes_config(vault), cur, pend
+        )
+        # Dirty routing change: 8 ensures + 8 removes = exactly MAX
+        # changed notes, plus the config rider: one explicit 17-path
+        # commit must succeed (previously the total-path bound rejected
+        # it after the projections had already been applied).
+        _write_daily_config(vault, {"folder": "daily"})
+        config2 = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config2, cursor_path=cur
+        )
+        self.assertEqual(len(plan.transitions), self.core.MAX_DAILY_PROJECTION_TARGETS)
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config2, plan, pending_path=pend
+        )
+        self.assertTrue(outcome.commit_created)
+        self.assertEqual(
+            len(outcome.changed_targets), self.core.MAX_DAILY_PROJECTION_TARGETS
+        )
+        shown = subprocess.run(
+            ["git", "show", "--name-only", "--format=", "HEAD"],
+            cwd=str(vault), check=True, capture_output=True, text=True,
+        ).stdout.split()
+        self.assertEqual(len(shown), self.core.MAX_DAILY_PROJECTION_TARGETS + 1)
+        self.assertIn(self.core.RECONCILE_CONFIG_RELPATH, shown)
+        self.core.finalize_daily_links_reconciliation(
+            vault, config2, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+        cursor = self.core.load_daily_links_reconcile_cursor(cur)
+        self.assertEqual(cursor.daily_folder, "daily")
+
+
+# ---------------------------------------------------------------------------
+# W4a: reconciliation wired into engine mutations (MCP-only integration)
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_has_yaml(), "PyYAML required")
+class ReconcileEngineIntegrationTests(unittest.TestCase):
+    """Every normal mutation reconciles under the held lock BEFORE
+    preflight/mutation; delete guards a dirty target with zero
+    reconciliation I/O; disabled modes are fully inert."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="tnm_w4a_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _engine(self, name, *, daily=True, reconcile=True):
+        sub = self.tmpdir / name
+        sub.mkdir()
+        cursor = sub / "cursor.json"
+        pending = sub / "pending.json"
+        engine, vault, _gbrain_bin = _make_daily_engine(
+            self.core, sub,
+            daily_links_enabled=daily,
+            reconcile_enabled=reconcile,
+            reconcile_cursor_path=cursor,
+            reconcile_pending_path=pending,
+        )
+        return engine, vault, cursor, pending
+
+    def _record_reconciliation(self, recorder):
+        """Wrap the reconciliation lifecycle + preflight/capture seams with
+        event recorders; returns a restore-free context manager."""
+        real = {
+            name: getattr(self.core, name)
+            for name in (
+                "prepare_daily_links_reconciliation",
+                "apply_daily_links_reconciliation",
+                "finalize_daily_links_reconciliation",
+                "gbrain_sync_incremental",
+                "git_preflight_commit",
+                "gbrain_capture",
+                "gbrain_delete",
+            )
+        }
+
+        def make_spy(name):
+            def spy(*args, **kwargs):
+                recorder["events"].append(name)
+                if name != "gbrain_sync_incremental":
+                    recorder.setdefault(name, []).append(args)
+                return real[name](*args, **kwargs)
+
+            return spy
+
+        patches = [
+            mock.patch.object(self.core, name, side_effect=make_spy(name))
+            for name in real
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_mutation_reconciles_before_preflight_same_config_snapshot(
+        self,
+    ) -> None:
+        engine, vault, cursor, pending = self._engine("order")
+        created = engine.create("t1", "Task One", scheduled=_WR_D1, body="b")
+        self.assertEqual(created.state, self.core.APPLIED_AND_COMMITTED)
+        # Cursor established by the create-time bootstrap; now an external
+        # commit lands while the cursor lags.
+        self.assertTrue(cursor.exists())
+        _reconcile_write_task(vault, "t2", scheduled=_WR_D2)
+        _reconcile_commit(vault, "external add")
+        recorder = {"events": []}
+        self._record_reconciliation(recorder)
+        result = engine.complete("t1")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        events = recorder["events"]
+        # Full lifecycle runs BEFORE the existing preflight and mutation.
+        self.assertEqual(events[:4], [
+            "prepare_daily_links_reconciliation",
+            "apply_daily_links_reconciliation",
+            "gbrain_sync_incremental",
+            "finalize_daily_links_reconciliation",
+        ])
+        self.assertLess(
+            events.index("finalize_daily_links_reconciliation"),
+            events.index("git_preflight_commit"),
+        )
+        # Reconciliation's own sync precedes preflight's sync; capture is last.
+        self.assertEqual(events[4:6], ["git_preflight_commit", "gbrain_sync_incremental"])
+        self.assertLess(
+            events.index("git_preflight_commit"),
+            events.index("gbrain_capture"),
+        )
+        # The lagging external change was reconciled by the mutation.
+        self.assertIn(
+            "- [[t2]]", _reconcile_note(vault, f"journal/{_WR_D2}.md")
+        )
+        # One validated config snapshot passes prepare/apply/finalize.
+        configs = [args[2] for args in recorder["prepare_daily_links_reconciliation"]]
+        self.assertIs(configs[0], recorder["apply_daily_links_reconciliation"][0][2])
+        self.assertIs(
+            configs[0],
+            recorder["finalize_daily_links_reconciliation"][0][1],
+        )
+        self.assertIsInstance(configs[0], self.core.DailyNotesConfig)
+
+    def test_reconcile_failure_skips_preflight_and_mutation(self) -> None:
+        engine, vault, cursor, pending = self._engine("fail")
+        engine.create("t1", "Task One", scheduled=_WR_D1, body="b")
+        _reconcile_write_task(vault, "t2", scheduled=_WR_D2)
+        _reconcile_commit(vault, "external add")
+        task_before = (vault / "tasks" / "t1.md").read_bytes()
+        cursor_before = cursor.read_bytes()
+        recorder = {"events": []}
+        self._record_reconciliation(recorder)
+        with mock.patch.object(
+            self.core,
+            "finalize_daily_links_reconciliation",
+            side_effect=self.core.CoreError("injected finalize failure"),
+        ):
+            with self.assertRaises(self.core.CoreError):
+                engine.complete("t1")
+        # Cursor semantics preserved: old cursor + pending intact for replay.
+        self.assertEqual(cursor.read_bytes(), cursor_before)
+        self.assertTrue(pending.exists())
+        # Preflight and the mutation never ran; the reconciliation itself
+        # got as far as apply (its commit landed) but not finalize.
+        self.assertNotIn("git_preflight_commit", recorder["events"])
+        self.assertNotIn("gbrain_capture", recorder["events"])
+        self.assertIn("apply_daily_links_reconciliation", recorder["events"])
+        self.assertEqual((vault / "tasks" / "t1.md").read_bytes(), task_before)
+
+    def test_prepare_failure_skips_preflight_and_mutation(self) -> None:
+        engine, vault, cursor, pending = self._engine("prepfail")
+        engine.create("t1", "Task One", scheduled=_WR_D1, body="b")
+        # Corrupt the established cursor: prepare fails closed.
+        cursor.write_text("{corrupt", encoding="utf-8")
+        with mock.patch.object(
+            self.core, "gbrain_capture", side_effect=AssertionError("must not capture")
+        ):
+            with self.assertRaises(self.core.CoreError):
+                engine.complete("t1")
+        self.assertEqual(cursor.read_text(encoding="utf-8"), "{corrupt")
+        self.assertFalse(pending.exists())
+
+    def test_reconciliation_inert_when_master_disabled(self) -> None:
+        # Master off + reconcile switch on: reconciliation must be fully
+        # inert (no lifecycle calls, no cursor/pending I/O).
+        engine, vault, cursor, pending = self._engine(
+            "inert_master", daily=False, reconcile=True
+        )
+        recorder = {"events": []}
+        self._record_reconciliation(recorder)
+        result = engine.create("t1", "Task One", body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        reconcilers = [
+            name for name in recorder["events"]
+            if name.endswith("_reconciliation")
+        ]
+        self.assertEqual(reconcilers, [])
+        self.assertFalse(cursor.exists())
+        self.assertFalse(pending.exists())
+
+    def test_reconciliation_inert_when_switch_disabled(self) -> None:
+        # Master on + reconcile switch off: daily projections still work,
+        # reconciliation stays inert.
+        engine, vault, cursor, pending = self._engine(
+            "inert_switch", daily=True, reconcile=False
+        )
+        recorder = {"events": []}
+        self._record_reconciliation(recorder)
+        result = engine.create("t1", "Task One", scheduled=_WR_D1, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        reconcilers = [
+            name for name in recorder["events"]
+            if name.endswith("_reconciliation")
+        ]
+        self.assertEqual(reconcilers, [])
+        self.assertFalse(cursor.exists())
+        self.assertFalse(pending.exists())
+        self.assertIn(
+            "- [[t1]]", _reconcile_note(vault, f"journal/{_WR_D1}.md")
+        )
+
+    def test_delete_dirty_target_zero_reconcile_io(self) -> None:
+        engine, vault, cursor, pending = self._engine("dirtydelete")
+        engine.create("t1", "Task One", scheduled=_WR_D1, body="b")
+        self.assertTrue(cursor.exists())
+        cursor_before = cursor.read_bytes()
+        # Dirty the delete target (uncommitted external edit).
+        task_path = vault / "tasks" / "t1.md"
+        task_path.write_bytes(task_path.read_bytes() + b"dirty edit\n")
+        recorder = {"events": []}
+        self._record_reconciliation(recorder)
+        with self.assertRaises(self.core.ValidationError):
+            engine.delete("t1")
+        reconcilers = [
+            name for name in recorder["events"]
+            if name.endswith("_reconciliation")
+        ]
+        # Zero reconciliation calls and zero cursor/pending I/O.
+        self.assertEqual(reconcilers, [])
+        self.assertEqual(cursor.read_bytes(), cursor_before)
+        self.assertFalse(pending.exists())
+        self.assertFalse(recorder["events"])
+        # The task and its dirty edit are untouched.
+        self.assertTrue(task_path.read_bytes().endswith(b"dirty edit\n"))
+
+    def test_delete_clean_reconciles_before_preflight_and_delete(self) -> None:
+        engine, vault, cursor, pending = self._engine("cleandelete")
+        engine.create("t1", "Task One", scheduled=_WR_D1, body="b")
+        # External committed change while the cursor lags.
+        _reconcile_write_task(vault, "t2", scheduled=_WR_D2)
+        _reconcile_commit(vault, "external add")
+        recorder = {"events": []}
+        self._record_reconciliation(recorder)
+        result = engine.delete("t1")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        events = recorder["events"]
+        # Clean target: reconciliation runs first (guard already passed),
+        # then preflight, then the delete lifecycle.
+        self.assertEqual(events[:4], [
+            "prepare_daily_links_reconciliation",
+            "apply_daily_links_reconciliation",
+            "gbrain_sync_incremental",
+            "finalize_daily_links_reconciliation",
+        ])
+        self.assertLess(
+            events.index("finalize_daily_links_reconciliation"),
+            events.index("git_preflight_commit"),
+        )
+        self.assertLess(
+            events.index("git_preflight_commit"),
+            events.index("gbrain_delete"),
+        )
+        # The lagging external change was reconciled before the delete;
+        # the deleted task's own daily link is gone afterwards.
+        self.assertIn(
+            "- [[t2]]", _reconcile_note(vault, f"journal/{_WR_D2}.md")
+        )
+        self.assertNotIn(
+            "- [[t1]]", _reconcile_note(vault, f"journal/{_WR_D1}.md")
+        )
+        self.assertFalse((vault / "tasks" / "t1.md").exists())
 
 
 if __name__ == "__main__":
