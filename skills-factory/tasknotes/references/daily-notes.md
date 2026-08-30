@@ -82,10 +82,27 @@ reconciled HEAD SHA, the prior Daily Notes folder/format, the projection
 format version), never titles, bodies, or any content. A missing cursor
 bootstraps with an ensure-only pass for currently scheduled tasks (the
 first-enable backfill); a present-but-invalid document fails closed.
-Candidate enumeration and reads are bounded; overflow fails closed.
+Candidate enumeration and reads are bounded; enumeration overflow fails
+closed, and established-cursor reconciliation stays fail-closed above 16
+composed transitions.
 These files are private runtime state, not vault content: task Markdown
 stays gbrain-only and the projection remains the adapter's only direct
 vault-file write.
+
+**First-activation batching (issue #144).** The bootstrap pass alone may
+carry more than 16 total ensure transitions. Apply then splits the plan
+deterministically into batches of at most 16 distinct resolved Daily Note
+targets — all transitions for one target stay together, and a coarse date
+format (e.g. `YYYY-MM`) counts as one target — with one targeted commit per
+batch and no config rider (bootstrap never re-homes routing). It remains one
+lock-held lifecycle (prepare once, native sync once, finalize once): the
+pending sibling is written once, only after all batches succeeded, and the
+cursor advances only via the post-sync finalize. Full-candidate and HEAD
+rechecks before the first batch, between batches, and immediately before
+the pending make any external task add/remove/schedule change or HEAD
+movement fail closed; partial batch commits are retained (no rollback, and
+the recovery marker is never touched), and an unchanged retry is an
+ordinary bootstrap replay that converges without duplicate links.
 
 **Delete exception:** `task_delete` checks target cleanliness BEFORE any
 reconciliation — a dirty (uncommitted) delete target rejects with zero

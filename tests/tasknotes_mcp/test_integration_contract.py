@@ -590,6 +590,40 @@ class DailyNoteProjectionDocsContract(unittest.TestCase):
         self.assertIn("**Delete exception.**", text)
         self.assertIn("zero reconciliation I/O", prose)
 
+    def test_runbook_and_reference_document_bootstrap_overflow_contract(
+        self,
+    ) -> None:
+        """Issue #144 W4: the first-activation bootstrap overflow contract
+        (deterministic bounded batches, one lifecycle, drift fail-closed,
+        retained partial commits) and the retained established-cursor
+        bound must be documented consistently in the runbook and the
+        deep-dive reference."""
+        for name, text in (
+            ("runbook", self.runbook),
+            ("reference", self.reference),
+        ):
+            prose = " ".join(text.split())
+            self.assertIn(
+                "more than 16 total ensure transitions", prose, name
+            )
+            self.assertIn(
+                "fail-closed above 16 composed transitions", prose, name
+            )
+            self.assertIn(
+                "at most 16 distinct resolved Daily Note targets",
+                prose,
+                name,
+            )
+            self.assertIn("one targeted commit per batch", prose, name)
+            self.assertIn(
+                "written once, only after all batches", prose, name
+            )
+            self.assertIn("no config rider", prose, name)
+            self.assertIn(
+                "converges without duplicate links", prose, name
+            )
+            self.assertIn("recovery marker is never touched", prose, name)
+
     def test_workflow_agents_documents_slave_switch(self) -> None:
         """Issue #139 W4b: the deploy variable table must list the slave
         switch and describe both switches as default-on strict booleans."""

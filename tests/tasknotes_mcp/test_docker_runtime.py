@@ -173,12 +173,13 @@ class TaskNotesDockerRuntimeTests(unittest.TestCase):
         data_dir = Path(tempfile.mkdtemp(prefix="tasknotes-runtime-"))
         self.addCleanup(shutil.rmtree, data_dir, ignore_errors=True)
         _chown_data_dir(data_dir, uid, gid)
-        # The e2e now runs three lifecycle phases (disabled mode, the
-        # issue #139 daily-links phase with Git/gbrain evidence, and the
-        # revision-3 external-edit refresh reconciliation), roughly
-        # tripling the mutation count; give it a tripled budget.
+        # The e2e now runs four lifecycle phases (disabled mode, the
+        # issue #139 daily-links phase with Git/gbrain evidence, the
+        # revision-3 external-edit refresh reconciliation, and the
+        # issue #144 large-bootstrap missing-cursor reconcile), roughly
+        # quadrupling the mutation count; give it a quadrupled budget.
         result = self._run_e2e_container(
-            data_dir, uid, gid, as_runtime_user=True, timeout=900
+            data_dir, uid, gid, as_runtime_user=True, timeout=1200
         )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("real-gbrain disabled-mode lifecycle: PASS", result.stdout)
@@ -186,6 +187,7 @@ class TaskNotesDockerRuntimeTests(unittest.TestCase):
         self.assertIn(
             "real-gbrain external-edit refresh reconciliation: PASS", result.stdout
         )
+        self.assertIn("real-gbrain large-bootstrap reconcile: PASS", result.stdout)
         self.assertIn("real-gbrain MCP lifecycle: PASS", result.stdout)
 
     def test_root_container_run_is_rejected(self) -> None:
@@ -504,6 +506,42 @@ class TaskNotesDockerHarnessContractTests(unittest.TestCase):
         self.assertIn('cursor["daily_folder"] == DAILY_FOLDER', text)
         self.assertIn('cursor["daily_format"] == DAILY_FORMAT', text)
         self.assertIn("not RECONCILE_PENDING_PATH.exists()", text)
+
+    def test_e2e_large_bootstrap_reconcile_contract(self) -> None:
+        """Issue #144: the e2e must prove the real refresh lane bootstraps
+        a MISSING cursor over >16 distinct scheduled Daily Note targets in
+        bounded batches — at most 16 daily note paths per targeted reconcile
+        commit — with one cursor finalized only after the native sync, the
+        pending sibling cleared, and canonical non-duplicate links. The
+        first-enable state is re-entered by removing only the private
+        reconcile cursor (runtime metadata; never vault content, never a
+        recursive deletion)."""
+        text = self._e2e_text()
+        # The dedicated phase exists and runs from main().
+        self.assertIn("_large_bootstrap_reconcile_phase", text)
+        self.assertIn('print("real-gbrain large-bootstrap reconcile: PASS")', text)
+        # Deliberate, narrow cursor reset (no recursive deletion helpers).
+        self.assertIn("RECONCILE_CURSOR_PATH.unlink()", text)
+        self.assertIn('"large bootstrap fixture"', text)
+        # >16 distinct scheduled targets, external writes only.
+        self.assertIn("count = 17  # > MAX_DAILY_PROJECTION_TARGETS (16)", text)
+        self.assertIn('[GBRAIN_WRAPPER, "refresh"]', text)
+        # Bounded Git accounting: exactly two reconcile commits, each with
+        # at most 16 daily paths, union == the 17 new targets, no
+        # duplicates; links canonical and exactly once.
+        self.assertIn("assert len(reconcile_after) == 2", text)
+        self.assertIn("assert len(paths) <= 16", text)
+        self.assertIn("assert len(changed) == count", text)
+        self.assertIn("assert len(set(changed)) == len(changed)", text)
+        self.assertIn('note.count(f"- [[{slug}]]") == 1', text)
+        # Real gbrain visibility of a projected note after the sync.
+        self.assertIn('"[[20261201t090000]]" in body', text)
+        # One cursor finalized to the final HEAD; pending cleared.
+        self.assertIn('cursor["reconciled_head"] == head_after', text)
+        self.assertIn("not RECONCILE_PENDING_PATH.exists()", text)
+        # The no-recursive-deletion / no-shutil harness contract still holds.
+        self.assertNotIn("rmtree", text)
+        self.assertNotIn("shutil", text)
 
     @staticmethod
     def _harness_env_passthrough() -> str:

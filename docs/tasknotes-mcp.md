@@ -466,6 +466,27 @@ or any task/note content; task Markdown stays gbrain-only. A missing
 cursor bootstraps with an ensure-only pass for currently scheduled tasks
 (the first-enable backfill); a present-but-invalid document fails closed.
 
+**First-activation overflow and batching (issue #144).** Because the
+bootstrap pass is ensure-only for currently scheduled tasks, a first enable
+may involve more than 16 total ensure transitions; established-cursor
+reconciliation remains fail-closed above 16 composed transitions. Bootstrap
+apply therefore splits its plan deterministically into bounded batches of at
+most 16 distinct resolved Daily Note targets — all transitions for one
+target stay in one batch, and a coarse date format such as `YYYY-MM` counts
+as one target — with one targeted commit per batch and no config rider
+(bootstrap never re-homes routing). This is still one lock-held
+reconciliation lifecycle: every lane still prepares and applies once, runs
+the native sync once, and finalizes once. The pending sibling is written
+once, only after all batches succeeded; the cursor advances only through the
+finalize that follows a verified native sync. Before the first batch,
+between bootstrap batches, and immediately before the pending is written,
+apply re-enumerates all bounded task candidates and re-checks HEAD: any
+external task add/remove/schedule change or HEAD movement fails closed with
+no pending and no cursor advance. Batch commits already created are retained
+(no automatic rollback, and the recovery marker is never touched); a retry
+after such a failure is an ordinary bootstrap replay and converges without
+duplicate links.
+
 Two locked lanes run the same bounded lifecycle with one validated
 `DailyNotesConfig` snapshot through prepare → apply → sync → finalize:
 

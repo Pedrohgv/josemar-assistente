@@ -704,6 +704,88 @@ class ReconcileCliBehaviorTests(unittest.TestCase):
         self.assertEqual(cursor["reconciled_head"], head_after)
         self.assertEqual(cursor["daily_folder"], "journal")
 
+    def test_bootstrap_overflow_multibatch_reconcile_then_finalize(self) -> None:
+        """Issue #144 W3 (fixed CLI): an absent cursor with >16 scheduled
+        tasks reconciles multi-batch — one targeted commit per batch of at
+        most 16 daily notes, no bootstrap overflow — leaves a replayable
+        pending, and the (post-sync) finalize advances the cursor to the
+        final head with canonical no-duplicate links."""
+        # 17 scheduled tasks total: t1 from make_vault plus 16 more at
+        # distinct December dates (MAX_DAILY_PROJECTION_TARGETS == 16).
+        count = 17
+        for i in range(1, count):
+            _write_task(
+                self.vault, f"t{i + 1:02d}", scheduled=f"2026-12-{i + 1:02d}"
+            )
+        _commit_all(self.vault, "bootstrap overflow")
+        head_before = _git(self.vault, "rev-parse", "HEAD")
+        self.assertFalse(self.cursor_path.exists(), "absent cursor: bootstrap")
+        fd = self._hold_lock()
+        try:
+            result = self.run_cli("reconcile", flag="true", lock_fd=fd)
+        finally:
+            os.close(fd)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = self.out(result)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["action"], "reconcile")
+        self.assertEqual(payload["status"], "applied")
+        self.assertEqual(payload["applied"], count)
+        self.assertTrue(payload["commit_created"])
+        self.assertFalse(self.cursor_path.exists(),
+                         "reconcile must never advance the cursor")
+        self.assertTrue(self.pending_path.exists())
+        pending = json.loads(self.pending_path.read_text(encoding="utf-8"))
+        self.assertEqual(pending["from_head"], head_before)
+        head_after = _git(self.vault, "rev-parse", "HEAD")
+        self.assertEqual(pending["to_head"], head_after)
+        # Two deterministic batches (16 + 1 targets), one targeted
+        # commit per batch, each within the daily-note bound.
+        commits = _git(self.vault, "rev-list", f"{head_before}..HEAD").split()
+        self.assertEqual(len(commits), 2)
+        self.assertEqual(
+            sorted(
+                _git(self.vault, "show", "--name-only", "--format=",
+                     commits[0]).split()
+            ),
+            ["journal/2026-12-17.md"],
+        )
+        self.assertEqual(
+            sorted(
+                _git(self.vault, "show", "--name-only", "--format=",
+                     commits[1]).split()
+            ),
+            sorted(
+                [f"journal/{_D1}.md"]
+                + [f"journal/2026-12-{i + 1:02d}.md" for i in range(1, 16)]
+            ),
+        )
+        # Canonical, non-duplicate links for every bootstrapped task.
+        note = (self.vault / "journal" / f"{_D1}.md").read_text(encoding="utf-8")
+        self.assertEqual(note.count("- [[t1]]"), 1)
+        for i in range(1, count):
+            note = (self.vault / "journal" / f"2026-12-{i + 1:02d}.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(note.count(f"- [[t{i + 1:02d}]]"), 1)
+
+        # Post-sync finalize (as invoked by refresh after sync success):
+        # the cursor advances to the final head and the pending clears.
+        fd = self._hold_lock()
+        try:
+            result = self.run_cli("finalize", flag="true", lock_fd=fd)
+        finally:
+            os.close(fd)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = self.out(result)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["status"], "finalized")
+        self.assertFalse(self.pending_path.exists())
+        self.assertTrue(self.cursor_path.exists())
+        cursor = json.loads(self.cursor_path.read_text(encoding="utf-8"))
+        self.assertEqual(cursor["reconciled_head"], head_after)
+        self.assertEqual(cursor["daily_folder"], "journal")
+
     def test_second_unchanged_cycle_is_idempotent(self) -> None:
         """A steady-state refresh cycle (no external changes) applies
         nothing and keeps the cursor stable — replay never duplicates."""
