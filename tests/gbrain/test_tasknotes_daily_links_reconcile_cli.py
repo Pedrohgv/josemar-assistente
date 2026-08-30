@@ -786,6 +786,72 @@ class ReconcileCliBehaviorTests(unittest.TestCase):
         self.assertEqual(cursor["reconciled_head"], head_after)
         self.assertEqual(cursor["daily_folder"], "journal")
 
+    def test_raw_unquoted_native_date_reconcile_then_finalize(self) -> None:
+        """Issue #146 W2: with an explicit raw-YAML fixture (unquoted
+        ``scheduled: 2026-08-03``, which yaml.safe_load resolves to a
+        native ``datetime.date``), the fixed CLI retains its normal
+        behavior: the raw task is a canonical scheduled candidate,
+        reconcile prepares/applies one targeted commit with a replayable
+        pending, and the post-sync finalize advances the cursor. Task
+        Markdown stays untouched by reconciliation."""
+        raw = (
+            "---\n"
+            "type: note\n"
+            "title: t1\n"
+            "status: open\n"
+            "priority: normal\n"
+            "tags:\n"
+            "  - task\n"
+            "scheduled: 2026-08-03\n"
+            "---\n"
+            "body t1\n"
+        )
+        (self.vault / "tasks" / "t1.md").write_text(raw, encoding="utf-8")
+        _commit_all(self.vault, "raw unquoted fixture")
+        head_before = _git(self.vault, "rev-parse", "HEAD")
+        fd = self._hold_lock()
+        try:
+            result = self.run_cli("reconcile", flag="true", lock_fd=fd)
+        finally:
+            os.close(fd)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = self.out(result)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["action"], "reconcile")
+        self.assertEqual(payload["status"], "applied")
+        self.assertEqual(payload["applied"], 1)
+        self.assertTrue(payload["commit_created"])
+        note = (self.vault / "journal" / "2026-08-03.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(note.count("- [[t1]]"), 1)
+        self.assertTrue(self.pending_path.exists())
+        pending = json.loads(self.pending_path.read_text(encoding="utf-8"))
+        self.assertEqual(pending["from_head"], head_before)
+        head_after = _git(self.vault, "rev-parse", "HEAD")
+        self.assertEqual(pending["to_head"], head_after)
+        # Reconciliation never writes task Markdown: the raw unquoted
+        # scalar is still exactly on disk.
+        self.assertIn(
+            "scheduled: 2026-08-03",
+            (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8"),
+        )
+        # Post-sync finalize advances the cursor and clears the pending.
+        fd = self._hold_lock()
+        try:
+            result = self.run_cli("finalize", flag="true", lock_fd=fd)
+        finally:
+            os.close(fd)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = self.out(result)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["status"], "finalized")
+        self.assertFalse(self.pending_path.exists())
+        self.assertTrue(self.cursor_path.exists())
+        cursor = json.loads(self.cursor_path.read_text(encoding="utf-8"))
+        self.assertEqual(cursor["reconciled_head"], head_after)
+        self.assertEqual(cursor["daily_folder"], "journal")
+
     def test_second_unchanged_cycle_is_idempotent(self) -> None:
         """A steady-state refresh cycle (no external changes) applies
         nothing and keeps the cursor stable — replay never duplicates."""

@@ -571,6 +571,64 @@ class RefreshRealCliEndToEndTests(_RefreshFixtureMixin, unittest.TestCase):
         self.assertIn("scheduled: '2026-09-01'",
                       (vault / "tasks" / "t1.md").read_text(encoding="utf-8"))
 
+    def test_enabled_refresh_end_to_end_raw_unquoted_native_date(self) -> None:
+        """Issue #146 W2: the same fixed refresh job path/ordering
+        (reconcile -> native sync/extract -> finalize) over an explicit
+        raw-YAML fixture — unquoted ``scheduled: 2026-08-03``, which
+        yaml.safe_load resolves to a native ``datetime.date``. The link
+        is projected, the cursor advances only via the post-sync
+        finalize, the pending clears, and the task Markdown keeps its
+        raw unquoted form."""
+        vault = make_vault(self.tmp, "vault")
+        raw = (
+            "---\n"
+            "type: note\n"
+            "title: t1\n"
+            "status: open\n"
+            "priority: normal\n"
+            "tags:\n"
+            "  - task\n"
+            "scheduled: 2026-08-03\n"
+            "---\n"
+            "body t1\n"
+        )
+        (vault / "tasks" / "t1.md").write_text(raw, encoding="utf-8")
+        _commit_all(vault, "raw unquoted fixture")
+        head_before = _git(vault, "rev-parse", "HEAD")
+        self._setup_real()
+        fd = self._hold_lock()
+        try:
+            result = self._run_wrapper(
+                [str(self.wrapper), "refresh"],
+                env=self.env(
+                    TASKNOTES_DAILY_LINKS_ENABLED="true",
+                    TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="true",
+                    TASKNOTES_LOCK_FD=str(fd),
+                ),
+                pass_fds=[fd],
+            )
+        finally:
+            os.close(fd)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"success": true', result.stdout)
+        note = (vault / "journal" / "2026-08-03.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(note.count("- [[t1]]"), 1)
+        head_after = _git(vault, "rev-parse", "HEAD")
+        self.assertNotEqual(head_before, head_after)
+        self.assertFalse(self.pending_path.exists(),
+                         "finalize must clear the pending sibling")
+        self.assertTrue(self.cursor_path.exists(), "finalize must write the cursor")
+        cursor = json.loads(self.cursor_path.read_text(encoding="utf-8"))
+        self.assertEqual(cursor["reconciled_head"], head_after)
+        self.assertEqual(cursor["daily_folder"], "journal")
+        # Reconciliation never writes task Markdown.
+        self.assertIn(
+            "scheduled: 2026-08-03",
+            (vault / "tasks" / "t1.md").read_text(encoding="utf-8"),
+        )
+
     def test_enabled_refresh_end_to_end_bootstrap_overflow_multibatch(
         self,
     ) -> None:
