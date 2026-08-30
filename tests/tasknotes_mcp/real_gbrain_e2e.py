@@ -26,15 +26,26 @@ Two lifecycle phases run against the same disposable vault (issue #139 W4):
    cleanups, delete cleanup, and completion/archive link retention into the
    Daily Notes, commits them as content-free Git commits, syncs them under
    the shared lock, and makes them visible to the real gbrain index.
-3. External-edit refresh reconciliation (issue #139 revision 3 W3): an
-   established scheduled task with its bare canonical Daily Note link is
-   rescheduled externally (direct task-file edit + commit, no MCP mutation);
-   ``josemar-gbrain refresh`` then runs the approved W3 lane under the
-   runtime lock (reconcile CLI prepare/apply/targeted commit, native
-   committed incremental sync, then finalize). The old link is gone, the
-   new link appears exactly once, the task stays gbrain-visible through the
-   required committed incremental sync, and the cursor advances to the new
-   HEAD with no pending sibling.
+3. External-edit refresh reconciliation (issue #139 revision 3 W3, with
+   the issue #146 revision-2 bare-date proof): the pinned writer's disk
+   control form is a single-quoted scheduled scalar (asserted verbatim
+   before any edit — the runtime is never forced to spell differently).
+   An established scheduled task with its bare canonical Daily Note link
+   is then rescheduled externally (direct task-file edit replacing ONLY
+   that scalar with the UNQUOTED bare date + commit, no MCP mutation);
+   the installed image core parser must read the external edit back as a
+   native ``datetime.date`` (never ``datetime.datetime``) whose
+   isoformat is the new day. ``josemar-gbrain refresh`` then runs the
+   approved lane under the runtime lock (reconcile CLI prepare/apply/
+   targeted commit, native committed incremental sync, then finalize).
+   The old link is gone, the new link appears exactly once, the task
+   stays gbrain-visible through the required committed incremental sync,
+   the external task bytes stay exactly equal (reconciliation is
+   read-only for task Markdown), and the cursor advances to the new HEAD
+   with no pending sibling. Finally, a normal real MCP mutation of a
+   DIFFERENT existing task (non-scheduling priority update, fresh client
+   session) must succeed through pre-mutation reconciliation whose
+   established cursor HEAD contains the unquoted external task.
 4. Large-bootstrap missing-cursor reconcile (issue #144): the private
    reconcile cursor is removed once (re-entering the documented
    first-enable state) and 17 managed scheduled tasks on distinct Daily
@@ -57,6 +68,7 @@ first-enable state; no vault content is ever deleted.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import os
 import re
@@ -1135,28 +1147,93 @@ def _gbrain_task_visible(source_id: str, slug: str, env: dict[str, str]) -> str:
     return page.get("compiled_truth", "")
 
 
+def _installed_core():
+    """Import the core engine INSTALLED in the built image (fixed
+    /opt/josemar/scripts path; container-only — never a handwritten YAML
+    parser and never a host override)."""
+    import importlib.util
+
+    core_path = Path("/opt/josemar/scripts/tasknotes_mcp_core.py")
+    spec = importlib.util.spec_from_file_location(
+        "tasknotes_mcp_core_installed", core_path
+    )
+    assert spec is not None and spec.loader is not None, core_path
+    module = importlib.util.module_from_spec(spec)
+    # The module MUST be registered in sys.modules under its spec name
+    # before exec_module: dataclass processing resolves forward
+    # references through sys.modules, and an unregistered module breaks
+    # that lookup.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+async def _mcp_priority_update(env: dict[str, str]) -> dict:
+    """Fresh real MCP client session: one normal non-scheduling priority
+    update of an existing synthetic task (issue #146 revision 2).
+
+    The mutation exercises pre-mutation reconciliation whose established
+    cursor HEAD contains the externally edited UNQUOTED task; a
+    reconciliation failure surfaces naturally as a tool error (``call``
+    raises — nothing is swallowed here), and the success state is
+    asserted on the returned payload.
+    """
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    params = StdioServerParameters(
+        command="/opt/hermes/.venv/bin/python3",
+        args=["/opt/josemar/scripts/tasknotes_mcp.py"],
+        env=env,
+    )
+    async with stdio_client(params) as streams:
+        async with ClientSession(*streams) as session:
+            await session.initialize()
+            updated = await call(
+                session,
+                "task_update",
+                {"slug": "20260720t090000", "priority": "low"},
+            )
+            assert updated["state"] == "applied_and_committed", updated
+            return updated
+
+
 def _external_reconcile_phase(vault: Path, env: dict[str, str]) -> None:
-    """Issue #139 revision 3 W3: prove the refresh lane reconciles an
-    external (non-MCP) manual task reschedule against the Daily Notes.
+    """Issue #139 revision 3 W3, with the issue #146 revision-2 proof:
+    the refresh lane reconciles an external (non-MCP) manual task
+    reschedule whose new scheduled scalar is an UNQUOTED bare date.
 
     Every task mutation here goes DIRECTLY to the task file and git — never
     through the MCP. Scenario:
 
       1. ``old_task`` is committed at ``old_date`` and its bare canonical
          Daily Note link is already committed and synced into gbrain (the
-         W4 projection phase left both the link and the reconcile cursor at
-         the then-HEAD).
-      2. The task is edited externally to a NEW scheduled date and the
-         change is committed (a manual Obsidian edit the next refresh must
-         pick up).
-      3. ``josemar-gbrain refresh`` runs the approved W3 lane under the
+         projection phase left both the link and the reconcile cursor at
+         the then-HEAD). The pinned writer's disk control form is a
+         single-quoted scalar — asserted verbatim BEFORE any edit; the
+         runtime is never forced to spell differently.
+      2. The task is edited externally to a NEW scheduled date by
+         replacing ONLY that scheduled scalar with the UNQUOTED bare date
+         and committing (a manual Obsidian/Syncthing edit the next
+         refresh must pick up). The exact edited bytes are snapshotted
+         and the installed image core parser must read the scheduled
+         value back as a native ``datetime.date`` (never
+         ``datetime.datetime``) whose isoformat is the new day.
+      3. ``josemar-gbrain refresh`` runs the approved lane under the
          runtime lock: the fixed reconcile CLI prepare/apply + one targeted
          commit, the wrapper's native committed incremental sync/extract,
          then finalize.
       4. We assert the old date's link is gone, the new date's link is
          exactly once, the task remains gbrain-visible through that
-         committed incremental sync, and the cursor/pending reflect the
-         advanced reconciled HEAD with no pending sibling.
+         committed incremental sync, the external task bytes remain
+         EXACTLY equal (reconciliation is read-only for task Markdown),
+         and the cursor/pending reflect the advanced reconciled HEAD with
+         no pending sibling.
+      5. A normal real MCP mutation of a DIFFERENT existing task
+         (non-scheduling priority update, fresh client session) must
+         succeed through pre-mutation reconciliation whose established
+         cursor HEAD contains the unquoted external task; the external
+         task's bytes and its new link are re-asserted afterwards.
     """
     old_task = "20260724t133000"  # delta2, still scheduled from the W4 phase
     old_date = "2026-07-24"
@@ -1168,25 +1245,44 @@ def _external_reconcile_phase(vault: Path, env: dict[str, str]) -> None:
     # The new date's note does not exist yet (no link to remove).
     assert not _daily_note_path(new_date).is_file(), _daily_note_path(new_date)
 
-    # External manual edit (never through the MCP): rewrite the task's
-    # scheduled date and commit it. The worktree then matches HEAD, so the
-    # reconcile's head reader vs. worktree snapshot sees the reschedule.
+    # External manual edit (never through the MCP): the pinned writer's
+    # disk control form is the single-quoted scalar — asserted verbatim —
+    # and the edit replaces ONLY that scalar with the UNQUOTED bare date.
+    # The runtime is never made to emit the unquoted form. The worktree
+    # then matches HEAD, so the reconcile's head reader vs. worktree
+    # snapshot sees the reschedule.
     task_path = vault / "tasks" / f"{old_task}.md"
     assert task_path.is_file(), task_path
-    text = task_path.read_text(encoding="utf-8")
-    assert f"scheduled: '{old_date}'" in text, text
-    task_path.write_text(
-        text.replace(f"scheduled: '{old_date}'", f"scheduled: '{new_date}'"),
-        encoding="utf-8",
-    )
+    quoted_scalar = f"scheduled: '{old_date}'".encode("utf-8")
+    unquoted_scalar = f"scheduled: {new_date}".encode("utf-8")
+    original_bytes = task_path.read_bytes()
+    assert original_bytes.count(quoted_scalar) == 1, original_bytes
+    edited_bytes = original_bytes.replace(quoted_scalar, unquoted_scalar, 1)
+    assert edited_bytes.count(unquoted_scalar) == 1, edited_bytes
+    assert quoted_scalar not in edited_bytes, edited_bytes
+    task_path.write_bytes(edited_bytes)
     run(["git", "add", "-A"], env=env, cwd=vault)
     run(["git", "commit", "-q", "-m", "external manual reschedule"], env=env, cwd=vault)
     head_before = run(["git", "rev-parse", "HEAD"], env=env, cwd=vault).strip()
 
-    # Approved W3 refresh lane under the runtime lock: the real wrapper
+    # Issue #146 revision 2: the exact external bytes are snapshotted and
+    # the INSTALLED image core parser (not a handwritten parser) must
+    # cross the raw YAML boundary natively: the unquoted scalar parses to
+    # a ``datetime.date`` (never a ``datetime.datetime``) whose
+    # canonical isoformat is exactly the new day.
+    external_bytes = task_path.read_bytes()
+    installed_core = _installed_core()
+    fm, _body = installed_core._parse_frontmatter(
+        task_path.read_text(encoding="utf-8")
+    )
+    assert isinstance(fm["scheduled"], datetime.date), fm["scheduled"]
+    assert not isinstance(fm["scheduled"], datetime.datetime), fm["scheduled"]
+    assert fm["scheduled"].isoformat() == new_date, fm["scheduled"]
+
+    # Approved refresh lane under the runtime lock: the real wrapper
     # (self-acquires the shared lock through the lock-runner chain and
     # invokes the real fixed reconcile CLI inside it) reconciles, syncs,
-    # then finalizes.
+    # then finalizes — exactly once.
     refresh = run(
         [GBRAIN_WRAPPER, "refresh"],
         env=dict(
@@ -1207,8 +1303,8 @@ def _external_reconcile_phase(vault: Path, env: dict[str, str]) -> None:
     # incremental sync (the page is present, not page_not_found).
     _gbrain_task_visible(_reconcile_refresh_source_id(env), old_task, env)
 
-    # Git accounting: the W3 refresh lane created exactly one targeted
-    # reconcile commit AFTER the external edit (the W4 phase's pre-mutation
+    # Git accounting: the refresh lane created exactly one targeted
+    # reconcile commit AFTER the external edit (earlier phases' pre-mutation
     # reconcile commits precede it); the tree is clean (nothing pending
     # after the sync).
     log = run(["git", "log", "--oneline"], env=env, cwd=vault)
@@ -1235,6 +1331,26 @@ def _external_reconcile_phase(vault: Path, env: dict[str, str]) -> None:
     assert cursor["daily_folder"] == DAILY_FOLDER, cursor
     assert cursor["daily_format"] == DAILY_FORMAT, cursor
     assert not RECONCILE_PENDING_PATH.exists(), RECONCILE_PENDING_PATH
+
+    # Reconciliation is read-only for task Markdown: the externally
+    # edited unquoted bytes are EXACTLY what the refresh left on disk.
+    assert task_path.read_bytes() == external_bytes, task_path
+    assert f"scheduled: {new_date}" in task_path.read_text(encoding="utf-8")
+
+    # Issue #146 revision 2: a normal real MCP mutation of a DIFFERENT
+    # existing task (non-scheduling priority update, fresh client
+    # session) must succeed through pre-mutation reconciliation whose
+    # established cursor HEAD contains the unquoted external task. A
+    # reconciliation failure surfaces naturally as a tool error (call()
+    # raises); success is asserted on the payload.
+    asyncio.run(
+        _mcp_priority_update(dict(env, TASKNOTES_DAILY_LINKS_ENABLED="true"))
+    )
+    # The external task was untouched by that reconciliation/mutation:
+    # exact bytes and exactly one canonical link on the new day.
+    assert task_path.read_bytes() == external_bytes, task_path
+    note_new_after = _read_daily_note(new_date)
+    assert note_new_after.count(f"- [[{old_task}]]") == 1, note_new_after
 
 
 def _large_bootstrap_reconcile_phase(vault: Path, env: dict[str, str]) -> None:
@@ -1369,6 +1485,14 @@ def _large_bootstrap_reconcile_phase(vault: Path, env: dict[str, str]) -> None:
     assert cursor["daily_folder"] == DAILY_FOLDER, cursor
     assert cursor["daily_format"] == DAILY_FORMAT, cursor
     assert not RECONCILE_PENDING_PATH.exists(), RECONCILE_PENDING_PATH
+    # Issue #146 revision 2 (non-distorting cross-check): the #144
+    # bootstrap naturally retains the externally edited unquoted task
+    # from the earlier phase — its raw bare-date scalar survives the
+    # bootstrap's head/worktree probes and targeted commits untouched.
+    prior_external = vault / "tasks" / "20260724t133000.md"
+    assert "scheduled: 2026-07-26" in prior_external.read_text(
+        encoding="utf-8"
+    )
 
 
 def _assert_fixed_contract_paths_used() -> None:
