@@ -55,6 +55,17 @@ Design invariants (fixed, do not redesign):
      prepare/apply/targeted-commit/finalize lifecycle on those
      foundations; only finalize advances the cursor, and only after the
      caller confirms native sync success.
+   - Missing-cursor bootstrap reconciliation (issue #144 W1) is the
+     only path allowed past the composed-transition bound: it composes
+     through an internal bootstrap-only seam and applies deterministic
+     batches of at most ``MAX_DAILY_PROJECTION_TARGETS`` distinct Daily
+     Note targets, one targeted commit per batch (no config rider).
+     Established reconciliation keeps the >16 fail-closed policy. W2
+     adds in-memory-only full candidate evidence on the plan and
+     full-candidate + locally-evolving expected-HEAD rechecks before
+     the first batch, between bootstrap batches, and immediately
+     before pending publication; external drift fails closed with no
+     pending/cursor completion and no rollback.
  """
 
 from __future__ import annotations
@@ -72,7 +83,17 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -4781,8 +4802,10 @@ def build_reconcile_snapshot(
 #     reconciliation; gbrain/PGLite/the public wrapper are never
 #     invoked; the recovery marker is never touched.
 #   - A missing cursor bootstraps (ensure-only for currently scheduled
-#     tasks); a corrupt established cursor fails closed; pending/replay
-#     is idempotent.
+#     tasks; the only path allowed past the composed-transition bound,
+#     via the internal bootstrap-only composition seam and deterministic
+#     batching by distinct daily target — issue #144 W1); a corrupt
+#     established cursor fails closed; pending/replay is idempotent.
 #   - Transitions compose by ``(resolved daily target, slug)``: the
 #     final ensure wins (a coarse target collapse is one ensure), the
 #     destination is ensured before the old link is removed, old dates
@@ -4796,6 +4819,22 @@ def build_reconcile_snapshot(
 #     no cursor advancement and no partial cursor. The targeted commit
 #     accepts at most ``MAX_DAILY_PROJECTION_TARGETS`` changed daily
 #     notes plus the single ``RECONCILE_CONFIG_RELPATH`` rider.
+#     Established reconciliation keeps the total composed-transition
+#     bound; only the bootstrap apply batches deterministically (max
+#     distinct targets per batch, one targeted commit per batch, no
+#     rider — bootstrap never re-homes routing).
+#   - Bootstrap apply rechecks are full-candidate (issue #144 W2): a
+#     bounded re-enumeration must exactly match the plan's in-memory
+#     candidate evidence and HEAD must equal the locally expected head
+#     before the first batch, before each later batch, and immediately
+#     before publishing the pending. The expected head evolves only to
+#     a proven direct child of the retained pre-commit head (exactly one
+#     parent equal to it — an external commit before or reordered with
+#     the targeted reconciliation commit fails closed), and immediately
+#     before pending construction the current HEAD must still equal it;
+#     external drift fails closed with no pending publication and no
+#     rollback (partial batch commits stay so an unchanged retry
+#     converges).
 #   - The pending sibling structurally pins the applied Daily Notes
 #     routing (folder/format). ``finalize_*`` requires the caller's
 #     native-sync-success signal, verifies pending/head identity and
@@ -4893,9 +4932,20 @@ class ReconcilePlan:
 
     ``from_head`` is the head the comparison was made against (the
     cursor's ``reconciled_head``, or the current head for bootstrap);
-    ``to_head`` is the current head at prepare time. ``expected_states``
-    carries the current-side task states of every slug with a
-    transition so apply can recheck for source churn.
+    ``to_head`` is the current head at prepare time. Bootstrap plans
+    (missing cursor) may carry more than ``MAX_DAILY_PROJECTION_TARGETS``
+    transitions (issue #144 W1); apply batches them deterministically
+    by distinct target.
+
+    ``expected_candidates`` is IN-MEMORY-ONLY expected full candidate
+    identity/state evidence (issue #144 W2): every bounded candidate of
+    the prepared snapshot — bootstrap captures all of them, including
+    unscheduled ones — and the current-side state of every slug in an
+    established plan's old/current union. Each entry is structural only
+    (slug, presence, task-ness, location, scheduled, archived; never
+    titles, bodies, or any note content) and is never persisted; apply
+    re-proves an exact set/state match against a fresh bounded
+    enumeration.
     """
 
     mode: str
@@ -4906,7 +4956,7 @@ class ReconcilePlan:
     routing_changed: bool
     transitions: Tuple[ReconcileTransition, ...]
     net_classes: Tuple[Tuple[str, str], ...]
-    expected_states: Tuple[ReconcileTaskState, ...]
+    expected_candidates: Tuple[ReconcileTaskState, ...]
     config_commit_needed: bool
 
 
@@ -5021,8 +5071,27 @@ def compose_reconcile_steps(
     ``(target, slug)`` for determinism. Ensure dates resolve through the
     current config; remove dates through the cursor's prior routing.
     Every old/new target passes the R5 collision fence. Exceeding the
-    target bound fails closed.
+    target bound fails closed. This bound is the established-cursor
+    policy; a missing-cursor bootstrap must compose through the internal
+    :func:`_compose_reconcile_steps_bootstrap` seam instead (issue #144).
     """
+    return _compose_reconcile_steps_impl(
+        vault, profile, config, prior, nets, enforce_target_bound=True
+    )
+
+
+def _compose_reconcile_steps_impl(
+    vault: Path,
+    profile: TaskNotesProfile,
+    config: DailyNotesConfig,
+    prior: Optional[DailyNotesConfig],
+    nets: Mapping[str, ReconcileNetChange],
+    *,
+    enforce_target_bound: bool,
+) -> Tuple[ReconcileComposedStep, ...]:
+    """Shared composition body; ``enforce_target_bound`` selects whether
+    the total composed-transition bound is enforced (established-cursor
+    policy) or lifted (bootstrap-only seam, issue #144 W1). Internal."""
     if not isinstance(config, DailyNotesConfig):
         raise ValidationError(
             "reconcile composition requires a validated DailyNotesConfig"
@@ -5097,9 +5166,71 @@ def compose_reconcile_steps(
         key=lambda s: (s.target_relative, s.slug),
     )
     composed = ensure_steps + remove_steps
-    if len(composed) > MAX_DAILY_PROJECTION_TARGETS:
+    if enforce_target_bound and len(composed) > MAX_DAILY_PROJECTION_TARGETS:
         raise CoreError("reconcile transitions exceed target bound")
     return tuple(composed)
+
+
+def _compose_reconcile_steps_bootstrap(
+    vault: Path,
+    profile: TaskNotesProfile,
+    config: DailyNotesConfig,
+    nets: Mapping[str, ReconcileNetChange],
+) -> Tuple[ReconcileComposedStep, ...]:
+    """Bootstrap-only composition seam: no total composed-transition bound.
+
+    Internal-only (issue #144 W1); never caller-selectable. Exclusively
+    for a missing-cursor bootstrap, which is ensure-only for currently
+    scheduled tasks (no prior routing, no removes), so the shared
+    composition semantics — same ``(target, slug)`` collapse, ordering,
+    determinism, and the R5 collision fence — still apply unchanged;
+    only the total bound is lifted. Apply batches the result by distinct
+    target via :func:`_batch_reconcile_transitions`. Established
+    reconciliation must keep using :func:`compose_reconcile_steps`
+    (bound enforced, fail closed before any side effect).
+    """
+    return _compose_reconcile_steps_impl(
+        vault, profile, config, None, nets, enforce_target_bound=False
+    )
+
+
+_ReconcileTransitionT = TypeVar(
+    "_ReconcileTransitionT", ReconcileComposedStep, ReconcileTransition
+)
+
+
+def _batch_reconcile_transitions(
+    transitions: Tuple[_ReconcileTransitionT, ...],
+) -> Tuple[Tuple[_ReconcileTransitionT, ...], ...]:
+    """Deterministically split composed transitions into target batches.
+
+    Issue #144 W1 bootstrap-only helper (internal; never caller
+    selectable). Membership is keyed by distinct ``target_relative``:
+    every transition resolving to the same Daily Note target stays in
+    exactly one batch (a target is never split across batches), each
+    batch holds at most ``MAX_DAILY_PROJECTION_TARGETS`` distinct
+    targets, and both membership and order derive solely from the
+    deterministic composed order (targets batch in first-appearance
+    order; within-batch order is the input order). Pure: no side
+    effects. An empty input yields no batches.
+    """
+    batches: List[List[Any]] = []
+    targets_per_batch: List[int] = []
+    batch_of_target: Dict[str, int] = {}
+    for transition in transitions:
+        target = transition.target_relative
+        index = batch_of_target.get(target)
+        if index is None:
+            if batches and targets_per_batch[-1] < MAX_DAILY_PROJECTION_TARGETS:
+                index = len(batches) - 1
+            else:
+                batches.append([])
+                targets_per_batch.append(0)
+                index = len(batches) - 1
+            batch_of_target[target] = index
+            targets_per_batch[index] += 1
+        batches[index].append(transition)
+    return tuple(tuple(batch) for batch in batches)
 
 
 def list_git_tree_task_slugs(
@@ -5371,15 +5502,18 @@ def prepare_daily_links_reconciliation(
     """Plan one reconciliation pass (read-only, no side effects).
 
     With a missing cursor (bootstrap), the plan is ensure-only for the
-    currently scheduled tasks. With an established cursor, each slug's
-    state at ``reconciled_head`` is read through the W2a Git object
-    reader and compared to the current committed HEAD + worktree
-    (W2a bounded snapshot plus targeted no-follow probes), producing
-    per-slug net classifications and composed transitions. A corrupt
-    established cursor fails closed (the loader raises). All bounded
-    candidates are prepared before anything is applied; overflow fails
-    closed. Task Markdown is never written and no gbrain/PGLite call is
-    made.
+    currently scheduled tasks, composed through the internal
+    bootstrap-only seam so more than ``MAX_DAILY_PROJECTION_TARGETS``
+    composed transitions are allowed (issue #144 W1); apply batches
+    them deterministically by distinct target. With an established
+    cursor, each slug's state at ``reconciled_head`` is read through
+    the W2a Git object reader and compared to the current committed
+    HEAD + worktree (W2a bounded snapshot plus targeted no-follow
+    probes), producing per-slug net classifications and composed
+    transitions. A corrupt established cursor fails closed (the loader
+    raises). All bounded candidates are prepared before anything is
+    applied; an established-cursor overflow fails closed. Task Markdown
+    is never written and no gbrain/PGLite call is made.
 
     Old-routing lookup uses the applied routing pinned by an existing
     pending sibling when one is present (an applied-but-unfinalized
@@ -5469,7 +5603,14 @@ def prepare_daily_links_reconciliation(
         prior.folder,
         prior.format,
     ) != (config.folder, config.format)
-    steps = compose_reconcile_steps(vault, profile, config, prior, nets)
+    if mode == RECONCILE_MODE_BOOTSTRAP:
+        # Issue #144 W1: bootstrap-only seam — a missing-cursor plan may
+        # carry more than MAX composed ensure transitions; apply batches
+        # them by distinct target. Established reconciliation keeps the
+        # bound (fail closed before any side effect).
+        steps = _compose_reconcile_steps_bootstrap(vault, profile, config, nets)
+    else:
+        steps = compose_reconcile_steps(vault, profile, config, prior, nets)
     transitions: List[ReconcileTransition] = []
     for step in steps:
         cfg = config if step.routing == RECONCILE_ROUTING_CURRENT else prior
@@ -5488,13 +5629,12 @@ def prepare_daily_links_reconciliation(
                 projection=projection,
             )
         )
-    transition_slugs = {t.slug for t in transitions}
-    expected_states = tuple(
-        sorted(
-            (new_states[slug] for slug in transition_slugs),
-            key=lambda s: s.slug,
-        )
-    )
+    # Issue #144 W2: IN-MEMORY-ONLY full candidate identity/state
+    # evidence — every bounded candidate of the prepared snapshot
+    # (bootstrap: all of them, unscheduled included) and the
+    # current-side state of every slug in an established plan's
+    # old/current union. Structural only; never persisted.
+    expected_candidates = tuple(sorted(new_states.values(), key=lambda s: s.slug))
     config_commit_needed = False
     if mode == RECONCILE_MODE_RECONCILE and routing_changed:
         config_commit_needed = _config_tracked_and_dirty(vault, git_env)
@@ -5507,9 +5647,50 @@ def prepare_daily_links_reconciliation(
         routing_changed=routing_changed,
         transitions=tuple(transitions),
         net_classes=tuple(sorted((s, n.cls) for s, n in nets.items())),
-        expected_states=expected_states,
+        expected_candidates=expected_candidates,
         config_commit_needed=config_commit_needed,
     )
+
+
+def _git_commit_parent_ids(
+    vault: Path,
+    git_env: Dict[str, str],
+    head: str,
+) -> Tuple[str, ...]:
+    """Resolve the parent SHAs of one commit via fixed-argv plumbing.
+
+    Read-only: ``git rev-list --parents -n 1 <head>`` through the same
+    sanitized, streamed, bounded ``_run_git`` plumbing as every other
+    core Git call. Raises ``GitError`` on failure and ``CoreError`` if
+    the output does not resolve exactly ``head``.
+    """
+    r = _run_git(vault, git_env, ["rev-list", "--parents", "-n", "1", head])
+    if r.returncode != 0:
+        raise GitError(f"git rev-list failed: {_redact(r.stderr)[:200]}")
+    fields = r.stdout.split()
+    if len(fields) < 1 or fields[0] != head:
+        raise CoreError("reconcile commit head could not be resolved")
+    return tuple(fields[1:])
+
+
+def _require_reconcile_commit_provenance(
+    vault: Path,
+    git_env: Dict[str, str],
+    head: str,
+    expected_parent: str,
+) -> None:
+    """Fail closed unless ``head`` is a direct child of ``expected_parent``.
+
+    Exactly one parent (non-merge) equal to the retained pre-commit
+    expected head. An external commit that arrived before the targeted
+    reconciliation commit, or was reordered with it, makes ``head``'s
+    parent something else and fails closed (issue #144 Gate 2).
+    """
+    parents = _git_commit_parent_ids(vault, git_env, head)
+    if parents != (expected_parent,):
+        raise CoreError(
+            "reconcile commit is not the direct child of the expected head"
+        )
 
 
 def _recheck_reconcile_sources(
@@ -5518,12 +5699,23 @@ def _recheck_reconcile_sources(
     plan: ReconcilePlan,
     git_env: Dict[str, str],
     *,
+    expected_head: str,
     max_files: int,
     max_size: int,
 ) -> None:
-    """Fail closed when task inputs or HEAD drifted since prepare."""
+    """Fail closed when the prepared candidate evidence or HEAD drifted.
+
+    Issue #144 W2: replaces the fixed-HEAD/transition-only recheck with
+    a full bounded candidate re-enumeration proved against the plan's
+    in-memory evidence — an exact set and state match (newly appearing
+    candidates, add/remove/tag/schedule/location changes on known ones
+    all fail) — plus an expected-HEAD check. The expected head is
+    ``plan.to_head`` for the first check and afterwards evolves only to
+    the directly resulting current HEAD of this reconciler's own batch
+    commits, so any external commit movement fails closed.
+    """
     head = git_head_id(vault, git_env)
-    if head is None or not is_valid_git_commit_sha(head) or head != plan.to_head:
+    if head is None or not is_valid_git_commit_sha(head) or head != expected_head:
         raise CoreError("reconcile source inputs changed before apply")
     current_map = {
         c.slug: c
@@ -5531,7 +5723,11 @@ def _recheck_reconcile_sources(
             vault, profile, max_files=max_files, max_size=max_size
         )
     }
-    for expected in plan.expected_states:
+    evidence = {s.slug: s for s in plan.expected_candidates}
+    for slug in current_map:
+        if slug not in evidence:
+            raise CoreError("reconcile source inputs changed before apply")
+    for expected in plan.expected_candidates:
         now = _current_reconcile_task_state(
             vault, profile, expected.slug, current_map, max_size=max_size
         )
@@ -5565,6 +5761,36 @@ def apply_daily_links_reconciliation(
     the commit, structurally pinning the applied Daily Notes routing
     (heads, timestamp, folder, format). The cursor is never advanced
     here.
+
+    Bootstrap plans (missing cursor) may exceed
+    ``MAX_DAILY_PROJECTION_TARGETS`` composed ensure transitions (issue
+    #144 W1): they are processed in deterministic batches keyed by
+    distinct Daily Note target (at most MAX distinct targets per batch,
+    same-target transitions never split), each batch applied only via
+    :func:`apply_daily_note_projection` and committed on its own with
+    only that batch's actually changed targets and no config rider
+    (bootstrap never re-homes routing). The outcome aggregates the
+    union across batches (changed targets, applied sum, any-commit
+    flag, final commit head). Established reconciliation keeps the
+    single-commit path with the config rider when the plan needs it.
+
+    Source rechecks (issue #144 W2) are full-candidate: a bounded
+    re-enumeration must prove an exact set/state match against the
+    plan's in-memory candidate evidence (unscheduled candidates
+    included) and HEAD must equal the locally expected head —
+    ``plan.to_head`` before the first batch, re-proved before each
+    later bootstrap batch, and immediately before publishing the
+    single pending. After a batch commit created by this reconciler,
+    the expected head evolves only to a proven direct child of the
+    retained pre-commit head (exactly one parent equal to it), so an
+    external commit arriving before or reordered with the targeted
+    reconciliation commit fails closed; and immediately before
+    pending construction the current HEAD must still equal the
+    locally expected head, which alone is adopted. Any external task
+    add/remove/schedule change or unexpected HEAD movement fails
+    closed with no pending publication and no cursor completion; batch
+    commits already created are kept (no automatic rollback, no
+    recovery marker) so an unchanged retry converges.
     """
     if not isinstance(config, DailyNotesConfig):
         raise ValidationError(
@@ -5576,43 +5802,126 @@ def apply_daily_links_reconciliation(
         git_env = _build_git_env()
     _recheck_reconcile_sources(
         vault, profile, plan, git_env,
+        expected_head=plan.to_head,
         max_files=max_files, max_size=max_size,
     )
     prior = plan.prior
     changed: List[str] = []
     applied = 0
-    for transition in plan.transitions:
-        cfg = (
-            config
-            if transition.routing == RECONCILE_ROUTING_CURRENT
-            else prior
-        )
-        if cfg is None:
-            raise ValidationError("reconcile remove requires a prior routing")
-        outcome = apply_daily_note_projection(
-            vault, cfg, transition.projection,
-            _final_check_hook=_final_check_hook,
-        )
-        if outcome.state == DAILY_PROJECTION_CONFLICT:
-            raise CoreError(
-                "daily note projection conflict during reconcile apply"
-            )
-        if outcome.state == DAILY_PROJECTION_APPLIED:
-            applied += 1
-            changed.append(transition.target_relative)
-    stage = sorted(set(changed))
-    if plan.config_commit_needed and _config_tracked_and_dirty(vault, git_env):
-        stage.append(RECONCILE_CONFIG_RELPATH)
-        stage.sort()
     commit_created = False
-    if stage:
-        commit_created = git_commit_reconcile_targets(
-            vault, [vault / rel for rel in stage], git_env
+    if plan.mode == RECONCILE_MODE_BOOTSTRAP:
+        # Issue #144 W1: bootstrap-only batched apply. Batches are
+        # deterministic (see _batch_reconcile_transitions); each batch
+        # stays within the per-commit daily-note target bound. Issue
+        # #144 W2: every later batch re-proves the full candidate
+        # snapshot against a locally evolving expected HEAD, and the
+        # single pending is published only after all batches succeeded
+        # plus a final recheck.
+        expected_head = plan.to_head
+        for batch_index, batch in enumerate(
+            _batch_reconcile_transitions(plan.transitions)
+        ):
+            if batch_index > 0:
+                _recheck_reconcile_sources(
+                    vault, profile, plan, git_env,
+                    expected_head=expected_head,
+                    max_files=max_files, max_size=max_size,
+                )
+            batch_changed: List[str] = []
+            for transition in batch:
+                cfg = (
+                    config
+                    if transition.routing == RECONCILE_ROUTING_CURRENT
+                    else prior
+                )
+                if cfg is None:
+                    raise ValidationError(
+                        "reconcile remove requires a prior routing"
+                    )
+                outcome = apply_daily_note_projection(
+                    vault, cfg, transition.projection,
+                    _final_check_hook=_final_check_hook,
+                )
+                if outcome.state == DAILY_PROJECTION_CONFLICT:
+                    raise CoreError(
+                        "daily note projection conflict during reconcile apply"
+                    )
+                if outcome.state == DAILY_PROJECTION_APPLIED:
+                    applied += 1
+                    batch_changed.append(transition.target_relative)
+            stage = sorted(set(batch_changed))
+            if stage and git_commit_reconcile_targets(
+                vault, [vault / rel for rel in stage], git_env
+            ):
+                commit_created = True
+                # Issue #144 Gate 2: the expected head evolves only to
+                # the directly resulting current HEAD of this
+                # reconciler's own commit — proven, not adopted. The
+                # resolved head must be exactly one commit whose single
+                # parent is the retained pre-commit expected head; an
+                # external commit arriving before (or reordered with)
+                # the targeted reconciliation commit fails closed
+                # before pending.
+                evolved = git_head_id(vault, git_env)
+                if evolved is None or not is_valid_git_commit_sha(evolved):
+                    raise CoreError("reconcile apply requires a vault HEAD")
+                evolved = validate_git_commit_sha(evolved)
+                _require_reconcile_commit_provenance(
+                    vault, git_env, evolved, expected_head
+                )
+                expected_head = evolved
+            changed.extend(stage)
+        # Issue #144 W2: final full-candidate + expected-HEAD recheck
+        # immediately before publishing the single pending record.
+        _recheck_reconcile_sources(
+            vault, profile, plan, git_env,
+            expected_head=expected_head,
+            max_files=max_files, max_size=max_size,
         )
-    head_now = git_head_id(vault, git_env)
-    if head_now is None:
-        raise CoreError("reconcile apply requires a vault HEAD")
-    head_now = validate_git_commit_sha(head_now)
+        # Issue #144 Gate 2: narrow final race gate immediately before
+        # pending construction — the current HEAD must still equal the
+        # locally expected head, and only that expected head (never a
+        # reread arbitrary value) is adopted for the pending.
+        head_now = git_head_id(vault, git_env)
+        if (
+            head_now is None
+            or not is_valid_git_commit_sha(head_now)
+            or head_now != expected_head
+        ):
+            raise CoreError("reconcile source inputs changed before apply")
+        head_now = expected_head
+    else:
+        for transition in plan.transitions:
+            cfg = (
+                config
+                if transition.routing == RECONCILE_ROUTING_CURRENT
+                else prior
+            )
+            if cfg is None:
+                raise ValidationError("reconcile remove requires a prior routing")
+            outcome = apply_daily_note_projection(
+                vault, cfg, transition.projection,
+                _final_check_hook=_final_check_hook,
+            )
+            if outcome.state == DAILY_PROJECTION_CONFLICT:
+                raise CoreError(
+                    "daily note projection conflict during reconcile apply"
+                )
+            if outcome.state == DAILY_PROJECTION_APPLIED:
+                applied += 1
+                changed.append(transition.target_relative)
+        stage = sorted(set(changed))
+        if plan.config_commit_needed and _config_tracked_and_dirty(vault, git_env):
+            stage.append(RECONCILE_CONFIG_RELPATH)
+            stage.sort()
+        if stage:
+            commit_created = git_commit_reconcile_targets(
+                vault, [vault / rel for rel in stage], git_env
+            )
+        head_now = git_head_id(vault, git_env)
+        if head_now is None:
+            raise CoreError("reconcile apply requires a vault HEAD")
+        head_now = validate_git_commit_sha(head_now)
     pending = DailyLinksReconcilePending(
         from_head=plan.from_head,
         to_head=head_now,

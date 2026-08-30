@@ -35,11 +35,23 @@ Two lifecycle phases run against the same disposable vault (issue #139 W4):
    new link appears exactly once, the task stays gbrain-visible through the
    required committed incremental sync, and the cursor advances to the new
    HEAD with no pending sibling.
+4. Large-bootstrap missing-cursor reconcile (issue #144): the private
+   reconcile cursor is removed once (re-entering the documented
+   first-enable state) and 17 managed scheduled tasks on distinct Daily
+   Note targets are added externally; ``josemar-gbrain refresh`` then
+   bootstraps through the real reconcile CLI in deterministic bounded
+   batches (more than 16 total ensure transitions, at most 16 distinct
+   daily note targets per targeted commit), syncs natively, and finalizes
+   one cursor to the final HEAD with the pending sibling cleared and
+   canonical non-duplicate links.
 
 The script never deletes anything under /opt/data: the outer host test
 fixture owns the fresh temporary directory and removes it after the
 container exits; the Daily Notes fixture is only ever written, never
-removed.
+removed. Narrow deliberate exception (issue #144 phase 4): the private
+reconcile cursor file — runtime metadata under /opt/data/.gbrain, never
+vault content — is removed once to re-enter the documented missing-cursor
+first-enable state; no vault content is ever deleted.
 """
 
 from __future__ import annotations
@@ -1225,6 +1237,140 @@ def _external_reconcile_phase(vault: Path, env: dict[str, str]) -> None:
     assert not RECONCILE_PENDING_PATH.exists(), RECONCILE_PENDING_PATH
 
 
+def _large_bootstrap_reconcile_phase(vault: Path, env: dict[str, str]) -> None:
+    """Issue #144: prove the real refresh lane bootstraps a MISSING cursor
+    over more than 16 distinct scheduled Daily Note targets in bounded
+    batches, then finalizes exactly one cursor after the native sync.
+
+    Scenario (everything external — never a task_* MCP call):
+
+      1. The private reconcile cursor (runtime metadata under
+         /opt/data/.gbrain) is removed once, deliberately re-entering the
+         documented missing-cursor first-enable state. No vault content is
+         ever deleted; the preexisting scheduled tasks (three targets,
+         already canonically linked by the earlier phases) stay in place.
+      2. 17 managed scheduled tasks on 17 distinct Daily Note targets are
+         written directly to the tasks folder and committed.
+      3. ``josemar-gbrain refresh`` runs the approved lane under the
+         runtime lock: the reconcile CLI bootstraps ensure-only with more
+         than 16 total ensure transitions, splits the plan deterministically
+         into bounded batches (at most 16 distinct daily note targets per
+         batch, one targeted commit per batch), the wrapper's native
+         committed incremental sync runs once, then finalize advances the
+         single cursor to the final HEAD and clears the pending sibling.
+      4. Assertions: refresh success; every new link canonical and exactly
+         once inside a template-rendered note; exactly two targeted
+         reconcile commits (the three already-linked preexisting targets
+         land in the first batch as idempotent no-ops: 16 + 4 distinct
+         targets), each staging at most 16 daily-note paths and only daily
+         paths; the 17 changed targets are the union with no duplicates;
+         one projected note is visible through the real gbrain index; the
+         cursor equals the final HEAD and the pending sibling is gone.
+    """
+    # Step 1: deliberate re-entry into the missing-cursor state.
+    assert RECONCILE_CURSOR_PATH.is_file(), RECONCILE_CURSOR_PATH
+    assert not RECONCILE_PENDING_PATH.exists(), RECONCILE_PENDING_PATH
+    RECONCILE_CURSOR_PATH.unlink()
+
+    # Step 2: >16 external managed scheduled tasks on distinct targets.
+    count = 17  # > MAX_DAILY_PROJECTION_TARGETS (16)
+    dates = [f"2026-12-{i:02d}" for i in range(1, count + 1)]
+    slugs = [f"202612{i:02d}t090000" for i in range(1, count + 1)]
+    for slug, date in zip(slugs, dates):
+        path = vault / "tasks" / f"{slug}.md"
+        lines = [
+            "---",
+            "type: note",
+            f"title: Disposable bootstrap task {date}",
+            "status: open",
+            "priority: normal",
+            "tags:",
+            "  - task",
+            f"scheduled: '{date}'",
+            "---",
+            f"Bootstrap body for {slug}.",
+            "",
+        ]
+        path.write_text("\n".join(lines), encoding="utf-8")
+    run(["git", "add", "-A"], env=env, cwd=vault)
+    run(["git", "commit", "-q", "-m", "large bootstrap fixture"], env=env, cwd=vault)
+    head_before = run(["git", "rev-parse", "HEAD"], env=env, cwd=vault).strip()
+
+    # Step 3: the real refresh lane under the runtime lock.
+    refresh = run(
+        [GBRAIN_WRAPPER, "refresh"],
+        env=dict(
+            env,
+            TASKNOTES_DAILY_LINKS_ENABLED="true",
+            TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="true",
+        ),
+    )
+    assert '"success": true' in refresh, refresh
+
+    # Step 4a: canonical, non-duplicate links in template-rendered notes.
+    for slug, date in zip(slugs, dates):
+        note = _read_daily_note(date)
+        assert note.count(f"- [[{slug}]]") == 1, (slug, note)
+        assert f"# {date}" in note, note
+
+    # Step 4b: bounded Git accounting — exactly two targeted reconcile
+    # commits, each staging at most 16 daily-note paths and only daily
+    # paths; the 17 changed targets are exactly the union, no duplicates.
+    log = run(["git", "log", "--oneline"], env=env, cwd=vault)
+    lines = log.splitlines()
+    fixture_idx = next(
+        i for i, line in enumerate(lines) if line.endswith("large bootstrap fixture")
+    )
+    reconcile_after = [
+        line
+        for line in lines[:fixture_idx]
+        if line.endswith("tasknotes-mcp: daily links reconcile")
+    ]
+    assert len(reconcile_after) == 2, reconcile_after
+    changed: list[str] = []
+    for line in reconcile_after:
+        names = run(
+            ["git", "show", "--name-only", "--pretty=format:", line.split(" ", 1)[0]],
+            env=env,
+            cwd=vault,
+        )
+        paths = [p for p in names.splitlines() if p.strip()]
+        assert paths, (line, paths)
+        assert len(paths) <= 16, (line, paths)
+        assert all(p.startswith(f"{DAILY_FOLDER}/") for p in paths), (line, paths)
+        changed.extend(paths)
+    assert len(changed) == count, (changed, count)
+    assert len(set(changed)) == len(changed), changed
+
+    # Step 4c: the committed incremental sync made the projected notes
+    # visible to the real gbrain index (source-routed native read).
+    source_id = _reconcile_refresh_source_id(env)
+    page = json.loads(
+        run(
+            [
+                GBRAIN_NATIVE,
+                "call",
+                "--source",
+                source_id,
+                "get_page",
+                json.dumps({"slug": f"{DAILY_FOLDER}/2026/12/01"}),
+            ],
+            env=env,
+        )
+    )
+    body = page.get("compiled_truth", "")
+    assert "[[20261201t090000]]" in body, body
+
+    # Step 4d: one cursor finalized to the final HEAD; pending cleared.
+    head_after = run(["git", "rev-parse", "HEAD"], env=env, cwd=vault).strip()
+    assert head_after != head_before, head_after
+    cursor = json.loads(RECONCILE_CURSOR_PATH.read_text(encoding="utf-8"))
+    assert cursor["reconciled_head"] == head_after, cursor
+    assert cursor["daily_folder"] == DAILY_FOLDER, cursor
+    assert cursor["daily_format"] == DAILY_FORMAT, cursor
+    assert not RECONCILE_PENDING_PATH.exists(), RECONCILE_PENDING_PATH
+
+
 def _assert_fixed_contract_paths_used() -> None:
     """Runtime proof that the built-image MCP honored the fixed-path
     contract: gbrain state landed in /opt/data/.gbrain and the shared lock
@@ -1267,6 +1413,13 @@ def main() -> None:
     _external_reconcile_phase(vault, env)
     _assert_fixed_contract_paths_used()
     print("real-gbrain external-edit refresh reconciliation: PASS")
+    # Phase 4 — issue #144: the real refresh lane bootstraps a missing
+    # cursor over >16 distinct scheduled Daily Note targets in bounded
+    # batches (<=16 daily targets per reconcile commit), syncs natively
+    # once, and finalizes the single cursor with the pending cleared.
+    _large_bootstrap_reconcile_phase(vault, env)
+    _assert_fixed_contract_paths_used()
+    print("real-gbrain large-bootstrap reconcile: PASS")
     print("real-gbrain MCP lifecycle: PASS")
 
 

@@ -6884,6 +6884,24 @@ def _reconcile_note(vault: Path, relative: str) -> str:
     return (vault / relative).read_text(encoding="utf-8")
 
 
+def _reconcile_commits_since(vault: Path, base: str) -> List[str]:
+    """Newest-first SHAs of the commits after ``base`` (exclusive)."""
+    return subprocess.run(
+        ["git", "rev-list", f"{base}..HEAD"], cwd=str(vault), check=True,
+        capture_output=True, text=True,
+    ).stdout.split()
+
+
+def _reconcile_commit_paths(vault: Path, rev: str) -> List[str]:
+    """Sorted vault-relative paths touched by one commit."""
+    return sorted(
+        subprocess.run(
+            ["git", "show", "--name-only", "--format=", rev],
+            cwd=str(vault), check=True, capture_output=True, text=True,
+        ).stdout.split()
+    )
+
+
 class ReconcileNetClassificationTests(unittest.TestCase):
     """Pure net-change classification (add/remove/tag-loss/reschedule/...)."""
 
@@ -7133,6 +7151,89 @@ class ReconcileComposeTests(unittest.TestCase):
         }
         with self.assertRaises(self.core.CoreError):
             self._steps(nets)
+
+    # -- Issue #144 W1: bootstrap-only composition seam and batching ----
+
+    def _seam_steps(self, nets):
+        return self.core._compose_reconcile_steps_bootstrap(
+            self.vault, self.profile, self._config(), nets
+        )
+
+    def _batch(self, steps):
+        return self.core._batch_reconcile_transitions(steps)
+
+    def _composed_step(self, op, slug, target, *, date=_WR_D1,
+                       routing="current"):
+        return self.core.ReconcileComposedStep(
+            operation=op, slug=slug, date=date, routing=routing,
+            target_relative=target,
+        )
+
+    def test_bootstrap_seam_lifts_only_the_total_bound(self) -> None:
+        # The internal bootstrap-only seam composes >MAX distinct-target
+        # ensures deterministically; the public compose still fails
+        # closed (test_target_overflow_fails_closed).
+        count = self.core.MAX_DAILY_PROJECTION_TARGETS + 1
+        nets = {
+            f"t{i:02d}": self._net(
+                self.core.RECONCILE_NET_ADDED,
+                current=f"2026-12-{i + 1:02d}",
+                ensure=f"2026-12-{i + 1:02d}",
+            )
+            for i in range(count)
+        }
+        steps = self._seam_steps(nets)
+        self.assertEqual(len(steps), count)
+        self.assertEqual(
+            [(s.slug, s.operation, s.routing) for s in steps],
+            [(f"t{i:02d}", "ensure", "current") for i in range(count)],
+        )
+        # Deterministic: identical inputs compose identically.
+        self.assertEqual(self._seam_steps(nets), steps)
+
+    def test_bootstrap_batching_groups_by_distinct_target(self) -> None:
+        # Membership is keyed by distinct target: all same-target
+        # transitions share one batch, at most MAX distinct targets per
+        # batch, order follows the composed order.
+        max_t = self.core.MAX_DAILY_PROJECTION_TARGETS
+        steps = [
+            self._composed_step("ensure", "a1", "journal/d01.md"),
+            self._composed_step(
+                "remove", "a2", "journal/d01.md", routing="prior"
+            ),
+        ]
+        steps += [
+            self._composed_step("ensure", f"s{i:02d}", f"journal/d{i:02d}.md")
+            for i in range(2, max_t + 1)
+        ]
+        steps.append(self._composed_step("ensure", "z1", "journal/d17.md"))
+        batches = self._batch(tuple(steps))
+        self.assertEqual(len(batches), 2)
+        self.assertEqual(
+            [len({s.target_relative for s in b}) for b in batches],
+            [max_t, 1],
+        )
+        # The two d01 transitions are never split across batches.
+        self.assertEqual(
+            [s.slug for s in batches[0] if s.target_relative == "journal/d01.md"],
+            ["a1", "a2"],
+        )
+        self.assertEqual(
+            [(s.slug, s.target_relative) for s in batches[1]],
+            [("z1", "journal/d17.md")],
+        )
+        # Deterministic membership and order.
+        self.assertEqual(self._batch(tuple(steps)), batches)
+
+    def test_bootstrap_batching_small_or_empty_plans(self) -> None:
+        # A plan within the bound batches to exactly one batch equal to
+        # the input (no behavior change); empty input yields no batches.
+        steps = tuple(
+            self._composed_step("ensure", f"t{i:02d}", f"journal/d{i:02d}.md")
+            for i in range(self.core.MAX_DAILY_PROJECTION_TARGETS)
+        )
+        self.assertEqual(self._batch(steps), (steps,))
+        self.assertEqual(self._batch(()), ())
 
 
 class ReconcileGitTreeTests(unittest.TestCase):
@@ -7793,19 +7894,580 @@ class ReconcileLifecycleTests(unittest.TestCase):
             cursor_path=cur, pending_path=pend,
         )
 
-    def test_prepare_overflow_fails_closed_no_partial_cursor(self) -> None:
-        vault, _sub, profile, cur, pend = self._setup("overflow")
-        for i in range(self.core.MAX_DAILY_PROJECTION_TARGETS + 1):
+    def test_bootstrap_overflow_batches_distinct_targets(self) -> None:
+        # Issue #144 W1: a missing-cursor bootstrap with >MAX distinct
+        # scheduled dates no longer fails closed at prepare. Apply
+        # batches deterministically (16 + 1 distinct targets) with one
+        # targeted commit per batch, every commit stays within the
+        # daily-target bound, and the outcome aggregates the union.
+        vault, _sub, profile, cur, pend = self._setup("bootoverflow")
+        count = self.core.MAX_DAILY_PROJECTION_TARGETS + 1
+        for i in range(count):
+            _reconcile_write_task(
+                vault, f"t{i:02d}", scheduled=f"2026-12-{i + 1:02d}"
+            )
+        init_head = _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        self.assertEqual(plan.mode, self.core.RECONCILE_MODE_BOOTSTRAP)
+        self.assertEqual(len(plan.transitions), count)
+        # Deterministic batching of the distinct targets: 16 + 1.
+        batches = self.core._batch_reconcile_transitions(plan.transitions)
+        self.assertEqual(
+            [len({t.target_relative for t in b}) for b in batches],
+            [self.core.MAX_DAILY_PROJECTION_TARGETS, 1],
+        )
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config, plan, pending_path=pend
+        )
+        self.assertTrue(outcome.commit_created)
+        self.assertEqual(outcome.applied, count)
+        self.assertEqual(len(outcome.changed_targets), count)
+        # Exactly one reconcile commit per batch, each within the bound,
+        # daily notes only, and never the config rider (no routing change).
+        commits = _reconcile_commits_since(vault, init_head)
+        self.assertEqual(len(commits), len(batches))
+        for rev in commits:
+            shown = _reconcile_commit_paths(vault, rev)
+            self.assertLessEqual(
+                len(shown), self.core.MAX_DAILY_PROJECTION_TARGETS
+            )
+            self.assertTrue(all(p.endswith(".md") for p in shown))
+            self.assertNotIn(self.core.RECONCILE_CONFIG_RELPATH, shown)
+        self.assertEqual(
+            _reconcile_commit_paths(vault, commits[0]),
+            ["journal/2026-12-17.md"],
+        )
+        self.assertEqual(
+            _reconcile_commit_paths(vault, commits[1]),
+            [f"journal/2026-12-{i + 1:02d}.md" for i in range(16)],
+        )
+        # Canonical, non-duplicate links on every touched note.
+        for i in range(count):
+            note = _reconcile_note(vault, f"journal/2026-12-{i + 1:02d}.md")
+            self.assertEqual(note.count(f"- [[t{i:02d}]]"), 1)
+        # Finalize advances the cursor to the final (last-batch) head.
+        cursor = self.core.finalize_daily_links_reconciliation(
+            vault, config, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(cursor.reconciled_head, head)
+        self.assertFalse(pend.exists())
+
+    def test_bootstrap_same_target_overflow_single_batch(self) -> None:
+        # >MAX ensures onto ONE distinct daily target compose unbounded,
+        # batch into exactly one batch (targets never split), and commit
+        # once; links stay canonical and duplicate-free.
+        vault, _sub, profile, cur, pend = self._setup("sametargetoverflow")
+        count = self.core.MAX_DAILY_PROJECTION_TARGETS + 4
+        for i in range(count):
+            _reconcile_write_task(vault, f"t{i:02d}", scheduled=_WR_D1)
+        init_head = _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        self.assertEqual(plan.mode, self.core.RECONCILE_MODE_BOOTSTRAP)
+        self.assertEqual(len(plan.transitions), count)
+        self.assertEqual(
+            {t.target_relative for t in plan.transitions},
+            {f"journal/{_WR_D1}.md"},
+        )
+        batches = self.core._batch_reconcile_transitions(plan.transitions)
+        self.assertEqual(len(batches), 1)
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config, plan, pending_path=pend
+        )
+        self.assertTrue(outcome.commit_created)
+        self.assertEqual(outcome.applied, count)
+        self.assertEqual(outcome.changed_targets, (f"journal/{_WR_D1}.md",))
+        commits = _reconcile_commits_since(vault, init_head)
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(
+            _reconcile_commit_paths(vault, commits[0]),
+            [f"journal/{_WR_D1}.md"],
+        )
+        note = _reconcile_note(vault, f"journal/{_WR_D1}.md")
+        for i in range(count):
+            self.assertEqual(note.count(f"- [[t{i:02d}]]"), 1)
+        self.core.finalize_daily_links_reconciliation(
+            vault, config, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+
+    def test_established_cursor_overflow_still_fails_closed(self) -> None:
+        # The >16 composed-transition fail-closed policy is retained for
+        # established reconciliation — before any side effect.
+        vault, _sub, profile, cur, pend = self._setup("estoverflow")
+        _reconcile_write_task(vault, "t00", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        self._run(vault, profile, config, cur, pend)
+        cursor_before = self.core.load_daily_links_reconcile_cursor(cur)
+        count = self.core.MAX_DAILY_PROJECTION_TARGETS + 1
+        for i in range(count):
+            _reconcile_write_task(
+                vault, f"n{i:02d}", scheduled=f"2027-01-{i + 1:02d}"
+            )
+        _reconcile_commit(vault)
+        head_before = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        with self.assertRaises(self.core.CoreError):
+            self.core.prepare_daily_links_reconciliation(
+                vault, profile, config, cursor_path=cur, pending_path=pend,
+            )
+        # No side effects: cursor/pending untouched, no notes, no commit.
+        self.assertFalse(pend.exists())
+        self.assertEqual(
+            self.core.load_daily_links_reconcile_cursor(cur), cursor_before
+        )
+        self.assertFalse((vault / "journal" / "2027-01-01.md").exists())
+        head_after = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(head_after, head_before)
+
+    # -- Issue #144 W2: full-candidate/expected-HEAD recheck lifecycle --
+
+    def test_bootstrap_batch_failure_leaves_no_pending_then_retry_converges(
+        self,
+    ) -> None:
+        # A batch-2 recheck failure (external schedule change injected
+        # during batch 1) fails closed with no pending and no cursor,
+        # keeps the batch-1 commit (no rollback), and an unchanged
+        # retry converges with canonical no-duplicate links and one
+        # pending publication, then the cursor after finalize.
+        vault, _sub, profile, cur, pend = self._setup("w2retry")
+        count = self.core.MAX_DAILY_PROJECTION_TARGETS + 1
+        for i in range(count):
+            _reconcile_write_task(
+                vault, f"t{i:02d}", scheduled=f"2026-12-{i + 1:02d}"
+            )
+        init_head = _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+
+        def drift() -> None:
+            path = vault / "tasks" / "t00.md"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "scheduled: '2026-12-01'", "scheduled: '2027-02-01'"
+                ),
+                encoding="utf-8",
+            )
+
+        def undrift() -> None:
+            path = vault / "tasks" / "t00.md"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "scheduled: '2027-02-01'", "scheduled: '2026-12-01'"
+                ),
+                encoding="utf-8",
+            )
+
+        with self.assertRaises(self.core.CoreError):
+            self.core.apply_daily_links_reconciliation(
+                vault, profile, config, plan, pending_path=pend,
+                _final_check_hook=drift,
+            )
+        self.assertFalse(pend.exists())
+        self.assertFalse(cur.exists())
+        # No rollback: the batch-1 commit is kept, batch 2 never ran.
+        commits = _reconcile_commits_since(vault, init_head)
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(
+            _reconcile_commit_paths(vault, commits[0]),
+            [f"journal/2026-12-{i + 1:02d}.md" for i in range(16)],
+        )
+        self.assertFalse((vault / "journal" / "2026-12-17.md").exists())
+        # Revert the external drift, then the unchanged retry converges:
+        # batch-1 ensures replay as no-ops, batch 2 applies exactly once.
+        undrift()
+        plan2 = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        self.assertEqual(plan2.mode, self.core.RECONCILE_MODE_BOOTSTRAP)
+        kinds = {t.slug: t.projection.kind for t in plan2.transitions}
+        self.assertEqual(
+            [kinds[f"t{i:02d}"] for i in range(16)], ["none"] * 16
+        )
+        self.assertEqual(kinds["t16"], "create")
+        pending_writes: List[Any] = []
+        real_write = self.core.write_daily_links_reconcile_pending
+
+        def counting_write(pending, path=None):
+            pending_writes.append(pending)
+            return real_write(pending, path)
+
+        with mock.patch.object(
+            self.core, "write_daily_links_reconcile_pending",
+            side_effect=counting_write,
+        ):
+            outcome = self.core.apply_daily_links_reconciliation(
+                vault, profile, config, plan2, pending_path=pend,
+            )
+        # Exactly one pending, published only after all batches.
+        self.assertEqual(len(pending_writes), 1)
+        self.assertTrue(outcome.commit_created)
+        self.assertEqual(outcome.applied, 1)
+        self.assertEqual(
+            outcome.changed_targets, ("journal/2026-12-17.md",)
+        )
+        commits = _reconcile_commits_since(vault, init_head)
+        self.assertEqual(len(commits), 2)
+        self.assertEqual(
+            _reconcile_commit_paths(vault, commits[0]),
+            ["journal/2026-12-17.md"],
+        )
+        for i in range(count):
+            note = _reconcile_note(vault, f"journal/2026-12-{i + 1:02d}.md")
+            self.assertEqual(note.count(f"- [[t{i:02d}]]"), 1)
+        cursor = self.core.finalize_daily_links_reconciliation(
+            vault, config, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+        self.assertFalse(pend.exists())
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(cursor.reconciled_head, head)
+
+    def test_bootstrap_external_commit_before_batch_commit_fails_provenance(
+        self,
+    ) -> None:
+        # Gate 2: an external commit landing immediately before the
+        # targeted batch commit makes the reconciliation commit's
+        # parent the external head instead of the retained expected
+        # head — the post-commit HEAD is rejected (not adopted) and the
+        # apply fails closed with no pending/cursor and no rollback.
+        vault, _sub, profile, cur, pend = self._setup("w2g2parent")
+        count = self.core.MAX_DAILY_PROJECTION_TARGETS + 1
+        for i in range(count):
+            _reconcile_write_task(
+                vault, f"t{i:02d}", scheduled=f"2026-12-{i + 1:02d}"
+            )
+        init_head = _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        real_commit = self.core.git_commit_reconcile_targets
+
+        def commit_spy(v, targets, env=None):
+            # External commit lands exactly before the targeted
+            # reconciliation commit (pathspec-scoped: notes untouched).
+            (vault / "external.txt").write_text("external\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "--", "external.txt"], cwd=str(v),
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "external", "--", "external.txt"],
+                cwd=str(v), check=True, capture_output=True,
+            )
+            return real_commit(v, targets, env)
+
+        with mock.patch.object(
+            self.core, "git_commit_reconcile_targets", side_effect=commit_spy
+        ):
+            with self.assertRaises(self.core.CoreError):
+                self.core.apply_daily_links_reconciliation(
+                    vault, profile, config, plan, pending_path=pend,
+                )
+        self.assertFalse(pend.exists())
+        self.assertFalse(cur.exists())
+        # No rollback: both the external commit and the reconciliation
+        # commit exist, in that order (proven by the parent relation).
+        commits = _reconcile_commits_since(vault, init_head)
+        self.assertEqual(len(commits), 2)
+        self.assertEqual(
+            _reconcile_commit_paths(vault, commits[0]),
+            [f"journal/2026-12-{i + 1:02d}.md" for i in range(16)],
+        )
+        self.assertEqual(
+            _reconcile_commit_paths(vault, commits[1]), ["external.txt"]
+        )
+        # Batch 2 never ran.
+        self.assertFalse((vault / "journal" / "2026-12-17.md").exists())
+
+    def test_bootstrap_external_head_move_before_pending_fails_closed(
+        self,
+    ) -> None:
+        # Gate 2: an external HEAD move after the final full recheck
+        # but before pending construction fails the final equality
+        # gate; no pending is written (nothing arbitrary is adopted)
+        # and no cursor advances.
+        vault, _sub, profile, cur, pend = self._setup("w2g2pending")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_write_task(vault, "t2", scheduled=_WR_D2)
+        init_head = _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        real_recheck = self.core._recheck_reconcile_sources
+        injected = {"done": False}
+
+        def recheck_spy(v, p, pl, env, *, expected_head, max_files, max_size):
+            real_recheck(
+                v, p, pl, env,
+                expected_head=expected_head,
+                max_files=max_files, max_size=max_size,
+            )
+            # The final (post-evolution) recheck passed cleanly; move
+            # HEAD externally right after it, before pending.
+            if expected_head != plan.to_head and not injected["done"]:
+                injected["done"] = True
+                (vault / "late.txt").write_text("late\n", encoding="utf-8")
+                subprocess.run(
+                    ["git", "add", "--", "late.txt"], cwd=str(v),
+                    check=True, capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "commit", "-m", "late external", "--", "late.txt"],
+                    cwd=str(v), check=True, capture_output=True,
+                )
+
+        with mock.patch.object(
+            self.core, "_recheck_reconcile_sources", side_effect=recheck_spy
+        ):
+            with self.assertRaises(self.core.CoreError):
+                self.core.apply_daily_links_reconciliation(
+                    vault, profile, config, plan, pending_path=pend,
+                )
+        self.assertFalse(pend.exists())
+        self.assertFalse(cur.exists())
+        # No rollback: the reconciliation commit and the late external
+        # commit both exist, external last; the pending never recorded
+        # either.
+        commits = _reconcile_commits_since(vault, init_head)
+        self.assertEqual(len(commits), 2)
+        self.assertEqual(
+            _reconcile_commit_paths(vault, commits[0]), ["late.txt"]
+        )
+        self.assertEqual(
+            _reconcile_commit_paths(vault, commits[1]),
+            sorted([f"journal/{_WR_D1}.md", f"journal/{_WR_D2}.md"]),
+        )
+        # Replay converges from the committed links with no duplicates.
+        plan2 = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        self.assertTrue(
+            all(t.projection.kind == "none" for t in plan2.transitions)
+        )
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config, plan2, pending_path=pend,
+        )
+        self.assertFalse(outcome.commit_created)
+        cursor = self.core.finalize_daily_links_reconciliation(
+            vault, config, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+        self.assertFalse(pend.exists())
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(cursor.reconciled_head, head)
+        for date in (_WR_D1, _WR_D2):
+            note = _reconcile_note(vault, f"journal/{date}.md")
+            slug = "t1" if date == _WR_D1 else "t2"
+            self.assertEqual(note.count(f"- [[{slug}]]"), 1)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(cursor.reconciled_head, head)
+
+    def test_bootstrap_new_candidate_between_batches_fails_closed(self) -> None:
+        # A newly-added unscheduled candidate during batch 1 is caught
+        # by the batch-2 full-candidate recheck: fail closed with no
+        # pending/cursor and no rollback of the batch-1 commit.
+        vault, _sub, profile, cur, pend = self._setup("w2newcand")
+        count = self.core.MAX_DAILY_PROJECTION_TARGETS + 1
+        for i in range(count):
+            _reconcile_write_task(
+                vault, f"t{i:02d}", scheduled=f"2026-12-{i + 1:02d}"
+            )
+        init_head = _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        self.assertTrue(
+            all(s.scheduled is not None for s in plan.expected_candidates)
+        )
+
+        def drift() -> None:
+            _reconcile_write_task(vault, "zz_backlog")  # unscheduled
+
+        with self.assertRaises(self.core.CoreError):
+            self.core.apply_daily_links_reconciliation(
+                vault, profile, config, plan, pending_path=pend,
+                _final_check_hook=drift,
+            )
+        self.assertFalse(pend.exists())
+        self.assertFalse(cur.exists())
+        commits = _reconcile_commits_since(vault, init_head)
+        self.assertEqual(len(commits), 1)
+        self.assertFalse((vault / "journal" / "2026-12-17.md").exists())
+        self.assertTrue((vault / "tasks" / "zz_backlog.md").exists())
+
+    def test_bootstrap_drift_before_pending_publication_fails_closed(
+        self,
+    ) -> None:
+        # A candidate added during the only batch is caught by the
+        # final recheck immediately before pending publication: the
+        # batch commit is kept but no pending is published.
+        vault, _sub, profile, cur, pend = self._setup("w2prepend")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_write_task(vault, "t2", scheduled=_WR_D2)
+        init_head = _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        batches = self.core._batch_reconcile_transitions(plan.transitions)
+        self.assertEqual(len(batches), 1)
+
+        def drift() -> None:
+            _reconcile_write_task(vault, "zz_backlog")  # unscheduled
+
+        with self.assertRaises(self.core.CoreError):
+            self.core.apply_daily_links_reconciliation(
+                vault, profile, config, plan, pending_path=pend,
+                _final_check_hook=drift,
+            )
+        self.assertFalse(pend.exists())
+        self.assertFalse(cur.exists())
+        commits = _reconcile_commits_since(vault, init_head)
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(
+            _reconcile_commit_paths(vault, commits[0]),
+            sorted([f"journal/{_WR_D1}.md", f"journal/{_WR_D2}.md"]),
+        )
+        self.assertTrue((vault / "tasks" / "zz_backlog.md").exists())
+
+    def test_bootstrap_head_drift_fails_closed(self) -> None:
+        # An external commit between prepare and apply fails the
+        # expected-HEAD check before any side effect.
+        vault, _sub, profile, cur, pend = self._setup("w2headdrift")
+        _reconcile_write_task(vault, "t1", scheduled=_WR_D1)
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        (vault / "scratch.txt").write_text("external\n", encoding="utf-8")
+        _reconcile_commit(vault, "external commit")
+        with self.assertRaises(self.core.CoreError):
+            self.core.apply_daily_links_reconciliation(
+                vault, profile, config, plan, pending_path=pend,
+            )
+        self.assertFalse(pend.exists())
+        self.assertFalse(cur.exists())
+        self.assertFalse((vault / "journal" / f"{_WR_D1}.md").exists())
+
+    def test_bootstrap_multi_batch_pending_then_finalize_guards(self) -> None:
+        # Full multi-batch success publishes exactly one pending whose
+        # base is the prepared bootstrap base and whose head is the
+        # final head; a sync/finalize failure leaves the cursor absent
+        # with the pending intact for replay; a successful finalize
+        # advances the cursor and clears the pending.
+        vault, _sub, profile, cur, pend = self._setup("w2multibatch")
+        count = self.core.MAX_DAILY_PROJECTION_TARGETS + 1
+        for i in range(count):
             _reconcile_write_task(
                 vault, f"t{i:02d}", scheduled=f"2026-12-{i + 1:02d}"
             )
         _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        pending_writes: List[Any] = []
+        real_write = self.core.write_daily_links_reconcile_pending
+
+        def counting_write(pending, path=None):
+            pending_writes.append(pending)
+            return real_write(pending, path)
+
+        with mock.patch.object(
+            self.core, "write_daily_links_reconcile_pending",
+            side_effect=counting_write,
+        ):
+            outcome = self.core.apply_daily_links_reconciliation(
+                vault, profile, config, plan, pending_path=pend,
+            )
+        self.assertTrue(outcome.commit_created)
+        self.assertEqual(outcome.applied, count)
+        self.assertEqual(len(pending_writes), 1)
+        pending = self.core.load_daily_links_reconcile_pending(pend)
+        self.assertEqual(pending.from_head, plan.from_head)
+        self.assertEqual(pending.to_head, outcome.pending.to_head)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(pending.to_head, head)
+        # Sync/finalize failure: no cursor, pending kept for replay.
         with self.assertRaises(self.core.CoreError):
-            self.core.prepare_daily_links_reconciliation(
-                vault, profile, self.core.load_daily_notes_config(vault),
-                cursor_path=cur,
+            self.core.finalize_daily_links_reconciliation(
+                vault, config, sync_succeeded=False,
+                cursor_path=cur, pending_path=pend,
             )
         self.assertFalse(cur.exists())
+        self.assertTrue(pend.exists())
+        # Successful finalize advances the cursor to the final head.
+        cursor = self.core.finalize_daily_links_reconciliation(
+            vault, config, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+        self.assertEqual(cursor.reconciled_head, pending.to_head)
+        self.assertFalse(pend.exists())
+
+    def test_bootstrap_empty_plan_still_publishes_pending_and_finalizes(
+        self,
+    ) -> None:
+        # An empty bootstrap (no scheduled tasks; unscheduled candidate
+        # evidence only) still runs the full-candidate rechecks and the
+        # pending/finalize path with no commit.
+        vault, _sub, profile, cur, pend = self._setup("w2empty")
+        _reconcile_write_task(vault, "backlog")  # unscheduled candidate
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        self.assertEqual(plan.mode, self.core.RECONCILE_MODE_BOOTSTRAP)
+        self.assertEqual(plan.transitions, ())
+        self.assertEqual(len(plan.expected_candidates), 1)
+        self.assertIsNone(plan.expected_candidates[0].scheduled)
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config, plan, pending_path=pend,
+        )
+        self.assertFalse(outcome.commit_created)
+        pending = self.core.load_daily_links_reconcile_pending(pend)
+        self.assertEqual(pending.from_head, plan.from_head)
+        self.assertEqual(pending.to_head, plan.to_head)
+        cursor = self.core.finalize_daily_links_reconciliation(
+            vault, config, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+        self.assertEqual(cursor.reconciled_head, pending.to_head)
         self.assertFalse(pend.exists())
 
     def test_head_dual_location_ambiguous_fails_closed(self) -> None:
@@ -8197,6 +8859,62 @@ class ReconcileEngineIntegrationTests(unittest.TestCase):
             recorder["finalize_daily_links_reconciliation"][0][1],
         )
         self.assertIsInstance(configs[0], self.core.DailyNotesConfig)
+
+    def test_bootstrap_overflow_reconciles_before_preflight_and_mutation(
+        self,
+    ) -> None:
+        # Issue #144 W3 (engine path): an absent cursor with >MAX
+        # externally scheduled tasks no longer overflows bootstrap
+        # reconciliation — the mutation's reconciliation runs first
+        # (multi-batch), succeeds, finalizes, and only then do the
+        # preflight and the mutation run.
+        engine, vault, cursor, pending = self._engine("bootoverflow")
+        count = self.core.MAX_DAILY_PROJECTION_TARGETS + 1
+        for i in range(count):
+            _reconcile_write_task(
+                vault, f"t{i:02d}", scheduled=f"2026-12-{i + 1:02d}"
+            )
+        _reconcile_commit(vault, "external bootstrap batch")
+        recorder = {"events": []}
+        self._record_reconciliation(recorder)
+        result = engine.create("zz", "Task Zed", scheduled=_WR_D2, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        events = recorder["events"]
+        # Full lifecycle runs BEFORE the existing preflight and mutation.
+        self.assertEqual(events[:4], [
+            "prepare_daily_links_reconciliation",
+            "apply_daily_links_reconciliation",
+            "gbrain_sync_incremental",
+            "finalize_daily_links_reconciliation",
+        ])
+        self.assertLess(
+            events.index("finalize_daily_links_reconciliation"),
+            events.index("git_preflight_commit"),
+        )
+        self.assertLess(
+            events.index("git_preflight_commit"),
+            events.index("gbrain_capture"),
+        )
+        # No bootstrap overflow: the cursor advanced via finalize and
+        # the pending cleared; exactly one targeted commit per batch.
+        self.assertTrue(cursor.exists())
+        self.assertFalse(pending.exists())
+        subjects = subprocess.run(
+            ["git", "log", "--pretty=%s"], cwd=str(vault),
+            capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+        self.assertEqual(
+            subjects.count(self.core.RECONCILE_COMMIT_MSG), 2,
+            "one reconcile commit per bootstrap batch (16 + 1)",
+        )
+        # Canonical, non-duplicate links for every bootstrapped task
+        # plus the mutation's own projection.
+        for i in range(count):
+            note = _reconcile_note(vault, f"journal/2026-12-{i + 1:02d}.md")
+            self.assertEqual(note.count(f"- [[t{i:02d}]]"), 1)
+        self.assertIn(
+            "- [[zz]]", _reconcile_note(vault, f"journal/{_WR_D2}.md")
+        )
 
     def test_reconcile_failure_skips_preflight_and_mutation(self) -> None:
         engine, vault, cursor, pending = self._engine("fail")

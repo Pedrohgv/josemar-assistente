@@ -571,6 +571,103 @@ class RefreshRealCliEndToEndTests(_RefreshFixtureMixin, unittest.TestCase):
         self.assertIn("scheduled: '2026-09-01'",
                       (vault / "tasks" / "t1.md").read_text(encoding="utf-8"))
 
+    def test_enabled_refresh_end_to_end_bootstrap_overflow_multibatch(
+        self,
+    ) -> None:
+        """Issue #144 W3 (refresh path): an absent cursor with >16
+        scheduled tasks still completes the full refresh chain —
+        reconcile (multi-batch targeted commits) -> native sync/extract
+        exactly once -> finalize — advancing the cursor to the final
+        head with canonical no-duplicate links."""
+        vault = make_vault(self.tmp, "vault")
+        # 17 scheduled tasks total (MAX_DAILY_PROJECTION_TARGETS == 16):
+        # t1 from make_vault plus 16 more at distinct December dates.
+        count = 17
+        for i in range(1, count):
+            _write_task(
+                vault, f"t{i + 1:02d}", scheduled=f"2026-12-{i + 1:02d}"
+            )
+        _commit_all(vault, "bootstrap overflow")
+        head_before = _git(vault, "rev-parse", "HEAD")
+        self._setup_real()
+        fd = self._hold_lock()
+        try:
+            result = self._run_wrapper(
+                [str(self.wrapper), "refresh"],
+                env=self.env(
+                    TASKNOTES_DAILY_LINKS_ENABLED="true",
+                    TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="true",
+                    TASKNOTES_LOCK_FD=str(fd),
+                ),
+                pass_fds=[fd],
+            )
+        finally:
+            os.close(fd)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"success": true', result.stdout)
+        # The native sync/extract chain ran exactly once.
+        lines = self.unified_lines()
+        self.assertEqual(
+            len([ln for ln in lines if ln.startswith("gbrain sync")]), 1
+        )
+        self.assertEqual(
+            len(
+                [
+                    ln
+                    for ln in lines
+                    if ln.startswith("gbrain extract --stale")
+                ]
+            ),
+            1,
+        )
+        self.assertEqual(
+            len([ln for ln in lines if ln.startswith("gbrain extract links")]),
+            1,
+        )
+        head_after = _git(vault, "rev-parse", "HEAD")
+        self.assertNotEqual(head_before, head_after)
+        # Multi-batch bootstrap: exactly two targeted commits (16 + 1).
+        commits = _git(vault, "rev-list", f"{head_before}..HEAD").split()
+        self.assertEqual(len(commits), 2)
+        self.assertEqual(
+            sorted(
+                _git(vault, "show", "--name-only", "--format=",
+                     commits[0]).split()
+            ),
+            ["journal/2026-12-17.md"],
+        )
+        self.assertEqual(
+            sorted(
+                _git(vault, "show", "--name-only", "--format=",
+                     commits[1]).split()
+            ),
+            sorted(
+                [f"journal/{_D1}.md"]
+                + [f"journal/2026-12-{i + 1:02d}.md" for i in range(1, 16)]
+            ),
+        )
+        # Finalize advanced the cursor to the final head, pending cleared.
+        self.assertFalse(self.pending_path.exists(),
+                         "finalize must clear the pending sibling")
+        self.assertTrue(self.cursor_path.exists(), "finalize must write the cursor")
+        cursor = json.loads(self.cursor_path.read_text(encoding="utf-8"))
+        self.assertEqual(cursor["reconciled_head"], head_after)
+        self.assertEqual(cursor["daily_folder"], "journal")
+        # Canonical, non-duplicate links; task markdown never rewritten.
+        self.assertEqual(
+            (vault / "journal" / f"{_D1}.md").read_text(
+                encoding="utf-8"
+            ).count("- [[t1]]"),
+            1,
+        )
+        for i in range(1, count):
+            note = (vault / "journal" / f"2026-12-{i + 1:02d}.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(note.count(f"- [[t{i + 1:02d}]]"), 1)
+        self.assertIn("scheduled: '2026-09-01'",
+                      (vault / "tasks" / "t1.md").read_text(encoding="utf-8"))
+
     def test_enabled_refresh_full_chain_self_acquired_lock(self) -> None:
         """Manual run without an inherited fd: the wrapper self-acquires the
         lock through the real lock-runner chain, and the real CLI still
