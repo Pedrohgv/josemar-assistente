@@ -3337,10 +3337,86 @@ class DailyNotesConfigTests(unittest.TestCase):
             self.core.load_daily_notes_config(self.vault)
 
     def test_template_unsafe_paths_rejected(self) -> None:
-        for template in ("/tmp/t.md", "a\\b.md", "../evil.md", "a//b.md", "notes.txt"):
+        # Explicit .md safety remains (issue #141 W1): unsafe references
+        # that already end in .md are rejected unchanged.
+        for template in ("/tmp/t.md", "a\\b.md", "../evil.md", "a//b.md"):
             _write_daily_config(self.vault, {"template": template})
             with self.assertRaises(self.core.PathError):
                 self.core.load_daily_notes_config(self.vault)
+
+    def test_template_extensionless_reference_normalized_to_md(self) -> None:
+        # Extensionless nested reference is normalized once at load into
+        # the canonical vault-relative Markdown physical path.
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily-note.md").write_text(
+            "# {{date}}\n", encoding="utf-8"
+        )
+        _write_daily_config(self.vault, {"template": "templates/daily-note"})
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.template, "templates/daily-note.md")
+
+    def test_template_explicit_md_reference_unchanged(self) -> None:
+        # A reference already ending exactly in .md is stored unchanged.
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily.md").write_text(
+            "# {{date}}\n", encoding="utf-8"
+        )
+        _write_daily_config(self.vault, {"template": "templates/daily.md"})
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.template, "templates/daily.md")
+
+    def test_template_dotted_reference_normalized_to_md(self) -> None:
+        # The decision uses the complete reference (not Path.suffix):
+        # a dotted name whose complete reference does not end in .md
+        # gains .md (templates/daily.v2 -> templates/daily.v2.md).
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily.v2.md").write_text(
+            "# {{date}}\n", encoding="utf-8"
+        )
+        _write_daily_config(self.vault, {"template": "templates/daily.v2"})
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.template, "templates/daily.v2.md")
+
+    def test_template_unsafe_raw_reference_segments_rejected(self) -> None:
+        # Raw unsafe references are rejected by shape BEFORE normalization:
+        # appending .md must never mask an unsafe raw segment (. -> ..md,
+        # .. -> ...md, templates/ -> templates/.md).
+        unsafe = (
+            ".",           # dot segment (would mask to ..md)
+            "..",          # traversal (would mask to ...md)
+            "a/../b",      # nested traversal segment
+            "templates/",  # trailing empty segment (would mask to templates/.md)
+            "a//b",        # internal empty segment
+            "/tmp/t",      # absolute
+            "a\\b",        # backslash
+            "a\x0bb",      # control character
+            "../evil",     # leading traversal
+        )
+        for template in unsafe:
+            _write_daily_config(self.vault, {"template": template})
+            with self.assertRaises(self.core.PathError):
+                self.core.load_daily_notes_config(self.vault)
+
+    def test_template_normalized_missing_allowed_at_load_then_rejected_read(
+        self,
+    ) -> None:
+        # Lazy allowance: a normalized canonical target that does not exist
+        # yet is accepted at load, then rejected at the bounded read.
+        _write_daily_config(self.vault, {"template": "templates/ghost"})
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.template, "templates/ghost.md")
+        with self.assertRaises(self.core.PathError):
+            self.core.read_daily_note_template(self.vault, cfg)
+
+    def test_template_normalized_symlink_rejected(self) -> None:
+        # A symlink at the canonical .md target is rejected even when the
+        # configured reference is extensionless.
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "real.md").write_text("x", encoding="utf-8")
+        os.symlink("real.md", str(self.vault / "templates" / "alias.md"))
+        _write_daily_config(self.vault, {"template": "templates/alias"})
+        with self.assertRaises(self.core.PathError):
+            self.core.load_daily_notes_config(self.vault)
 
     def test_template_missing_file_accepted_at_load(self) -> None:
         _write_daily_config(self.vault, {"template": "templates/daily.md"})
@@ -3498,6 +3574,35 @@ class DailyNoteTemplateReadTests(unittest.TestCase):
         (self.vault / "templates" / "real.md").write_text("x", encoding="utf-8")
         os.symlink("real.md", str(self.vault / "templates" / "alias.md"))
         cfg = self.core.DailyNotesConfig(template="templates/alias.md")
+        with self.assertRaises(self.core.PathError):
+            self.core.read_daily_note_template(self.vault, cfg)
+
+    def test_extensionless_config_reads_physical_md(self) -> None:
+        # An extensionless configured reference reads the physical .md
+        # sibling (the canonical target); no extensionless file exists.
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily-note.md").write_text(
+            "# {{date}}\n## Tasks\n", encoding="utf-8"
+        )
+        _write_daily_config(self.vault, {"template": "templates/daily-note"})
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.template, "templates/daily-note.md")
+        self.assertEqual(
+            self.core.read_daily_note_template(self.vault, cfg),
+            "# {{date}}\n## Tasks\n",
+        )
+
+    def test_extensionless_physical_file_without_md_sibling_not_read(self) -> None:
+        # A raw extensionless physical file is never probed: with no .md
+        # sibling the read fails at the bounded-read point and the
+        # extensionless file's content is never returned.
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily-note").write_text(
+            "raw extensionless body\n", encoding="utf-8"
+        )
+        _write_daily_config(self.vault, {"template": "templates/daily-note"})
+        cfg = self.core.load_daily_notes_config(self.vault)
+        self.assertEqual(cfg.template, "templates/daily-note.md")
         with self.assertRaises(self.core.PathError):
             self.core.read_daily_note_template(self.vault, cfg)
 
@@ -4977,6 +5082,69 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         syncs = [c for c in _read_calls(self.tmpdir) if c["argv"][0] == "sync"]
         self.assertGreaterEqual(len(syncs), 2)  # preflight + post-commit
 
+    def test_create_scheduled_extensionless_template_creates_note_with_bare_link(
+        self,
+    ) -> None:
+        # W1 (#141): an extensionless .obsidian/daily-notes.json template
+        # reference is normalized at load to the canonical physical .md
+        # path; an actual scheduled create builds the Daily Note from that
+        # template with exactly one bare canonical task link.
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily-note.md").write_text(
+            "# {{date}}\n\nDay note for {{title}}\n\n## Tasks\n",
+            encoding="utf-8",
+        )
+        _write_daily_config(
+            self.vault, {"folder": "journal", "template": "templates/daily-note"}
+        )
+        subprocess.run(["git", "add", "-A"], cwd=str(self.vault), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "template fixture"], cwd=str(self.vault), check=True, capture_output=True)
+        result = self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        self.assertIsNone(result.daily_link_detail)
+        self.assertEqual(result.daily_link_dates, [_D1])
+        content = self._note(_D1).read_text(encoding="utf-8")
+        # Created FROM the template (rendered {{date}}/{{title}}), not the
+        # default body, with exactly one bare canonical link (no alias).
+        self.assertEqual(
+            content,
+            "# 2026-08-27\n\nDay note for 2026-08-27\n\n## Tasks\n- [[t1]]\n",
+        )
+        self.assertEqual(content.count("- [[t1]]"), 1)
+        self.assertNotIn("[[t1|", content)
+        self.assertEqual(self._git("status", "--porcelain").strip(), "")
+
+    def test_create_scheduled_explicit_md_template_creates_note_with_bare_link(
+        self,
+    ) -> None:
+        # Explicit .md template reference regression: identical lifecycle
+        # success (normalization is a no-op for a reference already ending
+        # in .md).
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily-note.md").write_text(
+            "# {{date}}\n\nDay note for {{title}}\n\n## Tasks\n",
+            encoding="utf-8",
+        )
+        _write_daily_config(
+            self.vault, {"folder": "journal", "template": "templates/daily-note.md"}
+        )
+        subprocess.run(["git", "add", "-A"], cwd=str(self.vault), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "template fixture"], cwd=str(self.vault), check=True, capture_output=True)
+        result = self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_APPLIED)
+        self.assertIsNone(result.daily_link_detail)
+        self.assertEqual(result.daily_link_dates, [_D1])
+        content = self._note(_D1).read_text(encoding="utf-8")
+        self.assertEqual(
+            content,
+            "# 2026-08-27\n\nDay note for 2026-08-27\n\n## Tasks\n- [[t1]]\n",
+        )
+        self.assertEqual(content.count("- [[t1]]"), 1)
+        self.assertNotIn("[[t1|", content)
+        self.assertEqual(self._git("status", "--porcelain").strip(), "")
+
     def test_create_backlog_no_link(self) -> None:
         result = self.engine.create("t1", "My Task", body="b")
         self.assertEqual(result.daily_link_state, self.core.DAILY_LINK_NOT_APPLICABLE)
@@ -5260,6 +5428,53 @@ class DailyLinkIntegrationTests(unittest.TestCase):
         )
         _write_daily_config(
             self.vault, {"folder": "journal", "template": "templates/daily.md"}
+        )
+        with self.assertRaises(self.core.ValidationError):
+            self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertFalse((self.vault / "tasks" / "t1.md").exists())
+        self.assertFalse(self._note(_D1).exists())
+        self.assertEqual(
+            [c for c in _read_calls(self.tmpdir) if c["argv"][0] == "capture"],
+            [],
+        )
+
+    def test_prevalidation_failure_extensionless_missing_template_zero_side_effects(
+        self,
+    ) -> None:
+        # W1 (#141): an extensionless reference normalizes to the canonical
+        # .md target; with no physical .md sibling the load tolerates the
+        # missing canonical file but the bounded read fails the scheduled
+        # create BEFORE any task mutation: no task file, no Daily Note,
+        # no fake-gbrain capture invocation. The raw extensionless file
+        # (if any) is never probed as the template.
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "ghost").write_text(
+            "raw extensionless body\n", encoding="utf-8"
+        )
+        _write_daily_config(
+            self.vault, {"folder": "journal", "template": "templates/ghost"}
+        )
+        with self.assertRaises(self.core.PathError):
+            self.engine.create("t1", "My Task", scheduled=_D1, body="b")
+        self.assertFalse((self.vault / "tasks" / "t1.md").exists())
+        self.assertFalse(self._note(_D1).exists())
+        self.assertEqual(
+            [c for c in _read_calls(self.tmpdir) if c["argv"][0] == "capture"],
+            [],
+        )
+
+    def test_prevalidation_failure_extensionless_invalid_template_zero_side_effects(
+        self,
+    ) -> None:
+        # W1 (#141): a normalized canonical template without a '## Tasks'
+        # section fails deterministically before any task mutation, with
+        # the same zero-side-effect boundary as the explicit .md case.
+        (self.vault / "templates").mkdir()
+        (self.vault / "templates" / "daily-note.md").write_text(
+            "# {{date}}\n\nno tasks here\n", encoding="utf-8"
+        )
+        _write_daily_config(
+            self.vault, {"folder": "journal", "template": "templates/daily-note"}
         )
         with self.assertRaises(self.core.ValidationError):
             self.engine.create("t1", "My Task", scheduled=_D1, body="b")
