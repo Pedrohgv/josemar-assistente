@@ -32,7 +32,12 @@ TASKNOTES_GBRAIN_NATIVE = "/opt/josemar/libexec/gbrain-native"
 
 # Fixed deployment locations (issue #110): the vault, gbrain state, and the
 # shared lock never come from the caller's environment. Non-location
-# operational settings (TASKNOTES_LOCK_TIMEOUT, TZ) remain env-driven.
+# operational settings (TASKNOTES_LOCK_TIMEOUT, TZ,
+# TASKNOTES_DAILY_LINKS_ENABLED, TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED)
+# remain env-driven. Cross-system default propagation for the
+# reconciliation switch is issue #139 W4b; this surface parses it strictly
+# (case-insensitive true/false, invalid values fail closed) with an
+# intended default of enabled.
 TASKNOTES_VAULT = "/opt/data/obsidian"
 TASKNOTES_GBRAIN_HOME = "/opt/data"
 TASKNOTES_LOCK_DIR = "/opt/data/.locks"
@@ -65,6 +70,22 @@ def _env_float(name: str, default: float) -> float:
     return value
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    """Strict boolean env parsing (issue #139): missing or empty resolves
+    to the provided default; a nonempty value must be case-insensitive
+    'true'/'false' and anything else is rejected at engine init instead of
+    being coerced."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValidationError(f"{name} must be 'true' or 'false'")
+
+
 def _assert_runtime_identity() -> None:
     """The MCP must run as the hermes runtime user before any native gbrain
     work: the global lock and PGLite must never be touched as root. Refuses
@@ -88,6 +109,10 @@ def _get_engine() -> TaskNotesEngine:
             lock_dir=Path(TASKNOTES_LOCK_DIR),
             lock_timeout=_env_float("TASKNOTES_LOCK_TIMEOUT", 10.0),
             tz=os.environ.get("TZ", "UTC"),
+            daily_links_enabled=_env_bool("TASKNOTES_DAILY_LINKS_ENABLED", True),
+            reconcile_enabled=_env_bool(
+                "TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED", True
+            ),
         )
     return _ENGINE
 

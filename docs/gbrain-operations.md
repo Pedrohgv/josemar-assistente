@@ -196,9 +196,15 @@ Immediate non-negotiables:
    runner.
 5. **No nested wrapper usage in TaskNotes.** TaskNotes remains a bounded MCP
    adapter implemented on short-lived native gbrain commands, the sole
-   task-file writer. It retains its transaction-level global lock and internal
+   task-file writer. Its single direct filesystem exception (issue #139,
+   default on) is its own derived Daily Note task-link projection: while it
+   owns the transaction lock it may create/edit only the vault-confined Daily
+   Note file for a task's exact `scheduled` date, then reconciles the
+   filesystem-originated change through native incremental gbrain sync under
+   the same lock. It retains its transaction-level global lock and internal
    native invocation; it must never route through the public `gbrain`
-   wrapper's lock path internally, nor be invoked from it. Task mutations go
+   wrapper's lock path internally, nor be invoked from it, and it exposes no
+   generic note-write tool. Task mutations go
    through the `task_*` MCP tools only. See `docs/tasknotes-mcp.md`.
 
 ## Pinned Values

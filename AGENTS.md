@@ -111,7 +111,7 @@ When modifying user state, commit/push inside `agent-state` repo when requested.
 
 - Repo-owned skills: `skills-factory/*` -> copied to `/opt/josemar/skills`.
 - User-owned skills: `agent-state/skills/*` -> synced into `/opt/data/skills`.
-- Keep native gbrain (`skills-factory/gbrain` + `scripts/josemar-gbrain`) as the canonical vault interface. The bounded `tasknotes` MCP is the only specialized exception and still uses short-lived native gbrain commands as the sole task writer. `josemar-gbrain` provides operator-only `reindex` activation and lightweight `refresh` for periodic manual Obsidian edit reconciliation. Agent-facing vault access (chat, skills, external general vault actions) runs through the public `gbrain` command, which is safe by default (issue #110): it transparently provides the safe-adapter behavior — `hermes` runtime user, shared lock. The internal private native gbrain path is never presented as an agent command; it is limited to the locked operator/cron paths (`josemar-gbrain` wrapper and both refresh crons) and the TaskNotes MCP implementation, which cooperate on the same lock and do NOT use the public wrapper (see the safe-access non-negotiables below).
+- Keep native gbrain (`skills-factory/gbrain` + `scripts/josemar-gbrain`) as the canonical vault interface. The bounded `tasknotes` MCP is the only specialized exception and still uses short-lived native gbrain commands as the sole task-file writer. Its only direct vault-file write is the default-on Daily Note task-link projection (issue #139): while owning its transaction lock it may create/edit only the derived, vault-confined Daily Note file for a task's exact `scheduled` date, then reconciles that change through native incremental gbrain sync — it is never a generic note writer and never nests the public `gbrain` wrapper. Its bounded reconciliation additionally keeps private cursor/pending state files under `/opt/data/.gbrain` (structural metadata only, never vault or task content); task Markdown stays gbrain-only. `josemar-gbrain` provides operator-only `reindex` activation and lightweight `refresh` for periodic manual Obsidian edit reconciliation. Agent-facing vault access (chat, skills, external general vault actions) runs through the public `gbrain` command, which is safe by default (issue #110): it transparently provides the safe-adapter behavior — `hermes` runtime user, shared lock. The internal private native gbrain path is never presented as an agent command; it is limited to the locked operator/cron paths (`josemar-gbrain` wrapper and both refresh crons) and the TaskNotes MCP implementation, which cooperate on the same lock and do NOT use the public wrapper (see the safe-access non-negotiables below).
 - Automatic skill creation, patching, and curation are intentionally disabled (`skills.creation_nudge_interval: 0`, `skills.write_approval: true`, `curator.enabled: false`). Keep these guards until issue #69's re-enable criteria pass against a pinned Hermes release.
 - Until issue #69 is resolved, intentional user-skill authoring must be explicit and use the flat `/opt/data/skills/<name>/SKILL.md` layout so workspace sync can version it. Never route runtime writes into `/opt/josemar/skills`.
 - Per-profile skill enable/disable choices are user state under `hermes/skill-toggles/`; state-owned provider/model selection is user state in `hermes/models.yaml` (strict selection-only v1: exactly 11 allowlisted auxiliary tasks — `vision`, `web_extract`, `compression`, `skills_hub`, `approval`, `mcp`, `title_generation`, `triage_specifier`, `kanban_decomposer`, `profile_describer`, `curator`; `provider: auto` requires `model: ""`; sparse overlay — only explicitly present entries apply, existing sparse v1 files stay valid and are never auto-mutated; adopt new slots by manually copying them from the template). Never version the full Hermes `config.yaml`: it mixes operational, security, and deployment controls and stays repo/operator/runtime-owned and unversioned — state ownership is provider/model selection only.
@@ -154,10 +154,17 @@ Adapter"; TaskNotes specifics are in `docs/tasknotes-mcp.md`.
    Routine adapted access does NOT require pausing the jobs.
 6. **No nested wrapper usage in TaskNotes.** TaskNotes remains a bounded MCP
    adapter on short-lived native gbrain commands and is the sole task-file
-   writer. It retains its transaction-level global lock and internal native
-   invocation; it must never route through the public `gbrain` wrapper's lock
-   path internally, nor be invoked from it. Task mutations go through the
-   `task_*` MCP tools only.
+   writer: task Markdown is only written through gbrain. Its single direct
+   vault-file exception (issue #139, default on) is its own derived Daily
+   Note task-link projection — locked, vault-confined, exact-`scheduled`
+   paths only, followed by mandatory native incremental gbrain reconciliation
+   under the same lock (its bounded cursor/pending reconcile state under
+   `/opt/data/.gbrain` is private runtime metadata, never vault or task
+   content). It retains its transaction-level global lock and
+   internal native invocation; it must never route through the public `gbrain`
+   wrapper's lock path internally, nor be invoked from it, and it exposes no
+   generic note-write tool. Task mutations go through the `task_*` MCP tools
+   only.
 
 ### Skill Organization: SKILL.md vs. references/
 

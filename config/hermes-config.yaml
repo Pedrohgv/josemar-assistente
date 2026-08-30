@@ -93,6 +93,12 @@ mcp_servers:
       GBRAIN_EMBEDDING_MODEL_REVISION: "${GBRAIN_EMBEDDING_MODEL_REVISION}"
       GBRAIN_EMBEDDING_MODEL: "${GBRAIN_EMBEDDING_MODEL}"
       GBRAIN_EMBEDDING_DIMENSIONS: "${GBRAIN_EMBEDDING_DIMENSIONS}"
+      # Issue #139: explicitly forward the strict daily-links switches to
+      # the MCP subprocess. Compose defaults both to true; missing/empty
+      # enables. The reconcile slave is effective only while the master
+      # daily-links switch is also true.
+      TASKNOTES_DAILY_LINKS_ENABLED: "${TASKNOTES_DAILY_LINKS_ENABLED}"
+      TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED: "${TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED}"
     connect_timeout: 30
     timeout: 180
     supports_parallel_tool_calls: false

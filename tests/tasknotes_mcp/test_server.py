@@ -392,11 +392,14 @@ class ServerContractTests(unittest.TestCase):
 
     def test_engine_uses_runtime_environment(self) -> None:
         """Locations are fixed constants; only the non-location operational
-        settings (lock timeout, TZ) come from the environment."""
+        settings (lock timeout, TZ, daily-links switch) come from the
+        environment. An empty daily-links value resolves to the provided
+        default (enabled)."""
         setattr(self.server, "_ENGINE", None)
         env = {
             "TASKNOTES_LOCK_TIMEOUT": "3.5",
             "TZ": "America/Sao_Paulo",
+            "TASKNOTES_DAILY_LINKS_ENABLED": "",
         }
         with mock.patch.dict(os.environ, env, clear=False):
             with mock.patch.object(self.server, "TaskNotesEngine") as engine_class:
@@ -409,6 +412,8 @@ class ServerContractTests(unittest.TestCase):
             lock_dir=Path("/opt/data/.locks"),
             lock_timeout=3.5,
             tz="America/Sao_Paulo",
+            daily_links_enabled=True,
+            reconcile_enabled=True,
         )
 
     def test_engine_fixed_locations_ignore_forged_env(self) -> None:
@@ -422,6 +427,7 @@ class ServerContractTests(unittest.TestCase):
             "TASKNOTES_LOCK_DIR": "/forged/locks",
             "TASKNOTES_LOCK_TIMEOUT": "3.5",
             "TZ": "America/Sao_Paulo",
+            "TASKNOTES_DAILY_LINKS_ENABLED": "",
         }
         with mock.patch.dict(os.environ, env, clear=False):
             with mock.patch.object(self.server, "TaskNotesEngine") as engine_class:
@@ -433,6 +439,8 @@ class ServerContractTests(unittest.TestCase):
             lock_dir=Path("/opt/data/.locks"),
             lock_timeout=3.5,
             tz="America/Sao_Paulo",
+            daily_links_enabled=True,
+            reconcile_enabled=True,
         )
 
     def test_engine_refuses_to_run_as_root(self) -> None:
@@ -486,6 +494,211 @@ class ServerContractTests(unittest.TestCase):
                 with mock.patch.object(self.server, "TaskNotesEngine") as engine_class:
                     self.server._get_engine()
         self.assertEqual(engine_class.call_args.kwargs["lock_timeout"], 3.5)
+
+    # --- TASKNOTES_DAILY_LINKS_ENABLED strict switch (issue #139) ---
+
+    def _get_engine_with_bool_env(self, raw: str | None) -> mock.Mock:
+        """Construct the engine (TaskNotesEngine mocked) with the daily-links
+        switch pinned to ``raw`` (None = key absent) in a deterministic
+        clear environment, returning the mocked engine class."""
+        setattr(self.server, "_ENGINE", None)
+        env = {"TASKNOTES_LOCK_TIMEOUT": "10", "TZ": "UTC"}
+        if raw is not None:
+            env["TASKNOTES_DAILY_LINKS_ENABLED"] = raw
+        with mock.patch.object(self.server.os, "geteuid", return_value=10000):
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.object(
+                    self.server, "TaskNotesEngine"
+                ) as engine_class:
+                    self.server._get_engine()
+        return engine_class
+
+    def test_daily_links_env_forwards_both_valid_values_case_insensitively(
+        self,
+    ) -> None:
+        for raw, expected in (
+            ("true", True),
+            ("TRUE", True),
+            ("True", True),
+            ("false", False),
+            ("FALSE", False),
+            ("False", False),
+        ):
+            with self.subTest(raw=raw):
+                engine_class = self._get_engine_with_bool_env(raw)
+                self.assertIs(
+                    engine_class.call_args.kwargs["daily_links_enabled"], expected
+                )
+
+    def test_daily_links_env_missing_or_empty_defaults_enabled(self) -> None:
+        """Missing/empty MUST resolve to the provided default (enabled):
+        the engine is constructed with the default-on value, never an
+        ambient truthy/falsy value."""
+        for raw in (None, "", "   "):
+            with self.subTest(raw=repr(raw)):
+                engine_class = self._get_engine_with_bool_env(raw)
+                self.assertIs(
+                    engine_class.call_args.kwargs["daily_links_enabled"], True
+                )
+
+    def test_daily_links_env_invalid_rejected_at_engine_init(self) -> None:
+        """Any nonempty value other than case-insensitive true/false is
+        rejected at engine init (fail-closed, no coercion); the engine is
+        never constructed and the invalid value never reaches it. Through a
+        tool call the same rejection surfaces as a tool error."""
+        for bad in ("yes", "1", "0", "on", "enabled", " true extra"):
+            with self.subTest(bad=bad):
+                setattr(self.server, "_ENGINE", None)
+                with mock.patch.object(
+                    self.server.os, "geteuid", return_value=10000
+                ):
+                    with mock.patch.dict(
+                        os.environ,
+                        {"TASKNOTES_DAILY_LINKS_ENABLED": bad},
+                        clear=False,
+                    ):
+                        with mock.patch.object(
+                            self.server, "TaskNotesEngine"
+                        ) as engine_class:
+                            with self.assertRaisesRegex(
+                                self.server.ValidationError,
+                                "TASKNOTES_DAILY_LINKS_ENABLED must be "
+                                "'true' or 'false'",
+                            ):
+                                self.server._get_engine()
+                            with self.assertRaisesRegex(
+                                FakeToolError,
+                                "TASKNOTES_DAILY_LINKS_ENABLED must be "
+                                "'true' or 'false'",
+                            ):
+                                self.server.task_get("t1")
+                self.assertIsNone(self.server._ENGINE)
+                engine_class.assert_not_called()
+
+    # --- TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED strict switch (W4a) ---
+
+    def _get_engine_with_reconcile_env(self, raw: str | None) -> mock.Mock:
+        """Construct the engine (TaskNotesEngine mocked) with the
+        reconciliation switch pinned to ``raw`` (None = key absent) in a
+        deterministic clear environment, returning the mocked engine
+        class."""
+        setattr(self.server, "_ENGINE", None)
+        env = {"TASKNOTES_LOCK_TIMEOUT": "10", "TZ": "UTC"}
+        if raw is not None:
+            env["TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED"] = raw
+        with mock.patch.object(self.server.os, "geteuid", return_value=10000):
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.object(
+                    self.server, "TaskNotesEngine"
+                ) as engine_class:
+                    self.server._get_engine()
+        return engine_class
+
+    def test_reconcile_env_forwards_both_valid_values_case_insensitively(
+        self,
+    ) -> None:
+        for raw, expected in (
+            ("true", True),
+            ("TRUE", True),
+            ("True", True),
+            ("false", False),
+            ("FALSE", False),
+            ("False", False),
+        ):
+            with self.subTest(raw=raw):
+                engine_class = self._get_engine_with_reconcile_env(raw)
+                self.assertIs(
+                    engine_class.call_args.kwargs["reconcile_enabled"], expected
+                )
+
+    def test_reconcile_env_missing_or_empty_defaults_enabled(self) -> None:
+        """Missing/empty MUST default to enabled (intended default true);
+        cross-system default propagation remains W4b."""
+        for raw in (None, "", "   "):
+            with self.subTest(raw=repr(raw)):
+                engine_class = self._get_engine_with_reconcile_env(raw)
+                self.assertIs(
+                    engine_class.call_args.kwargs["reconcile_enabled"], True
+                )
+
+    def test_reconcile_env_invalid_rejected_at_engine_init(self) -> None:
+        """Any nonempty value other than case-insensitive true/false is
+        rejected at engine init (fail-closed, no coercion); the engine is
+        never constructed and the invalid value never reaches it."""
+        for bad in ("yes", "1", "0", "on", "enabled", " true extra"):
+            with self.subTest(bad=bad):
+                setattr(self.server, "_ENGINE", None)
+                with mock.patch.object(
+                    self.server.os, "geteuid", return_value=10000
+                ):
+                    with mock.patch.dict(
+                        os.environ,
+                        {"TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED": bad},
+                        clear=False,
+                    ):
+                        with mock.patch.object(
+                            self.server, "TaskNotesEngine"
+                        ) as engine_class:
+                            with self.assertRaisesRegex(
+                                self.server.ValidationError,
+                                "TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED must "
+                                "be 'true' or 'false'",
+                            ):
+                                self.server._get_engine()
+                self.assertIsNone(self.server._ENGINE)
+                engine_class.assert_not_called()
+
+    def test_daily_links_flag_matrix_missing_empty_false_and_mixed_pairs(
+        self,
+    ) -> None:
+        """Combined matrix: both flags are parsed independently. Missing
+        and empty each resolve to enabled (per-flag provided default),
+        explicit false (any case/spacing) disables that flag alone, and
+        mixed pairs keep the other flag's value intact. Case-insensitive
+        true/false are forwarded verbatim."""
+        matrix = (
+            # (master_raw, slave_raw, master_expected, slave_expected)
+            (None, None, True, True),            # both missing -> enabled
+            ("", "", True, True),                # both empty -> enabled
+            ("   ", "  ", True, True),           # both blank -> enabled
+            ("false", "false", False, False),    # both explicit false
+            ("FALSE", "False", False, False),    # case-insensitive false
+            ("false", None, False, True),        # mixed: only master off
+            (None, "false", True, False),        # mixed: only slave off
+            ("false", "", False, True),          # mixed: explicit + empty
+            ("", "false", True, False),          # mixed: empty + explicit
+            ("TRUE", "True", True, True),        # case-insensitive true
+            ("true", "false", True, False),      # mixed explicit pair
+            ("false", "true", False, True),      # mixed explicit pair
+        )
+        for master_raw, slave_raw, master_expected, slave_expected in matrix:
+            with self.subTest(
+                master=repr(master_raw), slave=repr(slave_raw)
+            ):
+                setattr(self.server, "_ENGINE", None)
+                env = {
+                    "TASKNOTES_LOCK_TIMEOUT": "10",
+                    "TZ": "UTC",
+                    "TASKNOTES_DAILY_LINKS_ENABLED": master_raw,
+                    "TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED": slave_raw,
+                }
+                env = {k: v for k, v in env.items() if v is not None}
+                with mock.patch.object(
+                    self.server.os, "geteuid", return_value=10000
+                ):
+                    with mock.patch.dict(os.environ, env, clear=True):
+                        with mock.patch.object(
+                            self.server, "TaskNotesEngine"
+                        ) as engine_class:
+                            self.server._get_engine()
+                self.assertIs(
+                    engine_class.call_args.kwargs["daily_links_enabled"],
+                    master_expected,
+                )
+                self.assertIs(
+                    engine_class.call_args.kwargs["reconcile_enabled"],
+                    slave_expected,
+                )
 
     def test_main_uses_stdio_transport(self) -> None:
         self.server.main()

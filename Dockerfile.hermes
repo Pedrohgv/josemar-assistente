@@ -318,6 +318,10 @@ COPY scripts/hermes-gbrain-refresh-cron.sh /opt/josemar/scripts/hermes-gbrain-re
 COPY scripts/hermes-gbrain-embedding-refresh-cron.sh /opt/josemar/scripts/hermes-gbrain-embedding-refresh-cron.sh
 COPY scripts/hermes-gbrain-embedding-refresh.py /opt/josemar/scripts/hermes-gbrain-embedding-refresh.py
 COPY scripts/tasknotes_mcp_core.py scripts/tasknotes_mcp.py scripts/tasknotes_lock_run.py /opt/josemar/scripts/
+# Fixed-purpose Daily-links reconciliation CLI (issue #139 W3): invoked by
+# josemar-gbrain refresh under the inherited tasknotes lock; compile-checked
+# below so an import/syntax break fails the build loudly.
+COPY scripts/tasknotes_daily_links_reconcile.py /opt/josemar/scripts/tasknotes_daily_links_reconcile.py
 # Vault-recovery export (Phase 1): Hermes-side exporter core + cron entrypoint
 # + thin wrapper. Local staged immutable generations only; the remote
 # uploader is phase 2 and ships in its own container.
@@ -349,6 +353,7 @@ RUN chmod +x /opt/josemar/scripts/hermes-workspace-sync-cron.sh \
     /opt/josemar/scripts/hermes-gbrain-embedding-refresh.py \
     /opt/josemar/scripts/tasknotes_mcp.py \
     /opt/josemar/scripts/tasknotes_lock_run.py \
+    /opt/josemar/scripts/tasknotes_daily_links_reconcile.py \
     /opt/josemar/scripts/mnemosyne-backup-export.sh \
     /opt/josemar/scripts/mnemosyne-backup-restore.sh \
     /opt/josemar/scripts/vault-recovery-export.sh \
@@ -360,6 +365,7 @@ RUN chmod +x /opt/josemar/scripts/hermes-workspace-sync-cron.sh \
         /opt/josemar/scripts/tasknotes_mcp_core.py \
         /opt/josemar/scripts/tasknotes_mcp.py \
         /opt/josemar/scripts/tasknotes_lock_run.py \
+        /opt/josemar/scripts/tasknotes_daily_links_reconcile.py \
         /opt/josemar/scripts/mnemosyne_backup_core.py \
         /opt/josemar/scripts/vault_recovery_core.py \
         /opt/josemar/scripts/vault_recovery_restore_core.py \

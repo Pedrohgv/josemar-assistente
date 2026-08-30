@@ -35,13 +35,27 @@ Design invariants (fixed, do not redesign):
   - Completion date defaults to today in the configured TZ; explicit dates
     must be valid ``YYYY-MM-DD``. Already-completed tasks preserve the
     existing completion date.
-  - Week planning (issue #128) is the semantic ``planned_week`` argument:
-    a valid ``YYYY-MM-DD`` Monday stored under the raw ``planned_week``
-    key, mutually exclusive with ``scheduled`` on MCP writes, reserved
-    from generic custom_fields, and requiring a profile ``userFields``
-    entry of type ``date`` to set. Rewrites normalize a manually
-    inconsistent pair to scheduled-only; reads never mutate.
-"""
+   - Week planning (issue #128) is the semantic ``planned_week`` argument:
+     a valid ``YYYY-MM-DD`` Monday stored under the raw ``planned_week``
+     key, mutually exclusive with ``scheduled`` on MCP writes, reserved
+     from generic custom_fields, and requiring a profile ``userFields``
+     entry of type ``date`` to set. Rewrites normalize a manually
+     inconsistent pair to scheduled-only; reads never mutate.
+   - Daily Notes projection primitives (issue #139 W1b) are internal-only:
+     they prepare transformed Daily Note bytes and apply them with a
+     no-follow optimistic atomic writer. They only accept a validated
+     ``DailyNotesConfig`` plus a resolved Daily Note target/operation,
+     never write task files, and never invoke gbrain/PGLite.
+   - Daily-links reconciliation (issue #139 W2a/W2b) is internal-only
+     and never writes task Markdown, never invokes gbrain/PGLite, and
+     never uses the recovery marker. W2a added read-only foundations: a
+     structural cursor/pending pair at fixed runtime paths, bounded
+     no-follow atomic file primitives, a fixed-argv streamed Git object
+     reader, and bounded candidate enumeration/snapshots. W2b adds the
+     prepare/apply/targeted-commit/finalize lifecycle on those
+     foundations; only finalize advances the cursor, and only after the
+     caller confirms native sync success.
+ """
 
 from __future__ import annotations
 
@@ -2522,18 +2536,3178 @@ def today_in_tz(tz: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Daily Notes primitives (issue #139, W1a: pure/internal only)
+# ---------------------------------------------------------------------------
+#
+# Strict parsing/transformation primitives for Obsidian Daily Notes
+# integration. These are pure or internal-only helpers: they never write
+# task files, never invoke gbrain/PGLite, and are NOT wired into the
+# engine lifecycle (no engine construction requirement, no lifecycle
+# integration). Error messages are content-free.
+
+# Obsidian core Daily Notes plugin config (relative to the vault root).
+DAILY_NOTES_OBSIDIAN_DIR = ".obsidian"
+DAILY_NOTES_CONFIG_NAME = "daily-notes.json"
+DAILY_NOTES_DEFAULT_FORMAT = "YYYY-MM-DD"
+DAILY_NOTES_MAX_FILE_SIZE = 1024 * 1024  # 1 MB config/template read bound
+
+# Exact H2 heading that scopes the daily task list inside a daily note body.
+DAILY_NOTE_TASKS_HEADING = "## Tasks"
+
+# Top-level frontmatter keys normalized for daily note pages.
+DAILY_NOTE_DATE_KEY = "date"
+DAILY_NOTE_TITLE_KEY = "title"
+
+# Supported date tokens (strict subset of the Obsidian/moment syntax) and
+# the only literal characters allowed between tokens (safe numeric-path
+# separators). Every maximal alphabetic run must be exactly one supported
+# token; any other alphabetic syntax is rejected.
+_DAILY_FORMAT_TOKENS: Tuple[str, ...] = ("YYYY", "YY", "MM", "M", "DD", "D")
+_DAILY_FORMAT_ALPHA_RUN_RE = re.compile(r"[A-Za-z]+")
+_DAILY_FORMAT_SAFE_LITERAL_RE = re.compile(r"[-._/]")
+_DAILY_FORMAT_MAX_LEN = 64
+
+# Bullet list item that is exactly one wikilink (optional indent, optional
+# display text). Anything else in the section is preserved as prose.
+_DAILY_BULLET_WIKILINK_RE = re.compile(
+    r"^([ \t]*)[-*+][ \t]+\[\[([^\[\]]+)\]\][ \t]*$"
+)
+
+# Template expression (no nesting, no braces inside).
+_DAILY_TEMPLATE_EXPR_RE = re.compile(r"\{\{([^{}]*)\}\}")
+
+
+@dataclass(frozen=True)
+class DailyNotesConfig:
+    """Validated Daily Notes configuration (strict subset, lazy defaults).
+
+    ``folder`` is the relative daily-notes folder (``""`` = vault root),
+    ``format`` the note filename date format (default ``YYYY-MM-DD``), and
+    ``template`` an optional relative Markdown template (``None`` = unset).
+    """
+
+    folder: str = ""
+    format: str = DAILY_NOTES_DEFAULT_FORMAT
+    template: Optional[str] = None
+
+
+def validate_daily_note_format(fmt: str) -> str:
+    """Validate a Daily Notes date format string (strict token subset).
+
+    Every maximal alphabetic run must be exactly one of ``YYYY``, ``YY``,
+    ``MM``, ``M``, ``DD``, ``D``; literal characters between runs must be
+    safe numeric-path separators (``-``, ``.``, ``_``, ``/``). Any other
+    alphabetic or unsafe literal syntax is rejected. Returns the format
+    unchanged.
+    """
+    if not isinstance(fmt, str) or not fmt:
+        raise ValidationError("daily note format must be a non-empty string")
+    if len(fmt) > _DAILY_FORMAT_MAX_LEN:
+        raise ValidationError("daily note format exceeds length bound")
+    has_token = False
+    pos = 0
+    for run_match in _DAILY_FORMAT_ALPHA_RUN_RE.finditer(fmt):
+        for ch in fmt[pos:run_match.start()]:
+            if _DAILY_FORMAT_SAFE_LITERAL_RE.match(ch) is None:
+                raise ValidationError(
+                    "daily note format literal is not a safe path separator"
+                )
+        if run_match.group(0) not in _DAILY_FORMAT_TOKENS:
+            raise ValidationError("daily note format uses unsupported syntax")
+        has_token = True
+        pos = run_match.end()
+    for ch in fmt[pos:]:
+        if _DAILY_FORMAT_SAFE_LITERAL_RE.match(ch) is None:
+            raise ValidationError(
+                "daily note format literal is not a safe path separator"
+            )
+    if not has_token:
+        raise ValidationError("daily note format must contain a date token")
+    return fmt
+
+
+def _format_daily_token(token: str, parsed: datetime.date) -> str:
+    """Render one validated date token deterministically."""
+    if token == "YYYY":
+        return f"{parsed.year:04d}"
+    if token == "YY":
+        return f"{parsed.year % 100:02d}"
+    if token == "MM":
+        return f"{parsed.month:02d}"
+    if token == "M":
+        return str(parsed.month)
+    if token == "DD":
+        return f"{parsed.day:02d}"
+    return str(parsed.day)  # "D"
+
+
+def format_daily_note_date(date: str, fmt: str) -> str:
+    """Deterministically format a ``YYYY-MM-DD`` date with a validated format.
+
+    Token semantics: ``YYYY`` (4-digit year), ``YY`` (2-digit year),
+    ``MM``/``M`` (zero-padded/plain month), ``DD``/``D`` (zero-padded/
+    plain day). Literals must be safe numeric-path separators.
+    """
+    validate_date(date, "date")
+    validate_daily_note_format(fmt)
+    parsed = datetime.date.fromisoformat(date)
+    out: List[str] = []
+    pos = 0
+    for run_match in _DAILY_FORMAT_ALPHA_RUN_RE.finditer(fmt):
+        out.append(fmt[pos:run_match.start()])
+        out.append(_format_daily_token(run_match.group(0), parsed))
+        pos = run_match.end()
+    out.append(fmt[pos:])
+    return "".join(out)
+
+
+def _validate_relative_note_path(relative: str) -> str:
+    """Validate a vault-relative note path: safe segments only, no traversal."""
+    if not isinstance(relative, str) or not relative:
+        raise PathError("relative path must be a non-empty string")
+    if relative.startswith("/"):
+        raise PathError("relative path must not be absolute")
+    if "\\" in relative:
+        raise PathError("relative path must not contain backslash")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in relative):
+        raise PathError("relative path must not contain control characters")
+    for part in relative.split("/"):
+        if part in ("", ".", ".."):
+            raise PathError("relative path must not contain traversal segments")
+    return relative
+
+
+def _check_existing_dir_components_no_follow(vault: Path, relative_dir: str) -> None:
+    """Reject existing symlink components in a vault-relative directory path.
+
+    Missing components are tolerated (the Daily Notes plugin creates
+    folders lazily). Once a component is missing, nothing deeper can
+    exist, so the walk stops. Existing non-directory components are also
+    rejected.
+    """
+    if not relative_dir:
+        return
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    current_fd = _open_directory_no_follow(vault)
+    try:
+        for part in relative_dir.split("/"):
+            try:
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    return
+                if exc.errno == errno.ELOOP:
+                    raise PathError("path component is a symlink") from exc
+                raise PathError("cannot verify path component") from exc
+            os.close(current_fd)
+            current_fd = next_fd
+    finally:
+        os.close(current_fd)
+
+
+def _check_existing_regular_no_follow(path: Path) -> None:
+    """If ``path`` exists, require a regular file (no symlink). Tolerate absence."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise PathError("cannot inspect configured path") from exc
+    if not stat_is_regular_mode(st.st_mode):
+        raise PathError("configured path must be a regular file when present")
+
+
+def _validate_daily_notes_folder(folder: str, vault: Path) -> str:
+    """Validate the configured daily-notes folder path (may not exist yet)."""
+    if not folder:
+        return ""
+    _validate_relative_note_path(folder)
+    _check_existing_dir_components_no_follow(vault, folder)
+    return folder
+
+
+def _validate_daily_notes_template(template: str, vault: Path) -> str:
+    """Validate the configured daily-notes template path (relative Markdown)."""
+    _validate_relative_note_path(template)
+    if not template.endswith(".md"):
+        raise PathError("daily notes template must be a Markdown (.md) file")
+    parts = template.split("/")
+    dir_rel = "/".join(parts[:-1])
+    _check_existing_dir_components_no_follow(vault, dir_rel)
+    _check_existing_regular_no_follow(vault / template)
+    return template
+
+
+def load_daily_notes_config(vault: Path) -> DailyNotesConfig:
+    """Strict reader for ``<vault>/.obsidian/daily-notes.json`` (fail closed).
+
+    A validated active Obsidian core Daily Notes config is required: a
+    missing file (or missing ``.obsidian``) raises ``CoreError`` rather
+    than inferring defaults. Inside a present config, missing/empty/null
+    ``folder``/``format`` values retain their defaults (``""`` and
+    ``YYYY-MM-DD``) and ``template`` stays unset. When present, the file
+    must be a JSON object; only ``folder``, ``format``, and ``template``
+    are interpreted (unknown keys are ignored for Obsidian compatibility).
+    Path-shaped values are strictly validated: relative, no backslash/
+    control characters, no traversal or unsafe segments, and no symlink
+    components where they exist. Raises ``CoreError`` (``ValidationError``
+    /``PathError`` subclasses) on missing, malformed, or unsafe config.
+    """
+    config_path = vault / DAILY_NOTES_OBSIDIAN_DIR / DAILY_NOTES_CONFIG_NAME
+    if not target_exists_no_follow(config_path):
+        raise CoreError("daily notes config is required but missing")
+    try:
+        obsidian_fd = _open_relative_directory_no_follow(
+            vault, DAILY_NOTES_OBSIDIAN_DIR
+        )
+    except PathError:
+        raise
+    try:
+        text = _read_directory_entry_no_follow(
+            obsidian_fd,
+            DAILY_NOTES_CONFIG_NAME,
+            max_size=DAILY_NOTES_MAX_FILE_SIZE,
+        )
+    finally:
+        os.close(obsidian_fd)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValidationError("daily notes config is not valid JSON") from exc
+    if not isinstance(data, dict):
+        raise ValidationError("daily notes config root must be an object")
+
+    folder = data.get("folder")
+    if folder is None:
+        folder = ""
+    if not isinstance(folder, str):
+        raise ValidationError("daily notes folder must be a string")
+    folder = _validate_daily_notes_folder(folder, vault)
+
+    fmt = data.get("format")
+    if fmt is None:
+        fmt = ""
+    if not isinstance(fmt, str):
+        raise ValidationError("daily notes format must be a string")
+    if fmt:
+        validate_daily_note_format(fmt)
+    else:
+        fmt = DAILY_NOTES_DEFAULT_FORMAT
+
+    template = data.get("template")
+    if template is None:
+        template = ""
+    if not isinstance(template, str):
+        raise ValidationError("daily notes template must be a string")
+    if template:
+        template = _validate_daily_notes_template(template, vault)
+    else:
+        template = None
+
+    return DailyNotesConfig(folder=folder, format=fmt, template=template)
+
+
+def read_daily_note_template(vault: Path, config: DailyNotesConfig) -> Optional[str]:
+    """Read the configured daily-notes template no-follow and bounded.
+
+    Returns ``None`` when no template is configured. A configured template
+    must exist as a regular, non-symlink, bounded file; anything else is a
+    strict ``PathError``.
+    """
+    if not config.template:
+        return None
+    parts = config.template.split("/")
+    dir_rel = "/".join(parts[:-1])
+    name = parts[-1]
+    if dir_rel:
+        directory_fd = _open_relative_directory_no_follow(vault, dir_rel)
+    else:
+        directory_fd = _open_directory_no_follow(vault)
+    try:
+        return _read_directory_entry_no_follow(
+            directory_fd, name, max_size=DAILY_NOTES_MAX_FILE_SIZE
+        )
+    finally:
+        os.close(directory_fd)
+
+
+def resolve_daily_note_path(vault: Path, config: DailyNotesConfig, date: str) -> Path:
+    """Resolve ``<folder>/<formatted date>.md`` as a vault-confined path.
+
+    Pure computation over an already-validated config: the date must be a
+    valid ``YYYY-MM-DD``, the formatted filename must pass strict relative
+    path validation, and the result is joined under ``vault`` (vault-
+    confined by construction). No filesystem access.
+    """
+    validate_date(date, "date")
+    formatted = format_daily_note_date(date, config.format)
+    filename = f"{formatted}.md"
+    if config.folder:
+        relative = f"{config.folder}/{filename}"
+    else:
+        relative = filename
+    _validate_relative_note_path(relative)
+    return vault / relative
+
+
+def render_daily_note_template(template: str, *, date: str, title: str) -> str:
+    """Render a Daily Notes template body (no code execution).
+
+    Supported expressions only: ``{{date}}``, ``{{title}}``, and
+    ``{{date:FORMAT}}`` (``FORMAT`` validated by
+    :func:`validate_daily_note_format`). Any other expression is rejected;
+    nothing is ever evaluated.
+    """
+    if not isinstance(template, str):
+        raise ValidationError("daily note template must be a string")
+    if len(template) > MAX_BODY_LEN:
+        raise ValidationError("daily note template exceeds length bound")
+    validate_date(date, "date")
+    if not isinstance(title, str) or len(title) > MAX_TITLE_LEN:
+        raise ValidationError("daily note title must be a bounded string")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in title):
+        raise ValidationError("daily note title must not contain control characters")
+
+    def _replace(match: "re.Match[str]") -> str:
+        expr = match.group(1).strip()
+        if expr == "date":
+            return date
+        if expr == "title":
+            return title
+        if expr.startswith("date:"):
+            return format_daily_note_date(date, expr[len("date:"):])
+        raise ValidationError(
+            "daily note template contains an unsupported expression"
+        )
+
+    return _DAILY_TEMPLATE_EXPR_RE.sub(_replace, template)
+
+
+def build_default_daily_note_body(date: str) -> str:
+    """Deterministic default body for a missing daily note.
+
+    Includes the ``# <date>`` H1 and the exact ``## Tasks`` H2 that the
+    structural transformer scopes to.
+    """
+    validate_date(date, "date")
+    return f"# {date}\n\n{DAILY_NOTE_TASKS_HEADING}\n"
+
+
+def normalize_daily_note_frontmatter(
+    frontmatter: Mapping[str, Any], *, date: str, title_stem: str
+) -> Dict[str, Any]:
+    """Fill empty/null top-level daily-note frontmatter date/title.
+
+    A top-level ``date`` value that is null or an empty/blank string
+    becomes the scheduled ISO date; a top-level ``title`` value that is
+    null or empty/blank becomes the filename stem. Non-empty values (any
+    type) and absent keys are returned unchanged.
+    """
+    validate_date(date, "date")
+    if not isinstance(frontmatter, Mapping):
+        raise ValidationError("daily note frontmatter must be a mapping")
+    if not isinstance(title_stem, str) or not title_stem:
+        raise ValidationError("daily note title stem must be a non-empty string")
+    out = dict(frontmatter)
+    for key, fallback in (
+        (DAILY_NOTE_DATE_KEY, date),
+        (DAILY_NOTE_TITLE_KEY, title_stem),
+    ):
+        if key not in out:
+            continue
+        current = out[key]
+        if current is None or (isinstance(current, str) and not current.strip()):
+            out[key] = fallback
+    return out
+
+
+def _is_h2_heading(line: str) -> bool:
+    """Return True for exactly-level-2 headings (``##``/``## text``), not H3+."""
+    stripped = line.rstrip(" \t")
+    return stripped == "##" or stripped.startswith("## ")
+
+
+def _is_tasks_heading(line: str) -> bool:
+    """Return True for the exact ``## Tasks`` H2 (trailing whitespace tolerated)."""
+    return line.rstrip(" \t") == DAILY_NOTE_TASKS_HEADING
+
+
+def find_tasks_section(body: str) -> Tuple[int, int]:
+    """Locate the single ``## Tasks`` H2 section in a daily note body.
+
+    Returns ``(start, end)`` character offsets: ``start`` is the offset of
+    the heading line, ``end`` the offset of the next H2 heading line or
+    ``len(body)``. Only exact-text level-2 headings match; H1/H3 lines do
+    not end the section. Raises ``ValidationError`` unless the body
+    contains exactly one ``## Tasks`` heading.
+    """
+    if not isinstance(body, str):
+        raise ValidationError("daily note body must be a string")
+    if len(body) > MAX_BODY_LEN:
+        raise ValidationError("daily note body exceeds length bound")
+    lines = body.split("\n")
+    heading_offsets: List[int] = []
+    line_offsets: List[int] = []
+    offset = 0
+    for line in lines:
+        line_offsets.append(offset)
+        if _is_tasks_heading(line):
+            heading_offsets.append(offset)
+        offset += len(line) + 1
+    if len(heading_offsets) != 1:
+        raise ValidationError(
+            "daily note body must contain exactly one '## Tasks' section"
+        )
+    start = heading_offsets[0]
+    end = len(body)
+    for line, off in zip(lines, line_offsets):
+        if off > start and _is_h2_heading(line):
+            end = off
+            break
+    return start, end
+
+
+def _bullet_wikilink_matches_slug(line: str, slug: str) -> bool:
+    """Return True if the line is a bullet whose wikilink target is exactly ``slug``."""
+    matched = _DAILY_BULLET_WIKILINK_RE.match(line)
+    if matched is None:
+        return False
+    target = matched.group(2).split("|", 1)[0]
+    return target == slug
+
+
+def _daily_link_line(slug: str, indent: str = "") -> str:
+    """The exact canonical task line: a bullet-only bare wikilink."""
+    return f"{indent}- [[{slug}]]"
+
+
+def _section_bullet_wikilink_spans(
+    body: str, start: int, end: int, slug: str
+) -> List[Tuple[int, int]]:
+    """Return ``(offset, length)`` content spans of exact-slug bullet lines."""
+    spans: List[Tuple[int, int]] = []
+    offset = start
+    for line in body[start:end].split("\n"):
+        if _bullet_wikilink_matches_slug(line, slug):
+            spans.append((offset, len(line)))
+        offset += len(line) + 1
+    return spans
+
+
+def _line_removal_span(body: str, line_start: int, line_len: int) -> Tuple[int, int]:
+    """Extend a line content span to swallow exactly one adjacent newline."""
+    line_end = line_start + line_len
+    if line_end < len(body) and body[line_end] == "\n":
+        return line_start, line_end + 1
+    if line_start > 0 and body[line_start - 1] == "\n":
+        return line_start - 1, line_end
+    return line_start, line_end
+
+
+def _merge_removal_spans(
+    spans: List[Tuple[int, int]]
+) -> List[Tuple[int, int]]:
+    """Merge overlapping/adjacent removal spans (newline-swallow chains)."""
+    merged: List[Tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _apply_edits(body: str, edits: List[Tuple[int, int, str]]) -> str:
+    """Apply non-overlapping ``(start, end, replacement)`` edits in order."""
+    ordered = sorted(edits, key=lambda edit: (edit[0], edit[1]))
+    parts: List[str] = []
+    cursor = 0
+    for start, end, replacement in ordered:
+        parts.append(body[cursor:start])
+        parts.append(replacement)
+        cursor = end
+    parts.append(body[cursor:])
+    return "".join(parts)
+
+
+def add_daily_note_task_link(body: str, *, slug: str) -> Tuple[str, bool]:
+    """Add or normalize the task's bare bullet wikilink in ``## Tasks``.
+
+    The canonical task line is exactly ``- [[<slug>]]``. Any bullet-only
+    wikilink whose target is exactly ``slug`` — bare (``- [[slug]]``) or
+    carrying a prior display alias (``- [[slug|alias]]``) — inside the
+    exactly-one ``## Tasks`` section is owned: all such lines are
+    deduped, the first occurrence is normalized in place to the bare
+    canonical form (leading indentation preserved), and the duplicates
+    are removed. When no exact-slug bullet exists, the bare canonical
+    line is appended at the end of the section. Bytes outside the
+    section — and similar-but-not-exact slugs or prose — are preserved
+    verbatim. Returns ``(new_body, changed)``.
+    """
+    slug = validate_slug(slug)
+    start, end = find_tasks_section(body)
+    spans = _section_bullet_wikilink_spans(body, start, end, slug)
+    if not spans:
+        canonical = _daily_link_line(slug)
+        prefix = ""
+        if end == len(body) and body and not body.endswith("\n"):
+            prefix = "\n"
+        new_body = body[:end] + prefix + canonical + "\n" + body[end:]
+        return new_body, True
+    first_start, first_len = spans[0]
+    matched = _DAILY_BULLET_WIKILINK_RE.match(body[first_start:first_start + first_len])
+    assert matched is not None  # matched in _section_bullet_wikilink_spans
+    canonical = _daily_link_line(slug, indent=matched.group(1))
+    edits: List[Tuple[int, int, str]] = [
+        (first_start, first_start + first_len, canonical)
+    ]
+    removal_spans = [
+        _line_removal_span(body, span_start, span_len)
+        for span_start, span_len in spans[1:]
+    ]
+    for rm_start, rm_end in _merge_removal_spans(removal_spans):
+        edits.append((rm_start, rm_end, ""))
+    new_body = _apply_edits(body, edits)
+    return new_body, new_body != body
+
+
+def remove_daily_note_task_link(body: str, *, slug: str) -> Tuple[str, bool]:
+    """Remove every exact-slug bullet wikilink from ``## Tasks``.
+
+    Every bullet-only line in the section whose wikilink targets exactly
+    ``slug`` — bare (``- [[slug]]``) or carrying a display alias
+    (``- [[slug|alias]]``) — is removed together with one adjacent
+    newline. Similar slugs, prose mentions, and bytes outside the
+    section are preserved verbatim. Returns ``(new_body, changed)``;
+    unchanged bodies return ``(body, False)``.
+    """
+    slug = validate_slug(slug)
+    start, end = find_tasks_section(body)
+    spans = _section_bullet_wikilink_spans(body, start, end, slug)
+    if not spans:
+        return body, False
+    removal_spans = [
+        _line_removal_span(body, span_start, span_len)
+        for span_start, span_len in spans
+    ]
+    new_body = _apply_edits(
+        body, [(s, e, "") for s, e in _merge_removal_spans(removal_spans)]
+    )
+    return new_body, True
+
+
+# ---------------------------------------------------------------------------
+# Daily Notes projection preparation/persistence (issue #139, W1b: internal)
+# ---------------------------------------------------------------------------
+#
+# Internal primitives that turn a planned task-link ensure/remove into
+# pre-computed Daily Note bytes and apply them with a no-follow optimistic
+# atomic writer. Built strictly on top of the W1a primitives (validated
+# DailyNotesConfig, template renderer, ``## Tasks`` section transformer).
+# These helpers are NOT wired into the engine lifecycle, never write task
+# files, never invoke gbrain/PGLite, and are NOT a generic writer/tool:
+# every API only accepts a validated DailyNotesConfig plus a resolved
+# Daily Note target/operation. Error messages are content-free (no note
+# contents, no absolute/private target paths, no temp names).
+
+# Projection operations.
+DAILY_PROJECTION_OP_ENSURE = "ensure"
+DAILY_PROJECTION_OP_REMOVE = "remove"
+
+# Projection kinds (what the writer must do with the target note).
+DAILY_NOTE_PROJECTION_CREATE = "create"    # note missing at prepare: create it
+DAILY_NOTE_PROJECTION_REPLACE = "replace"  # note exists: atomic replacement
+DAILY_NOTE_PROJECTION_NONE = "none"        # nothing to write (idempotent)
+
+# Projection outcome states.
+DAILY_PROJECTION_APPLIED = "applied"
+DAILY_PROJECTION_NOT_APPLIED = "not_applied"
+DAILY_PROJECTION_CONFLICT = "projection_conflict"
+
+# Modes for newly created daily-note folders/files (umask applies on create).
+DAILY_NOTE_CREATE_DIR_MODE = 0o755
+DAILY_NOTE_CREATE_FILE_MODE = 0o644
+
+# Hard bounds.
+MAX_DAILY_PROJECTION_TARGETS = 16
+DAILY_PROJECTION_MAX_ATTEMPTS = 2  # exactly two total attempts per projection
+
+# Generic content-free projection commit message.
+DAILY_PROJECTION_COMMIT_MSG = "tasknotes-mcp: daily note projection"
+
+
+@dataclass(frozen=True)
+class _DailySourceFingerprint:
+    """Identity of the exact Daily Note source a transformation was based on.
+
+    Combines stable identity/ freshness metadata (device, inode, size,
+    ``mtime_ns``) with a SHA-256 over the bytes actually read so the
+    writer can require "same source" immediately before replacement.
+    """
+
+    dev: int
+    ino: int
+    size: int
+    mtime_ns: int
+    mode: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class DailyNoteProjection:
+    """A prepared Daily Note projection ready for atomic application.
+
+    Produced by :func:`prepare_daily_note_projection` before any task
+    side effect. ``kind`` selects the writer behavior (create / replace /
+    none); ``content`` holds the transformed bytes (``None`` for the
+    ``none`` kind); ``fingerprint`` is the source identity the
+    transformation was computed against (``None`` when the note was
+    missing). Consumed only by :func:`apply_daily_note_projection`.
+    """
+
+    operation: str
+    date: str
+    slug: str
+    target_relative: str
+    kind: str
+    content: Optional[bytes]
+    fingerprint: Optional[_DailySourceFingerprint]
+
+
+@dataclass(frozen=True)
+class DailyNoteProjectionOutcome:
+    """Structured outcome of an applied Daily Note projection.
+
+    ``state`` is one of ``applied``, ``not_applied`` (idempotent no-op),
+    or ``projection_conflict`` (persistent race; nothing was written).
+    ``attempts`` reports the write attempts consumed (1 or 2).
+    """
+
+    state: str
+    attempts: int = 1
+    created: bool = False
+    changed: bool = False
+    detail: Optional[str] = None
+
+
+def _read_fd_bytes_bounded(fd: int, max_size: int) -> bytes:
+    """Read at most ``max_size + 1`` bytes from ``fd``; close the fd.
+
+    Raises ``CoreError`` if the source exceeds ``max_size``.
+    """
+    data = b""
+    try:
+        while len(data) <= max_size:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > max_size:
+            raise CoreError("daily note exceeds size bound")
+    finally:
+        os.close(fd)
+    return data
+
+
+def _read_daily_note_source(
+    vault: Path, relative: str
+) -> Optional[Tuple[str, _DailySourceFingerprint]]:
+    """Read a Daily Note no-follow and bounded; return text + fingerprint.
+
+    Every path component is opened with ``O_NOFOLLOW`` (symlinked
+    components raise ``PathError``); the note must be a regular file
+    within the size bound. Returns ``None`` when the note — or any
+    folder along the configured path — is absent.
+    """
+    parts = relative.split("/")
+    dir_flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_DIRECTORY"):
+        dir_flags |= os.O_DIRECTORY
+    parent_fd = _open_directory_no_follow(vault)
+    try:
+        for part in parts[:-1]:
+            try:
+                next_fd = os.open(part, dir_flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise PathError(
+                        "daily note folder component is a symlink"
+                    ) from exc
+                raise PathError("cannot open daily note folder component") from exc
+            os.close(parent_fd)
+            parent_fd = next_fd
+        try:
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise PathError("daily note is a symlink") from exc
+            raise PathError("cannot open daily note") from exc
+        try:
+            st = os.fstat(fd)
+        except OSError as exc:
+            os.close(fd)
+            raise PathError("cannot inspect daily note") from exc
+        if not stat_is_regular_mode(st.st_mode):
+            os.close(fd)
+            raise PathError("daily note is not a regular file")
+        try:
+            data = _read_fd_bytes_bounded(fd, DAILY_NOTES_MAX_FILE_SIZE)
+        except CoreError:
+            raise
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CoreError("daily note is not valid UTF-8") from exc
+        fingerprint = _DailySourceFingerprint(
+            dev=st.st_dev,
+            ino=st.st_ino,
+            size=st.st_size,
+            mtime_ns=st.st_mtime_ns,
+            mode=st.st_mode & 0o7777,
+            sha256=hashlib.sha256(data).hexdigest(),
+        )
+        return text, fingerprint
+    finally:
+        os.close(parent_fd)
+
+
+def _transform_daily_note_text(
+    text: str,
+    *,
+    operation: str,
+    slug: str,
+    date: str,
+    stem: str,
+    normalize_frontmatter: bool = False,
+) -> Tuple[str, bool]:
+    """Apply the section transformer (and, only on creation, normalization).
+
+    The ``## Tasks`` requirement is enforced by the W1a transformer
+    (exactly one section). Existing-note frontmatter is never normalized
+    or reserialized: every byte outside the ``## Tasks`` section is
+    preserved verbatim unless ``normalize_frontmatter`` is explicitly
+    requested — which happens only for missing-note/template creation,
+    where null/empty top-level ``date``/``title`` values are filled
+    before the note first exists. Returns ``(new_text, changed)``.
+    """
+    fm, raw_body = _parse_frontmatter(text)
+    body_offset = len(text) - len(raw_body)
+    if operation == DAILY_PROJECTION_OP_ENSURE:
+        new_body, body_changed = add_daily_note_task_link(raw_body, slug=slug)
+    else:
+        new_body, body_changed = remove_daily_note_task_link(raw_body, slug=slug)
+    if not normalize_frontmatter:
+        return text[:body_offset] + new_body, body_changed
+    normalized = normalize_daily_note_frontmatter(fm, date=date, title_stem=stem)
+    fm_changed = normalized != fm
+    if fm_changed:
+        new_text = _serialize_frontmatter(normalized) + new_body
+    else:
+        new_text = text[:body_offset] + new_body
+    return new_text, body_changed or fm_changed
+
+
+def _validate_daily_note_content(text: str) -> bytes:
+    """Bound-check and encode transformed note content before any write."""
+    encoded = text.encode("utf-8")
+    if len(encoded) > DAILY_NOTES_MAX_FILE_SIZE:
+        raise ValidationError("daily note content exceeds size bound")
+    return encoded
+
+
+def prepare_daily_note_projection(
+    vault: Path,
+    config: DailyNotesConfig,
+    operation: str,
+    date: str,
+    *,
+    slug: str,
+) -> DailyNoteProjection:
+    """Pre-read the target and compute the transformed bytes (no side effects).
+
+    For a planned ensure/remove, reads the existing target no-follow and
+    bounded, requires exactly one ``## Tasks`` section, and applies the
+    W1a section transformer. Existing notes are never reserialized:
+    bytes outside the ``## Tasks`` section (including all frontmatter)
+    are preserved verbatim. Missing notes: ensure prepares a create from
+    the valid configured template (rendered, with null/empty top-level
+    ``date``/``title`` normalized) or the deterministic default body —
+    date/title normalization applies only during this creation; remove
+    is an idempotent no-op (no note is created just to remove it).
+    Raises typed core errors on invalid input, unreadable/symlinked/
+    oversized sources, or a missing/duplicated ``## Tasks`` section.
+    """
+    if not isinstance(config, DailyNotesConfig):
+        raise ValidationError(
+            "daily note projection requires a validated DailyNotesConfig"
+        )
+    if operation not in (DAILY_PROJECTION_OP_ENSURE, DAILY_PROJECTION_OP_REMOVE):
+        raise ValidationError(
+            "daily note operation must be 'ensure' or 'remove'"
+        )
+    validate_slug(slug)
+    target = resolve_daily_note_path(vault, config, date)
+    relative = target.relative_to(vault).as_posix()
+    stem = target.stem
+    source = _read_daily_note_source(vault, relative)
+    if source is None:
+        if operation == DAILY_PROJECTION_OP_REMOVE:
+            return DailyNoteProjection(
+                operation=operation,
+                date=date,
+                slug=slug,
+                target_relative=relative,
+                kind=DAILY_NOTE_PROJECTION_NONE,
+                content=None,
+                fingerprint=None,
+            )
+        template_text = read_daily_note_template(vault, config)
+        if template_text is None:
+            base_text = build_default_daily_note_body(date)
+        else:
+            base_text = render_daily_note_template(
+                template_text, date=date, title=stem
+            )
+        new_text, _changed = _transform_daily_note_text(
+            base_text,
+            operation=operation,
+            slug=slug,
+            date=date,
+            stem=stem,
+            # Date/title normalization applies only during missing-note
+            # creation (template rendering); existing notes are never
+            # normalized or reserialized.
+            normalize_frontmatter=True,
+        )
+        return DailyNoteProjection(
+            operation=operation,
+            date=date,
+            slug=slug,
+            target_relative=relative,
+            kind=DAILY_NOTE_PROJECTION_CREATE,
+            content=_validate_daily_note_content(new_text),
+            fingerprint=None,
+        )
+    text, fingerprint = source
+    new_text, changed = _transform_daily_note_text(
+        text,
+        operation=operation,
+        slug=slug,
+        date=date,
+        stem=stem,
+    )
+    if not changed:
+        return DailyNoteProjection(
+            operation=operation,
+            date=date,
+            slug=slug,
+            target_relative=relative,
+            kind=DAILY_NOTE_PROJECTION_NONE,
+            content=None,
+            fingerprint=fingerprint,
+        )
+    return DailyNoteProjection(
+        operation=operation,
+        date=date,
+        slug=slug,
+        target_relative=relative,
+        kind=DAILY_NOTE_PROJECTION_REPLACE,
+        content=_validate_daily_note_content(new_text),
+        fingerprint=fingerprint,
+    )
+
+
+def _open_daily_parent_dir(
+    vault: Path, dir_rel: str, *, create: bool
+) -> Optional[int]:
+    """Open the note's parent directory no-follow; optionally mkdir missing parts.
+
+    Missing components are created only when ``create`` is true, along
+    the already-validated configured path, and each created (or racing)
+    component is immediately reopened with ``O_NOFOLLOW|O_DIRECTORY`` so
+    a symlink swap is rejected. Returns ``None`` when a component is
+    missing and creation was not requested.
+    """
+    if not dir_rel:
+        return _open_directory_no_follow(vault)
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    current_fd = _open_directory_no_follow(vault)
+    try:
+        for part in dir_rel.split("/"):
+            try:
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create:
+                    os.close(current_fd)
+                    return None
+                try:
+                    os.mkdir(part, DAILY_NOTE_CREATE_DIR_MODE, dir_fd=current_fd)
+                except FileExistsError:
+                    pass  # racing creator; re-checked by the open below
+                except OSError as exc:
+                    raise PathError("cannot create daily note folder") from exc
+                try:
+                    next_fd = os.open(part, flags, dir_fd=current_fd)
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP:
+                        raise PathError(
+                            "daily note folder component is a symlink"
+                        ) from exc
+                    raise PathError(
+                        "cannot open daily note folder component"
+                    ) from exc
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise PathError(
+                        "daily note folder component is a symlink"
+                    ) from exc
+                raise PathError("cannot open daily note folder component") from exc
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def _daily_entry_exists(parent_fd: int, name: str) -> bool:
+    """No-follow existence check for one directory entry."""
+    try:
+        os.lstat(name, dir_fd=parent_fd)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise PathError("cannot inspect daily note path") from exc
+
+
+def _daily_fingerprint_matches(
+    parent_fd: int, name: str, fingerprint: _DailySourceFingerprint
+) -> bool:
+    """Reopen/restat/rehash the source; require the identical fingerprint."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise PathError("daily note is a symlink") from exc
+        raise PathError("cannot open daily note") from exc
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:
+        os.close(fd)
+        raise PathError("cannot inspect daily note") from exc
+    if (
+        st.st_dev,
+        st.st_ino,
+        st.st_size,
+        st.st_mtime_ns,
+    ) != (
+        fingerprint.dev,
+        fingerprint.ino,
+        fingerprint.size,
+        fingerprint.mtime_ns,
+    ):
+        os.close(fd)
+        return False
+    try:
+        data = _read_fd_bytes_bounded(fd, DAILY_NOTES_MAX_FILE_SIZE)
+    except (CoreError, OSError):
+        # Unreadable or overgrown source counts as a mismatch (race);
+        # the recompute path re-reads strictly.
+        return False
+    return hashlib.sha256(data).hexdigest() == fingerprint.sha256
+
+
+def _create_daily_temp_file(parent_fd: int, target_name: str) -> Tuple[str, int]:
+    """Create a sibling temp file with O_EXCL|O_NOFOLLOW; return (name, fd)."""
+    for _ in range(8):
+        candidate = f".{target_name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+        try:
+            fd = os.open(
+                candidate,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise PathError("daily note temp path is a symlink") from exc
+            raise CoreError("cannot create daily note temp file") from exc
+        return candidate, fd
+    raise CoreError("cannot create daily note temp file")
+
+
+def _apply_daily_projection_attempt(
+    vault: Path,
+    projection: DailyNoteProjection,
+    *,
+    hook: Optional[Callable[[], None]],
+) -> Optional[str]:
+    """Apply one projection attempt; return the outcome state or None on race.
+
+    Creates/opens the parent directory no-follow, writes a sibling temp
+    file (O_EXCL|O_NOFOLLOW), fsyncs the content, runs the final-check
+    test seam, re-verifies the source fingerprint (or continued absence),
+    publishes, fsyncs the parent when supported, and always cleans the
+    temp file on failure. Never overwrites a source that changed since
+    prepare. Publication is atomic and kind-aware: a replace projection
+    publishes with ``os.replace`` after fingerprint re-verification; a
+    create projection publishes with an atomic no-clobber ``os.link`` so
+    a target materialized at the actual publication boundary (EEXIST) is
+    never overwritten and becomes a retryable race instead. OSError from
+    the write/publish syscalls is mapped to a typed content-free
+    ``CoreError`` so it degrades into the projection write-failure
+    result instead of escaping after the task has been committed.
+    """
+    parts = projection.target_relative.split("/")
+    name = parts[-1]
+    dir_rel = "/".join(parts[:-1])
+    kind = projection.kind
+    if kind == DAILY_NOTE_PROJECTION_NONE:
+        parent_fd = _open_daily_parent_dir(vault, dir_rel, create=False)
+        try:
+            if parent_fd is None:
+                # The note (and its folder) cannot exist now.
+                if projection.fingerprint is None:
+                    return DAILY_PROJECTION_NOT_APPLIED
+                return None  # source vanished since prepare: race
+            if hook is not None:
+                hook()
+            if projection.fingerprint is None:
+                if _daily_entry_exists(parent_fd, name):
+                    return None  # note appeared since prepare: race
+                return DAILY_PROJECTION_NOT_APPLIED
+            if not _daily_fingerprint_matches(
+                parent_fd, name, projection.fingerprint
+            ):
+                return None  # changed since prepare: race
+            return DAILY_PROJECTION_NOT_APPLIED
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
+    if kind not in (DAILY_NOTE_PROJECTION_CREATE, DAILY_NOTE_PROJECTION_REPLACE):
+        raise ValidationError("invalid daily note projection kind")
+    if not isinstance(projection.content, (bytes, bytearray)):
+        raise ValidationError("daily note projection content must be bytes")
+    fingerprint = projection.fingerprint
+    if kind == DAILY_NOTE_PROJECTION_REPLACE and fingerprint is None:
+        raise ValidationError("replace projection requires a source fingerprint")
+    content = bytes(projection.content)
+    parent_fd = _open_daily_parent_dir(
+        vault, dir_rel, create=(kind == DAILY_NOTE_PROJECTION_CREATE)
+    )
+    if parent_fd is None:
+        return None  # parent vanished since prepare: race
+    mode = (
+        fingerprint.mode
+        if fingerprint is not None
+        else DAILY_NOTE_CREATE_FILE_MODE
+    )
+    temp_name: Optional[str] = None
+    published = False
+    try:
+        temp_name, temp_fd = _create_daily_temp_file(parent_fd, name)
+        try:
+            try:
+                view = memoryview(content)
+                while view:
+                    written = os.write(temp_fd, view)
+                    view = view[written:]
+                os.fsync(temp_fd)
+                os.fchmod(temp_fd, mode)
+            except OSError as exc:
+                # Write-stage failures must never escape after the task
+                # has been committed: map them into the typed projection
+                # write-failure path (degraded daily result, temp cleaned
+                # by the finally below, never a recovery marker).
+                raise CoreError(
+                    "daily note projection write failed"
+                ) from exc
+        finally:
+            os.close(temp_fd)
+        # Final-check test seam: runs immediately before the source
+        # re-verification so tests can inject concurrent modifications.
+        if hook is not None:
+            hook()
+        if kind == DAILY_NOTE_PROJECTION_CREATE:
+            if _daily_entry_exists(parent_fd, name):
+                return None  # note appeared since prepare: race
+        else:
+            if fingerprint is None or not _daily_fingerprint_matches(
+                parent_fd, name, fingerprint
+            ):
+                return None  # source changed since prepare: race
+        if kind == DAILY_NOTE_PROJECTION_CREATE:
+            # Atomic no-clobber publication: the absence check above is
+            # only advisory, so the target is created by hard-linking the
+            # fsynced sibling temp file. If a competing creator
+            # materializes the target at the actual publication boundary,
+            # ``os.link`` fails with EEXIST, the racing bytes are never
+            # overwritten, and the caller takes the bounded
+            # re-read/recompute/retry path.
+            try:
+                os.link(
+                    temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd
+                )
+            except FileExistsError:
+                return None  # created at the publication boundary: race
+            except OSError as exc:
+                raise CoreError(
+                    "daily note projection write failed"
+                ) from exc
+            # The temp name still exists (second hard link to the same
+            # inode); ``published`` stays False so the finally below
+            # removes it while the target keeps the published content.
+        else:
+            try:
+                os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            except OSError as exc:
+                # Publish-stage failures map to the same typed write-failure
+                # path; the temp file is cleaned up below and the target is
+                # never partially written.
+                raise CoreError(
+                    "daily note projection write failed"
+                ) from exc
+            published = True  # os.replace consumed the temp name
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            pass  # parent fsync is best-effort (not supported everywhere)
+        return DAILY_PROJECTION_APPLIED
+    finally:
+        if temp_name is not None and not published:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        os.close(parent_fd)
+
+
+def apply_daily_note_projection(
+    vault: Path,
+    config: DailyNotesConfig,
+    projection: DailyNoteProjection,
+    *,
+    _final_check_hook: Optional[Callable[[], None]] = None,
+) -> DailyNoteProjectionOutcome:
+    """Optimistically apply a prepared projection (exactly two attempts).
+
+    The first attempt applies the prepared bytes; on a detected race the
+    transformation is recomputed (fresh strict read + transform) and the
+    second — final — attempt is made. A persistent race returns the
+    typed generic ``projection_conflict`` outcome and never overwrites
+    the racing content. Creation is no-clobber at the actual publication
+    boundary: a target created concurrently there is never overwritten
+    (the EEXIST becomes a retryable race). OSError from the
+    write/publish syscalls is mapped to a typed content-free ``CoreError``
+    (write-failure path). ``_final_check_hook`` is an internal test seam
+    invoked immediately before each final check.
+    """
+    if not isinstance(config, DailyNotesConfig):
+        raise ValidationError(
+            "daily note projection requires a validated DailyNotesConfig"
+        )
+    if not isinstance(projection, DailyNoteProjection):
+        raise ValidationError("daily note projection requires a prepared projection")
+    _validate_relative_note_path(projection.target_relative)
+    attempts = 0
+    current = projection
+    while attempts < DAILY_PROJECTION_MAX_ATTEMPTS:
+        attempts += 1
+        state = _apply_daily_projection_attempt(
+            vault, current, hook=_final_check_hook
+        )
+        if state is not None:
+            return DailyNoteProjectionOutcome(
+                state=state,
+                attempts=attempts,
+                created=(
+                    state == DAILY_PROJECTION_APPLIED
+                    and current.kind == DAILY_NOTE_PROJECTION_CREATE
+                ),
+                changed=(
+                    state == DAILY_PROJECTION_APPLIED
+                    and current.kind == DAILY_NOTE_PROJECTION_REPLACE
+                ),
+            )
+        if attempts < DAILY_PROJECTION_MAX_ATTEMPTS:
+            current = prepare_daily_note_projection(
+                vault,
+                config,
+                current.operation,
+                current.date,
+                slug=current.slug,
+            )
+    return DailyNoteProjectionOutcome(
+        state=DAILY_PROJECTION_CONFLICT,
+        attempts=attempts,
+        detail="daily note changed during projection; not applied",
+    )
+
+
+def git_commit_daily_projection_targets(
+    vault: Path,
+    targets: List[Path],
+    git_env: Optional[Dict[str, str]] = None,
+) -> bool:
+    """Stage only the provided Daily Note paths and commit iff staged.
+
+    Bounded explicit multi-target companion to the task Git helpers: it
+    stages exactly the given (already vault-confined) changed Daily Note
+    paths — never ``git add -A`` — and creates one generic content-free
+    projection commit. Targets are lexically validated to stay inside
+    the vault (relative, no traversal, no backslash). Hooks, signing,
+    gc, and maintenance are disabled command-locally. Never runs
+    checkout/reset/clean/merge/pull/push. Returns True if a commit was
+    created, False if nothing was staged.
+    """
+    if git_env is None:
+        git_env = _build_git_env()
+    if len(targets) > MAX_DAILY_PROJECTION_TARGETS:
+        raise ValidationError("daily note projection targets exceed count bound")
+    rels: List[str] = []
+    seen: set = set()
+    for target in targets:
+        path = Path(target)
+        if path.is_absolute():
+            try:
+                rel = path.relative_to(vault)
+            except ValueError as exc:
+                raise PathError("daily note projection target is not in the vault") from exc
+        else:
+            rel = path
+        rel_str = rel.as_posix()
+        _validate_relative_note_path(rel_str)
+        if rel_str in seen:
+            continue
+        seen.add(rel_str)
+        rels.append(rel_str)
+    if not rels:
+        return False
+    r = _run_git(vault, git_env, ["add", "--"] + rels)
+    if r.returncode != 0:
+        raise GitError(f"git add daily projection targets failed: {_redact(r.stderr)[:200]}")
+    r = _run_git(vault, git_env, ["diff", "--cached", "--quiet"])
+    if r.returncode == 0:
+        return False
+    r = _run_git(vault, git_env, ["commit", "-m", DAILY_PROJECTION_COMMIT_MSG, "--"] + rels)
+    if r.returncode != 0:
+        raise GitError(f"git daily projection commit failed: {_redact(r.stderr)[:200]}")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Daily Notes link integration (issue #139, W2: engine lifecycle)
+# ---------------------------------------------------------------------------
+#
+# Scheduled-driven Daily Notes projection for create/update/delete. The
+# final ACTUAL scheduling state (never caller intent) drives the link
+# transitions; plans are composed by resolved target path (a transition
+# collapsing onto one daily target emits exactly one ensure); resolved
+# targets inside the task/archive folders are rejected before any task
+# side effect. The Daily Notes config is loaded and validated at most
+# once per operation, before the task side effects, and the same
+# immutable snapshot is carried through the post-task apply/commit/sync
+# (no engine-lifetime caching). The W1b prepare/apply primitives and the
+# multi-target Git helper do all the work. Only ``applied_and_committed``
+# task outcomes are projected; projection-only failures degrade the
+# optional daily result fields and never change the authoritative task
+# state, never write task files, and never use the recovery marker.
+
+# Daily link projection result states (content-free).
+DAILY_LINK_APPLIED = "applied_and_committed"
+DAILY_LINK_SYNC_FAILED = "committed_sync_failed"
+DAILY_LINK_CONFLICT = "conflict"
+DAILY_LINK_WRITE_FAILED = "write_failed"
+DAILY_LINK_COMMIT_FAILED = "commit_failed"
+DAILY_LINK_NOT_APPLICABLE = "not_applicable"
+DAILY_LINK_NOT_APPLIED = "not_applied"
+
+# Generic content-free details for degraded daily outcomes.
+_DAILY_LINK_FAILURE_DETAIL = {
+    DAILY_LINK_CONFLICT: "daily note projection conflict",
+    DAILY_LINK_WRITE_FAILED: "daily note projection write failed",
+    DAILY_LINK_COMMIT_FAILED: "daily note projection commit failed",
+    DAILY_LINK_SYNC_FAILED: "daily note projection committed but sync failed",
+}
+
+
+def _daily_scheduled_date(value: Any) -> Optional[str]:
+    """Extract a plain ``YYYY-MM-DD`` scheduled value; None when unusable.
+
+    Collapses the gbrain-normalized bare-date form back to ``YYYY-MM-DD``
+    and validates. Non-strings and invalid dates yield ``None`` (only a
+    valid scheduled date drives a daily link; scheduled is the sole
+    source).
+    """
+    if not isinstance(value, str):
+        return None
+    value = _denormalize_bare_date(value)
+    try:
+        return validate_date(value, "scheduled")
+    except ValidationError:
+        return None
+
+
+def _daily_link_plan(
+    old: Optional[str], new: Optional[str]
+) -> Optional[List[Tuple[str, str]]]:
+    """Compute ensure/remove steps from the actual scheduling transition.
+
+    ``old``/``new`` are plain ``YYYY-MM-DD`` scheduled dates or None
+    (backlog/week planning). Order matters: the ensure of the new date
+    always precedes the removal of the old date so a partial failure
+    never loses the link.
+    """
+    if new is not None:
+        steps: List[Tuple[str, str]] = [(DAILY_PROJECTION_OP_ENSURE, new)]
+        if old is not None and old != new:
+            steps.append((DAILY_PROJECTION_OP_REMOVE, old))
+        return steps
+    if old is not None:
+        return [(DAILY_PROJECTION_OP_REMOVE, old)]
+    return None
+
+
+def _compose_daily_link_plan_by_target(
+    vault: Path,
+    config: DailyNotesConfig,
+    steps: List[Tuple[str, str]],
+) -> List[Tuple[str, str]]:
+    """Compose planned steps by resolved target path, not merely date.
+
+    ``steps`` are date-level ensure/remove steps in plan order (ensure
+    before remove). Steps whose dates resolve to the same Daily Note
+    target (e.g. a ``YYYY-MM`` format where D1 and D2 share one monthly
+    note) collapse to the first step: a D1 -> D2 transition resolving to
+    a single target emits exactly one ensure and never an ensure
+    followed by a remove of the same link.
+    """
+    composed: List[Tuple[str, str]] = []
+    seen: set = set()
+    for operation, date in steps:
+        target = resolve_daily_note_path(vault, config, date)
+        relative = target.relative_to(vault).as_posix()
+        if relative in seen:
+            continue
+        seen.add(relative)
+        composed.append((operation, date))
+    return composed
+
+
+def _reject_daily_projection_collision(
+    profile: TaskNotesProfile, target_relative: str
+) -> None:
+    """Reject a projection target inside task/archive Markdown folders.
+
+    Task Markdown is gbrain-only; the Daily Notes direct writer must
+    never mutate TaskNotes-managed files. Any resolved daily-note target
+    inside the configured ``tasksFolder`` — or inside the active archive
+    folder (relevant only when ``moveArchivedTasks`` is true and an
+    archive folder is configured) — is rejected deterministically
+    before any side effect.
+    """
+    protected = [profile.tasks_folder]
+    if profile.move_archived_tasks and profile.archive_folder:
+        protected.append(profile.archive_folder)
+    for folder in protected:
+        if target_relative == folder or target_relative.startswith(folder + "/"):
+            raise ValidationError(
+                "daily note projection target collides with the task or "
+                "archive folder"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Daily-links reconciliation foundations (issue #139, W2a: read-only)
+# ---------------------------------------------------------------------------
+#
+# Private, read-only foundations for the future Daily Notes link
+# backfill/reconciliation (prepare/finalize lands in later phases on
+# these stable names). Nothing here advances the cursor, writes task
+# files, writes projections, invokes gbrain/PGLite, uses the public
+# gbrain wrapper, or touches the recovery marker.
+#
+# State lives in two fixed runtime files under ``/opt/data/.gbrain``
+# (never under the vault, never in the gbrain DB): the reconcile cursor
+# and its fixed pending sibling. Both hold only structural metadata —
+# schema id/version, a reconciled HEAD SHA, the prior Daily Notes
+# folder/format, and the projection format version — never titles, note
+# bodies, or any content. A missing cursor is the bootstrap signal; any
+# present-but-invalid document (malformed, oversized, schema- or
+# SHA-invalid) fails closed. File primitives are bounded, no-follow,
+# atomic (temp + fsync + replace), restrictive-mode, and content-free
+# on error. Git task objects are read via fixed-argv, no-shell,
+# streamed ``git show`` with a kill/reap hard cap aligned to
+# ``LIST_MAX_FILE_SIZE`` (not ``MAX_OUTPUT``); there is no custom Git
+# object/pack parser.
+
+# Fixed runtime paths (never vault-relative, never gbrain DB).
+DAILY_LINKS_RECONCILE_CURSOR_PATH = Path(
+    "/opt/data/.gbrain/josemar-tasknotes-daily-links-reconcile.json"
+)
+DAILY_LINKS_RECONCILE_PENDING_PATH = Path(
+    "/opt/data/.gbrain/josemar-tasknotes-daily-links-reconcile-pending.json"
+)
+
+# Cursor/pending schema identity. A version bump is a deliberate
+# migration event; readers reject every other version (fail closed).
+# The pending document gained its applied-routing pin while the format
+# was still unwired (no released writer exists), so the shared version
+# remains 1.
+DAILY_LINKS_RECONCILE_SCHEMA_ID = "josemar-tasknotes-daily-links-reconcile"
+DAILY_LINKS_RECONCILE_CURSOR_VERSION = 1
+
+# The projection link format version recorded by the cursor. A mismatch
+# means the cursor was produced for a different link format and later
+# reconciliation must not assume compatibility (the loader rejects it).
+DAILY_LINKS_PROJECTION_FORMAT_VERSION = 1
+
+# Cursor/pending documents are tiny structural JSON; this bound is a
+# corruption guard, not a storage budget.
+RECONCILE_CURSOR_MAX_FILE_SIZE = 64 * 1024
+RECONCILE_CURSOR_FILE_MODE = 0o600
+
+# Candidate classification constants (pure, deterministic).
+RECONCILE_CLASS_CANDIDATE = "candidate"
+RECONCILE_CLASS_NON_TASK = "non_task"
+RECONCILE_CLASS_MALFORMED = "malformed"
+
+# Candidate locations inside the snapshot.
+RECONCILE_LOCATION_TASKS = "tasks"
+RECONCILE_LOCATION_ARCHIVE = "archive"
+
+# Git object read states. ``missing`` is the typed no-before-state
+# result: the task path simply does not exist at the requested commit.
+GIT_OBJECT_PRESENT = "present"
+GIT_OBJECT_MISSING = "missing"
+
+# Exact key sets of the two reconcile documents (fail closed on both
+# missing and extra keys; the format is private and versioned).
+_RECONCILE_CURSOR_JSON_KEYS = frozenset(
+    {"schema", "version", "reconciled_head", "daily_folder", "daily_format",
+     "projection_format"}
+)
+_RECONCILE_PENDING_JSON_KEYS = frozenset(
+    {"schema", "version", "from_head", "to_head", "started_at",
+     "daily_folder", "daily_format"}
+)
+
+_GIT_SHA_HEX = frozenset("abcdef") | frozenset(str(value) for value in range(10))
+
+
+@dataclass(frozen=True)
+class DailyLinksReconcileCursor:
+    """Strict reconcile cursor (structural metadata only, never content).
+
+    ``reconciled_head`` is the full vault HEAD SHA through which all
+    Daily Notes links are considered reconciled. ``daily_folder``/``daily_format``
+    record the prior Daily Notes configuration so later phases can resolve
+    old targets after config changes. ``projection_format`` is the link
+    format version the reconciliation was performed with.
+    """
+
+    reconciled_head: str
+    daily_folder: str
+    daily_format: str
+    projection_format: int
+    version: int = DAILY_LINKS_RECONCILE_CURSOR_VERSION
+
+
+@dataclass(frozen=True)
+class DailyLinksReconcilePending:
+    """Strict in-flight reconciliation marker (fixed pending sibling).
+
+    ``daily_folder``/``daily_format`` structurally pin the applied Daily
+    Notes routing snapshot: the exact configuration representation the
+    applied cycle used, consumed by finalize identity verification and
+    by old-routing lookup when a later prepare replays an
+    applied-but-unfinalized cycle. Non-sensitive commit/routing
+    metadata only.
+    """
+
+    from_head: str
+    to_head: str
+    started_at: int
+    daily_folder: str
+    daily_format: str
+    version: int = DAILY_LINKS_RECONCILE_CURSOR_VERSION
+
+
+def is_valid_git_commit_sha(value: Any) -> bool:
+    """True for a full lowercase hexadecimal Git object id (SHA-1/SHA-256)."""
+    if not isinstance(value, str) or len(value) not in (40, 64):
+        return False
+    return all(ch in _GIT_SHA_HEX for ch in value)
+
+
+def validate_git_commit_sha(value: Any) -> str:
+    """Require a full lowercase hexadecimal Git object id (fail closed)."""
+    if not is_valid_git_commit_sha(value):
+        raise ValidationError(
+            "value must be a full lowercase hexadecimal Git object id"
+        )
+    return value
+
+
+def validate_git_task_object_path(value: Any) -> str:
+    """Validate a vault-relative task Markdown path for ``<sha>:<path>`` revs."""
+    _validate_relative_note_path(value)
+    if not value.endswith(".md"):
+        raise PathError("git object path must be a Markdown (.md) file")
+    return value
+
+
+def _require_reconcile_document_header(
+    data: Any, keys: frozenset
+) -> None:
+    """Strict common document checks: object root, exact keys, schema, version."""
+    if not isinstance(data, Mapping):
+        raise ValidationError("reconcile state document root must be an object")
+    if set(data.keys()) != keys:
+        raise ValidationError("reconcile state document schema is invalid")
+    if data["schema"] != DAILY_LINKS_RECONCILE_SCHEMA_ID:
+        raise ValidationError("reconcile state document schema id mismatch")
+    version = data["version"]
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != DAILY_LINKS_RECONCILE_CURSOR_VERSION
+    ):
+        raise ValidationError("reconcile state document version mismatch")
+
+
+def parse_daily_links_reconcile_cursor(
+    data: Mapping[str, Any]
+) -> DailyLinksReconcileCursor:
+    """Strictly validate a parsed cursor document (pure, fail closed).
+
+    Rejects missing/extra keys, schema id/version mismatch, SHA-invalid
+    heads, unsafe folders, invalid formats, and projection format
+    mismatch. Holds no titles or note bodies by construction.
+    """
+    _require_reconcile_document_header(data, _RECONCILE_CURSOR_JSON_KEYS)
+    head = validate_git_commit_sha(data["reconciled_head"])
+    folder = data["daily_folder"]
+    if not isinstance(folder, str):
+        raise ValidationError("reconcile cursor daily folder must be a string")
+    if folder:
+        _validate_relative_note_path(folder)
+    fmt = data["daily_format"]
+    if not isinstance(fmt, str):
+        raise ValidationError("reconcile cursor daily format must be a string")
+    validate_daily_note_format(fmt)
+    projection_format = data["projection_format"]
+    if isinstance(projection_format, bool) or not isinstance(projection_format, int):
+        raise ValidationError(
+            "reconcile cursor projection format must be an integer"
+        )
+    if projection_format != DAILY_LINKS_PROJECTION_FORMAT_VERSION:
+        raise ValidationError("reconcile cursor projection format mismatch")
+    return DailyLinksReconcileCursor(
+        reconciled_head=head,
+        daily_folder=folder,
+        daily_format=fmt,
+        projection_format=projection_format,
+        version=data["version"],
+    )
+
+
+def parse_daily_links_reconcile_pending(
+    data: Mapping[str, Any]
+) -> DailyLinksReconcilePending:
+    """Strictly validate a parsed pending document (pure, fail closed).
+
+    The applied-routing pin (``daily_folder``/``daily_format``) is
+    validated with the same strictness as the cursor's routing fields.
+    """
+    _require_reconcile_document_header(data, _RECONCILE_PENDING_JSON_KEYS)
+    from_head = validate_git_commit_sha(data["from_head"])
+    to_head = validate_git_commit_sha(data["to_head"])
+    started_at = data["started_at"]
+    if (
+        isinstance(started_at, bool)
+        or not isinstance(started_at, int)
+        or started_at <= 0
+    ):
+        raise ValidationError(
+            "reconcile pending started_at must be a positive integer"
+        )
+    folder = data["daily_folder"]
+    if not isinstance(folder, str):
+        raise ValidationError("reconcile pending daily folder must be a string")
+    if folder:
+        _validate_relative_note_path(folder)
+    fmt = data["daily_format"]
+    if not isinstance(fmt, str):
+        raise ValidationError("reconcile pending daily format must be a string")
+    validate_daily_note_format(fmt)
+    return DailyLinksReconcilePending(
+        from_head=from_head,
+        to_head=to_head,
+        started_at=started_at,
+        daily_folder=folder,
+        daily_format=fmt,
+        version=data["version"],
+    )
+
+
+def _daily_links_reconcile_cursor_payload(
+    cursor: DailyLinksReconcileCursor
+) -> Dict[str, Any]:
+    """Canonical (sorted-keys on dump) structural cursor payload."""
+    return {
+        "schema": DAILY_LINKS_RECONCILE_SCHEMA_ID,
+        "version": cursor.version,
+        "reconciled_head": cursor.reconciled_head,
+        "daily_folder": cursor.daily_folder,
+        "daily_format": cursor.daily_format,
+        "projection_format": cursor.projection_format,
+    }
+
+
+def _daily_links_reconcile_pending_payload(
+    pending: DailyLinksReconcilePending
+) -> Dict[str, Any]:
+    """Canonical (sorted-keys on dump) structural pending payload."""
+    return {
+        "schema": DAILY_LINKS_RECONCILE_SCHEMA_ID,
+        "version": pending.version,
+        "from_head": pending.from_head,
+        "to_head": pending.to_head,
+        "started_at": pending.started_at,
+        "daily_folder": pending.daily_folder,
+        "daily_format": pending.daily_format,
+    }
+
+
+def _read_reconcile_json_document(
+    path: Path, *, max_size: int
+) -> Optional[Mapping[str, Any]]:
+    """Read a bounded runtime JSON object no-follow; ``None`` when absent.
+
+    Any present-but-unreadable, symlinked, non-regular, oversized, or
+    non-JSON document fails closed with typed, content-free errors.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise PathError("reconcile state file is a symlink") from exc
+        raise PathError("cannot open reconcile state file") from exc
+    closed = False
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError as exc:
+            raise PathError("cannot inspect reconcile state file") from exc
+        if not stat_is_regular_mode(st.st_mode):
+            raise PathError("reconcile state file is not a regular file")
+        try:
+            data = _read_fd_bytes_bounded(fd, max_size)  # closes fd itself
+            closed = True
+        except CoreError:
+            raise CoreError("reconcile state file exceeds size bound") from None
+    finally:
+        if not closed:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValidationError("reconcile state file is not valid UTF-8") from exc
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValidationError("reconcile state file is not valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValidationError("reconcile state file root must be an object")
+    return parsed
+
+
+def _write_reconcile_json_document(
+    path: Path, payload: Mapping[str, Any]
+) -> None:
+    """Atomically publish a bounded runtime JSON document.
+
+    Creates the parent directory (runtime state area, never the vault),
+    writes a restrictive-mode ``O_EXCL|O_NOFOLLOW`` temp sibling, fsyncs
+    it, publishes with ``os.replace`` (no-follow by construction), and
+    best-effort fsyncs the parent. The temp file is always cleaned up on
+    failure. Errors are typed and content-free.
+    """
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    if len(encoded) > RECONCILE_CURSOR_MAX_FILE_SIZE:
+        raise ValidationError("reconcile state payload exceeds size bound")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise PathError("cannot prepare reconcile state directory") from exc
+    parent_fd = _open_directory_no_follow(path.parent)
+    name = path.name
+    temp_name: Optional[str] = None
+    temp_fd: Optional[int] = None
+    published = False
+    try:
+        for _ in range(8):
+            candidate = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+            try:
+                temp_fd = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise PathError(
+                        "reconcile state temp path is a symlink"
+                    ) from exc
+                raise CoreError(
+                    "cannot create reconcile state temp file"
+                ) from exc
+            temp_name = candidate
+            break
+        if temp_name is None or temp_fd is None:
+            raise CoreError("cannot create reconcile state temp file")
+        try:
+            view = memoryview(encoded)
+            while view:
+                written = os.write(temp_fd, view)
+                view = view[written:]
+            os.fsync(temp_fd)
+            os.fchmod(temp_fd, RECONCILE_CURSOR_FILE_MODE)
+        except OSError as exc:
+            raise CoreError("cannot write reconcile state file") from exc
+        finally:
+            os.close(temp_fd)
+            temp_fd = None
+        try:
+            os.replace(temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            published = True
+        except OSError as exc:
+            raise CoreError("cannot publish reconcile state file") from exc
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            pass  # parent fsync is best-effort (not supported everywhere)
+    finally:
+        if temp_name is not None and not published:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        if temp_fd is not None:
+            try:
+                os.close(temp_fd)
+            except OSError:
+                pass
+        os.close(parent_fd)
+
+
+def load_daily_links_reconcile_cursor(
+    path: Optional[Path] = None,
+) -> Optional[DailyLinksReconcileCursor]:
+    """Load the reconcile cursor; ``None`` means bootstrap (no cursor yet).
+
+    A missing cursor is the bootstrap signal. Any present-but-invalid
+    document fails closed (typed ``CoreError`` subclasses).
+    """
+    cursor_path = DAILY_LINKS_RECONCILE_CURSOR_PATH if path is None else path
+    data = _read_reconcile_json_document(
+        cursor_path, max_size=RECONCILE_CURSOR_MAX_FILE_SIZE
+    )
+    if data is None:
+        return None
+    return parse_daily_links_reconcile_cursor(data)
+
+
+def write_daily_links_reconcile_cursor(
+    cursor: DailyLinksReconcileCursor,
+    path: Optional[Path] = None,
+) -> None:
+    """Validate and atomically publish the reconcile cursor."""
+    if not isinstance(cursor, DailyLinksReconcileCursor):
+        raise ValidationError(
+            "reconcile cursor write requires a DailyLinksReconcileCursor"
+        )
+    payload = _daily_links_reconcile_cursor_payload(cursor)
+    # Fail closed before touching the filesystem if the payload would
+    # not round-trip through the strict parser.
+    parse_daily_links_reconcile_cursor(payload)
+    cursor_path = DAILY_LINKS_RECONCILE_CURSOR_PATH if path is None else path
+    _write_reconcile_json_document(cursor_path, payload)
+
+
+def load_daily_links_reconcile_pending(
+    path: Optional[Path] = None,
+) -> Optional[DailyLinksReconcilePending]:
+    """Load the pending sibling; ``None`` when no reconciliation is in flight.
+
+    Any present-but-invalid document fails closed (typed ``CoreError``
+    subclasses); policy for stale pending state belongs to later phases.
+    """
+    pending_path = DAILY_LINKS_RECONCILE_PENDING_PATH if path is None else path
+    data = _read_reconcile_json_document(
+        pending_path, max_size=RECONCILE_CURSOR_MAX_FILE_SIZE
+    )
+    if data is None:
+        return None
+    return parse_daily_links_reconcile_pending(data)
+
+
+def write_daily_links_reconcile_pending(
+    pending: DailyLinksReconcilePending,
+    path: Optional[Path] = None,
+) -> None:
+    """Validate and atomically publish the pending sibling."""
+    if not isinstance(pending, DailyLinksReconcilePending):
+        raise ValidationError(
+            "reconcile pending write requires a DailyLinksReconcilePending"
+        )
+    payload = _daily_links_reconcile_pending_payload(pending)
+    parse_daily_links_reconcile_pending(payload)
+    pending_path = DAILY_LINKS_RECONCILE_PENDING_PATH if path is None else path
+    _write_reconcile_json_document(pending_path, payload)
+
+
+def clear_daily_links_reconcile_pending(path: Optional[Path] = None) -> bool:
+    """Unlink the pending sibling no-follow; True when it existed."""
+    pending_path = DAILY_LINKS_RECONCILE_PENDING_PATH if path is None else path
+    try:
+        os.unlink(str(pending_path))
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise PathError("cannot clear reconcile pending file") from exc
+
+
+@dataclass(frozen=True)
+class GitTaskObjectRead:
+    """Typed result of a bounded ``git show <sha>:<path>`` object read.
+
+    ``state`` is ``present`` (``text`` holds the strict-UTF-8 object
+    body) or ``missing`` — the typed no-before-state result for a task
+    path that does not exist at the requested commit.
+    """
+
+    state: str
+    text: Optional[str] = None
+
+
+def _run_git_show_bounded(
+    vault: Path,
+    git_env: Dict[str, str],
+    rev: str,
+    *,
+    max_size: int,
+    timeout: float,
+) -> bytes:
+    """Stream ``git show <rev>`` with a kill/reap hard size cap.
+
+    Mirrors the bounded subprocess runner: disk-backed capture files, a
+    polled size cap on both streams (``max_size`` for the object body —
+    deliberately ``LIST_MAX_FILE_SIZE``-aligned, not ``MAX_OUTPUT`` —
+    and ``MAX_OUTPUT`` for diagnostics), and process-group SIGKILL plus
+    reap on cap or timeout. Returns raw object bytes (never decoded
+    here).
+    """
+    argv = ["git"] + _GIT_BASE_ARGS + ["show", rev]
+    with (
+        tempfile.TemporaryFile() as stdout_file,
+        tempfile.TemporaryFile() as stderr_file,
+    ):
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                env=git_env,
+                cwd=str(vault),
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            raise SubprocessError("executable not found: git") from exc
+        except OSError as exc:
+            raise SubprocessError("cannot start subprocess") from exc
+        deadline = time.monotonic() + timeout
+        while proc.poll() is None:
+            if (
+                os.fstat(stdout_file.fileno()).st_size > max_size
+                or os.fstat(stderr_file.fileno()).st_size > MAX_OUTPUT
+            ):
+                _kill_reap(proc)
+                raise SubprocessError("git object exceeds size bound")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill_reap(proc)
+                raise SubprocessError("git object read timed out")
+            try:
+                proc.wait(timeout=min(0.01, remaining))
+            except subprocess.TimeoutExpired:
+                pass
+        if (
+            os.fstat(stdout_file.fileno()).st_size > max_size
+            or os.fstat(stderr_file.fileno()).st_size > MAX_OUTPUT
+        ):
+            raise SubprocessError("git object exceeds size bound")
+        if proc.returncode != 0:
+            stderr_file.seek(0)
+            err = stderr_file.read(MAX_OUTPUT + 1).decode("utf-8", errors="replace")
+            raise GitError(f"git show failed: {_redact(err)[:200]}")
+        stdout_file.seek(0)
+        data = stdout_file.read(max_size + 1)
+        if len(data) > max_size:
+            raise SubprocessError("git object exceeds size bound")
+        return data
+
+
+def read_git_task_object(
+    vault: Path,
+    sha: str,
+    rel_path: str,
+    git_env: Optional[Dict[str, str]] = None,
+    *,
+    max_size: int = LIST_MAX_FILE_SIZE,
+    timeout: float = GIT_TIMEOUT,
+) -> GitTaskObjectRead:
+    """Read ``git show <sha>:<vault-relative task path>`` bounded and no-shell.
+
+    Fixed argv only (the SHA and path are strictly validated before
+    interpolation), no shell, a minimal no-credential env, streamed
+    output with a kill/reap hard cap aligned to ``max_size`` (default
+    ``LIST_MAX_FILE_SIZE``, not ``MAX_OUTPUT``), and strict UTF-8
+    decoding. A task path absent at the commit is the typed ``missing``
+    state; an unknown commit, an unreadable repo, an oversized object,
+    or a non-UTF-8 object raise typed content-free errors. No custom
+    Git object/pack parsing: object membership is resolved through the
+    ``rev-parse``/``ls-tree`` plumbing and the body through ``git show``.
+    """
+    sha = validate_git_commit_sha(sha)
+    rel_path = validate_git_task_object_path(rel_path)
+    if git_env is None:
+        git_env = _build_git_env()
+    rev = f"{sha}:{rel_path}"
+    # The commit itself must exist: an unknown SHA is corruption from the
+    # reconciler's perspective (fail closed), never a "missing" state.
+    r = _run_git(
+        vault, git_env,
+        ["rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"],
+        timeout=timeout,
+    )
+    if r.returncode == 1:
+        raise GitError("git object reader: commit not found")
+    if r.returncode != 0:
+        raise GitError(f"git object reader failed: {_redact(r.stderr)[:200]}")
+    # Exact path membership in the commit tree (exit-code semantics only).
+    r = _run_git(vault, git_env, ["ls-tree", sha, "--", rel_path], timeout=timeout)
+    if r.returncode != 0:
+        raise GitError(f"git object reader failed: {_redact(r.stderr)[:200]}")
+    listing = r.stdout.strip()
+    if not listing:
+        return GitTaskObjectRead(state=GIT_OBJECT_MISSING, text=None)
+    fields = listing.splitlines()[0].split("\t", 1)[0].split()
+    if (
+        len(fields) < 3
+        or fields[1] != "blob"
+        or fields[0] not in ("100644", "100755")
+    ):
+        # Git reports committed symlinks as blobs (mode 120000 whose
+        # content is the link target): require an allowed regular-file
+        # mode so a symlink can never masquerade as task content.
+        raise CoreError("git object reader: path is not a regular blob")
+    data = _run_git_show_bounded(
+        vault, git_env, rev, max_size=max_size, timeout=timeout
+    )
+    try:
+        text = data.decode("utf-8")  # strict
+    except UnicodeDecodeError as exc:
+        raise CoreError("git object reader: object is not valid UTF-8") from exc
+    return GitTaskObjectRead(state=GIT_OBJECT_PRESENT, text=text)
+
+
+@dataclass(frozen=True)
+class ReconcileClassification:
+    """Pure classification of one candidate file's frontmatter.
+
+    ``candidate`` carries the task tag and a usable scheduled value;
+    ``non_task`` is confidently not a task; ``malformed`` is task-scope
+    ambiguity (unparsable tags, or a task with an unusable scheduled
+    value).
+    """
+
+    cls: str
+    scheduled: Optional[str] = None
+    archived: bool = False
+
+
+@dataclass(frozen=True)
+class ReconcileTaskCandidate:
+    """One valid task candidate in the reconciliation snapshot."""
+
+    slug: str
+    location: str
+    scheduled: Optional[str]
+    archived: bool = False
+
+
+@dataclass(frozen=True)
+class ReconcileSnapshot:
+    """Deterministic, read-only reconciliation input snapshot."""
+
+    head: str
+    candidates: Tuple[ReconcileTaskCandidate, ...]
+
+
+def reconcile_slug_from_filename(name: str) -> Optional[str]:
+    """``<slug>.md`` -> validated slug, else ``None`` (not a candidate name)."""
+    if not name.endswith(".md"):
+        return None
+    try:
+        return validate_slug(name[:-3])
+    except PathError:
+        return None
+
+
+def classify_reconcile_frontmatter(
+    frontmatter: Mapping[str, Any],
+    profile: TaskNotesProfile,
+) -> ReconcileClassification:
+    """Pure, deterministic classification of task-file frontmatter.
+
+    Built on the existing semantic parsing rules: only the configured
+    task tag makes a file a task; the scheduled value must be absent
+    (backlog), a plain ``YYYY-MM-DD`` date, or the gbrain-normalized
+    bare-date form. Anything ambiguous in task scope is ``malformed``.
+    """
+    if not isinstance(frontmatter, Mapping):
+        raise ValidationError("frontmatter must be a mapping")
+    tags = frontmatter.get("tags")
+    if tags is None:
+        tags = []  # absent or null tags: confidently not a task
+    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+        return ReconcileClassification(cls=RECONCILE_CLASS_MALFORMED)
+    tags_t = tuple(tags)
+    archived = profile.archive_tag in tags_t
+    if profile.task_tag not in tags_t:
+        return ReconcileClassification(
+            cls=RECONCILE_CLASS_NON_TASK, archived=archived
+        )
+    raw_scheduled = frontmatter.get(profile.mappings["scheduled"])
+    if raw_scheduled is None:
+        return ReconcileClassification(
+            cls=RECONCILE_CLASS_CANDIDATE, scheduled=None, archived=archived
+        )
+    scheduled = _daily_scheduled_date(raw_scheduled)
+    if scheduled is None:
+        return ReconcileClassification(cls=RECONCILE_CLASS_MALFORMED, archived=archived)
+    return ReconcileClassification(
+        cls=RECONCILE_CLASS_CANDIDATE, scheduled=scheduled, archived=archived
+    )
+
+
+def enumerate_reconcile_candidates(
+    vault: Path,
+    profile: TaskNotesProfile,
+    *,
+    max_files: int = LIST_MAX_FILES,
+    max_size: int = LIST_MAX_FILE_SIZE,
+) -> Tuple[ReconcileTaskCandidate, ...]:
+    """Enumerate valid task/archive candidates read-only and bounded.
+
+    Top-level ``.md`` entries of the tasks folder plus — only when the
+    archive is active (``moveArchivedTasks`` with a configured folder) —
+    the archive folder. No recursion and no symlink following: symlinked
+    or oversized task-scope entries fail closed, as does exceeding the
+    file bound. A slug present in both folders is an ambiguous pair and
+    fails closed. Malformed and non-task entries are classified and
+    excluded. Nothing is ever written and no gbrain/PGLite call is made.
+    """
+    folders: List[Tuple[str, str]] = [(RECONCILE_LOCATION_TASKS, profile.tasks_folder)]
+    if (
+        profile.move_archived_tasks
+        and profile.archive_folder
+        and profile.archive_folder != profile.tasks_folder
+    ):
+        folders.append((RECONCILE_LOCATION_ARCHIVE, profile.archive_folder))
+    seen: Dict[str, ReconcileTaskCandidate] = {}
+    scanned = 0
+    for location, folder in folders:
+        if location == RECONCILE_LOCATION_ARCHIVE and not target_exists_no_follow(
+            vault / folder
+        ):
+            continue  # the plugin creates the archive folder lazily
+        directory_fd = _open_relative_directory_no_follow(vault, folder)
+        try:
+            for name in sorted(os.listdir(directory_fd)):
+                if not name.endswith(".md"):
+                    continue
+                scanned += 1
+                if scanned > max_files:
+                    raise CoreError(
+                        "reconcile candidate enumeration exceeds file bound"
+                    )
+                try:
+                    text = _read_directory_entry_no_follow(
+                        directory_fd, name, max_size=max_size
+                    )
+                except (PathError, CoreError):
+                    # Symlinked/unreadable/oversized task-scope entries are
+                    # ambiguity, not absence: fail closed.
+                    raise
+                slug = reconcile_slug_from_filename(name)
+                if slug is None:
+                    continue  # non-slug .md name: not a candidate
+                try:
+                    fm, _body = _parse_frontmatter(text)
+                except Exception:
+                    # Unparsable frontmatter (invalid YAML etc.):
+                    # malformed, excluded.
+                    continue
+                classification = classify_reconcile_frontmatter(fm, profile)
+                if classification.cls != RECONCILE_CLASS_CANDIDATE:
+                    continue
+                candidate = ReconcileTaskCandidate(
+                    slug=slug,
+                    location=location,
+                    scheduled=classification.scheduled,
+                    archived=classification.archived,
+                )
+                if slug in seen:
+                    raise CoreError(
+                        "ambiguous task candidate in both task and archive folders"
+                    )
+                seen[slug] = candidate
+        finally:
+            os.close(directory_fd)
+    return tuple(sorted(seen.values(), key=lambda c: (c.slug, c.location)))
+
+
+def build_reconcile_snapshot(
+    vault: Path,
+    profile: TaskNotesProfile,
+    git_env: Optional[Dict[str, str]] = None,
+    *,
+    max_files: int = LIST_MAX_FILES,
+    max_size: int = LIST_MAX_FILE_SIZE,
+) -> ReconcileSnapshot:
+    """Build a deterministic read-only snapshot for later reconciliation.
+
+    Combines the validated current HEAD SHA with the bounded candidate
+    enumeration. Pure data in, pure data out: no cursor access, no
+    writes, no gbrain. Fails closed when HEAD is missing or invalid.
+    """
+    head = git_head_id(vault, git_env)
+    if head is None:
+        raise CoreError("reconcile snapshot requires a vault HEAD")
+    head = validate_git_commit_sha(head)
+    candidates = enumerate_reconcile_candidates(
+        vault, profile, max_files=max_files, max_size=max_size
+    )
+    return ReconcileSnapshot(head=head, candidates=candidates)
+
+
+# ---------------------------------------------------------------------------
+# Daily-links reconciliation lifecycle (issue #139, W2b: prepare/apply/
+# targeted-commit/finalize) — internal only
+# ---------------------------------------------------------------------------
+#
+# Stable core API called by later phases under their existing lock. The
+# lifecycle plans link transitions from the net external task changes
+# between the cursor's ``reconciled_head`` (read through the W2a
+# fixed-argv Git object reader) and the current committed HEAD +
+# worktree (W2a bounded snapshot), applies them with the existing safe
+# W1b Daily Note primitives (R1-R4), commits ONLY the actually changed
+# daily notes (plus the tracked-and-daily-notes config when a routing
+# change needs it) with explicit targeted staging — never ``git add -A``
+# — and finally advances the cursor.
+#
+# Hard rules (do not weaken):
+#   - Task Markdown is never written, staged, or rewritten by
+#     reconciliation; gbrain/PGLite/the public wrapper are never
+#     invoked; the recovery marker is never touched.
+#   - A missing cursor bootstraps (ensure-only for currently scheduled
+#     tasks); a corrupt established cursor fails closed; pending/replay
+#     is idempotent.
+#   - Transitions compose by ``(resolved daily target, slug)``: the
+#     final ensure wins (a coarse target collapse is one ensure), the
+#     destination is ensured before the old link is removed, old dates
+#     route through the cursor's prior folder/format and current dates
+#     through the current config, and every old/new target passes the
+#     R5 collision fence. A config folder/format routing change re-homes
+#     all currently scheduled tasks; a template-only change does not.
+#   - All bounded candidates are prepared before anything is applied;
+#     candidate/target overflow, source churn between prepare and
+#     apply, projection conflicts, and commit failures fail closed with
+#     no cursor advancement and no partial cursor. The targeted commit
+#     accepts at most ``MAX_DAILY_PROJECTION_TARGETS`` changed daily
+#     notes plus the single ``RECONCILE_CONFIG_RELPATH`` rider.
+#   - The pending sibling structurally pins the applied Daily Notes
+#     routing (folder/format). ``finalize_*`` requires the caller's
+#     native-sync-success signal, verifies pending/head identity and
+#     the pinned routing against its supplied config, then atomically
+#     advances the cursor and clears the pending sibling; failures
+#     leave both in place for replay. One crash window is idempotent:
+#     a cursor already advanced to the pending's head just clears the
+#     stale pending. Prepare resolves old-link routing through the
+#     pending's pinned routing when one is present (it supersedes the
+#     cursor's prior routing for an applied-but-unfinalized cycle).
+
+# Reconciliation modes.
+RECONCILE_MODE_BOOTSTRAP = "bootstrap"    # no cursor yet: ensure-only
+RECONCILE_MODE_RECONCILE = "reconcile"    # established cursor: net diff
+
+# Routing selection for a composed step.
+RECONCILE_ROUTING_CURRENT = "current"     # resolve via the current config
+RECONCILE_ROUTING_PRIOR = "prior"         # resolve via the cursor's prior routing
+
+# Net external change classes (per slug).
+RECONCILE_NET_ADDED = "added"             # not at reconciled_head, task now
+RECONCILE_NET_REMOVED = "removed"         # at reconciled_head, gone now
+RECONCILE_NET_TAG_LOSS = "tag_loss"       # file remains, task tag gone
+RECONCILE_NET_RESCHEDULED = "rescheduled"  # scheduled changed (either way)
+RECONCILE_NET_UNSCHEDULED = "unscheduled"  # scheduled cleared to backlog
+RECONCILE_NET_ARCHIVE_MOVE = "archive_move"  # same slug/date, folder moved
+RECONCILE_NET_UNCHANGED = "unchanged"     # incl. title/body-only edits
+
+# Generic content-free reconciliation commit message.
+RECONCILE_COMMIT_MSG = "tasknotes-mcp: daily links reconcile"
+
+# Vault-relative Daily Notes config path staged with a routing change.
+RECONCILE_CONFIG_RELPATH = f"{DAILY_NOTES_OBSIDIAN_DIR}/{DAILY_NOTES_CONFIG_NAME}"
+
+
+@dataclass(frozen=True)
+class ReconcileTaskState:
+    """One slug's task state on one side of the comparison.
+
+    ``present`` False models an absent file (all other fields then
+    meaningless); ``is_task`` False models a present file that is not a
+    managed task (e.g. task-tag loss).
+    """
+
+    slug: str
+    present: bool
+    is_task: bool = False
+    location: Optional[str] = None
+    scheduled: Optional[str] = None
+    archived: bool = False
+
+
+@dataclass(frozen=True)
+class ReconcileNetChange:
+    """Pure net external change for one slug, with planned link dates.
+
+    ``ensure_date``/``remove_date`` are link-level dates (prior routing
+    for the remove, current routing for the ensure — resolved later);
+    ``current_scheduled`` carries the task's current scheduled date so a
+    routing change can re-home otherwise-unchanged tasks.
+    """
+
+    cls: str
+    current_scheduled: Optional[str] = None
+    ensure_date: Optional[str] = None
+    remove_date: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ReconcileComposedStep:
+    """One composed transition, resolved to its daily-note target."""
+
+    operation: str
+    slug: str
+    date: str
+    routing: str
+    target_relative: str
+
+
+@dataclass(frozen=True)
+class ReconcileTransition:
+    """A composed step with its pre-prepared Daily Note projection."""
+
+    operation: str
+    slug: str
+    date: str
+    routing: str
+    target_relative: str
+    projection: DailyNoteProjection
+
+
+@dataclass(frozen=True)
+class ReconcilePlan:
+    """Everything needed to apply one reconciliation pass (no side effects yet).
+
+    ``from_head`` is the head the comparison was made against (the
+    cursor's ``reconciled_head``, or the current head for bootstrap);
+    ``to_head`` is the current head at prepare time. ``expected_states``
+    carries the current-side task states of every slug with a
+    transition so apply can recheck for source churn.
+    """
+
+    mode: str
+    cursor: Optional[DailyLinksReconcileCursor]
+    prior: Optional[DailyNotesConfig]
+    from_head: str
+    to_head: str
+    routing_changed: bool
+    transitions: Tuple[ReconcileTransition, ...]
+    net_classes: Tuple[Tuple[str, str], ...]
+    expected_states: Tuple[ReconcileTaskState, ...]
+    config_commit_needed: bool
+
+
+@dataclass(frozen=True)
+class ReconcileApplyOutcome:
+    """Structured outcome of an applied reconciliation plan."""
+
+    applied: int
+    changed_targets: Tuple[str, ...]
+    commit_created: bool
+    commit_id: Optional[str]
+    pending: DailyLinksReconcilePending
+
+
+def classify_reconcile_net_change(
+    old_state: Optional[ReconcileTaskState],
+    new_state: Optional[ReconcileTaskState],
+) -> ReconcileNetChange:
+    """Pure, deterministic classification of one slug's net external change.
+
+    ``old_state`` is the task state at the cursor's ``reconciled_head``
+    (``None`` = absent there), ``new_state`` the current worktree state.
+    A slug rename manifests naturally as ``removed``(old) +
+    ``added``(new), which composes to the correct remove+ensure pair.
+    Title/body-only edits and same-slug archive moves never change the
+    link, so they classify as ``unchanged``/``archive_move`` with no
+    transitions; titles are never projected.
+    """
+    for state in (old_state, new_state):
+        if state is not None and not isinstance(state, ReconcileTaskState):
+            raise ValidationError(
+                "reconcile net change requires ReconcileTaskState inputs"
+            )
+    # Normalize None to an absent state so the branch logic below is total.
+    old = old_state if old_state is not None else ReconcileTaskState(
+        slug="", present=False
+    )
+    new = new_state if new_state is not None else ReconcileTaskState(
+        slug="", present=False
+    )
+    if not old.present and not new.present:
+        return ReconcileNetChange(cls=RECONCILE_NET_UNCHANGED)
+    if not old.present:
+        if new.is_task:
+            return ReconcileNetChange(
+                cls=RECONCILE_NET_ADDED,
+                current_scheduled=new.scheduled,
+                ensure_date=new.scheduled,
+            )
+        return ReconcileNetChange(cls=RECONCILE_NET_UNCHANGED)
+    if not new.present:
+        return ReconcileNetChange(
+            cls=RECONCILE_NET_REMOVED,
+            remove_date=old.scheduled if old.is_task else None,
+        )
+    if old.is_task and not new.is_task:
+        return ReconcileNetChange(
+            cls=RECONCILE_NET_TAG_LOSS,
+            remove_date=old.scheduled,
+        )
+    if not old.is_task and new.is_task:
+        return ReconcileNetChange(
+            cls=RECONCILE_NET_ADDED,
+            current_scheduled=new.scheduled,
+            ensure_date=new.scheduled,
+        )
+    if not old.is_task and not new.is_task:
+        return ReconcileNetChange(cls=RECONCILE_NET_UNCHANGED)
+    # Both sides are managed tasks.
+    if old.scheduled != new.scheduled:
+        if old.scheduled is None:
+            return ReconcileNetChange(
+                cls=RECONCILE_NET_RESCHEDULED,
+                current_scheduled=new.scheduled,
+                ensure_date=new.scheduled,
+            )
+        if new.scheduled is None:
+            return ReconcileNetChange(
+                cls=RECONCILE_NET_UNSCHEDULED,
+                remove_date=old.scheduled,
+            )
+        return ReconcileNetChange(
+            cls=RECONCILE_NET_RESCHEDULED,
+            current_scheduled=new.scheduled,
+            ensure_date=new.scheduled,
+            remove_date=old.scheduled,
+        )
+    if old.location != new.location:
+        return ReconcileNetChange(
+            cls=RECONCILE_NET_ARCHIVE_MOVE,
+            current_scheduled=new.scheduled,
+        )
+    return ReconcileNetChange(
+        cls=RECONCILE_NET_UNCHANGED,
+        current_scheduled=new.scheduled,
+    )
+
+
+def compose_reconcile_steps(
+    vault: Path,
+    profile: TaskNotesProfile,
+    config: DailyNotesConfig,
+    prior: Optional[DailyNotesConfig],
+    nets: Mapping[str, ReconcileNetChange],
+) -> Tuple[ReconcileComposedStep, ...]:
+    """Compose net changes into ordered, target-resolved steps (pure).
+
+    Steps compose by ``(resolved daily target, slug)``: the final ensure
+    wins over a remove on the same physical target (a coarse target
+    collapse is one ensure), ensures are ordered before removes so a
+    partial failure never loses a link, and each group is sorted by
+    ``(target, slug)`` for determinism. Ensure dates resolve through the
+    current config; remove dates through the cursor's prior routing.
+    Every old/new target passes the R5 collision fence. Exceeding the
+    target bound fails closed.
+    """
+    if not isinstance(config, DailyNotesConfig):
+        raise ValidationError(
+            "reconcile composition requires a validated DailyNotesConfig"
+        )
+    if prior is not None and not isinstance(prior, DailyNotesConfig):
+        raise ValidationError(
+            "reconcile prior routing must be a DailyNotesConfig"
+        )
+    routing_changed = prior is not None and (
+        prior.folder,
+        prior.format,
+    ) != (config.folder, config.format)
+    raw: List[Tuple[str, str, str, str]] = []
+    for slug in sorted(nets):
+        net = nets[slug]
+        if not isinstance(net, ReconcileNetChange):
+            raise ValidationError(
+                "reconcile composition requires ReconcileNetChange values"
+            )
+        if net.ensure_date:
+            raw.append(
+                (DAILY_PROJECTION_OP_ENSURE, slug, net.ensure_date,
+                 RECONCILE_ROUTING_CURRENT)
+            )
+        if net.remove_date:
+            raw.append(
+                (DAILY_PROJECTION_OP_REMOVE, slug, net.remove_date,
+                 RECONCILE_ROUTING_PRIOR)
+            )
+        if (
+            routing_changed
+            and net.cls in (RECONCILE_NET_UNCHANGED, RECONCILE_NET_ARCHIVE_MOVE)
+            and net.current_scheduled
+        ):
+            # Config routing change: re-home this unchanged task directly.
+            raw.append(
+                (DAILY_PROJECTION_OP_REMOVE, slug, net.current_scheduled,
+                 RECONCILE_ROUTING_PRIOR)
+            )
+            raw.append(
+                (DAILY_PROJECTION_OP_ENSURE, slug, net.current_scheduled,
+                 RECONCILE_ROUTING_CURRENT)
+            )
+    ensures: Dict[Tuple[str, str], ReconcileComposedStep] = {}
+    removes: Dict[Tuple[str, str], ReconcileComposedStep] = {}
+    for operation, slug, date, routing in raw:
+        cfg = config if routing == RECONCILE_ROUTING_CURRENT else prior
+        if cfg is None:
+            raise ValidationError(
+                "reconcile remove requires a prior routing"
+            )
+        target = resolve_daily_note_path(vault, cfg, date)
+        target_relative = target.relative_to(vault).as_posix()
+        _reject_daily_projection_collision(profile, target_relative)
+        step = ReconcileComposedStep(
+            operation=operation,
+            slug=slug,
+            date=date,
+            routing=routing,
+            target_relative=target_relative,
+        )
+        key = (target_relative, slug)
+        if operation == DAILY_PROJECTION_OP_ENSURE:
+            ensures[key] = step
+        else:
+            removes[key] = step
+    ensure_steps = sorted(
+        ensures.values(), key=lambda s: (s.target_relative, s.slug)
+    )
+    remove_steps = sorted(
+        (s for k, s in removes.items() if k not in ensures),
+        key=lambda s: (s.target_relative, s.slug),
+    )
+    composed = ensure_steps + remove_steps
+    if len(composed) > MAX_DAILY_PROJECTION_TARGETS:
+        raise CoreError("reconcile transitions exceed target bound")
+    return tuple(composed)
+
+
+def list_git_tree_task_slugs(
+    vault: Path,
+    sha: str,
+    dir_rel: str,
+    git_env: Optional[Dict[str, str]] = None,
+    *,
+    timeout: float = GIT_TIMEOUT,
+    max_files: int = LIST_MAX_FILES,
+) -> Tuple[str, ...]:
+    """Enumerate top-level candidate slugs of one directory at a commit.
+
+    Read-only plumbing on ``git ls-tree <sha> -- <dir>/`` (non-recursive,
+    exit-code semantics only — no custom object/pack parsing). Missing
+    directories enumerate empty; symlinked or non-regular ``.md`` entries
+    and bound overruns fail closed with content-free errors.
+    """
+    sha = validate_git_commit_sha(sha)
+    _validate_relative_note_path(dir_rel)
+    if git_env is None:
+        git_env = _build_git_env()
+    r = _run_git(
+        vault, git_env, ["ls-tree", sha, "--", f"{dir_rel}/"], timeout=timeout
+    )
+    if r.returncode != 0:
+        raise GitError(f"git object reader failed: {_redact(r.stderr)[:200]}")
+    slugs: List[str] = []
+    count = 0
+    for line in r.stdout.splitlines():
+        if not line.strip():
+            continue
+        meta, tab, path = line.partition("\t")
+        fields = meta.split()
+        if not tab or len(fields) < 3:
+            raise CoreError("reconcile head enumeration: unexpected entry")
+        name = path.rsplit("/", 1)[-1]
+        if not name.endswith(".md"):
+            continue
+        count += 1
+        if count > max_files:
+            raise CoreError("reconcile head enumeration exceeds file bound")
+        if fields[0] not in ("100644", "100755"):
+            raise CoreError(
+                "reconcile head enumeration: entry is not a regular file"
+            )
+        slug = reconcile_slug_from_filename(name)
+        if slug is not None:
+            slugs.append(slug)
+    return tuple(sorted(set(slugs)))
+
+
+def _reconcile_probe_locations(profile: TaskNotesProfile) -> List[Tuple[str, str]]:
+    """Task/archive probe locations (location label, vault-relative path)."""
+    locations = [
+        (RECONCILE_LOCATION_TASKS, f"{profile.tasks_folder}/{{slug}}.md")
+    ]
+    if (
+        profile.move_archived_tasks
+        and profile.archive_folder
+        and profile.archive_folder != profile.tasks_folder
+    ):
+        locations.append(
+            (RECONCILE_LOCATION_ARCHIVE, f"{profile.archive_folder}/{{slug}}.md")
+        )
+    return locations
+
+
+def _classify_reconcile_probe(
+    slug: str,
+    location: str,
+    text: str,
+    profile: TaskNotesProfile,
+    *,
+    where: str,
+) -> ReconcileTaskState:
+    """Classify one probed task-file body; any ambiguity fails closed."""
+    try:
+        fm, _body = _parse_frontmatter(text)
+    except Exception as exc:
+        raise CoreError(f"reconcile probe: ambiguous task state ({where})") from exc
+    classification = classify_reconcile_frontmatter(fm, profile)
+    if classification.cls == RECONCILE_CLASS_MALFORMED:
+        raise CoreError(f"reconcile probe: ambiguous task state ({where})")
+    if classification.cls == RECONCILE_CLASS_NON_TASK:
+        return ReconcileTaskState(
+            slug=slug, present=True, is_task=False, location=location
+        )
+    return ReconcileTaskState(
+        slug=slug,
+        present=True,
+        is_task=True,
+        location=location,
+        scheduled=classification.scheduled,
+        archived=classification.archived,
+    )
+
+
+def _head_reconcile_task_state(
+    vault: Path,
+    profile: TaskNotesProfile,
+    sha: str,
+    slug: str,
+    git_env: Dict[str, str],
+    *,
+    max_size: int,
+) -> ReconcileTaskState:
+    """Read one slug's task state at a commit through the W2a Git reader.
+
+    Checks the tasks folder then the active archive folder; present in
+    both is an ambiguous pair (fail closed). Unparsable or malformed old
+    content is ambiguity (fail closed); an absent file is the absent
+    state.
+    """
+    found: List[Tuple[str, str]] = []
+    for location, template in _reconcile_probe_locations(profile):
+        rel = template.format(slug=slug)
+        result = read_git_task_object(
+            vault, sha, rel, git_env, max_size=max_size
+        )
+        if result.state == GIT_OBJECT_PRESENT:
+            found.append((location, result.text or ""))
+    if len(found) > 1:
+        raise CoreError("reconcile probe: ambiguous task state (head)")
+    if not found:
+        return ReconcileTaskState(slug=slug, present=False)
+    location, text = found[0]
+    return _classify_reconcile_probe(
+        slug, location, text, profile, where="head"
+    )
+
+
+def _current_reconcile_task_state(
+    vault: Path,
+    profile: TaskNotesProfile,
+    slug: str,
+    snapshot_map: Mapping[str, ReconcileTaskCandidate],
+    *,
+    max_size: int,
+) -> ReconcileTaskState:
+    """Read one slug's current task state from the bounded worktree view.
+
+    Snapshot candidates are used directly. A slug missing from the
+    snapshot is probed no-follow to distinguish an absent file from a
+    present non-task (task-tag loss); present in both task and archive
+    folders, unparsable, or malformed content is ambiguity (fail
+    closed).
+    """
+    candidate = snapshot_map.get(slug)
+    if candidate is not None:
+        return ReconcileTaskState(
+            slug=slug,
+            present=True,
+            is_task=True,
+            location=candidate.location,
+            scheduled=candidate.scheduled,
+            archived=candidate.archived,
+        )
+    found: List[Tuple[str, str]] = []
+    for location, template in _reconcile_probe_locations(profile):
+        rel = template.format(slug=slug)
+        if target_exists_no_follow(vault / rel):
+            found.append((location, rel))
+    if len(found) > 1:
+        raise CoreError("reconcile probe: ambiguous task state (worktree)")
+    if not found:
+        return ReconcileTaskState(slug=slug, present=False)
+    location, rel = found[0]
+    text = read_file_no_follow(vault / rel, max_size=max_size)
+    return _classify_reconcile_probe(
+        slug, location, text, profile, where="worktree"
+    )
+
+
+def _config_tracked_and_dirty(
+    vault: Path, git_env: Dict[str, str]
+) -> bool:
+    """True when the Daily Notes config is tracked AND has changes."""
+    r = _run_git(vault, git_env, ["ls-files", "--", RECONCILE_CONFIG_RELPATH])
+    if r.returncode != 0:
+        raise GitError(f"git ls-files failed: {_redact(r.stderr)[:200]}")
+    if not r.stdout.strip():
+        return False
+    r = _run_git(
+        vault, git_env, ["status", "--porcelain", "--", RECONCILE_CONFIG_RELPATH]
+    )
+    if r.returncode != 0:
+        raise GitError(f"git status failed: {_redact(r.stderr)[:200]}")
+    return r.stdout.strip() != ""
+
+
+def git_commit_reconcile_targets(
+    vault: Path,
+    targets: List[Path],
+    git_env: Optional[Dict[str, str]] = None,
+) -> bool:
+    """Stage only the provided reconciliation paths and commit iff staged.
+
+    Explicit targeted companion to the task Git helpers: it stages
+    exactly the given (already vault-confined) changed paths — never
+    ``git add -A`` — and creates one generic content-free reconciliation
+    commit. The allowed set is at most ``MAX_DAILY_PROJECTION_TARGETS``
+    daily-note (``.md``) targets plus the single validated
+    ``RECONCILE_CONFIG_RELPATH`` rider when a routing change needs it;
+    any other or excess path fails closed (a legal full bound of
+    ``MAX`` changed notes plus the config rider commits as one
+    17-path-max set). Targets are lexically validated to stay inside
+    the vault (relative, no traversal, no backslash). Hooks, signing,
+    gc, and maintenance are disabled command-locally. Never runs
+    checkout/reset/clean/merge/pull/push. Returns True if a commit was
+    created, False if nothing was staged. Unrelated dirty or staged
+    paths are untouched (the pathspec commit excludes them).
+    """
+    if git_env is None:
+        git_env = _build_git_env()
+    rels: List[str] = []
+    seen: set = set()
+    for target in targets:
+        path = Path(target)
+        if path.is_absolute():
+            try:
+                rel = path.relative_to(vault)
+            except ValueError as exc:
+                raise PathError(
+                    "reconcile commit target is not in the vault"
+                ) from exc
+        else:
+            rel = path
+        rel_str = rel.as_posix()
+        _validate_relative_note_path(rel_str)
+        if rel_str in seen:
+            continue
+        seen.add(rel_str)
+        rels.append(rel_str)
+    if not rels:
+        return False
+    note_targets = [r for r in rels if r != RECONCILE_CONFIG_RELPATH]
+    for rel in note_targets:
+        if not rel.endswith(".md"):
+            raise ValidationError("reconcile commit target is not a daily note")
+    if len(note_targets) > MAX_DAILY_PROJECTION_TARGETS:
+        raise ValidationError("reconcile commit targets exceed count bound")
+    r = _run_git(vault, git_env, ["add", "--"] + rels)
+    if r.returncode != 0:
+        raise GitError(f"git add reconcile targets failed: {_redact(r.stderr)[:200]}")
+    r = _run_git(vault, git_env, ["diff", "--cached", "--quiet"])
+    if r.returncode == 0:
+        return False
+    r = _run_git(
+        vault, git_env, ["commit", "-m", RECONCILE_COMMIT_MSG, "--"] + rels
+    )
+    if r.returncode != 0:
+        raise GitError(f"git reconcile commit failed: {_redact(r.stderr)[:200]}")
+    return True
+
+
+def prepare_daily_links_reconciliation(
+    vault: Path,
+    profile: TaskNotesProfile,
+    config: DailyNotesConfig,
+    git_env: Optional[Dict[str, str]] = None,
+    *,
+    cursor: Optional[DailyLinksReconcileCursor] = None,
+    cursor_path: Optional[Path] = None,
+    pending_path: Optional[Path] = None,
+    max_files: int = LIST_MAX_FILES,
+    max_size: int = LIST_MAX_FILE_SIZE,
+) -> ReconcilePlan:
+    """Plan one reconciliation pass (read-only, no side effects).
+
+    With a missing cursor (bootstrap), the plan is ensure-only for the
+    currently scheduled tasks. With an established cursor, each slug's
+    state at ``reconciled_head`` is read through the W2a Git object
+    reader and compared to the current committed HEAD + worktree
+    (W2a bounded snapshot plus targeted no-follow probes), producing
+    per-slug net classifications and composed transitions. A corrupt
+    established cursor fails closed (the loader raises). All bounded
+    candidates are prepared before anything is applied; overflow fails
+    closed. Task Markdown is never written and no gbrain/PGLite call is
+    made.
+
+    Old-routing lookup uses the applied routing pinned by an existing
+    pending sibling when one is present (an applied-but-unfinalized
+    cycle committed its links at that routing, superseding the
+    cursor's prior routing); a pending that matches neither the cursor
+    head nor the cursor's base fails closed as foreign state. The
+    effective prior routing is carried on the plan so apply re-uses
+    the identical routing for race recomputation.
+    """
+    if not isinstance(config, DailyNotesConfig):
+        raise ValidationError(
+            "reconcile prepare requires a validated DailyNotesConfig"
+        )
+    if git_env is None:
+        git_env = _build_git_env()
+    if cursor is None:
+        cursor = load_daily_links_reconcile_cursor(cursor_path)
+    pending = load_daily_links_reconcile_pending(pending_path)
+    snapshot = build_reconcile_snapshot(
+        vault, profile, git_env, max_files=max_files, max_size=max_size
+    )
+    head = snapshot.head
+    current_map = {c.slug: c for c in snapshot.candidates}
+    new_states: Dict[str, ReconcileTaskState] = {}
+    nets: Dict[str, ReconcileNetChange] = {}
+    prior: Optional[DailyNotesConfig] = None
+    if cursor is None:
+        mode = RECONCILE_MODE_BOOTSTRAP
+        from_head = head
+        for slug in sorted(current_map):
+            new_states[slug] = _current_reconcile_task_state(
+                vault, profile, slug, current_map, max_size=max_size
+            )
+            nets[slug] = classify_reconcile_net_change(None, new_states[slug])
+    else:
+        mode = RECONCILE_MODE_RECONCILE
+        from_head = cursor.reconciled_head
+        prior = DailyNotesConfig(
+            folder=cursor.daily_folder, format=cursor.daily_format
+        )
+        if pending is not None:
+            if (
+                pending.from_head != cursor.reconciled_head
+                and pending.to_head != cursor.reconciled_head
+            ):
+                raise CoreError(
+                    "reconcile pending does not match the established cursor"
+                )
+            # The applied-but-unfinalized cycle committed its links at
+            # the pending's pinned routing: it supersedes the cursor's
+            # prior routing for old-link lookup (identical when the
+            # cursor already advanced to the pending's head).
+            prior = DailyNotesConfig(
+                folder=pending.daily_folder, format=pending.daily_format
+            )
+        old_tasks = set(
+            list_git_tree_task_slugs(
+                vault, cursor.reconciled_head, profile.tasks_folder,
+                git_env, max_files=max_files,
+            )
+        )
+        old_archive: set = set()
+        if (
+            profile.move_archived_tasks
+            and profile.archive_folder
+            and profile.archive_folder != profile.tasks_folder
+        ):
+            old_archive = set(
+                list_git_tree_task_slugs(
+                    vault, cursor.reconciled_head, profile.archive_folder,
+                    git_env, max_files=max_files,
+                )
+            )
+        if old_tasks & old_archive:
+            raise CoreError("reconcile probe: ambiguous task state (head)")
+        for slug in sorted(old_tasks | old_archive | set(current_map)):
+            old_state = _head_reconcile_task_state(
+                vault, profile, cursor.reconciled_head, slug, git_env,
+                max_size=max_size,
+            )
+            new_state = _current_reconcile_task_state(
+                vault, profile, slug, current_map, max_size=max_size
+            )
+            new_states[slug] = new_state
+            nets[slug] = classify_reconcile_net_change(old_state, new_state)
+    routing_changed = prior is not None and (
+        prior.folder,
+        prior.format,
+    ) != (config.folder, config.format)
+    steps = compose_reconcile_steps(vault, profile, config, prior, nets)
+    transitions: List[ReconcileTransition] = []
+    for step in steps:
+        cfg = config if step.routing == RECONCILE_ROUTING_CURRENT else prior
+        if cfg is None:
+            raise ValidationError("reconcile remove requires a prior routing")
+        projection = prepare_daily_note_projection(
+            vault, cfg, step.operation, step.date, slug=step.slug
+        )
+        transitions.append(
+            ReconcileTransition(
+                operation=step.operation,
+                slug=step.slug,
+                date=step.date,
+                routing=step.routing,
+                target_relative=step.target_relative,
+                projection=projection,
+            )
+        )
+    transition_slugs = {t.slug for t in transitions}
+    expected_states = tuple(
+        sorted(
+            (new_states[slug] for slug in transition_slugs),
+            key=lambda s: s.slug,
+        )
+    )
+    config_commit_needed = False
+    if mode == RECONCILE_MODE_RECONCILE and routing_changed:
+        config_commit_needed = _config_tracked_and_dirty(vault, git_env)
+    return ReconcilePlan(
+        mode=mode,
+        cursor=cursor,
+        prior=prior,
+        from_head=from_head,
+        to_head=head,
+        routing_changed=routing_changed,
+        transitions=tuple(transitions),
+        net_classes=tuple(sorted((s, n.cls) for s, n in nets.items())),
+        expected_states=expected_states,
+        config_commit_needed=config_commit_needed,
+    )
+
+
+def _recheck_reconcile_sources(
+    vault: Path,
+    profile: TaskNotesProfile,
+    plan: ReconcilePlan,
+    git_env: Dict[str, str],
+    *,
+    max_files: int,
+    max_size: int,
+) -> None:
+    """Fail closed when task inputs or HEAD drifted since prepare."""
+    head = git_head_id(vault, git_env)
+    if head is None or not is_valid_git_commit_sha(head) or head != plan.to_head:
+        raise CoreError("reconcile source inputs changed before apply")
+    current_map = {
+        c.slug: c
+        for c in enumerate_reconcile_candidates(
+            vault, profile, max_files=max_files, max_size=max_size
+        )
+    }
+    for expected in plan.expected_states:
+        now = _current_reconcile_task_state(
+            vault, profile, expected.slug, current_map, max_size=max_size
+        )
+        if now != expected:
+            raise CoreError("reconcile source inputs changed before apply")
+
+
+def apply_daily_links_reconciliation(
+    vault: Path,
+    profile: TaskNotesProfile,
+    config: DailyNotesConfig,
+    plan: ReconcilePlan,
+    git_env: Optional[Dict[str, str]] = None,
+    *,
+    pending_path: Optional[Path] = None,
+    max_files: int = LIST_MAX_FILES,
+    max_size: int = LIST_MAX_FILE_SIZE,
+    _final_check_hook: Optional[Callable[[], None]] = None,
+) -> ReconcileApplyOutcome:
+    """Apply a prepared plan: projections, targeted commit, pending record.
+
+    Rechecks task source inputs (and HEAD) first — any churn fails
+    closed before a side effect. Applies every pre-prepared projection
+    with the existing safe W1b primitives (ensure projections route
+    through the current config, removes through the plan's prior
+    routing); a persistent projection conflict fails closed. Stages
+    ONLY the actually changed daily notes (plus the tracked-and-dirty
+    Daily Notes config when the plan needs it) and creates one targeted
+    commit — never ``git add -A``; unrelated dirty/staged paths are
+    untouched. On success writes the validated pending sibling after
+    the commit, structurally pinning the applied Daily Notes routing
+    (heads, timestamp, folder, format). The cursor is never advanced
+    here.
+    """
+    if not isinstance(config, DailyNotesConfig):
+        raise ValidationError(
+            "reconcile apply requires a validated DailyNotesConfig"
+        )
+    if not isinstance(plan, ReconcilePlan):
+        raise ValidationError("reconcile apply requires a prepared plan")
+    if git_env is None:
+        git_env = _build_git_env()
+    _recheck_reconcile_sources(
+        vault, profile, plan, git_env,
+        max_files=max_files, max_size=max_size,
+    )
+    prior = plan.prior
+    changed: List[str] = []
+    applied = 0
+    for transition in plan.transitions:
+        cfg = (
+            config
+            if transition.routing == RECONCILE_ROUTING_CURRENT
+            else prior
+        )
+        if cfg is None:
+            raise ValidationError("reconcile remove requires a prior routing")
+        outcome = apply_daily_note_projection(
+            vault, cfg, transition.projection,
+            _final_check_hook=_final_check_hook,
+        )
+        if outcome.state == DAILY_PROJECTION_CONFLICT:
+            raise CoreError(
+                "daily note projection conflict during reconcile apply"
+            )
+        if outcome.state == DAILY_PROJECTION_APPLIED:
+            applied += 1
+            changed.append(transition.target_relative)
+    stage = sorted(set(changed))
+    if plan.config_commit_needed and _config_tracked_and_dirty(vault, git_env):
+        stage.append(RECONCILE_CONFIG_RELPATH)
+        stage.sort()
+    commit_created = False
+    if stage:
+        commit_created = git_commit_reconcile_targets(
+            vault, [vault / rel for rel in stage], git_env
+        )
+    head_now = git_head_id(vault, git_env)
+    if head_now is None:
+        raise CoreError("reconcile apply requires a vault HEAD")
+    head_now = validate_git_commit_sha(head_now)
+    pending = DailyLinksReconcilePending(
+        from_head=plan.from_head,
+        to_head=head_now,
+        started_at=int(time.time()),
+        daily_folder=config.folder,
+        daily_format=config.format,
+    )
+    write_daily_links_reconcile_pending(pending, pending_path)
+    return ReconcileApplyOutcome(
+        applied=applied,
+        changed_targets=tuple(sorted(set(changed))),
+        commit_created=commit_created,
+        commit_id=head_now if commit_created else None,
+        pending=pending,
+    )
+
+
+def finalize_daily_links_reconciliation(
+    vault: Path,
+    config: DailyNotesConfig,
+    *,
+    sync_succeeded: bool,
+    git_env: Optional[Dict[str, str]] = None,
+    cursor: Optional[DailyLinksReconcileCursor] = None,
+    pending: Optional[DailyLinksReconcilePending] = None,
+    cursor_path: Optional[Path] = None,
+    pending_path: Optional[Path] = None,
+) -> DailyLinksReconcileCursor:
+    """Advance the cursor after the caller confirms native sync success.
+
+    Requires the caller's ``sync_succeeded`` signal and verifies the
+    pending/head identity (``to_head`` equals the current HEAD, and
+    ``from_head`` matches the established cursor when present) and the
+    pending's pinned applied routing (folder/format must equal the
+    supplied config) before atomically writing the advanced cursor
+    (current routing recorded) and clearing the pending sibling. A
+    config edit between apply and finalize therefore fails closed with
+    the old cursor and pending preserved for replay. One crash window
+    is idempotent: when the cursor was already advanced to the
+    pending's ``to_head`` (cursor-written, pending-not-cleared) and the
+    current HEAD matches, the stale pending is safely cleared and the
+    existing cursor returned. All other mismatches fail closed. Never
+    touches the recovery marker.
+    """
+    if not isinstance(sync_succeeded, bool):
+        raise ValidationError("sync_succeeded must be a boolean")
+    if not sync_succeeded:
+        raise CoreError(
+            "reconcile finalize requires a successful native sync"
+        )
+    if not isinstance(config, DailyNotesConfig):
+        raise ValidationError(
+            "reconcile finalize requires a validated DailyNotesConfig"
+        )
+    if git_env is None:
+        git_env = _build_git_env()
+    if cursor is None:
+        cursor = load_daily_links_reconcile_cursor(cursor_path)
+    if pending is None:
+        pending = load_daily_links_reconcile_pending(pending_path)
+    if pending is None:
+        raise CoreError("reconcile finalize requires a pending record")
+    if not isinstance(pending, DailyLinksReconcilePending):
+        raise ValidationError(
+            "reconcile finalize requires a pending record"
+        )
+    current = git_head_id(vault, git_env)
+    if current is None:
+        raise CoreError("reconcile finalize requires a vault HEAD")
+    current = validate_git_commit_sha(current)
+    if current != pending.to_head:
+        raise CoreError("reconcile pending head mismatch")
+    if cursor is not None and cursor.reconciled_head == pending.to_head:
+        # Crash window: the cursor was already advanced to this
+        # pending's head but the pending sibling was not cleared
+        # (identity verified above). Clear the stale pending and
+        # return the already-advanced cursor.
+        clear_daily_links_reconcile_pending(pending_path)
+        return cursor
+    if cursor is not None and pending.from_head != cursor.reconciled_head:
+        raise CoreError("reconcile pending base mismatch")
+    if (pending.daily_folder, pending.daily_format) != (
+        config.folder,
+        config.format,
+    ):
+        raise CoreError("reconcile pending routing mismatch")
+    advanced = DailyLinksReconcileCursor(
+        reconciled_head=pending.to_head,
+        daily_folder=config.folder,
+        daily_format=config.format,
+        projection_format=DAILY_LINKS_PROJECTION_FORMAT_VERSION,
+    )
+    write_daily_links_reconcile_cursor(advanced, cursor_path)
+    clear_daily_links_reconcile_pending(pending_path)
+    return advanced
+
+
+
+# ---------------------------------------------------------------------------
 # Mutation result
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class MutationResult:
-    """Structured outcome of a mutation operation."""
+    """Structured outcome of a mutation operation.
+
+    The ``daily_link_*`` fields (issue #139) are optional Daily Notes
+    link bookkeeping. They are populated only for ``create``/``update``/
+    ``delete`` operations with the daily-link feature enabled and an
+    ``applied_and_committed`` task outcome: ``daily_link_state`` reports
+    the projection outcome (``applied_and_committed``, or
+    ``not_applicable`` when no transition was required, or ``not_applied``
+    when nothing needed to change, or a degraded ``conflict``/
+    ``write_failed``/``commit_failed``/``committed_sync_failed``),
+    ``daily_link_detail`` carries a generic (content-free) degradation
+    detail, and ``daily_link_dates`` lists the affected ``YYYY-MM-DD``
+    daily note dates (multiple when a reschedule touches D1 and D2).
+    They default to ``None`` and stay ``None`` otherwise: disabled mode,
+    operations that never project (complete/archive/add_tag/remove_tag),
+    and task outcomes that did not apply and commit.
+    """
 
     state: str
     slug: str
     commit_id: Optional[str] = None
     detail: Optional[str] = None
+    daily_link_state: Optional[str] = None
+    daily_link_detail: Optional[str] = None
+    daily_link_dates: Optional[List[str]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -2547,6 +5721,8 @@ class TaskNotesEngine:
     All operations that invoke gbrain (including get) take the shared
     lock. List is lock-free because it never invokes gbrain. Mutations
     verify the profile, verify the gbrain source under the lock, run
+    Daily-links reconciliation when enabled (issue #139 W4a, before
+    preflight; delete runs its Git-clean target guard first), run
     preflight (commit pending + incremental sync), re-check the profile
     immediately before capture, execute the gbrain capture, verify
     read-back against a strict disk parse, and commit the target path.
@@ -2561,7 +5737,15 @@ class TaskNotesEngine:
         lock_dir: Optional[Path] = None,
         lock_timeout: float = DEFAULT_LOCK_TIMEOUT,
         tz: str = "UTC",
+        daily_links_enabled: bool = False,
+        reconcile_enabled: bool = False,
+        reconcile_cursor_path: Optional[Path] = None,
+        reconcile_pending_path: Optional[Path] = None,
     ) -> None:
+        if not isinstance(daily_links_enabled, bool):
+            raise ValidationError("daily_links_enabled must be a boolean")
+        if not isinstance(reconcile_enabled, bool):
+            raise ValidationError("reconcile_enabled must be a boolean")
         self.vault = Path(vault)
         self.gbrain_bin = gbrain_bin
         self.gbrain_home = Path(gbrain_home)
@@ -2570,6 +5754,29 @@ class TaskNotesEngine:
         self.lock_path = self.lock_dir / DEFAULT_LOCK_NAME
         self.recovery_marker = self.lock_dir / RECOVERY_MARKER_NAME
         self.tz = tz
+        self.daily_links_enabled = daily_links_enabled
+        # Daily-links reconciliation (issue #139 W4a) is gated by BOTH
+        # the daily-links master switch and the reconciliation switch:
+        # with the master disabled it is fully inert (no cursor/pending
+        # I/O, no calls). The cursor/pending locations default to the
+        # fixed W2a runtime paths; tests inject temporary paths.
+        self.reconcile_enabled = reconcile_enabled
+        self._reconcile_active = daily_links_enabled and reconcile_enabled
+        self.reconcile_cursor_path = (
+            Path(reconcile_cursor_path)
+            if reconcile_cursor_path is not None
+            else DAILY_LINKS_RECONCILE_CURSOR_PATH
+        )
+        self.reconcile_pending_path = (
+            Path(reconcile_pending_path)
+            if reconcile_pending_path is not None
+            else DAILY_LINKS_RECONCILE_PENDING_PATH
+        )
+        # Daily Notes config is loaded and validated at most once per
+        # projection-bearing operation, before any task side effect, and
+        # the immutable snapshot is carried through the post-task
+        # apply/commit/sync (no engine-lifetime caching). Never touched
+        # while daily_links_enabled is False.
         self._gbrain_env = _build_gbrain_env(self.gbrain_home, self.vault)
         self._git_env = _build_git_env()
         # Test seam: callable invoked after get_page/reconstruct and before
@@ -2770,6 +5977,230 @@ class TaskNotesEngine:
             return MutationResult(state=RECOVERY_REQUIRED, slug=slug)
         return MutationResult(state=DB_UPDATED_DISK_FAILED, slug=slug)
 
+    # -- daily link projection (issue #139, W2) ---------------------------
+
+    def _load_daily_config(self) -> DailyNotesConfig:
+        """Load and validate the Daily Notes config (no engine caching).
+
+        Called at most once per projection-bearing operation, before any
+        task side effect; the returned immutable snapshot is carried
+        through the post-task daily apply/commit/sync. Disabled mode
+        never calls this. A config edit therefore takes effect on the
+        next projection-bearing operation.
+        """
+        return load_daily_notes_config(self.vault)
+
+    # -- daily-links reconciliation (issue #139, W4a: engine wiring) ------
+
+    def _run_reconciliation(self, profile: TaskNotesProfile) -> DailyNotesConfig:
+        """Run the W2 reconciliation lifecycle (shared lock already held).
+
+        prepare -> apply (targeted commit) -> required native gbrain
+        sync (source-routed internal CLI path; never the public gbrain
+        wrapper, no nested lock, no PGLite access) -> finalize. One
+        validated ``DailyNotesConfig`` snapshot is loaded here and that
+        same object passes through prepare, apply, and finalize. Any
+        failure raises a typed core error that skips all later
+        preflight/projection/mutation; cursor/pending semantics are
+        preserved for replay and the recovery marker is never touched.
+        """
+        config = self._load_daily_config()
+        plan = prepare_daily_links_reconciliation(
+            self.vault, profile, config, self._git_env,
+            cursor_path=self.reconcile_cursor_path,
+            pending_path=self.reconcile_pending_path,
+        )
+        apply_daily_links_reconciliation(
+            self.vault, profile, config, plan, self._git_env,
+            pending_path=self.reconcile_pending_path,
+        )
+        # Required native sync: finalize may only run after a verified
+        # sync, so a sync failure leaves cursor+pending intact for
+        # replay and skips the rest of the operation.
+        gbrain_sync_incremental(
+            self.gbrain_bin, self._gbrain_env, self.vault, profile.source_id  # type: ignore[arg-type]
+        )
+        finalize_daily_links_reconciliation(
+            self.vault, config,
+            sync_succeeded=True,
+            git_env=self._git_env,
+            cursor_path=self.reconcile_cursor_path,
+            pending_path=self.reconcile_pending_path,
+        )
+        return config
+
+    def _maybe_reconcile(self, profile: TaskNotesProfile) -> None:
+        """Reconcile Daily Notes links before preflight (lock held).
+
+        Inert unless the daily-links master AND the reconciliation
+        switch are both enabled: disabled mode performs no cursor or
+        pending I/O and makes no reconciliation calls. When active this
+        runs BEFORE the existing Git preflight and before any mutation
+        side effect; any failure propagates and skips everything that
+        follows.
+        """
+        if not self._reconcile_active:
+            return
+        self._run_reconciliation(profile)
+
+    def _prepare_daily_link_projections(
+        self,
+        profile: TaskNotesProfile,
+        config: DailyNotesConfig,
+        steps: List[Tuple[str, str]],
+        slug: str,
+    ) -> List[DailyNoteProjection]:
+        """Pre-compute every needed projection target (no side effects).
+
+        Every resolved target is first rejected when it falls inside the
+        configured task folder or the active archive folder, so the
+        direct writer can never mutate task/archive Markdown. Runs the
+        W1b preparation (strict no-follow reads, structural ``## Tasks``
+        validation, template rendering for missing notes only) against
+        the operation's single validated ``config`` snapshot so a
+        deterministic failure raises BEFORE any task or gbrain side
+        effect.
+        """
+        if not isinstance(config, DailyNotesConfig):
+            raise ValidationError(
+                "daily note projection requires a validated DailyNotesConfig"
+            )
+        projections: List[DailyNoteProjection] = []
+        for operation, date in steps:
+            target = resolve_daily_note_path(self.vault, config, date)
+            _reject_daily_projection_collision(
+                profile, target.relative_to(self.vault).as_posix()
+            )
+            projections.append(
+                prepare_daily_note_projection(
+                    self.vault, config, operation, date, slug=slug
+                )
+            )
+        return projections
+
+    def _run_daily_link_projection(
+        self,
+        profile: TaskNotesProfile,
+        config: DailyNotesConfig,
+        projections: List[DailyNoteProjection],
+    ) -> Tuple[str, Optional[str], Optional[List[str]]]:
+        """Apply prepared projections, commit changed targets, sync (lock held).
+
+        Uses the same validated ``config`` snapshot that prevalidation
+        loaded before the task side effects. Steps run in plan order
+        (ensure before remove); the first failure stops later steps so a
+        failed ensure never loses the link. Every projection target is
+        re-checked against the task/archive folders immediately before
+        the direct write. Changed targets are committed with the W1
+        multi-target helper and synced with the native source-scoped
+        incremental sync. All failures are content-free and never touch
+        the recovery marker. Returns
+        ``(daily_link_state, daily_link_detail, daily_link_dates)``.
+        """
+        dates: List[str] = [projection.date for projection in projections]
+        changed: List[Path] = []
+        failure: Optional[str] = None
+        for projection in projections:
+            if failure is not None:
+                break
+            try:
+                # Last-gate collision check: the direct writer must never
+                # mutate task/archive Markdown (belt-and-braces behind the
+                # prevalidation rejection).
+                _reject_daily_projection_collision(
+                    profile, projection.target_relative
+                )
+                outcome = apply_daily_note_projection(
+                    self.vault, config, projection
+                )
+            except CoreError:
+                failure = DAILY_LINK_WRITE_FAILED
+                continue
+            if outcome.state == DAILY_PROJECTION_APPLIED:
+                changed.append(self.vault / projection.target_relative)
+            elif outcome.state == DAILY_PROJECTION_CONFLICT:
+                failure = DAILY_LINK_CONFLICT
+            # DAILY_PROJECTION_NOT_APPLIED: nothing to commit for this target.
+        if not changed:
+            if failure is not None:
+                return failure, _DAILY_LINK_FAILURE_DETAIL[failure], dates
+            return DAILY_LINK_NOT_APPLIED, None, (dates or None)
+        try:
+            git_commit_daily_projection_targets(
+                self.vault, changed, self._git_env
+            )
+        except CoreError:
+            if failure is not None:
+                return (
+                    DAILY_LINK_COMMIT_FAILED,
+                    "daily note projection partially applied; commit failed",
+                    dates,
+                )
+            return (
+                DAILY_LINK_COMMIT_FAILED,
+                _DAILY_LINK_FAILURE_DETAIL[DAILY_LINK_COMMIT_FAILED],
+                dates,
+            )
+        try:
+            gbrain_sync_incremental(
+                self.gbrain_bin, self._gbrain_env, self.vault, profile.source_id  # type: ignore[arg-type]
+            )
+        except CoreError:
+            if failure is not None:
+                return (
+                    DAILY_LINK_SYNC_FAILED,
+                    "daily note projection partially applied; sync failed",
+                    dates,
+                )
+            return (
+                DAILY_LINK_SYNC_FAILED,
+                _DAILY_LINK_FAILURE_DETAIL[DAILY_LINK_SYNC_FAILED],
+                dates,
+            )
+        if failure is not None:
+            return (
+                failure,
+                "daily note projection partially applied; applied targets committed and synced",
+                dates,
+            )
+        return DAILY_LINK_APPLIED, None, dates
+
+    def _finish_with_daily_links(
+        self,
+        profile: TaskNotesProfile,
+        result: MutationResult,
+        projections: Optional[List[DailyNoteProjection]],
+        config: Optional[DailyNotesConfig],
+    ) -> MutationResult:
+        """Attach Daily Notes projection outcomes to a finished mutation.
+
+        Disabled mode returns the task result untouched (no daily fields).
+        Projections run ONLY for ``applied_and_committed`` task outcomes;
+        any other outcome keeps the task result authoritative and untouched.
+        When enabled and no transition is required, reports
+        ``not_applicable``. ``config`` is the immutable snapshot loaded
+        once per operation before the task side effects; it is carried
+        unchanged into the post-task apply/commit/sync.
+        """
+        if not self.daily_links_enabled:
+            return result
+        if result.state != APPLIED_AND_COMMITTED:
+            return result
+        if projections is None:
+            result.daily_link_state = DAILY_LINK_NOT_APPLICABLE
+            return result
+        if config is None:
+            raise CoreError(
+                "daily link projection config snapshot missing"
+            )
+        state, detail, dates = self._run_daily_link_projection(
+            profile, config, projections
+        )
+        result.daily_link_state = state
+        result.daily_link_detail = detail
+        result.daily_link_dates = dates
+        return result
+
     # -- public operations ------------------------------------------------
 
     def create(
@@ -2834,6 +6265,9 @@ class TaskNotesEngine:
             profile = self._verify_source(profile)
             # Preflight.
             original_hash = profile.profile_hash
+            # W4a: reconcile Daily Notes links before preflight (lock
+            # already held); failure skips all later preflight/mutation.
+            self._maybe_reconcile(profile)
             self._preflight(profile)
             # Re-check profile stability.
             profile = self._verify_profile_stable(original_hash)
@@ -2850,6 +6284,23 @@ class TaskNotesEngine:
             _validate_markdown_bound(markdown)
             expected_document = semantic_from_markdown(markdown, profile)
             gbrain_slug = resolve_gbrain_slug(profile, slug)
+            # Daily link prevalidation (issue #139 W2): enabled mode with a
+            # scheduled create loads and validates the Daily Notes config
+            # exactly once, resolves the ensure target, and pre-computes
+            # the projection BEFORE any task side effect; a deterministic
+            # failure raises here. The snapshot is carried through the
+            # post-task apply/commit/sync.
+            daily_projections: Optional[List[DailyNoteProjection]] = None
+            daily_config: Optional[DailyNotesConfig] = None
+            if self.daily_links_enabled and scheduled_v is not None:
+                daily_config = self._load_daily_config()
+                date_steps = _daily_link_plan(None, scheduled_v)
+                steps = _compose_daily_link_plan_by_target(
+                    self.vault, daily_config, date_steps or []
+                )
+                daily_projections = self._prepare_daily_link_projections(
+                    profile, daily_config, steps, slug
+                )
             # CAPTURE-STARTED BOUNDARY: from here on, always return a MutationResult.
             try:
                 capture_result = gbrain_capture(self.gbrain_bin, self._gbrain_env, gbrain_slug, profile.source_id, markdown)  # type: ignore[arg-type]
@@ -2858,12 +6309,15 @@ class TaskNotesEngine:
                 return self._reconcile_after_capture_failure(
                     profile, slug, gbrain_slug, exc, expected_document
                 )
-            return self._handle_post_capture(
+            result = self._handle_post_capture(
                 profile,
                 slug,
                 gbrain_slug,
                 capture_result,
                 expected_document=expected_document,
+            )
+            return self._finish_with_daily_links(
+                profile, result, daily_projections, daily_config
             )
 
     def get(self, slug: str) -> Dict[str, Any]:
@@ -3007,6 +6461,9 @@ class TaskNotesEngine:
             profile = self._verify_source(profile)
             # Preflight.
             original_hash = profile.profile_hash
+            # W4a: reconcile Daily Notes links before preflight (lock
+            # already held); failure skips all later preflight/mutation.
+            self._maybe_reconcile(profile)
             self._preflight(profile)
             # Re-check profile stability.
             profile = self._verify_profile_stable(original_hash)
@@ -3020,6 +6477,11 @@ class TaskNotesEngine:
             current_status = current_fm.get(profile.mappings["status"])
             if current_status == profile.completed_status:
                 raise ValidationError("cannot update a completed task")
+            # Actual current scheduling state (denormalized, validated);
+            # the sole driver of daily link transitions (issue #139 W2).
+            current_scheduled = _daily_scheduled_date(
+                current_fm.get(profile.mappings["scheduled"])
+            )
             # Build updates (only modeled fields, no tags/title/completedDate).
             updates: Dict[str, Any] = {}
             if status_v is not None:
@@ -3054,6 +6516,29 @@ class TaskNotesEngine:
                 updates[key] = value
             if not updates and body_v is None:
                 return MutationResult(state=NOT_APPLIED, slug=slug)
+            # Daily link plan (issue #139 W2) from the FINAL actual
+            # scheduling state (current page state + applied updates,
+            # never caller intent). Only updates that actually touch the
+            # scheduled field drive a projection; a non-scheduling update
+            # projects nothing. The Daily Notes config is loaded and
+            # validated exactly once, BEFORE any task side effect, and
+            # the plan is composed by resolved target path (R4) so a
+            # transition collapsing onto one daily target emits exactly
+            # one ensure. Pre-computed before any task side effect; a
+            # deterministic failure raises here.
+            daily_projections_update: Optional[List[DailyNoteProjection]] = None
+            daily_config_update: Optional[DailyNotesConfig] = None
+            if self.daily_links_enabled and "scheduled" in updates:
+                final_scheduled = _daily_scheduled_date(updates["scheduled"])
+                date_steps = _daily_link_plan(current_scheduled, final_scheduled)
+                if date_steps is not None:
+                    daily_config_update = self._load_daily_config()
+                    steps = _compose_daily_link_plan_by_target(
+                        self.vault, daily_config_update, date_steps
+                    )
+                    daily_projections_update = self._prepare_daily_link_projections(
+                        profile, daily_config_update, steps, slug
+                    )
             markdown = reconstruct_markdown(
                 page, profile, updates, body_override=body_v
             )
@@ -3073,12 +6558,15 @@ class TaskNotesEngine:
                 return self._reconcile_after_capture_failure(
                     profile, slug, gbrain_slug, exc, expected_document
                 )
-            return self._handle_post_capture(
+            result = self._handle_post_capture(
                 profile,
                 slug,
                 gbrain_slug,
                 capture_result,
                 expected_document=expected_document,
+            )
+            return self._finish_with_daily_links(
+                profile, result, daily_projections_update, daily_config_update
             )
 
     def complete(
@@ -3101,6 +6589,9 @@ class TaskNotesEngine:
             profile = self.load_profile()
             profile = self._verify_source(profile)
             original_hash = profile.profile_hash
+            # W4a: reconcile Daily Notes links before preflight (lock
+            # already held); failure skips all later preflight/mutation.
+            self._maybe_reconcile(profile)
             self._preflight(profile)
             profile = self._verify_profile_stable(original_hash)
             profile = self._verify_source(profile)
@@ -3152,6 +6643,9 @@ class TaskNotesEngine:
             profile = self.load_profile()
             profile = self._verify_source(profile)
             original_hash = profile.profile_hash
+            # W4a: reconcile Daily Notes links before preflight (lock
+            # already held); failure skips all later preflight/mutation.
+            self._maybe_reconcile(profile)
             self._preflight(profile)
             profile = self._verify_profile_stable(original_hash)
             profile = self._verify_source(profile)
@@ -3230,12 +6724,48 @@ class TaskNotesEngine:
                     f"target has uncommitted changes: {target}"
                 )
 
+            # W4a delete exception: the Git-clean guard above runs BEFORE
+            # any reconciliation side effect, so a dirty target yields
+            # zero reconciliation I/O and calls. Once clean, reconcile
+            # other pending changes, then the preflight/delete lifecycle.
+            self._maybe_reconcile(profile)
+
             # Now safe: preflight commits pending unrelated edits and syncs.
             self._preflight(profile)
             profile = self._verify_profile_stable(original_hash)
             profile = self._verify_source(profile)
             # Re-resolve in case preflight changed things.
             gbrain_slug = resolve_gbrain_slug(profile, slug)
+
+            # Daily link prevalidation (issue #139 W2, D13 ordering): read
+            # and decode the CURRENT page to retain the actual scheduled
+            # state, then load the Daily Notes config exactly once and
+            # pre-compute the removal projection — BEFORE the soft-delete
+            # gate. A deterministic failure raises here: the task and its
+            # daily link stay untouched.
+            daily_projections_delete: Optional[List[DailyNoteProjection]] = None
+            daily_config_delete: Optional[DailyNotesConfig] = None
+            if self.daily_links_enabled:
+                page = gbrain_get_page(
+                    self.gbrain_bin, self._gbrain_env,
+                    gbrain_slug, profile.source_id,  # type: ignore[arg-type]
+                )
+                decoded_delete = decode_page(page)
+                old_scheduled = _daily_scheduled_date(
+                    decoded_delete["frontmatter"].get(profile.mappings["scheduled"])
+                )
+                if old_scheduled is not None:
+                    daily_config_delete = self._load_daily_config()
+                    date_steps = _daily_link_plan(old_scheduled, None)
+                    steps = _compose_daily_link_plan_by_target(
+                        self.vault, daily_config_delete, date_steps or []
+                    )
+                    daily_projections_delete = self._prepare_daily_link_projections(
+                        profile,
+                        daily_config_delete,
+                        steps,
+                        slug,
+                    )
 
             # Gbrain soft-delete: confirmation gate.
             try:
@@ -3281,10 +6811,18 @@ class TaskNotesEngine:
             except GbrainPageNotFound:
                 pass
 
-            return MutationResult(
+            result = MutationResult(
                 state=APPLIED_AND_COMMITTED,
                 slug=slug,
                 commit_id=commit_id,
+            )
+            # Daily link removal (issue #139 W2, D13): runs ONLY after the
+            # task deletion is verified (page_not_found above). A
+            # projection failure degrades the daily result fields while
+            # the task outcome stays authoritative; the returned
+            # commit_id remains the TASK deletion commit.
+            return self._finish_with_daily_links(
+                profile, result, daily_projections_delete, daily_config_delete
             )
 
     def _validate_tag_value(self, tag: Any) -> str:
@@ -3314,6 +6852,9 @@ class TaskNotesEngine:
                 )
             profile = self._verify_source(profile)
             original_hash = profile.profile_hash
+            # W4a: reconcile Daily Notes links before preflight (lock
+            # already held); failure skips all later preflight/mutation.
+            self._maybe_reconcile(profile)
             self._preflight(profile)
             profile = self._verify_profile_stable(original_hash)
             profile = self._verify_source(profile)
@@ -3365,6 +6906,9 @@ class TaskNotesEngine:
                 )
             profile = self._verify_source(profile)
             original_hash = profile.profile_hash
+            # W4a: reconcile Daily Notes links before preflight (lock
+            # already held); failure skips all later preflight/mutation.
+            self._maybe_reconcile(profile)
             self._preflight(profile)
             profile = self._verify_profile_stable(original_hash)
             profile = self._verify_source(profile)
