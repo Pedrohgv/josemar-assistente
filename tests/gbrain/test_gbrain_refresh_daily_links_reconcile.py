@@ -11,11 +11,12 @@ Covered layers:
      failure must skip finalize and fail refresh without advancing the
      cursor.
   2. Real CLI end-to-end (fixture-patched fixed constants, real temporary
-     Git vault, real W2 core): a full refresh with the master flag enabled
+     Git vault, real W2 core): a full refresh with the flags enabled
      projects the scheduled task link and advances the cursor only via the
-     post-sync finalize; with the flag disabled the CLI is completely
-     inert (garbage cursor/pending state is neither read nor written) and
-     refresh still succeeds; a hostile flag value fails refresh before any
+     post-sync finalize; with either flag explicitly false the CLI is
+     completely inert (garbage cursor/pending state is neither read nor
+     written) and refresh still succeeds; missing flags resolve to the
+     enabled default; a hostile flag value fails refresh before any
      gbrain call.
   3. Static refresh-flow contract: the fixed CLI constant, the isolated
      interpreter, and the required order inside do_refresh.
@@ -38,6 +39,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -344,6 +346,12 @@ def make_vault(tmpdir: Path, name: str) -> Path:
         json.dumps({"folder": "journal"}), encoding="utf-8"
     )
     _git(vault, "init", "-q")
+    # Deterministic repo-local identity: CI runners (GitHub Actions)
+    # have no global git identity, so the fixture's initial commit
+    # would otherwise exit 128. Repo-local config only — the global
+    # (and system) git config is never touched.
+    _git(vault, "config", "user.name", "tasknotes-tests")
+    _git(vault, "config", "user.email", "tasknotes-tests@local")
     _write_task(vault, "t1", scheduled=_D1)
     _commit_all(vault, "init")
     return vault
@@ -378,8 +386,9 @@ class _RefreshFixtureMixin:
     def env(self, **extra) -> dict:
         env = os.environ.copy()
         env.update({"HOME": str(self.tmp)})
-        # Deterministic feature flag: every test sets it explicitly.
+        # Deterministic feature flags: every test sets them explicitly.
         env.pop("TASKNOTES_DAILY_LINKS_ENABLED", None)
+        env.pop("TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED", None)
         env.pop("TASKNOTES_LOCK_FD", None)
         env.update(extra)
         return env
@@ -581,7 +590,7 @@ class RefreshRealCliEndToEndTests(_RefreshFixtureMixin, unittest.TestCase):
         self.assertFalse(self.pending_path.exists(), "pending cleared")
 
     def test_disabled_refresh_is_completely_inert_with_garbage_state(self) -> None:
-        """Flag disabled (default): the whole refresh succeeds exactly as
+        """Flags explicitly false: the whole refresh succeeds exactly as
         before the feature existed, and the real CLI never reads or writes
         the cursor/pending state (garbage bytes stay garbage) nor touches
         the (absent) vault."""
@@ -592,7 +601,9 @@ class RefreshRealCliEndToEndTests(_RefreshFixtureMixin, unittest.TestCase):
         self.pending_path.write_bytes(garbage_pending)
         self._setup_real()
         result = self._run_wrapper(
-            [str(self.wrapper), "refresh"], env=self.env()
+            [str(self.wrapper), "refresh"],
+            env=self.env(TASKNOTES_DAILY_LINKS_ENABLED="false",
+                         TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="false"),
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('"success": true', result.stdout)
@@ -600,6 +611,27 @@ class RefreshRealCliEndToEndTests(_RefreshFixtureMixin, unittest.TestCase):
         self.assertEqual(self.pending_path.read_bytes(), garbage_pending)
         self.assertFalse((self.tmp / "vault").exists(),
                          "an absent vault must stay untouched when disabled")
+
+    def test_missing_flags_refresh_defaults_enabled_end_to_end(self) -> None:
+        """Both flags missing resolve to the enabled default: a plain
+        refresh (no feature env at all) runs the reconciliation lifecycle
+        against the real vault and advances the cursor via the post-sync
+        finalize."""
+        vault = make_vault(self.tmp, "vault")
+        head_before = _git(vault, "rev-parse", "HEAD")
+        self._setup_real()
+        result = self._run_wrapper(
+            [str(self.wrapper), "refresh"], env=self.env()
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"success": true', result.stdout)
+        note = (vault / "journal" / f"{_D1}.md").read_text(encoding="utf-8")
+        self.assertIn("- [[t1]]", note)
+        head_after = _git(vault, "rev-parse", "HEAD")
+        self.assertNotEqual(head_before, head_after,
+                            "the default-enabled reconcile must commit")
+        self.assertFalse(self.pending_path.exists())
+        self.assertTrue(self.cursor_path.exists())
 
     def test_invalid_flag_fails_refresh_before_any_gbrain_call(self) -> None:
         """A hostile master flag value is a strict validation failure: the
@@ -705,6 +737,46 @@ class RefreshReconcileStaticContractTests(unittest.TestCase):
             lock_invocations, [],
             "do_refresh must not acquire locks beyond the shared entry",
         )
+
+
+class MakeVaultIdentityTests(unittest.TestCase):
+    """CI-portability regression (fast-tests run 33278429405): the
+    ``make_vault`` fixture must commit with a deterministic repo-local
+    identity so environments without a global git identity (GitHub
+    Actions runners) do not fail with ``git commit`` exit 128. The
+    global/system git config must remain untouched."""
+
+    def test_make_vault_commits_without_global_git_identity(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="gbrain-refresh-vault-identity-"
+        ) as raw:
+            tmp = Path(raw)
+            empty_config = tmp / "empty-gitconfig"
+            empty_config.write_text("", encoding="utf-8")
+            env = {
+                "GIT_CONFIG_GLOBAL": str(empty_config),
+                "GIT_CONFIG_SYSTEM": str(empty_config),
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+            with mock.patch.dict(os.environ, env):
+                vault = make_vault(tmp, "identity-vault")
+                # Follow-up fixture commits keep working under the same
+                # identity-free environment (repo-local config).
+                _write_task(vault, "t2", scheduled=_D1)
+                head = _commit_all(vault, "second")
+            self.assertEqual(len(head), 40)
+            # Nothing was written outside the repo: the empty global
+            # config file stayed empty.
+            self.assertEqual(empty_config.read_text(encoding="utf-8"), "")
+            # The identity is repo-local, not ambient.
+            self.assertEqual(
+                _git(vault, "config", "--local", "user.name"),
+                "tasknotes-tests",
+            )
+            self.assertEqual(
+                _git(vault, "config", "--local", "user.email"),
+                "tasknotes-tests@local",
+            )
 
 
 if __name__ == "__main__":

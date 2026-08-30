@@ -358,17 +358,25 @@ class TaskNotesDockerHarnessContractTests(unittest.TestCase):
 
     def test_e2e_daily_links_scenario_contract(self) -> None:
         """Issue #139 W4: the e2e lifecycle must run the disabled mode
-        before any Daily Notes configuration exists, run the daily-links
-        phase with the strict env flag against a custom numeric-subfolder
-        config + template with empty date/title identity + a preexisting
-        note, and prove Git projection commits plus native gbrain source
-        visibility after the incremental projection sync."""
+        (explicit master ``false``: the runtime treats a missing flag as
+        enabled) before any Daily Notes configuration exists, run the
+        daily-links phase with the strict env flag against a custom
+        numeric-subfolder config + template with empty date/title identity +
+        a preexisting note, and prove Git projection commits plus native
+        gbrain source visibility after the incremental projection sync."""
         text = self._e2e_text()
         # Disabled-mode subcase runs first, without any Daily Notes config.
         self.assertIn(
             'assert not (vault / ".obsidian" / DAILY_NOTES_CONFIG_NAME).exists()',
             text,
         )
+        # R8: a missing master flag defaults to enabled, so the disabled
+        # subcase must pass the flag explicitly as "false" instead of
+        # omitting it.
+        self.assertIn('dict(env, TASKNOTES_DAILY_LINKS_ENABLED="false")', text)
+        # Ambient protection retained: the harness container env must NOT
+        # forward the daily-links flags — the e2e builds each phase's MCP
+        # env explicitly.
         self.assertNotIn("TASKNOTES_DAILY_LINKS_ENABLED", self._harness_env_passthrough())
         # Enabled phase uses the strict boolean env flag (value "true").
         self.assertIn('dict(env, TASKNOTES_DAILY_LINKS_ENABLED="true")', text)
@@ -421,6 +429,36 @@ class TaskNotesDockerHarnessContractTests(unittest.TestCase):
         self.assertIn("compiled_truth", text)
         self.assertIn(
             '"[[20260721t100000]]" in body_19', text
+        )
+
+    def test_e2e_phase1_disabled_mode_pins_explicit_false_master_flag(self) -> None:
+        """R8 regression guard: the runtime treats a MISSING
+        ``TASKNOTES_DAILY_LINKS_ENABLED`` as enabled, so the e2e Phase 1
+        disabled-mode subcase must pass the master flag explicitly as
+        "false" in its per-phase env — omitting the flag would silently run
+        Phase 1 in enabled mode and void its no-daily_link_* assertions.
+        The stale absent-flag guard must stay gone, and the harness
+        container env still must not forward the flag (the e2e owns each
+        phase's env explicitly)."""
+        text = self._e2e_text()
+        # The Phase 1 lifecycle call carries the explicit disabled flag.
+        self.assertIn(
+            'lifecycle(vault, dict(env, TASKNOTES_DAILY_LINKS_ENABLED="false"))',
+            text,
+        )
+        # The lifecycle validates the exact explicit value at runtime.
+        self.assertIn(
+            'assert env.get("TASKNOTES_DAILY_LINKS_ENABLED") == "false"', text
+        )
+        # The stale absence claim ("the flag is absent from env" guarded by
+        # a startswith prefix scan) is gone — it could never hold the
+        # explicit-false phase env.
+        self.assertNotIn('key.startswith("TASKNOTES_DAILY_LINKS_ENABLED")', text)
+        self.assertNotIn("the flag is absent from env", text)
+        # Ambient protection retained: the harness container env never
+        # forwards the daily-links flags; each phase builds its own env.
+        self.assertNotIn(
+            "TASKNOTES_DAILY_LINKS_ENABLED", self._harness_env_passthrough()
         )
 
     def test_e2e_external_edit_reconciliation_contract(self) -> None:

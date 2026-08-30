@@ -35,6 +35,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -204,6 +205,12 @@ def make_vault(tmpdir: Path, name: str) -> Path:
         json.dumps({"folder": "journal"}), encoding="utf-8"
     )
     _git(vault, "init", "-q")
+    # Deterministic repo-local identity: CI runners (GitHub Actions)
+    # have no global git identity, so the fixture's initial commit
+    # would otherwise exit 128. Repo-local config only — the global
+    # (and system) git config is never touched.
+    _git(vault, "config", "user.name", "tasknotes-tests")
+    _git(vault, "config", "user.email", "tasknotes-tests@local")
     _write_task(vault, "t1", scheduled=_D1)
     _commit_all(vault, "init")
     return vault
@@ -286,9 +293,9 @@ class ReconcileCliSourceContractTests(unittest.TestCase):
         self.assertIn("runtime_identity_refused", self.src)
 
     def test_strict_master_flag_parsing_is_fail_closed(self) -> None:
-        """Missing/empty = disabled; only exact true/false accepted; the
-        disabled short-circuit must precede every lifecycle call inside
-        the step runner."""
+        """Missing/empty = enabled (provided default); only exact true/false
+        accepted for nonempty values; the disabled short-circuit must
+        precede every lifecycle call inside the step runner."""
         self.assertIn('normalized == "true"', self.src)
         self.assertIn('normalized == "false"', self.src)
         self.assertIn("daily_links_flag_invalid", self.src)
@@ -388,15 +395,17 @@ class ReconcileCliBehaviorTests(unittest.TestCase):
         verb: str,
         *,
         flag: str | None = None,
+        slave: str | None = "true",
         lock_fd: int | None = None,
         argv: list[str] | None = None,
     ) -> subprocess.CompletedProcess:
         env = self.env()
         if flag is not None:
             env[MASTER_FLAG] = flag
-            # Strict dual flags: the reconcile-enabled slave must also be
-            # enabled (else the CLI is inert before any lifecycle access).
-            env.setdefault(SLAVE_FLAG, "true")
+        if slave is not None:
+            # Strict dual flags: default the reconcile-enabled slave to
+            # enabled so single-flag tests exercise the master alone.
+            env[SLAVE_FLAG] = slave
         kwargs: dict = {}
         if lock_fd is not None:
             env["TASKNOTES_LOCK_FD"] = str(lock_fd)
@@ -438,12 +447,12 @@ class ReconcileCliBehaviorTests(unittest.TestCase):
 
     # -- master flag -----------------------------------------------------
 
-    def test_disabled_flag_values_are_inert_successes(self) -> None:
-        """Missing, empty, and false variants (any case/spacing) exit 0 as
-        inert without the lock fd, the vault, or any state access."""
+    def test_explicit_false_values_are_inert_successes(self) -> None:
+        """Explicit false variants (any case/spacing) exit 0 as inert
+        without the lock fd, the vault, or any state access."""
         garbage = self._write_garbage_state()
         vault_before = sorted(p.name for p in self.vault.rglob("*"))
-        for flag in (None, "", "false", "FALSE", " False "):
+        for flag in ("false", "FALSE", " False "):
             for verb in ("reconcile", "finalize"):
                 with self.subTest(flag=flag, verb=verb):
                     result = self.run_cli(verb, flag=flag)
@@ -457,6 +466,60 @@ class ReconcileCliBehaviorTests(unittest.TestCase):
         self.assertEqual(self.pending_path.read_bytes(), garbage[1])
         self.assertEqual(sorted(p.name for p in self.vault.rglob("*")),
                          vault_before, "the vault must be untouched")
+
+    def test_missing_or_empty_flag_defaults_enabled(self) -> None:
+        """Missing and empty master values resolve to the enabled default
+        (slave explicitly true): the CLI proceeds past the flag gate and
+        fails at the next precondition (no inherited lock), proving no
+        disabled short-circuit."""
+        garbage = self._write_garbage_state()
+        for flag in (None, "", "   "):
+            with self.subTest(flag=repr(flag)):
+                result = self.run_cli("reconcile", flag=flag)
+                self.assertNotEqual(result.returncode, 0,
+                                    result.stdout + result.stderr)
+                payload = self.out(result)
+                self.assertEqual(payload["error"], "tasknotes_lock_not_held")
+                self.assertNotIn('"status": "disabled"', result.stdout)
+        self.assertEqual(self.cursor_path.read_bytes(), garbage[0])
+        self.assertEqual(self.pending_path.read_bytes(), garbage[1])
+
+    def test_flag_matrix_missing_empty_false_and_mixed_pairs(self) -> None:
+        """Strict dual flags matrix: missing and empty on each flag resolve
+        to enabled (default), each explicit false disables, and mixed pairs
+        AND-combine. Outcomes: inert success only when at least one explicit
+        false; otherwise the run proceeds to the lock precondition. Invalid
+        nonempty values fail structured before anything else."""
+        inert = (False, "disabled")
+        matrix = (
+            # (master, slave, expected_error_or_inert)
+            (None, None, "tasknotes_lock_not_held"),   # both missing: enabled
+            ("", "", "tasknotes_lock_not_held"),       # both empty: enabled
+            ("true", None, "tasknotes_lock_not_held"), # slave missing: enabled
+            (None, "true", "tasknotes_lock_not_held"), # master missing: enabled
+            ("false", None, inert),                    # explicit false wins
+            (None, "false", inert),                    # explicit false wins
+            ("false", "", inert),                      # mixed false/empty
+            ("", "false", inert),                      # mixed empty/false
+            ("FALSE", "false", inert),                 # case-insensitive false
+            ("True", "TRUE", "tasknotes_lock_not_held"),
+            ("false", "true", inert),
+            ("true", "false", inert),
+        )
+        for master, slave, expected in matrix:
+            with self.subTest(master=repr(master), slave=repr(slave)):
+                result = self.run_cli("reconcile", flag=master, slave=slave)
+                payload = self.out(result)
+                if expected == inert:
+                    self.assertEqual(result.returncode, 0,
+                                     result.stdout + result.stderr)
+                    self.assertTrue(payload["success"])
+                    self.assertEqual(payload["status"], "disabled")
+                else:
+                    self.assertNotEqual(result.returncode, 0,
+                                        result.stdout + result.stderr)
+                    self.assertEqual(payload["error"], expected)
+                    self.assertNotIn('"status": "disabled"', result.stdout)
 
     def test_invalid_flag_values_fail_closed_without_state_access(self) -> None:
         garbage = self._write_garbage_state()
@@ -687,6 +750,46 @@ class ReconcileCliBehaviorTests(unittest.TestCase):
         self.assertEqual(payload["error"], "daily_links_reconcile_failed")
         self.assertEqual(self.cursor_path.read_bytes(), b"{not-a-cursor")
         self.assertEqual(self.pending_path.read_bytes(), b"{not-a-pending")
+
+
+class MakeVaultIdentityTests(unittest.TestCase):
+    """CI-portability regression (fast-tests run 33278429405): the
+    ``make_vault`` fixture must commit with a deterministic repo-local
+    identity so environments without a global git identity (GitHub
+    Actions runners) do not fail with ``git commit`` exit 128. The
+    global/system git config must remain untouched."""
+
+    def test_make_vault_commits_without_global_git_identity(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="reconcile-cli-vault-identity-"
+        ) as raw:
+            tmp = Path(raw)
+            empty_config = tmp / "empty-gitconfig"
+            empty_config.write_text("", encoding="utf-8")
+            env = {
+                "GIT_CONFIG_GLOBAL": str(empty_config),
+                "GIT_CONFIG_SYSTEM": str(empty_config),
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+            with mock.patch.dict(os.environ, env):
+                vault = make_vault(tmp, "identity-vault")
+                # Follow-up fixture commits keep working under the same
+                # identity-free environment (repo-local config).
+                _write_task(vault, "t2", scheduled=_D1)
+                head = _commit_all(vault, "second")
+            self.assertEqual(len(head), 40)
+            # Nothing was written outside the repo: the empty global
+            # config file stayed empty.
+            self.assertEqual(empty_config.read_text(encoding="utf-8"), "")
+            # The identity is repo-local, not ambient.
+            self.assertEqual(
+                _git(vault, "config", "--local", "user.name"),
+                "tasknotes-tests",
+            )
+            self.assertEqual(
+                _git(vault, "config", "--local", "user.email"),
+                "tasknotes-tests@local",
+            )
 
 
 if __name__ == "__main__":

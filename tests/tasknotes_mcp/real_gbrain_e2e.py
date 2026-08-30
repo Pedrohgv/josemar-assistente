@@ -13,9 +13,12 @@ and caller-provided bypasses are refused.
 
 Two lifecycle phases run against the same disposable vault (issue #139 W4):
 
-1. Disabled mode (default): the plain task lifecycle runs BEFORE any Daily
-   Notes configuration exists, proving no configuration prerequisite and no
-   ``daily_link_*`` result fields.
+1. Disabled mode (explicit ``TASKNOTES_DAILY_LINKS_ENABLED=false``): the
+   plain task lifecycle runs BEFORE any Daily Notes configuration exists,
+   proving no configuration prerequisite and no ``daily_link_*`` result
+   fields. The master flag is passed explicitly as ``false`` because the
+   runtime treats a missing flag as enabled; omitting it would silently run
+   this phase in enabled mode.
 2. Daily-links mode (``TASKNOTES_DAILY_LINKS_ENABLED=true``): after a
    fixture (numeric-subfolder ``daily-notes.json``, a template with empty
    ``date``/``title`` identity, and one preexisting Daily Note) the real
@@ -446,13 +449,13 @@ async def call(session: Any, name: str, arguments: dict) -> dict:
 
 
 async def lifecycle(vault: Path, env: dict[str, str]) -> None:
-    # Disabled-mode subcase (issue #139): the flag is absent from env and no
-    # Daily Notes configuration exists yet — the plain lifecycle must work
+    # Disabled-mode subcase (issue #139): the master flag is passed
+    # explicitly as "false" — the runtime treats a MISSING flag as enabled,
+    # so omission would silently run this phase in enabled mode — and no
+    # Daily Notes configuration exists yet: the plain lifecycle must work
     # with no configuration prerequisite and no daily_link_* result fields.
     assert not (vault / ".obsidian" / DAILY_NOTES_CONFIG_NAME).exists()
-    assert not any(
-        key.startswith("TASKNOTES_DAILY_LINKS_ENABLED") for key in env
-    ), env
+    assert env.get("TASKNOTES_DAILY_LINKS_ENABLED") == "false", env
 
     # The MCP client lives in the image venv; it is imported lazily so the
     # harness-proof guards above can run even on hosts without the package.
@@ -1239,10 +1242,15 @@ def main() -> None:
     expected_gid = _validated_id("TASKNOTES_E2E_GID")
     _prove_docker_harness(expected_uid, expected_gid)
     vault, env = prepare()
-    # Phase 1 — disabled mode (issue #139): the plain lifecycle runs before
-    # any Daily Notes configuration exists, proving no configuration
-    # prerequisite and no daily_link_* result fields.
-    asyncio.run(lifecycle(vault, env))
+    # Phase 1 — disabled mode (issue #139): the runtime treats a MISSING
+    # master flag as enabled, so the disabled subcase pins its env with an
+    # explicit TASKNOTES_DAILY_LINKS_ENABLED="false" (the slave reconcile
+    # flag is never consulted while the master is off). The plain lifecycle
+    # runs before any Daily Notes configuration exists, proving no
+    # configuration prerequisite and no daily_link_* result fields.
+    asyncio.run(
+        lifecycle(vault, dict(env, TASKNOTES_DAILY_LINKS_ENABLED="false"))
+    )
     print("real-gbrain disabled-mode lifecycle: PASS")
     # Phase 2 — daily-links mode: install the fixture (writes only), then
     # run the enabled-mode lifecycle against the real MCP.

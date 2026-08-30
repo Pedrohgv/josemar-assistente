@@ -1071,7 +1071,8 @@ do_refresh() {
     # returned success. Any failure fails refresh without advancing the
     # cursor (the W2 cursor/pending stay replayable). The fixed CLI
     # validates the master reconcile flag strictly and is completely
-    # inert when the feature is disabled (default).
+    # inert when the feature is explicitly disabled (the flags default to
+    # enabled when missing).
     reconcile_output=$("$PYTHON_BIN" -I "$TASKNOTES_RECONCILE_CLI" reconcile 2>&1) || {
         emit_json "$("$PYTHON_BIN" -I - "$reconcile_output" <<'PY'
 import json, sys

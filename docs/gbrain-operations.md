@@ -197,7 +197,7 @@ Immediate non-negotiables:
 5. **No nested wrapper usage in TaskNotes.** TaskNotes remains a bounded MCP
    adapter implemented on short-lived native gbrain commands, the sole
    task-file writer. Its single direct filesystem exception (issue #139,
-   default off) is its own derived Daily Note task-link projection: while it
+   default on) is its own derived Daily Note task-link projection: while it
    owns the transaction lock it may create/edit only the vault-confined Daily
    Note file for a task's exact `scheduled` date, then reconciles the
    filesystem-originated change through native incremental gbrain sync under

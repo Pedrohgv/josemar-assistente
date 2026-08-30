@@ -71,9 +71,10 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    """Strict boolean env parsing (issue #139): missing or empty disables
-    (default); a nonempty value must be case-insensitive 'true'/'false' and
-    anything else is rejected at engine init instead of being coerced."""
+    """Strict boolean env parsing (issue #139): missing or empty resolves
+    to the provided default; a nonempty value must be case-insensitive
+    'true'/'false' and anything else is rejected at engine init instead of
+    being coerced."""
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return default
@@ -108,7 +109,7 @@ def _get_engine() -> TaskNotesEngine:
             lock_dir=Path(TASKNOTES_LOCK_DIR),
             lock_timeout=_env_float("TASKNOTES_LOCK_TIMEOUT", 10.0),
             tz=os.environ.get("TZ", "UTC"),
-            daily_links_enabled=_env_bool("TASKNOTES_DAILY_LINKS_ENABLED", False),
+            daily_links_enabled=_env_bool("TASKNOTES_DAILY_LINKS_ENABLED", True),
             reconcile_enabled=_env_bool(
                 "TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED", True
             ),

@@ -28,13 +28,13 @@ Fixed-purpose by construction:
 Safety invariants:
   - The master reconcile flag (``TASKNOTES_DAILY_LINKS_ENABLED``) and the
     slave reconcile flag (``TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED``) are
-    both validated strictly: missing or empty means disabled, a nonempty
-    value must be exactly ``true`` or ``false`` (case-insensitive), and
-    anything else is a structured failure (never coerced). Reconciliation
-    is fully inert unless BOTH flags are enabled: when either is disabled
-    the CLI does no cursor/pending read or write, no vault access, and no
-    lock requirement - it exits successfully so refresh proceeds exactly
-    as before the feature existed.
+    both validated strictly: missing or empty means enabled (default), a
+    nonempty value must be exactly ``true`` or ``false`` (case-insensitive),
+    and anything else is a structured failure (never coerced).
+    Reconciliation is fully inert unless BOTH flags are enabled: when
+    either is explicitly disabled the CLI does no cursor/pending read or
+    write, no vault access, and no lock requirement - it exits successfully
+    so refresh proceeds exactly as before the feature existed.
   - Refuses root execution outright: the shared lock and all state access
     belong to the hermes runtime user.
   - Requires the INHERITED shared tasknotes flock: ``TASKNOTES_LOCK_FD``
@@ -89,8 +89,8 @@ RECONCILE_CURSOR_PATH = DAILY_LINKS_RECONCILE_CURSOR_PATH
 RECONCILE_PENDING_PATH = DAILY_LINKS_RECONCILE_PENDING_PATH
 
 # Master reconcile flag (issue #139). Same strict semantics as the MCP
-# server's boolean parsing: missing/empty disables; anything nonempty must
-# be exactly true/false.
+# server's boolean parsing: missing/empty enables (provided default);
+# anything nonempty must be exactly true/false.
 MASTER_FLAG = "TASKNOTES_DAILY_LINKS_ENABLED"
 
 # Slave reconcile flag (issue #139 W3). Same strict semantics as the master
@@ -130,10 +130,14 @@ def _fail(action: str, error: str, message: object) -> NoReturn:
 
 
 def _master_flag_enabled() -> bool:
-    """Strictly parse the master reconcile flag (fail closed, never coerce)."""
+    """Strictly parse the master reconcile flag (fail closed, never coerce).
+
+    Missing or empty resolves to the enabled default; a nonempty value must
+    be exactly ``true`` or ``false`` (case-insensitive).
+    """
     raw = os.environ.get(MASTER_FLAG)
     if raw is None or raw.strip() == "":
-        return False
+        return True
     normalized = raw.strip().lower()
     if normalized == "true":
         return True
@@ -145,14 +149,15 @@ def _master_flag_enabled() -> bool:
 def _slave_flag_enabled() -> bool:
     """Strictly parse the slave reconcile flag (fail closed, never coerce).
 
-    Same semantics as the master flag: missing/empty disables; a nonempty
-    value must be exactly ``true`` or ``false`` (case-insensitive); anything
-    else is a structured failure. Reconciliation is fully inert unless both
-    the master and slave flags are enabled.
+    Same semantics as the master flag: missing/empty enables (provided
+    default); a nonempty value must be exactly ``true`` or ``false``
+    (case-insensitive); anything else is a structured failure.
+    Reconciliation is fully inert unless both the master and slave flags
+    are enabled.
     """
     raw = os.environ.get(SLAVE_FLAG)
     if raw is None or raw.strip() == "":
-        return False
+        return True
     normalized = raw.strip().lower()
     if normalized == "true":
         return True

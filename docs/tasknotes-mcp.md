@@ -430,12 +430,13 @@ tool, API, or arbitrary note path is exposed.
 The feature is controlled by the strict boolean master
 `TASKNOTES_DAILY_LINKS_ENABLED`, propagated deploy workflow → `.env` →
 Compose → Hermes TaskNotes MCP env → engine. The deploy workflow and
-Compose both default it to `true`. Missing or empty resolves to enabled.
+Compose both default it to `true`, and the engine's own strict parse
+shares that default: Missing or empty resolves to enabled at every layer.
 Only case-insensitive
 `true`/`false` are accepted and any other value fails closed at deploy
-validation before any deploy mutation and again at MCP initialization (if
-the deployment chain is bypassed entirely and no value reaches the engine,
-the master fails closed to disabled). Explicit `false` rolls back or opts
+validation before any deploy mutation and again at MCP initialization
+(so even if the deployment chain is bypassed entirely, no disabled
+fallback exists). Explicit `false` rolls back or opts
 out: no Daily Notes config is read or required, no projection work runs,
 reconciliation is fully inert (no cursor/pending I/O; the refresh cycle
 proceeds unchanged), and mutation results carry no `daily_link_*` fields.

@@ -1176,11 +1176,13 @@ class ReindexStateAwareBehaviorTests(unittest.TestCase):
 class DailyLinksReconcileSlaveFlagTests(unittest.TestCase):
     """Issue #139 W3: the fixed Daily-links reconciliation CLI strictly parses
     the slave flag ``TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED`` with the same
-    semantics as the master flag. Reconciliation is fully inert unless BOTH
-    flags are enabled, and the slave is parsed before any lock/cursor/pending/
-    vault access. These tests run the real CLI directly (no wrapper, no vault,
-    no lock) because the disabled and invalid-slave paths exit before any
-    lifecycle access."""
+    semantics as the master flag (missing/empty resolves to the enabled
+    default; nonempty values must be exactly true/false). Reconciliation is
+    fully inert unless BOTH flags are enabled, and the slave is parsed before
+    any lock/cursor/pending/vault access. These tests run the real CLI
+    directly (no wrapper, no vault, no lock) because the explicitly-disabled
+    and invalid-slave paths exit before any lifecycle access, while the
+    enabled path stops at the lock precondition."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="gbrain-w3-slave-")
@@ -1218,26 +1220,30 @@ class DailyLinksReconcileSlaveFlagTests(unittest.TestCase):
                 self.assertNotIn("tasknotes_lock_not_held", result.stdout)
                 self.assertNotIn("runtime_identity_refused", result.stdout)
 
-    def test_slave_missing_is_inert_even_when_master_true(self) -> None:
-        """Slave missing (runtime absent) is conservative false: inert disabled
-        envelope, no lifecycle/lock access."""
+    def test_slave_missing_defaults_enabled_passes_flag_gate(self) -> None:
+        """Slave missing (runtime absent) resolves to the enabled default:
+        with master true the flag gate passes and the run proceeds to the
+        lifecycle preconditions (here: the lock check, which fails because
+        no inherited lock is held)."""
         result = self.run_cli(
             "reconcile",
             TASKNOTES_DAILY_LINKS_ENABLED="true",
         )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('"status": "disabled"', result.stdout)
-        self.assertNotIn("tasknotes_lock_not_held", result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('"status": "disabled"', result.stdout)
+        self.assertIn("tasknotes_lock_not_held", result.stdout)
 
-    def test_slave_empty_is_inert_even_when_master_true(self) -> None:
-        """Slave empty is conservative false: inert disabled envelope."""
+    def test_slave_empty_defaults_enabled_passes_flag_gate(self) -> None:
+        """Slave empty resolves to the enabled default: same enabled-path
+        behavior as a missing slave (lock precondition reached)."""
         result = self.run_cli(
             "reconcile",
             TASKNOTES_DAILY_LINKS_ENABLED="true",
             TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="   ",
         )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('"status": "disabled"', result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('"status": "disabled"', result.stdout)
+        self.assertIn("tasknotes_lock_not_held", result.stdout)
 
     def test_invalid_slave_fails_closed_before_lifecycle_access(self) -> None:
         """An invalid slave value fails closed with the structured flag error
@@ -1291,14 +1297,60 @@ class DailyLinksReconcileSlaveFlagTests(unittest.TestCase):
                 self.assertNotIn("tasknotes_lock_not_held", result.stdout)
                 self.assertNotIn("runtime_identity_refused", result.stdout)
 
-    def test_both_missing_is_inert(self) -> None:
-        """Strict dual flags: both flags missing (runtime absent) is fully
-        inert — successful disabled envelope, no lifecycle/lock access."""
+    def test_both_missing_defaults_enabled_proceeds_to_lock_check(self) -> None:
+        """Strict dual flags: both flags missing (runtime absent) each
+        resolve to the enabled default, so the run proceeds past the flag
+        gate to the lifecycle preconditions (the lock check fails because
+        no inherited lock is held)."""
         result = self.run_cli("reconcile")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('"status": "disabled"', result.stdout)
-        self.assertIn('"success": true', result.stdout)
-        self.assertNotIn("tasknotes_lock_not_held", result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('"status": "disabled"', result.stdout)
+        self.assertIn("tasknotes_lock_not_held", result.stdout)
+        self.assertNotIn("runtime_identity_refused", result.stdout)
+
+    def test_flag_matrix_missing_empty_false_and_mixed_pairs(self) -> None:
+        """Strict dual flags matrix over the real CLI: missing and empty on
+        each flag resolve to enabled, each explicit false disables, mixed
+        pairs AND-combine (inert only when at least one explicit false), and
+        case-insensitive valid values pass. Invalid nonempty fails closed
+        regardless of the other flag (covered separately above)."""
+        inert = (False, "disabled")
+        matrix = (
+            # (master, slave, expected)
+            (None, None, "tasknotes_lock_not_held"),    # both missing
+            ("", None, "tasknotes_lock_not_held"),      # master empty
+            (None, "", "tasknotes_lock_not_held"),      # slave empty
+            ("true", None, "tasknotes_lock_not_held"),
+            (None, "true", "tasknotes_lock_not_held"),
+            ("TRUE", "", "tasknotes_lock_not_held"),
+            ("", "True", "tasknotes_lock_not_held"),
+            ("false", None, inert),                     # explicit false wins
+            (None, "false", inert),                     # explicit false wins
+            ("false", "", inert),                       # mixed false/empty
+            ("", "false", inert),                       # mixed empty/false
+            ("False", "FALSE", inert),                  # case-insensitive
+            ("false", "true", inert),
+            ("true", "false", inert),
+        )
+        for master, slave, expected in matrix:
+            with self.subTest(master=repr(master), slave=repr(slave)):
+                env_extra = {}
+                if master is not None:
+                    env_extra["TASKNOTES_DAILY_LINKS_ENABLED"] = master
+                if slave is not None:
+                    env_extra["TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED"] = slave
+                result = self.run_cli("reconcile", **env_extra)
+                if expected == inert:
+                    self.assertEqual(result.returncode, 0,
+                                     result.stdout + result.stderr)
+                    self.assertIn('"status": "disabled"', result.stdout)
+                    self.assertIn('"success": true', result.stdout)
+                    self.assertNotIn("tasknotes_lock_not_held", result.stdout)
+                else:
+                    self.assertNotEqual(result.returncode, 0,
+                                        result.stdout + result.stderr)
+                    self.assertNotIn('"status": "disabled"', result.stdout)
+                    self.assertIn(expected, result.stdout)
 
     def test_slave_true_case_insensitive_passes_flag_gate(self) -> None:
         """Slave true (case-insensitive) with master true passes the flag gate
