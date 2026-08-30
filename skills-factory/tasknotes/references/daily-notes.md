@@ -103,7 +103,7 @@ second folder/date/template setting anywhere in the adapter.
 |---|---|---|
 | `folder` | vault-relative Daily Notes folder | vault root (`""`) |
 | `format` | note filename date format | `YYYY-MM-DD` |
-| `template` | vault-relative Markdown template path | no template |
+| `template` | vault-relative Obsidian Markdown note reference (canonical physical target appends `.md` unless the complete reference already ends in `.md`) | no template |
 
 - A present config must be a JSON object; unknown keys are ignored (Obsidian
   compatibility). A missing config (or missing `.obsidian/`) when the feature
@@ -117,8 +117,17 @@ second folder/date/template setting anywhere in the adapter.
   task operation (single config source, no reload or watch path).
 - Path values must be relative, without backslashes, control characters, or
   `.`/`..` traversal segments, and existing components may not be symlinks.
-  The template must be a `.md` file. Malformed/unsafe values fail closed
-  before any task side effect.
+- A non-empty `template` is a note reference, not necessarily a physical
+  filename: its canonical physical target appends `.md` iff the complete
+  reference does not already end exactly in `.md` — `templates/daily-note` →
+  `templates/daily-note.md`, `templates/daily-note.md` unchanged,
+  `templates/daily.v2` → `templates/daily.v2.md`. All path and safety checks
+  apply to that canonical target only; an extensionless physical file is
+  never probed or read as the template. The canonical target must be a
+  regular Markdown file when present (no symlink components; template reads
+  are no-follow and bounded); a missing canonical target may pass config
+  load, but the required template read fails closed before any task side
+  effect. Malformed/unsafe values fail closed before any task side effect.
 
 ## Date-format subset
 
@@ -140,7 +149,8 @@ Used only when a Daily Note must be created:
 
 - Template absent → deterministic default body: `# <date>` plus one
   `## Tasks` section.
-- Template present → bounded no-follow read, then exactly three expressions
+- Template present → bounded no-follow read of the canonical `.md` target
+  (see configuration above), then exactly three expressions
   are substituted: `{{date}}` (scheduled `YYYY-MM-DD`), `{{title}}` (Daily
   Note filename stem), `{{date:FORMAT}}` (same supported token subset).
   Any other `{{...}}` expression is rejected; Templater/JavaScript is never

@@ -2583,7 +2583,8 @@ class DailyNotesConfig:
 
     ``folder`` is the relative daily-notes folder (``""`` = vault root),
     ``format`` the note filename date format (default ``YYYY-MM-DD``), and
-    ``template`` an optional relative Markdown template (``None`` = unset).
+    ``template`` an optional canonical vault-relative Markdown physical
+    path (``None`` = unset), normalized exactly once at load/validation.
     """
 
     folder: str = ""
@@ -2728,16 +2729,42 @@ def _validate_daily_notes_folder(folder: str, vault: Path) -> str:
     return folder
 
 
+def _normalize_daily_template_reference(reference: str) -> str:
+    """Append ``.md`` unless the complete reference already ends in ``.md``.
+
+    The decision uses the complete configured reference string only (never
+    ``Path.suffix``), so ``templates/daily-note`` and ``templates/daily.v2``
+    both gain ``.md`` while ``templates/daily-note.md`` is unchanged.
+    Callers must shape-validate the raw reference first so an appended
+    suffix can never mask an unsafe raw segment.
+    """
+    if reference.endswith(".md"):
+        return reference
+    return f"{reference}.md"
+
+
 def _validate_daily_notes_template(template: str, vault: Path) -> str:
-    """Validate the configured daily-notes template path (relative Markdown)."""
+    """Validate and normalize the configured daily-notes template reference.
+
+    The raw reference is first validated for path shape (relative, no
+    backslash/control characters, no traversal/empty segments) BEFORE
+    normalization, so appending ``.md`` can never mask an unsafe raw
+    segment (``.`` → ``..md``, ``..`` → ``...md``, ``templates/`` →
+    ``templates/.md``); this is a pure shape check with no filesystem
+    probing — the raw extensionless reference is never probed on disk.
+    The reference is then normalized exactly once at load/validation into
+    the canonical vault-relative Markdown physical path (issue #141):
+    ``.md`` is appended unless the complete reference already ends in
+    ``.md``. All remaining checks apply to the canonical target only.
+    """
     _validate_relative_note_path(template)
-    if not template.endswith(".md"):
-        raise PathError("daily notes template must be a Markdown (.md) file")
-    parts = template.split("/")
+    canonical = _normalize_daily_template_reference(template)
+    _validate_relative_note_path(canonical)
+    parts = canonical.split("/")
     dir_rel = "/".join(parts[:-1])
     _check_existing_dir_components_no_follow(vault, dir_rel)
-    _check_existing_regular_no_follow(vault / template)
-    return template
+    _check_existing_regular_no_follow(vault / canonical)
+    return canonical
 
 
 def load_daily_notes_config(vault: Path) -> DailyNotesConfig:
@@ -2752,7 +2779,13 @@ def load_daily_notes_config(vault: Path) -> DailyNotesConfig:
     are interpreted (unknown keys are ignored for Obsidian compatibility).
     Path-shaped values are strictly validated: relative, no backslash/
     control characters, no traversal or unsafe segments, and no symlink
-    components where they exist. Raises ``CoreError`` (``ValidationError``
+    components where they exist. A non-empty ``template`` reference is
+    normalized exactly once into the canonical vault-relative Markdown
+    physical path (``.md`` appended unless the complete reference already
+    ends in ``.md``); all template checks apply to the canonical target
+    only, and the raw extensionless reference is never probed on disk.
+    A missing canonical template file is tolerated at load (lazy allowance).
+    Raises ``CoreError`` (``ValidationError``
     /``PathError`` subclasses) on missing, malformed, or unsafe config.
     """
     config_path = vault / DAILY_NOTES_OBSIDIAN_DIR / DAILY_NOTES_CONFIG_NAME
@@ -2812,9 +2845,11 @@ def load_daily_notes_config(vault: Path) -> DailyNotesConfig:
 def read_daily_note_template(vault: Path, config: DailyNotesConfig) -> Optional[str]:
     """Read the configured daily-notes template no-follow and bounded.
 
-    Returns ``None`` when no template is configured. A configured template
-    must exist as a regular, non-symlink, bounded file; anything else is a
-    strict ``PathError``.
+    Returns ``None`` when no template is configured. ``config.template``
+    is the canonical Markdown physical path (normalized at load), and no
+    extensionless variant is ever probed. A configured template must exist
+    as a regular, non-symlink, bounded file; anything else is a strict
+    ``PathError``.
     """
     if not config.template:
         return None

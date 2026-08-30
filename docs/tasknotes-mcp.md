@@ -501,13 +501,24 @@ no second folder/date/template configuration. A validated config is required
 when the feature is enabled and a projection is needed: a missing config (or
 missing `.obsidian/`) fails closed rather than inferring defaults. Supported
 keys: `folder` (vault-relative; missing/empty → vault root), `format`
-(missing/empty → `YYYY-MM-DD`), `template` (optional vault-relative Markdown
-path). Unknown keys are ignored for Obsidian compatibility. Path values must
-be relative, free of backslashes/control characters/traversal segments, and
-must not pass through symlink components where they exist; the template must
-be a `.md` file. Malformed JSON, non-object roots, or unsafe paths fail
-closed before any task side effect. The Periodic Notes plugin configuration
-is never read as a fallback.
+(missing/empty → `YYYY-MM-DD`), `template` (optional vault-relative Obsidian
+Markdown note reference). Unknown keys are ignored for Obsidian compatibility.
+Path values must be relative, free of backslashes/control characters/traversal
+segments, and must not pass through symlink components where they exist.
+
+A non-empty `template` value is a note reference, not necessarily a physical
+filename: its canonical physical target appends `.md` iff the complete
+reference does not already end exactly in `.md` — `templates/daily-note` →
+`templates/daily-note.md`, `templates/daily-note.md` unchanged, and
+`templates/daily.v2` → `templates/daily.v2.md`. All path and safety checks
+apply to that canonical target only; an extensionless physical file is never
+probed or read as the template. The canonical target must be a regular
+Markdown file when present (no symlink components; template reads are
+no-follow and bounded); a missing canonical target may pass config load, but
+the required template read fails closed before any task side effect.
+Malformed JSON, non-object roots, or unsafe paths fail closed before any
+task side effect. The Periodic Notes plugin configuration is
+never read as a fallback.
 
 Config freshness: there is no engine or MCP lifetime cache. Each
 projection-bearing task transaction reads and strictly validates
