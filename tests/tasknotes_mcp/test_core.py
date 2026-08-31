@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import datetime
 import errno
 import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -273,6 +275,17 @@ def _write_fake_gbrain(tmpdir: Path, behavior: Optional[dict] = None) -> Path:
                     return v
             return v
 
+        def json_default(o):
+            # State-JSON durability (issue #146 W2): a raw unquoted YAML
+            # date scalar parses to a native datetime.date. Real gbrain can
+            # hold such a value in its DB state; the fake stores its
+            # isoformat so the state round-trips. This changes no YAML
+            # serialization behavior — it only affects inputs that
+            # previously crashed json.dump.
+            if isinstance(o, (datetime.date, datetime.datetime)):
+                return o.isoformat()
+            raise TypeError(f"unserializable state value: {{o!r}}")
+
         if cmd == "sources" and len(argv) >= 2 and argv[1] == "list":
             sources = behavior.get("sources")
             if sources is None:
@@ -413,7 +426,7 @@ def _write_fake_gbrain(tmpdir: Path, behavior: Optional[dict] = None) -> Path:
                 with open(p, "w") as fobj:
                     fobj.write(disk_content)
             with open(STATE, "w") as fobj:
-                json.dump(state, fobj)
+                json.dump(state, fobj, default=json_default)
             print(json.dumps({{"written": True, "slug": slug}}))
             sys.exit(0)
 
@@ -431,7 +444,7 @@ def _write_fake_gbrain(tmpdir: Path, behavior: Optional[dict] = None) -> Path:
                 print(json.dumps({{"error": "page_not_found", "message": "not found"}}))
                 sys.exit(1)
             with open(STATE, "w") as fobj:
-                json.dump(state, fobj)
+                json.dump(state, fobj, default=json_default)
             print(json.dumps({{"status": "soft_deleted", "slug": slug,
                                "recoverable_until": "now + 72h via restore_page"}}))
             sys.exit(0)
@@ -485,7 +498,7 @@ def _write_fake_gbrain(tmpdir: Path, behavior: Optional[dict] = None) -> Path:
                             "timeline": timeline,
                         }}
                 with open(STATE, "w") as fobj:
-                    json.dump(state, fobj)
+                    json.dump(state, fobj, default=json_default)
             print(json.dumps({{"status": "ok"}}))
             sys.exit(0)
 
@@ -2188,10 +2201,12 @@ class EngineOperationTests(unittest.TestCase):
         self.assertEqual(str(fm["completedDate"])[:10], "2026-07-18")
 
     def test_complete_retains_plain_scheduled_date_on_disk(self) -> None:
-        """Regression for issue #107: completing a task with a bare
-        ``scheduled`` date must retain exactly that plain ``YYYY-MM-DD``
-        on disk, not the gbrain-normalized ``YYYY-MM-DDT00:00:00.000Z``
-        form returned by ``get_page``.
+        """Regression for issue #107 (tightened for issue #146): completing
+        a task with a bare ``scheduled`` date must leave the raw serialized
+        scheduled scalar as exactly that plain day on disk — the anchored
+        raw-line match admits any YAML quoting style but no trailing
+        timestamp, so the gbrain-normalized ``YYYY-MM-DDT00:00:00.000Z``
+        form returned by ``get_page`` can never leak onto disk.
         """
         self.engine.create(
             "t1", "T", status="open", scheduled="2026-08-10", body="b"
@@ -2200,10 +2215,33 @@ class EngineOperationTests(unittest.TestCase):
         self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
         disk_text = (self.vault / "tasks" / "t1.md").read_text(encoding="utf-8")
         fm, _ = self.core._parse_frontmatter(disk_text)
-        # The scheduled date is preserved as the exact plain bare date.
-        self.assertEqual(str(fm["scheduled"]), "2026-08-10")
-        # No normalized timestamp form leaks onto disk for scheduled.
-        self.assertNotIn("scheduled: 2026-08-10T00:00:00.000Z", disk_text)
+        # The parsed scheduled value is actually a ``str`` scalar holding
+        # the exact plain day. This is a narrow issue #107
+        # serializer/write-contract assertion: it pins the plain string
+        # scalar THIS MCP write path produces (the separate raw-YAML
+        # native-date acceptance coverage is issue #146 W2's concern), so
+        # it deliberately does not force any YAML quoting style elsewhere.
+        self.assertIsInstance(fm["scheduled"], str)
+        self.assertEqual(fm["scheduled"], "2026-08-10")
+        # The RAW serialized scalar is an exact plain day: the anchored
+        # full-line match accepts an optional quote style (the serializer's
+        # choice is not imposed) but rejects any trailing timestamp.
+        raw_line = next(
+            line
+            for line in disk_text.splitlines()
+            if line.lstrip().startswith("scheduled:")
+        )
+        match = re.match(
+            r"^scheduled:\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?$", raw_line
+        )
+        if match is None:
+            self.fail(f"scheduled scalar is not an exact plain day: {raw_line!r}")
+        self.assertEqual(match.group(1), "2026-08-10")
+        # No normalized midnight timestamp leaks into the scheduled
+        # scalar: the anchored match above admits only a plain day. (The
+        # file's other timestamped keys — gbrain write-through provenance
+        # such as ``ingested_at`` — are unrelated and untouched.)
+        self.assertNotIn("T00:00:00.000Z", raw_line)
         # Status/completedDate are updated as required.
         self.assertEqual(fm["status"], "done")
         self.assertEqual(str(fm["completedDate"]), "2026-08-10")
@@ -4921,6 +4959,27 @@ class DailyProjectionGitTests(unittest.TestCase):
 _D1 = "2026-08-27"
 _D2 = "2026-08-28"
 
+# Issue #146 W2: raw unquoted YAML scheduled scalar — yaml.safe_load
+# resolves it to a native ``datetime.date`` (the cross-boundary subject).
+# Synthetic fixture only; this pins no production serializer behavior.
+_RAW_DAY = "2026-08-03"
+
+
+def _raw_unquoted_task_text(slug: str, day: str) -> str:
+    """Synthetic raw-Markdown task with an UNQUOTED scheduled scalar."""
+    return (
+        "---\n"
+        "type: note\n"
+        f"title: {slug}\n"
+        "status: open\n"
+        "priority: normal\n"
+        "tags:\n"
+        "  - task\n"
+        f"scheduled: {day}\n"
+        "---\n"
+        f"body of {slug}\n"
+    )
+
 
 def _make_daily_engine(
     core,
@@ -5866,6 +5925,107 @@ class DailyLinkPlanTargetComposeTests(unittest.TestCase):
         )
 
 
+class DailyScheduledDateSemanticTests(unittest.TestCase):
+    """Issue #146 W1: the scheduled-day extractor accepts exactly the
+    semantic day values — a plain ``YYYY-MM-DD`` string, the pinned
+    gbrain normalized bare-date form, and a native ``datetime.date`` —
+    and rejects true datetimes (checked before the date check, since
+    datetime subclasses date) plus every other type without ``str()``
+    coercion."""
+
+    def setUp(self) -> None:
+        self.core = _load_core()
+        self.extract = self.core._daily_scheduled_date
+
+    def test_semantic_day_values_share_one_canonical_day(self) -> None:
+        for value in (
+            "2026-08-10",  # plain string
+            datetime.date(2026, 8, 10),  # native untimestamped date
+            "2026-08-10T00:00:00.000Z",  # pinned normalized gbrain form
+        ):
+            with self.subTest(value=repr(value)):
+                self.assertEqual(self.extract(value), "2026-08-10")
+
+    def test_datetime_rejected_even_at_midnight(self) -> None:
+        # A true datetime must never silently drive a daily link —
+        # including the midnight form that would alias the plain day.
+        self.assertIsNone(
+            self.extract(datetime.datetime(2026, 8, 10, 0, 0, 0))
+        )
+        self.assertIsNone(
+            self.extract(datetime.datetime(2026, 8, 10, 15, 30, 0))
+        )
+
+    def test_date_subclass_bad_isoformat_cannot_bypass_validation(self) -> None:
+        # A native date flows through the same validate_date contract as
+        # ordinary strings, so a subclass overriding isoformat() with a
+        # malformed local value can never bypass validation.
+        class BrokenIsoDate(datetime.date):
+            def isoformat(self) -> str:
+                return "not-a-date"
+
+        class ImpossibleIsoDate(datetime.date):
+            def isoformat(self) -> str:
+                return "2026-13-40"  # well-formed shape, invalid calendar day
+
+        self.assertIsNone(self.extract(BrokenIsoDate(2026, 8, 10)))
+        self.assertIsNone(self.extract(ImpossibleIsoDate(2026, 8, 10)))
+        # A well-behaved date subclass is still accepted directly.
+        class GoodIsoDate(datetime.date):
+            pass
+
+        self.assertEqual(self.extract(GoodIsoDate(2026, 8, 10)), "2026-08-10")
+
+    def test_invalid_or_malformed_strings_are_none(self) -> None:
+        for value in (
+            "not-a-date",
+            "2026-13-40",  # invalid calendar day
+            "2026-08-10T15:30:00",  # arbitrary timestamp string
+            "2026-08-10T00:00:00+00:00",  # non-pinned timestamp form
+            "",
+        ):
+            with self.subTest(value=repr(value)):
+                self.assertIsNone(self.extract(value))
+
+    def test_non_date_types_are_none_without_coercion(self) -> None:
+        for value in (
+            True,
+            False,
+            0,
+            20260810,
+            3.5,
+            ["2026-08-10"],
+            {"d": "2026-08-10"},
+            None,
+        ):
+            with self.subTest(value=repr(value)):
+                self.assertIsNone(self.extract(value))
+
+    def test_classifier_native_date_candidate_datetime_malformed(self) -> None:
+        sub = Path(tempfile.mkdtemp(prefix="tnm_sched_semantic_"))
+        self.addCleanup(shutil.rmtree, sub, ignore_errors=True)
+        vault = _make_vault(sub, "classify")
+        profile = self.core.load_profile(vault, vault)
+        classify = self.core.classify_reconcile_frontmatter
+        # A valid native date candidate classifies as a scheduled
+        # candidate with the canonical plain day.
+        classified = classify(
+            {"tags": ["task"], "scheduled": datetime.date(2026, 8, 10)},
+            profile,
+        )
+        self.assertEqual(classified.cls, self.core.RECONCILE_CLASS_CANDIDATE)
+        self.assertEqual(classified.scheduled, "2026-08-10")
+        # A true datetime — even at midnight — is malformed in task scope.
+        classified = classify(
+            {
+                "tags": ["task"],
+                "scheduled": datetime.datetime(2026, 8, 10, 0, 0, 0),
+            },
+            profile,
+        )
+        self.assertEqual(classified.cls, self.core.RECONCILE_CLASS_MALFORMED)
+
+
 @unittest.skipUnless(_has_yaml(), "PyYAML required")
 class DailyProjectionCollisionTests(unittest.TestCase):
     """R5 (issue #140): resolved projection targets inside the configured
@@ -6686,6 +6846,97 @@ class ReconcileEnumerationTests(unittest.TestCase):
         candidates = self.core.enumerate_reconcile_candidates(vault, profile)
         self.assertEqual([c.slug for c in candidates], ["t1"])
 
+    def test_raw_unquoted_native_date_is_canonical_scheduled_candidate(
+        self,
+    ) -> None:
+        # Issue #146 W2: a raw unquoted scheduled scalar crosses the real
+        # ``_parse_frontmatter`` (yaml.safe_load) boundary as a native
+        # ``datetime.date`` and must count as a canonical scheduled
+        # candidate everywhere the current state is read.
+        vault, profile = self._vault("rawdate")
+        raw = _raw_unquoted_task_text("rawtask", _RAW_DAY)
+        self._write_task(vault, "tasks", "rawtask", raw=raw)
+        fm, _body = self.core._parse_frontmatter(raw)
+        self.assertIsInstance(fm["scheduled"], datetime.date)
+        self.assertNotIsInstance(fm["scheduled"], datetime.datetime)
+        classification = self.core.classify_reconcile_frontmatter(fm, profile)
+        self.assertEqual(
+            classification.cls, self.core.RECONCILE_CLASS_CANDIDATE
+        )
+        self.assertEqual(classification.scheduled, _RAW_DAY)
+        # Bounded worktree enumeration carries the canonical plain day.
+        candidates = self.core.enumerate_reconcile_candidates(vault, profile)
+        self.assertEqual(
+            [(c.slug, c.scheduled) for c in candidates],
+            [("rawtask", _RAW_DAY)],
+        )
+        # The committed-head snapshot (git-object reader) accepts it too.
+        subprocess.run(
+            ["git", "add", "-A"], cwd=str(vault), check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "raw fixture"], cwd=str(vault),
+            check=True, capture_output=True,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        snapshot = self.core.build_reconcile_snapshot(vault, profile)
+        self.assertEqual(snapshot.head, head)
+        self.assertEqual(
+            [(c.slug, c.scheduled) for c in snapshot.candidates],
+            [("rawtask", _RAW_DAY)],
+        )
+
+    def test_raw_yaml_timestamp_scheduled_is_malformed(self) -> None:
+        # A raw unquoted true YAML timestamp resolves to
+        # ``datetime.datetime`` and must be malformed (never silently
+        # treated as a date): excluded from enumeration, and the worktree
+        # probe fails closed as ambiguous task state.
+        vault, profile = self._vault("rawts")
+        for slug, raw_value in (
+            ("rawts", "2026-08-03T15:30:00"),
+            ("rawts_midnight", "2026-08-03T00:00:00"),
+        ):
+            self._write_task(
+                vault, "tasks", slug,
+                raw=_raw_unquoted_task_text(slug, raw_value),
+            )
+        fm, _body = self.core._parse_frontmatter(
+            _raw_unquoted_task_text("x", "2026-08-03T15:30:00")
+        )
+        self.assertIsInstance(fm["scheduled"], datetime.datetime)
+        classification = self.core.classify_reconcile_frontmatter(fm, profile)
+        self.assertEqual(
+            classification.cls, self.core.RECONCILE_CLASS_MALFORMED
+        )
+        # Both timestamp tasks are excluded from bounded enumeration.
+        candidates = self.core.enumerate_reconcile_candidates(vault, profile)
+        self.assertEqual([c.slug for c in candidates], [])
+        # Probe path (slug absent from the snapshot map): fail closed.
+        with self.assertRaises(self.core.CoreError) as raised:
+            self.core._current_reconcile_task_state(
+                vault, profile, "rawts", {}, max_size=64 * 1024
+            )
+        self.assertIn("ambiguous task state", str(raised.exception))
+        # Even the pinned normalized ``...000Z`` form, written raw
+        # UNQUOTED, resolves through yaml.safe_load to a true
+        # ``datetime.datetime`` and is therefore malformed too — the W1
+        # pinned-string path applies to string values (e.g. gbrain
+        # get_page JSON), never to a raw timestamp scalar.
+        pinned = _raw_unquoted_task_text(
+            "pinned", "2026-08-03T00:00:00.000Z"
+        )
+        fm_pinned, _body = self.core._parse_frontmatter(pinned)
+        self.assertIsInstance(fm_pinned["scheduled"], datetime.datetime)
+        classification = self.core.classify_reconcile_frontmatter(
+            fm_pinned, profile
+        )
+        self.assertEqual(
+            classification.cls, self.core.RECONCILE_CLASS_MALFORMED
+        )
+
     def test_classification_pure_deterministic(self) -> None:
         _vault, profile = self._vault("classify")
         classify = self.core.classify_reconcile_frontmatter
@@ -7376,6 +7627,106 @@ class ReconcileLifecycleTests(unittest.TestCase):
             _reconcile_note(vault2, f"journal/deep/{_WR_D2}.md"),
         )
         self.assertEqual(cursor2.daily_folder, "journal/deep")
+
+    def test_bootstrap_projects_raw_unquoted_native_date(self) -> None:
+        # Issue #146 W2: a first-enable bootstrap includes a raw unquoted
+        # YAML native-date task as a canonical scheduled candidate and
+        # projects its link; its task Markdown stays untouched.
+        vault, _sub, profile, cur, pend = self._setup("rawboot")
+        (vault / "tasks" / "rawtask.md").write_text(
+            _raw_unquoted_task_text("rawtask", _RAW_DAY), encoding="utf-8"
+        )
+        raw_before = (vault / "tasks" / "rawtask.md").read_bytes()
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        self.assertEqual(plan.mode, self.core.RECONCILE_MODE_BOOTSTRAP)
+        self.assertEqual(
+            [(t.slug, t.operation, t.date) for t in plan.transitions],
+            [("rawtask", "ensure", _RAW_DAY)],
+        )
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config, plan, pending_path=pend
+        )
+        self.assertTrue(outcome.commit_created)
+        self.assertEqual(
+            _reconcile_note(vault, f"journal/{_RAW_DAY}.md").count(
+                "- [[rawtask]]"
+            ),
+            1,
+        )
+        # Reconciliation never writes task Markdown: the raw unquoted
+        # form is byte-identical after the full cycle.
+        self.assertEqual(
+            (vault / "tasks" / "rawtask.md").read_bytes(), raw_before
+        )
+        cursor = self.core.finalize_daily_links_reconciliation(
+            vault, config, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(cursor.reconciled_head, head)
+        self.assertFalse(pend.exists())
+
+    def test_raw_unquoted_and_quoted_same_day_swap_is_unchanged(self) -> None:
+        # Issue #146 W2: the quoted plain day and the raw unquoted
+        # native-date representation of the SAME day are the same
+        # semantic scheduled value. With the raw form committed at the
+        # cursor head, swapping the worktree to the quoted form (and vice
+        # versa) classifies unchanged with no projection transition; both
+        # the committed-head probe and the worktree probe accept their
+        # respective representations.
+        vault, _sub, profile, cur, pend = self._setup("rawswap")
+        (vault / "tasks" / "q1.md").write_text(
+            _raw_unquoted_task_text("q1", _RAW_DAY), encoding="utf-8"
+        )
+        _reconcile_commit(vault)
+        config = self.core.load_daily_notes_config(vault)
+        self._run(vault, profile, config, cur, pend)
+        # External rewrite: raw unquoted -> quoted plain day, same day.
+        quoted = (
+            "---\n"
+            "type: note\n"
+            "title: q1\n"
+            "status: open\n"
+            "priority: normal\n"
+            "tags:\n"
+            "  - task\n"
+            f"scheduled: '{_RAW_DAY}'\n"
+            "---\n"
+            "body of q1\n"
+        )
+        (vault / "tasks" / "q1.md").write_text(quoted, encoding="utf-8")
+        _reconcile_commit(vault)
+        plan = self.core.prepare_daily_links_reconciliation(
+            vault, profile, config, cursor_path=cur, pending_path=pend,
+        )
+        # The head probe read the raw native-date form at the cursor
+        # head; the worktree probe read the quoted form; both resolve to
+        # the same day -> unchanged, no transitions.
+        self.assertEqual(
+            dict(plan.net_classes)["q1"], self.core.RECONCILE_NET_UNCHANGED
+        )
+        self.assertEqual(plan.transitions, ())
+        outcome = self.core.apply_daily_links_reconciliation(
+            vault, profile, config, plan, pending_path=pend
+        )
+        self.assertFalse(outcome.commit_created)
+        cursor = self.core.finalize_daily_links_reconciliation(
+            vault, config, sync_succeeded=True,
+            cursor_path=cur, pending_path=pend,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(vault), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(cursor.reconciled_head, head)
+        self.assertFalse(pend.exists())
 
     def test_external_add_reschedule_unschedule_delete(self) -> None:
         vault, _sub, profile, cur, pend = self._setup("diffs")
@@ -8915,6 +9266,45 @@ class ReconcileEngineIntegrationTests(unittest.TestCase):
         self.assertIn(
             "- [[zz]]", _reconcile_note(vault, f"journal/{_WR_D2}.md")
         )
+
+    def test_raw_unquoted_task_mutation_proceeds_and_reconcile_read_only(
+        self,
+    ) -> None:
+        # Issue #146 W2: a raw unquoted YAML native-date task is a
+        # canonical candidate, so a normal engine mutation on the vault
+        # proceeds through pre-mutation reconciliation instead of failing
+        # as an ambiguous task state; reconciliation bootstraps the raw
+        # task's link while leaving its task Markdown byte-identical.
+        engine, vault, cursor, pending = self._engine("rawengine")
+        (vault / "tasks" / "rawtask.md").write_text(
+            _raw_unquoted_task_text("rawtask", _RAW_DAY), encoding="utf-8"
+        )
+        _reconcile_commit(vault, "external raw task")
+        raw_before = (vault / "tasks" / "rawtask.md").read_bytes()
+        result = engine.create("zz", "Task Zed", scheduled=_WR_D2, body="b")
+        self.assertEqual(result.state, self.core.APPLIED_AND_COMMITTED)
+        # The raw native-date candidate was bootstrapped (projected) and
+        # its task Markdown was never written by reconciliation.
+        self.assertEqual(
+            (vault / "tasks" / "rawtask.md").read_bytes(), raw_before
+        )
+        self.assertEqual(
+            _reconcile_note(vault, f"journal/{_RAW_DAY}.md").count(
+                "- [[rawtask]]"
+            ),
+            1,
+        )
+        self.assertIn(
+            "- [[zz]]", _reconcile_note(vault, f"journal/{_WR_D2}.md")
+        )
+        self.assertTrue(cursor.exists())
+        self.assertFalse(pending.exists())
+        # A direct mutation OF the raw task itself also proceeds (the
+        # completion write is the MCP write path, not reconciliation).
+        completed = engine.complete(
+            "rawtask", completion_date="2026-08-10"
+        )
+        self.assertEqual(completed.state, self.core.APPLIED_AND_COMMITTED)
 
     def test_reconcile_failure_skips_preflight_and_mutation(self) -> None:
         engine, vault, cursor, pending = self._engine("fail")

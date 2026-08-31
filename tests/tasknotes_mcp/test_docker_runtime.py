@@ -489,10 +489,23 @@ class TaskNotesDockerHarnessContractTests(unittest.TestCase):
         # Both strict flags are passed so the refresh lane is active.
         self.assertIn('TASKNOTES_DAILY_LINKS_ENABLED="true"', text)
         self.assertIn('TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED="true"', text)
-        # The external edit is a direct task-file rewrite + commit, never a
-        # task_* MCP call.
+        # The external edit is a direct, byte-exact single-scalar rewrite +
+        # commit, never a task_* MCP call. The pinned writer control remains
+        # quoted; only the simulated external source produces the unquoted
+        # scalar.
         self.assertIn('"external manual reschedule"', text)
-        self.assertIn('text.replace(f"scheduled: \'{old_date}\'",', text)
+        self.assertIn("original_bytes.count(quoted_scalar) == 1", text)
+        self.assertIn(
+            "original_bytes.replace(quoted_scalar, unquoted_scalar, 1)", text
+        )
+        self.assertIn("task_path.write_bytes(edited_bytes)", text)
+        # Revision 2: the installed core sees the external bare scalar as a
+        # native date, refresh preserves its bytes, and a separate normal
+        # MCP mutation proves established-head pre-mutation reconciliation.
+        self.assertIn("installed_core._parse_frontmatter", text)
+        self.assertIn('isinstance(fm["scheduled"], datetime.date)', text)
+        self.assertIn("task_path.read_bytes() == external_bytes", text)
+        self.assertIn("_mcp_priority_update", text)
         # Old link gone; new link exactly once.
         self.assertIn('f"- [[{old_task}]]" not in note_old_after', text)
         self.assertIn('note_new.count(f"- [[{old_task}]]") == 1', text)

@@ -3903,11 +3903,23 @@ _DAILY_LINK_FAILURE_DETAIL = {
 def _daily_scheduled_date(value: Any) -> Optional[str]:
     """Extract a plain ``YYYY-MM-DD`` scheduled value; None when unusable.
 
-    Collapses the gbrain-normalized bare-date form back to ``YYYY-MM-DD``
-    and validates. Non-strings and invalid dates yield ``None`` (only a
-    valid scheduled date drives a daily link; scheduled is the sole
-    source).
+    Accepts the semantic day values only: a plain ``YYYY-MM-DD`` string,
+    the gbrain-normalized bare-date form (collapsed back via
+    ``_denormalize_bare_date``), or a native ``datetime.date`` — an
+    untimestamped calendar day whose ``isoformat`` local value flows
+    through the SAME ``validate_date`` contract as ordinary strings, so
+    a subclass with a malformed ``isoformat`` cannot bypass validation. A
+    true ``datetime.datetime`` is rejected BEFORE the date check (datetime
+    subclasses date) so a timestamped value never silently drives a daily
+    link. Every other type (bool/int/float/list/dict) and any invalid or
+    malformed string (including arbitrary timestamp strings) yields
+    ``None`` — never generic ``str()`` coercion; only a valid scheduled
+    day drives a daily link (scheduled is the sole source).
     """
+    if isinstance(value, datetime.datetime):
+        return None
+    if isinstance(value, datetime.date):
+        value = value.isoformat()
     if not isinstance(value, str):
         return None
     value = _denormalize_bare_date(value)
@@ -4652,8 +4664,10 @@ def classify_reconcile_frontmatter(
 
     Built on the existing semantic parsing rules: only the configured
     task tag makes a file a task; the scheduled value must be absent
-    (backlog), a plain ``YYYY-MM-DD`` date, or the gbrain-normalized
-    bare-date form. Anything ambiguous in task scope is ``malformed``.
+    (backlog), a plain ``YYYY-MM-DD`` date, the gbrain-normalized
+    bare-date form, or a native ``datetime.date`` (an untimestamped
+    calendar day). Anything ambiguous in task scope — including a true
+    ``datetime.datetime`` — is ``malformed``.
     """
     if not isinstance(frontmatter, Mapping):
         raise ValidationError("frontmatter must be a mapping")
