@@ -27,6 +27,20 @@ SKILL_WARN_LINES = 220
 SKILL_ERROR_LINES = 350
 AGENTS_WARN_LINES = 300
 
+EXCLUDED_MARKDOWN_DIRS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+    "agent-state",  # nested private repository, validated by its own state flow
+    "dev-tools-venv",
+    "dump_folder",
+    "graphify-out",  # generated navigation artifacts, not canonical docs
+    "node_modules",
+    "venv",
+}
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -41,30 +55,45 @@ class Finding:
         return f"{level}: {relative}: {self.message}"
 
 
+def _is_excluded_markdown_path(root: Path, path: Path) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return True
+    return any(part in EXCLUDED_MARKDOWN_DIRS for part in relative.parts)
+
+
 def documentation_files(root: Path) -> list[Path]:
-    """Return public, repo-owned Markdown files relevant to harness/docs checks."""
+    """Return public repo-owned Markdown, including templates and scoped docs."""
 
-    candidates: list[Path] = []
-    for fixed in (
-        root / "README.md",
-        root / "AGENTS.md",
-        root / "tests" / "README.md",
-        root / "credentials" / "README.md",
-    ):
-        if fixed.is_file():
-            candidates.append(fixed)
+    return sorted(
+        path
+        for path in root.rglob("*.md")
+        if path.is_file() and not _is_excluded_markdown_path(root, path)
+    )
 
-    for subtree in (root / "docs", root / "skills-factory", root / ".github" / "workflows"):
-        if subtree.is_dir():
-            candidates.extend(path for path in subtree.rglob("*.md") if path.is_file())
 
-    return sorted(set(candidates))
+def _strip_markdown_link_title(raw_target: str) -> str:
+    """Extract the destination from a Markdown link target with optional title."""
+
+    target = raw_target.strip()
+    if target.startswith("<"):
+        closing = target.find(">")
+        if closing != -1:
+            return target[1:closing].strip()
+
+    # Standard Markdown permits `(path "title")`. Repository paths containing
+    # literal spaces should use angle brackets or percent-encoding so this cheap
+    # checker can remain deterministic without a full Markdown parser.
+    for quote in (' "', " '", " ("):
+        marker = target.find(quote)
+        if marker != -1:
+            return target[:marker].strip()
+    return target
 
 
 def _local_link_target(source: Path, raw_target: str) -> Path | None:
-    target = raw_target.strip()
-    if target.startswith("<") and target.endswith(">"):
-        target = target[1:-1].strip()
+    target = _strip_markdown_link_title(raw_target)
 
     if not target or target.startswith("#"):
         return None
@@ -111,7 +140,6 @@ def check_skill_references(root: Path) -> list[Finding]:
         return errors
 
     for skill_file in sorted(skills_root.glob("*/SKILL.md")):
-        skill_name = skill_file.parent.name
         text = skill_file.read_text(encoding="utf-8")
 
         for referenced_skill, relative_path in SKILL_VIEW_RE.findall(text):
@@ -132,10 +160,6 @@ def check_skill_references(root: Path) -> list[Finding]:
         references_dir = skill_file.parent / "references"
         if references_dir.exists() and not references_dir.is_dir():
             errors.append(Finding(skill_file, "references exists but is not a directory"))
-
-        # A self-reference using another skill's name is allowed only through
-        # skill_view; normal backtick references are intentionally local.
-        _ = skill_name
 
     return errors
 
@@ -164,7 +188,7 @@ def check_context_budgets(root: Path) -> tuple[list[Finding], list[Finding]]:
             )
 
     for agents_file in sorted(root.rglob("AGENTS.md")):
-        if ".git" in agents_file.parts or "agent-state" in agents_file.parts:
+        if _is_excluded_markdown_path(root, agents_file):
             continue
         lines = len(agents_file.read_text(encoding="utf-8").splitlines())
         if lines > AGENTS_WARN_LINES:
