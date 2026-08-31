@@ -132,7 +132,7 @@ The dedicated Chrome profile, SSH key/known-hosts material, and launcher install
 
 ## Disable / rollback
 
-1. Set/unset `BROWSER_CONTROL_ENABLED` so it resolves to disabled, then redeploy.
+1. Set repository variable `BROWSER_CONTROL_ENABLED=false`, then redeploy.
 2. Deployment removes stale Serve/authorized-key state and tears down the optional overlay while preserving normal named state according to the workflow contract.
 3. Stop the laptop launcher/tunnel and close the dedicated profile.
 4. Optional destructive volume cleanup is an operator action; follow `docs/browser-control.md` rather than performing it from chat.
