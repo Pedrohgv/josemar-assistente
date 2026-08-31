@@ -80,6 +80,17 @@ class DocsCheckTests(unittest.TestCase):
         (root / "docs" / "missing.md").write_text("# Exists\n", encoding="utf-8")
         self.assertEqual([], docs_check.check_repo_doc_path_references(root, [source]))
 
+    def test_runtime_vault_template_path_is_not_repo_document_route(self) -> None:
+        tempdir, root = self.make_root()
+        self.addCleanup(tempdir.cleanup)
+        source = root / "docs" / "tasknotes-mcp.md"
+        source.write_text("Runtime note: `templates/daily-note.md`.\n", encoding="utf-8")
+
+        self.assertEqual([], docs_check.check_repo_doc_path_references(root, [source]))
+
+        source.write_text("Read `templates/agent-state-template/missing.md`.\n", encoding="utf-8")
+        self.assertEqual(1, len(docs_check.check_repo_doc_path_references(root, [source])))
+
     def test_skill_view_reference_must_exist(self) -> None:
         tempdir, root = self.make_root()
         self.addCleanup(tempdir.cleanup)
