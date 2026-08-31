@@ -23,6 +23,9 @@ SKILL_VIEW_RE = re.compile(
     r"skill_view\(\s*[\"']([^\"']+)[\"']\s*,\s*file_path\s*=\s*[\"']([^\"']+)[\"']\s*\)"
 )
 REFERENCE_CODE_RE = re.compile(r"`(references/[A-Za-z0-9._/\-]+\.md)`")
+REPO_DOC_CODE_RE = re.compile(
+    r"`((?:docs|tests|credentials|skills-factory|templates|\.github)/[A-Za-z0-9._*/\-]+\.md)`"
+)
 
 SKILL_WARN_LINES = 220
 SKILL_ERROR_LINES = 350
@@ -130,6 +133,21 @@ def check_markdown_links(root: Path, paths: Iterable[Path]) -> list[Finding]:
     return errors
 
 
+def check_repo_doc_path_references(root: Path, paths: Iterable[Path]) -> list[Finding]:
+    """Validate explicit repo-root documentation paths used for harness routing."""
+
+    errors: list[Finding] = []
+    for source in paths:
+        text = source.read_text(encoding="utf-8")
+        for relative_path in REPO_DOC_CODE_RE.findall(text):
+            if "*" in relative_path:
+                continue
+            target = root / relative_path
+            if not target.is_file():
+                errors.append(Finding(source, f"referenced repository document does not exist: {relative_path}"))
+    return errors
+
+
 def check_skill_references(root: Path) -> list[Finding]:
     errors: list[Finding] = []
     skills_root = root / "skills-factory"
@@ -208,6 +226,7 @@ def run_checks(root: Path) -> tuple[list[Finding], list[Finding]]:
 
     paths = documentation_files(root)
     errors.extend(check_markdown_links(root, paths))
+    errors.extend(check_repo_doc_path_references(root, paths))
     errors.extend(check_skill_references(root))
     budget_errors, budget_warnings = check_context_budgets(root)
     errors.extend(budget_errors)
