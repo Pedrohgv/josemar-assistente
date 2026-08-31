@@ -32,7 +32,7 @@ class DocsCheckTests(unittest.TestCase):
         self.addCleanup(tempdir.cleanup)
         (root / "docs" / "target.md").write_text("# Target\n", encoding="utf-8")
         source = root / "docs" / "README.md"
-        source.write_text("[target](target.md#section)\n", encoding="utf-8")
+        source.write_text('[target](target.md#section "title")\n', encoding="utf-8")
 
         errors = docs_check.check_markdown_links(root, [source])
 
@@ -48,6 +48,25 @@ class DocsCheckTests(unittest.TestCase):
 
         self.assertEqual(1, len(errors))
         self.assertIn("broken local Markdown link", errors[0].message)
+
+    def test_documentation_files_include_templates_and_exclude_private_generated_trees(self) -> None:
+        tempdir, root = self.make_root()
+        self.addCleanup(tempdir.cleanup)
+        template_doc = root / "templates" / "agent-state-template" / "README.md"
+        template_doc.parent.mkdir(parents=True)
+        template_doc.write_text("# Template\n", encoding="utf-8")
+        private_doc = root / "agent-state" / "README.md"
+        private_doc.parent.mkdir()
+        private_doc.write_text("# Private\n", encoding="utf-8")
+        generated_doc = root / "graphify-out" / "GRAPH_REPORT.md"
+        generated_doc.parent.mkdir()
+        generated_doc.write_text("# Generated\n", encoding="utf-8")
+
+        paths = docs_check.documentation_files(root)
+
+        self.assertIn(template_doc, paths)
+        self.assertNotIn(private_doc, paths)
+        self.assertNotIn(generated_doc, paths)
 
     def test_skill_view_reference_must_exist(self) -> None:
         tempdir, root = self.make_root()
