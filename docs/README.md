@@ -65,7 +65,13 @@ These examples are navigation rules, not a substitute for applicable nested `AGE
 
 ## Mechanical integrity check
 
-`scripts/docs_check.py` validates repository-local Markdown links, skill reference targets, required documentation architecture files, and egregious always-loaded context-size regressions. Its repository-contract test runs under normal unit-test discovery, so `make test` / `make verify` exercise the check without requiring a separate Markdown toolchain or network access.
+Run the focused documentation contract with:
+
+```bash
+make docs-check
+```
+
+The target runs `scripts/docs_check.py`, which validates public repository-local Markdown links (including templates), skill reference targets, required documentation architecture files, and egregious always-loaded context-size regressions without network access. The same repository-contract check also runs through normal unit-test discovery, so `make test` / `make verify` exercise it automatically.
 
 Context-size warnings remain review heuristics: the checker only fails a `SKILL.md` at an intentionally high guardrail, because routine self-containment is more important than satisfying an arbitrary line target.
 
