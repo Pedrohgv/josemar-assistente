@@ -9,6 +9,7 @@ regressions without turning heuristic size guidance into a strict style system.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -55,22 +56,18 @@ class Finding:
         return f"{level}: {relative}: {self.message}"
 
 
-def _is_excluded_markdown_path(root: Path, path: Path) -> bool:
-    try:
-        relative = path.relative_to(root)
-    except ValueError:
-        return True
-    return any(part in EXCLUDED_MARKDOWN_DIRS for part in relative.parts)
-
-
 def documentation_files(root: Path) -> list[Path]:
-    """Return public repo-owned Markdown, including templates and scoped docs."""
+    """Return public repo-owned Markdown, pruning private/generated/tool trees."""
 
-    return sorted(
-        path
-        for path in root.rglob("*.md")
-        if path.is_file() and not _is_excluded_markdown_path(root, path)
-    )
+    root = root.resolve()
+    candidates: list[Path] = []
+    for current, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(name for name in dirnames if name not in EXCLUDED_MARKDOWN_DIRS)
+        current_path = Path(current)
+        for filename in sorted(filenames):
+            if filename.endswith(".md"):
+                candidates.append(current_path / filename)
+    return sorted(candidates)
 
 
 def _strip_markdown_link_title(raw_target: str) -> str:
@@ -187,9 +184,7 @@ def check_context_budgets(root: Path) -> tuple[list[Finding], list[Finding]]:
                 )
             )
 
-    for agents_file in sorted(root.rglob("AGENTS.md")):
-        if _is_excluded_markdown_path(root, agents_file):
-            continue
+    for agents_file in (path for path in documentation_files(root) if path.name == "AGENTS.md"):
         lines = len(agents_file.read_text(encoding="utf-8").splitlines())
         if lines > AGENTS_WARN_LINES:
             warnings.append(
