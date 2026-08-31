@@ -6,6 +6,7 @@ Root `AGENTS.md` also applies.
 
 ## Prompt Language Policy
 
+All prompts you write MUST be in English.
 All AI-harness-facing instructions in this directory must be written in English.
 
 ## Scope and executable truth
