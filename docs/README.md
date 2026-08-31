@@ -33,6 +33,7 @@ For documentation ownership, canonicality, context placement, and update require
 | Path | Role / audience | When to load |
 | --- | --- | --- |
 | [`../README.md`](../README.md) | Project orientation, architecture overview, onboarding, and top-level operations navigation | At project entry or when changing user-facing architecture/onboarding summaries |
+| [`../templates/agent-state-template/README.md`](../templates/agent-state-template/README.md) | Canonical private state bootstrap/ownership/model-selection contract | When changing `.sync-manifest`, state ownership, bootstrap/template behavior, `hermes/models.yaml`, skill toggles, or state-sync semantics |
 | [`../tests/README.md`](../tests/README.md) | Validation target selection, test-suite contracts, gated runtime tests, timeout guidance | When adding/changing tests or choosing validation for a change |
 | [`../.github/workflows/AGENTS.md`](../.github/workflows/AGENTS.md) | Subtree-specific workflow change constraints and documentation routing | Before changing `.github/workflows/**` |
 | [`../credentials/README.md`](../credentials/README.md) | Credential setup | When changing credential setup contracts or related onboarding |
@@ -55,6 +56,7 @@ Notable deep-reference patterns:
 These examples are navigation rules, not a substitute for applicable nested `AGENTS.md` files.
 
 - **Workflow variable, secret, input, deployment gate, or operator-visible deploy behavior:** read `.github/workflows/AGENTS.md`; update the canonical catalog in `github-workflows.md` and each subsystem runbook routed by the scoped guidance.
+- **Private state schema/bootstrap/sync change:** inspect the state-template README, template files, sync implementation/tests, and any affected runtime docs; do not duplicate the full state schema into root guidance.
 - **gbrain wrapper, cron, locking, PGLite, embeddings, reindex, or maintenance:** read root gbrain safety rules plus `gbrain-operations.md`; update the gbrain skill only if runtime-agent behavior changes.
 - **TaskNotes mutation/projection/reconciliation behavior:** read `tasknotes-mcp.md` and the TaskNotes skill; preserve the private-native-gbrain/shared-lock boundary.
 - **Skill behavior:** keep the routine contract in `SKILL.md`; use `references/` only for non-routine depth.
