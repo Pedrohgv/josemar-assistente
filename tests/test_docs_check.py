@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "docs_check.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_PATH = REPO_ROOT / "scripts" / "docs_check.py"
 SPEC = importlib.util.spec_from_file_location("docs_check", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 docs_check = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = docs_check
 SPEC.loader.exec_module(docs_check)
 
 
@@ -90,6 +93,10 @@ class DocsCheckTests(unittest.TestCase):
 
         messages = [finding.message for finding in errors]
         self.assertEqual(2, messages.count("required documentation architecture file is missing"))
+
+    def test_repository_documentation_contract(self) -> None:
+        errors, _warnings = docs_check.run_checks(REPO_ROOT)
+        self.assertEqual([], [finding.render(REPO_ROOT, "ERROR") for finding in errors])
 
 
 if __name__ == "__main__":
