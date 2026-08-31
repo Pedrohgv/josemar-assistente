@@ -46,4 +46,20 @@ jobs:
           TEST_DEPS_DIR: ${{ runner.temp }}/fast-test-deps
         run: |
           export PYTHONPATH="$TEST_DEPS_DIR${PYTHONPATH:+:$PYTHONPATH}"
-          make verify
+          verify_log="$RUNNER_TEMP/fast-tests-verify.log"
+          trap 'rm -f "$verify_log"' EXIT
+          set -o pipefail
+          set +e
+          make verify 2>&1 | tee "$verify_log"
+          verify_status=${PIPESTATUS[0]}
+          set -e
+
+          if (( verify_status != 0 )); then
+            echo
+            echo "=== Failed unittest cases ==="
+            if ! grep -E '^(FAIL|ERROR): ' "$verify_log"; then
+              echo "(verification failed, but no unittest FAIL:/ERROR: headers were found)"
+            fi
+          fi
+
+          exit "$verify_status"
