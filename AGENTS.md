@@ -38,6 +38,21 @@ Important top-level paths:
 - Create feature branches for non-trivial work. Do not commit directly to `main` unless explicitly requested.
 - Keep commits focused and scoped.
 
+## Runtime Storage and Local Development Safety
+
+Hermes runs as `HERMES_UID` (default 10000), while new Docker named volumes normally begin root-owned. `docker-hermes-init.sh` chowns only the explicit Hermes-writable allowlist. When adding a new Hermes-writable volume/mount, inspect and update `HERMES_WRITABLE_VOLUMES` in the init path and its tests. Never broadly chown bind mounts, read-only mounts, or cross-service volumes such as the Obsidian vault.
+
+When starting a local Hermes service for validation, explicitly disable Telegram so the development container cannot contend with the production bot deployment. Set `TELEGRAM_BOT_TOKEN=`, `PRIMARY_TELEGRAM_ID=`, all applicable `HERMES_TELEGRAM_*` variables, and `HERMES_GATEWAY_ALLOWED_USERS=` to empty values for the local run.
+
+Use local Compose by default:
+
+```bash
+docker compose up -d
+docker compose logs -f hermes
+```
+
+Changes to runtime mounts, writable-volume initialization, or local startup safety must inspect the relevant Compose/init source and tests; update durable operator/development documentation if the supported procedure changes.
+
 ## Documentation Architecture and Maintenance
 
 The canonical documentation architecture and update rules are in `docs/documentation-policy.md`. Read it when changing documentation or when code/config/test changes affect documented behavior.
@@ -69,6 +84,8 @@ Hermes, gbrain, Mnemosyne, Bun, container images, and selected helper tools are 
 
 Never version the full Hermes `config.yaml`; it mixes operational, security, and deployment controls and remains repo/operator/runtime-owned and unversioned. State-owned provider/model selection is the sparse `hermes/models.yaml` overlay only.
 
+When changing state ownership, `.sync-manifest`, state bootstrap/template behavior, `hermes/models.yaml`, skill toggles, or state sync semantics, inspect `templates/agent-state-template/README.md`, the template files, sync implementation/tests, and any affected runtime docs. The template README is the canonical durable state-model description; do not duplicate its full schema here.
+
 ## Skills Ownership and Boundaries
 
 - Repo-owned skills: `skills-factory/*` -> copied to `/opt/josemar/skills`.
@@ -97,7 +114,7 @@ Use `SKILL.md` for the routine path and `references/<topic>.md` for non-routine 
 
 Move uncommon schemas/taxonomies, exhaustive command-output descriptions, compatibility matrices, recovery/upgrade procedures, and rare edge cases into `references/`. The main skill must explicitly tell the agent when to load each reference.
 
-Good examples include `skills-factory/backup-operations/` and `skills-factory/tasknotes/`.
+Good examples include `skills-factory/backup-operations/`, `skills-factory/tasknotes/`, and the gbrain/browser-control splits documented in `docs/README.md`.
 
 ## Security Rules
 
@@ -115,6 +132,7 @@ Good examples include `skills-factory/backup-operations/` and `skills-factory/ta
 - For direct local Python tests, prefer `venv/bin/python3` when the repo virtualenv exists; CI/venv-less environments may use system Python only when dependencies are supplied as documented.
 - Run `make test` and `make verify` as separate top-level commands with deliberate timeouts of at least 30 minutes. Intentionally expensive Docker/runtime gates may need roughly 45–60 minutes when repository evidence supports that expectation.
 - A timeout is incomplete validation, not success or failure unless independent conclusive failure output was produced. Do not rerun an identical command solely because an unnecessarily short default timeout expired.
+- `scripts/docs_check.py` is exercised by the normal unit-test suite and validates documentation references/context guardrails without network access.
 
 Common commands:
 
@@ -122,6 +140,7 @@ Common commands:
 make test
 make verify
 venv/bin/python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
+python3 scripts/docs_check.py
 ```
 
 ## Key Routing References
@@ -129,8 +148,10 @@ venv/bin/python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
 - `docs/README.md` — documentation map, audience, and load/update routing
 - `docs/documentation-policy.md` — canonical documentation architecture and maintenance contract
 - `README.md` — top-level orientation and operator onboarding
+- `templates/agent-state-template/README.md` — canonical private-state ownership/bootstrap/model-selection contract
 - `tests/README.md` — supported validation commands and test-suite routing
 - `.github/workflows/AGENTS.md` — workflow-specific change constraints and documentation dependencies
+- `docs/github-workflows.md` — workflow index and secret/variable catalog
 - `docs/gbrain-operations.md` — gbrain operator architecture and operations
 - `docs/tasknotes-mcp.md` — TaskNotes MCP contracts and operations
 - `docs/vault-recovery-operations.md` — vault-recovery architecture/recovery
