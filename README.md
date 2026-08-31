@@ -1,30 +1,24 @@
 # Josemar Assistente
 
-Self-hosted Hermes assistant infrastructure for running a private AI assistant with Telegram, dashboard/API access, git-backed agent state, an Obsidian vault, and optional queue-based local ML jobs.
+Self-hosted Hermes assistant infrastructure with Telegram/dashboard access, Git-backed private agent state, a curated Obsidian/gbrain knowledge vault, encrypted recovery, and optional memory/browser/ML services.
 
-After the initial semantic embedding backfill is run manually, the daily
-no-agent `gbrain-embedding-refresh` job maintains stale vectors. The
-`refresh-embeddings` wrapper path is allowed only after an explicit user
-request.
+This repository is the public platform layer. User-specific identity, memories, private workflows, and user-owned skills live in a separate private `agent-state` repository.
 
-This repository is the public/platform layer. Personal identity, memories, private workflows, and user-specific skills live in a separate private `agent-state` repository so this repo can evolve independently from each user's assistant state.
+For the documentation map and guidance on what to load for a particular subsystem/change, start with [`docs/README.md`](docs/README.md).
 
-## What This Repo Provides
+## What this repository provides
 
-- **Hermes Agent gateway**: self-hosted runtime with dashboard and OpenAI-compatible API.
-- **Telegram channel**: allowlisted Telegram DM access with a single runtime owner.
-- **Independent agent state**: private git-backed Hermes state tree for context files, cron jobs, avatars, and user-owned skills.
-- **Two-scope skills model**: repo-owned platform skills in `skills-factory/`, user-owned skills in `agent-state/skills/`.
-- **Obsidian vault infrastructure**: dedicated Docker volume synchronized with Syncthing over a Tailscale sidecar.
-- **TaskNotes lifecycle MCP**: bounded create/get/list/update/complete/archive/delete/tag tools backed by native gbrain, with fail-closed profile and Git transaction guards.
-- **Encrypted vault backups**: daily immutable encrypted generations of the vault + gbrain state to Google Drive (vault-recovery lane, default-on), replacing the retired plaintext rotating-slot backup.
-- **Optional Mnemosyne conversation memory**: opt-in semantic recall/capture layer separate from the curated Obsidian vault, backed by an internal TEI embeddings service (no host port).
-- **Optional Mnemosyne encrypted backup**: separate rclone `crypt` backup lane to Google Drive slots for the Mnemosyne memory store; local staging is not encrypted, encryption begins at the rclone `crypt` remote, and full recovery is operator-controlled.
-- **Optional auxiliary ML service**: internal `aux-ml` container for FIFO, one-at-a-time long-running OCR jobs through llama.cpp.
-- **Multi-provider LLM config**: Ollama Cloud, Z.AI/GLM, DeepSeek, and other OpenAI-compatible providers can be configured.
-- **Security checks**: gitleaks and a custom PII guard in CI and optional pre-commit hooks.
-
-Domain-specific behavior, such as Brazilian credit-card invoice extraction, belongs in a user's private state-repo skills unless it is explicitly added to `skills-factory/`. The public repo currently ships the infrastructure needed to support OCR and custom skills, not that personal extraction workflow itself.
+- **Hermes gateway runtime** with dashboard/API/Telegram integration.
+- **Two-scope skills**: repo-owned platform skills in `skills-factory/` and user-owned skills in the private state repo.
+- **Git-backed agent state** under `/opt/data`, synchronized only for allowlisted paths.
+- **Curated Obsidian/gbrain vault** with a safe public agent-facing wrapper and shared single-writer coordination.
+- **Bounded TaskNotes MCP** for task lifecycle mutations, using private native gbrain internally under the same lock.
+- **Syncthing/Tailscale vault sync** for external Obsidian devices.
+- **Default encrypted vault recovery** for the vault plus complete gbrain runtime state.
+- **Optional Mnemosyne conversation memory** backed by an internal embeddings service.
+- **Optional connected-browser overlay** for work requiring an operator-controlled authenticated browser session; ordinary server-headless browser tooling remains separate.
+- **Optional aux-ml service** for bounded long-running OCR/ML jobs.
+- **CI/privacy gates** including test, secret, and PII checks.
 
 ## Architecture
 
@@ -32,123 +26,66 @@ Domain-specific behavior, such as Brazilian credit-card invoice extraction, belo
 flowchart LR
   User[User] --> Telegram[Telegram Bot]
   User --> Dashboard[Hermes Dashboard]
-
   Telegram --> Gateway[Hermes Gateway]
   Dashboard --> Gateway
 
   Gateway --> Agent[Josemar Agent]
-  Agent --> Models[LLM Providers<br/>Ollama Cloud / Z.AI / DeepSeek]
-  Agent --> CoreSkills[Repo Core Skills<br/>/opt/josemar/skills]
-  Agent --> StateSkills[User State Skills<br/>/opt/data/skills]
-  Agent --> GBrain[public gbrain CLI<br/>safe by default, issue #110]
+  Agent --> Models[LLM Providers]
+  Agent --> CoreSkills[Repo Skills<br/>/opt/josemar/skills]
+  Agent --> UserSkills[Private State Skills<br/>/opt/data/skills]
+
+  Agent --> PublicGBrain[public gbrain command<br/>agent-facing safe adapter]
   Agent --> TaskNotes[Bounded TaskNotes MCP]
-  TaskNotes --> GBrain
-  GBrain --> Vault[Obsidian Vault<br/>obsidian-vault volume<br/>canonical curated vault]
+  PublicGBrain --> SharedLock[shared gbrain / TaskNotes lock]
+  TaskNotes --> SharedLock
+  SharedLock --> NativeGBrain[private native gbrain]
+  NativeGBrain --> Vault[Obsidian Vault<br/>canonical curated knowledge]
 
-  CoreSkills --> AuxML[aux-ml API<br/>optional]
-  AuxML --> Llama[llama.cpp Router<br/>OCR models]
-
-  Agent --> StateTree[Hermes State Tree<br/>hermes-data volume / /opt/data]
-  StateTree <--> StateRepo[Private Agent State Repo]
   Vault <--> Syncthing[Syncthing]
-  Syncthing <--> Tailscale[Tailscale Sidecar]
-  Hermes --> VaultRecovery[vault-recovery lane<br/>daily encrypted generations]
-  VaultRecovery --> GDrive[Google Drive<br/>vault-recovery-crypt]
+  Syncthing <--> Tailscale[Tailscale]
 
-  %% Opt-in Mnemosyne layer (separate from the curated vault)
-  Agent -. opt-in .-> Mnemosyne[Mnemosyne<br/>semantic conversation memory]
-  Mnemosyne -. embeddings .-> TEI[TEI Embeddings<br/>internal only / no host port]
-  Mnemosyne --> MnemoStore[(mnemosyne.db<br/>/opt/data/mnemosyne/data)]
-  MnemoStore -. opt-in backup .-> MnemoBackup[rclone crypt uploader<br/>separate service]
-  MnemoBackup --> MnemoGDrive[Google Drive<br/>mnemosyne-crypt slots]
+  Agent --> StateTree[Hermes State Tree<br/>/opt/data]
+  StateTree <--> StateRepo[Private Agent State Repo]
+
+  Agent -. optional .-> Mnemosyne[Mnemosyne conversation memory]
+  Mnemosyne -. embeddings .-> TEI[Internal embeddings service]
+
+  CoreSkills -. optional .-> AuxML[aux-ml]
+  Agent -. optional session work .-> ConnectedBrowser[Connected operator browser]
+
+  Vault --> Recovery[Encrypted vault/gbrain recovery lane]
+  Recovery --> Remote[Encrypted remote generations]
 ```
 
-The canonical curated vault path is `gbrain -> Obsidian vault`. Mnemosyne is a separate, opt-in operational/conversation-memory layer; it is not a vault replacement. gbrain retrieval is keyword-only by default (text queries keyword-only, image/cross-modal queries rejected, `put`/`capture` do not embed); opt-in TEI E5 semantic/hybrid retrieval (issue #65) is activated separately by the operator (`josemar-gbrain enable-embeddings` + `embed-backfill`), after which both `gbrain search` and `gbrain query --no-expand` use the hybrid/semantic provider path. The TEI embeddings service is internal-only (no host port published); it is only present when the embeddings overlay is applied. The Mnemosyne encrypted backup lane is a separate rclone `crypt` uploader service to its own Google Drive slots, distinct from the vault backup.
+The public `gbrain` command is the general agent-facing vault path. TaskNotes is intentionally different: it owns task-file mutations and invokes the private native gbrain path internally while holding its transaction/shared lock. It must not route through the public wrapper. Both paths converge on the same single-writer gbrain/vault state.
 
-## State Separation
+Detailed gbrain/TaskNotes locking and recovery contracts live in [`docs/gbrain-operations.md`](docs/gbrain-operations.md) and [`docs/tasknotes-mcp.md`](docs/tasknotes-mcp.md).
 
-The main repository can stay public because user-specific assistant state is isolated in a private nested repo mounted at `agent-state/`.
+## State separation
 
 ```mermaid
 flowchart TB
-  PublicRepo[Public Platform Repo] --> Image[Docker Image]
-  PublicRepo --> CoreSkills[skills-factory<br/>repo-owned skills]
-  PublicRepo --> Compose[docker-compose.yml]
+  PublicRepo[Public Platform Repo] --> Image[Runtime Image]
+  PublicRepo --> CoreSkills[skills-factory]
+  PublicRepo --> Compose[Compose / deployment config]
 
-  PrivateRepo[Private Agent State Repo] --> Personality[SOUL.md / memories/USER.md / memories/MEMORY.md / AGENTS.md]
-  PrivateRepo --> UserSkills[skills/*]
-  PrivateRepo --> Cron[cron/jobs.json]
-  PrivateRepo --> Avatars[avatars/*]
+  PrivateRepo[Private Agent State Repo] --> Personality[SOUL / USER / MEMORY / AGENTS]
+  PrivateRepo --> UserSkills[skills]
+  PrivateRepo --> Cron[cron state]
+  PrivateRepo --> Avatars[avatars]
 
   Image --> Runtime[Hermes Runtime]
   CoreSkills --> Runtime
   Compose --> Runtime
-  PrivateRepo <--> StateTree[Runtime /opt/data Git Repo]
+  PrivateRepo <--> StateTree[/opt/data Git worktree]
   StateTree --> Runtime
 ```
 
-The state sync script only versions paths listed in `.sync-manifest`, uses the remote state repo as the blessed conflict winner, and can auto-commit/push state changes from the running assistant.
+Only paths listed by the state-sync manifest are versioned automatically. The private state repository remains the source of truth for user-owned state; the public repository must not contain private-state contents, credentials, PII, or user-specific anecdotes.
 
-## Obsidian Vault Flow
+## Quick start
 
-```mermaid
-flowchart LR
-  Hermes[Hermes Container<br/>/opt/data/obsidian + .gbrain] <--> GBrain[public gbrain CLI<br/>safe by default, issue #110]
-  GBrain <--> Vault[(obsidian-vault volume)]
-  Vault <--> Syncthing[Syncthing Container]
-  Syncthing <--> Tailscale[Tailscale Sidecar<br/>private network]
-  Tailscale <--> Devices[Laptop / Mobile Devices]
-  Hermes -->|daily export 04:00 local| Staging[(vault-recovery-staging)]
-  Staging --> Uploader[vault-recovery-uploader<br/>staging RO / config RO]
-  Uploader --> RcloneConfig[(obsidian-rclone-config)]
-  Uploader --> Drive[Google Drive<br/>vault-recovery-crypt<br/>14 committed generations]
-```
-
-The vault persists in its own Docker volume and syncs through Syncthing. The
-**vault-recovery lane** (default deployment composition) exports the vault
-**plus** the complete `/opt/data/.gbrain` state into immutable encrypted
-remote generations every day and retains the newest 14 — it replaces the
-retired plaintext `obsidian-backup` service (Phase 3); see
-`docs/vault-recovery-operations.md`. Native gbrain sync uses local-only Git
-history; the TaskNotes MCP reuses it for safe automatic commits. The
-repository has no remote consumer, its `.git/` directory must be excluded
-from Syncthing, and it is separate from agent-state versioning.
-
-## Semantic Memory (Mnemosyne pilot, opt-in)
-
-Mnemosyne is an opt-in semantic conversation-memory layer, separate from the curated Obsidian vault. It is not enabled by default and is selected by the `MNEMOSYNE_DEPLOY_MODE` repo variable (see the operator table below). When the pilot is enabled, the static `MEMORY.md`/`USER.md` files remain at their versioned paths as archived rollback material and are not injected into prompts.
-
-```mermaid
-flowchart LR
-  Turn[Primary user turn] -->|passive capture<br/>sync_turn| Mnemo[Mnemosyne store<br/>/opt/data/mnemosyne/data]
-  Mnemo -->|pre-turn recall| Agent[Hermes Agent]
-  Mnemo -. embeddings .-> TEI[TEI Embeddings<br/>internal / no host port]
-  Mnemo -. opt-in backup .-> Crypt[rclone crypt uploader<br/>separate service]
-  Crypt --> Drive[Google Drive<br/>mnemosyne-crypt slots]
-  Vault[Obsidian Vault<br/>canonical curated vault] -. keyword-only retrieval<br/>unchanged .-> Agent
-```
-
-- **Mnemosyne**: semantic conversational recall and capture, opt-in. Passive user-turn capture (`sync_turn`) and pre-turn recall are wired; non-conversation contexts (cron, flush, subagent, background, skill_loop) are excluded. No auto-sleep, reflection, or LLM consolidation runs in the pilot. Retrieval quality is evaluated separately (see `docs/mnemosyne-retrieval-quality.md`); this README makes no precise ranking claims.
-- **gbrain / Obsidian vault**: the canonical curated vault. Retrieval is keyword-only by default (text queries keyword-only, image/cross-modal queries rejected, `put`/`capture` do not embed); the Mnemosyne pilot does not enable gbrain embeddings or alter the gbrain wrapper's behavior. Opt-in TEI E5 semantic/hybrid retrieval (issue #65) is a separate operator activation (`josemar-gbrain enable-embeddings` + `embed-backfill`), after which both `gbrain search` and `gbrain query --no-expand` use the hybrid/semantic provider path; see `docs/gbrain-operations.md` → "Issue #65".
-- **Static `MEMORY.md` / `USER.md`**: archived rollback material. While the Mnemosyne pilot is enabled they are not injected into prompts; disabling the pilot restores them via the init rollback path.
-
-See `docs/mnemosyne-operations.md` for activation, recovery, and security details, and `docs/mnemosyne-retrieval-quality.md` for the retrieval quality gate.
-
-### MNEMOSYNE_DEPLOY_MODE
-
-| Value | Overlays applied (fixed order) | Prerequisites |
-| --- | --- | --- |
-| `off` (default / unset) | base only | none |
-| `pilot` | base + embeddings + mnemosyne | none beyond the base deploy secrets |
-| `backup` | base + embeddings + mnemosyne + mnemosyne-backup | positive `MNEMOSYNE_BACKUP_EXPORT_INTERVAL` (integer, no leading zeros, <= 10080 minutes) and `RCLONE_CONFIG_B64` (base64 rclone config containing a `crypt` remote named `mnemosyne-crypt`; the `vault-recovery-crypt` remote for the default backup lane is required on every deployment) |
-
-There is no embeddings-only mode: `pilot` is the smallest Mnemosyne-enabled mode. Any value other than `off`, `pilot`, or `backup` is rejected before any volume mutation or service teardown. The deploy workflow runs all preflight validation before any `docker volume create`, volume write, or service teardown. See `docs/mnemosyne-operations.md` for the full validation order, fail-closed teardown, mode-specific post-start verification, and the operator-controlled recovery lane.
-
-For the encrypted backup, local staging is not encrypted (it holds a compressed plaintext SQLite snapshot); encryption begins at the rclone `crypt` remote; full recovery is operator-controlled and never automated. See `docs/mnemosyne-operations.md` for the recovery drill and the secret-recovery requirement.
-
-## Quick Start
-
-### 1. Clone and Prepare State
+### 1. Clone the platform repository
 
 ```bash
 git clone <this-repo-url> josemar-assistente
@@ -156,13 +93,15 @@ cd josemar-assistente
 cp .env.example .env
 ```
 
-Clone your private state repo into `agent-state/`:
+### 2. Prepare the private state repository
+
+Clone an existing private state repository into `agent-state/`:
 
 ```bash
 git clone <your-private-agent-state-repo-url> agent-state
 ```
 
-If you do not have a state repo yet, initialize from the template:
+Or initialize one from the provided template:
 
 ```bash
 cp -r templates/agent-state-template/ agent-state
@@ -173,340 +112,86 @@ git commit -m "Initial state"
 cd ..
 ```
 
-### 2. Configure `.env`
+Treat `agent-state/` as private. Do not commit its contents into the public platform repository.
 
-Set the required runtime variables:
+### 3. Configure credentials and runtime settings
 
-```bash
-TELEGRAM_BOT_TOKEN=your-telegram-token
-PRIMARY_TELEGRAM_ID=123456789
-WORKSPACE_STATE_REPO=https://github.com/username/private-agent-state.git
-WORKSPACE_REPO_TOKEN=your-github-pat
-HERMES_DASHBOARD_SESSION_TOKEN=<openssl rand -hex 32>
-HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin
-HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=<openssl rand -hex 24>
-HERMES_DASHBOARD_BASIC_AUTH_SECRET=<openssl rand -hex 32>
-```
+- Use `.env.example` for local runtime configuration shape.
+- Use [`credentials/README.md`](credentials/README.md) for credential setup.
+- Use [`docs/github-workflows.md`](docs/github-workflows.md) for the canonical GitHub Actions secret/variable catalog and workflow operations.
 
-Use a username other than `admin` if this dashboard is reachable through any
-remote access path.
+Never commit real credentials or generated secret-bearing files.
 
-Set provider keys used by your configured model strategy:
+### 4. Start locally
 
 ```bash
-DEEPSEEK_API_KEY=your-deepseek-key
-ZAI_API_KEY=your-zai-key
-OLLAMA_API_KEY=your-ollama-cloud-key
-```
-
-Optionally enable web search and extract by setting a Tavily key (auto-detected by Hermes when present):
-
-```bash
-TAVILY_API_KEY=your-tavily-api-key
-```
-
-See `.env.example` for the full variable list.
-
-### 3. Start Locally
-
-```bash
-docker compose build
 docker compose up -d
 docker compose logs -f hermes
 ```
 
-Access:
+When starting a local Hermes instance for validation, explicitly disable Telegram credentials/allowlists so a development container cannot contend with the production bot deployment. See root [`AGENTS.md`](AGENTS.md) for contributor/harness rules.
 
-- Dashboard: `http://localhost:9119` with Basic Auth
-- API server (if enabled): `http://127.0.0.1:8642`
+Optional services use their documented Compose profiles/overlays; do not guess combinations from this README. Use the relevant runbook in [`docs/README.md`](docs/README.md).
 
-The dashboard host port binds to `127.0.0.1` by default. If publishing it through
-Cloudflare Tunnel, keep the tunnel origin pointed at `http://localhost:9119`.
-Cloudflare Access can be added as defense-in-depth after verifying Hermes
-Desktop compatibility with the extra access layer.
+## Core operational domains
 
-If the Cloudflare tunnel runs on a different host and must reach the Docker VM
-over the LAN, set `HERMES_DASHBOARD_BIND_IP` to the VM LAN address instead of
-`127.0.0.1`. Do not use `0.0.0.0`.
+### gbrain / Obsidian vault
 
-### 4. Optional Aux-ML
+The Obsidian vault is the canonical curated knowledge store. Agent-facing general note work uses the public `gbrain` command. Task lifecycle mutation uses the bounded TaskNotes MCP. External Obsidian/Syncthing edits are reconciled through the documented operator refresh path.
 
-Enable auxiliary ML only when needed:
+Semantic/hybrid gbrain retrieval is an operator-enabled capability rather than a timeless README claim about current runtime state. Use the runtime status command when current activation matters. See:
 
-```bash
-# In .env
-AUX_ML_ENABLED=true
-COMPOSE_PROFILES=aux-ml
+- [`skills-factory/gbrain/SKILL.md`](skills-factory/gbrain/SKILL.md) for routine runtime-agent operations;
+- [`docs/gbrain-operations.md`](docs/gbrain-operations.md) for activation/reindex/embeddings/maintenance;
+- [`docs/tasknotes-mcp.md`](docs/tasknotes-mcp.md) for task behavior and locking;
+- [`docs/obsidian-operations.md`](docs/obsidian-operations.md) for vault sync operations.
 
-docker compose up -d --build
-```
+### Encrypted vault recovery
 
-## Repository Layout
+The deployment includes the documented encrypted vault/gbrain recovery lane. Recovery/export/upload/restore ordering, validation gates, and rollback are high-risk operator procedures and intentionally live in [`docs/vault-recovery-operations.md`](docs/vault-recovery-operations.md), not this overview.
 
-```text
-josemar-assistente/
-├── agent-state/                    # Nested private git repo for assistant state
-├── aux-ml/                         # Optional FastAPI + llama.cpp queue service
-├── browser-tunnel/                 # Optional hardened OpenSSH reverse-tunnel sidecar image
-├── credentials/                    # Local credentials, not versioned
-├── docs/                           # Operations runbooks
-├── laptop/linux/                   # Optional on-demand Linux laptop launcher (Mint-tested)
-├── scripts/                        # Workspace sync, backup, privacy tooling
-├── skills-factory/                 # Repo-owned core skills shipped in image
-├── templates/agent-state-template/ # Starter private state repo template
-├── tests/                          # Python unit tests
-├── .github/workflows/              # Deploy, stop, runner test, privacy scan
-├── docker-compose.yml              # Service topology and persistent volumes
-├── docker-compose.browser-control.yml # Optional browser-control overlay
-├── docker-compose.embeddings.yml   # Optional local embedding service (TEI) overlay; NOT enabled by default. See docs/memory-embeddings-evaluation.md.
-├── docker-compose.mnemosyne.yml   # Optional Mnemosyne pilot overlay (semantic conversation memory); requires the embeddings overlay. See docs/mnemosyne-operations.md.
-├── docker-compose.mnemosyne-backup.yml # Optional Mnemosyne encrypted-backup overlay (separate rclone crypt uploader); layered last. See docs/mnemosyne-operations.md.
-├── docker-compose.vault-recovery.yml # Encrypted vault-recovery upload/recovery overlay; DEFAULT deployment composition (replaces the retired plaintext obsidian-backup lane). See docs/vault-recovery-operations.md.
-├── Dockerfile.hermes               # Custom Hermes image
-└── .env.example                    # Environment template
-```
+### Mnemosyne
 
-## Runtime Services and Volumes
+Mnemosyne is an optional conversation-memory subsystem separate from the curated vault. Its deployment modes, storage, embeddings dependency, backup/recovery, and rollback are documented in [`docs/mnemosyne-operations.md`](docs/mnemosyne-operations.md). Retrieval-quality evaluation lives in [`docs/mnemosyne-retrieval-quality.md`](docs/mnemosyne-retrieval-quality.md).
 
-| Service | Purpose |
-| --- | --- |
-| `hermes` | Main Hermes gateway, Telegram channel, dashboard/API, agent runtime. |
-| `aux-ml` | Optional internal queue API for long-running OCR jobs. |
-| `embeddings` | Optional local Hugging Face Text Embeddings Inference (TEI) service for semantic memory and opt-in gbrain E5 semantic/hybrid retrieval (issue #65). NOT enabled by default; only present when the `docker-compose.embeddings.yml` overlay is applied. gbrain embeddings are activated separately by the operator via `josemar-gbrain enable-embeddings` + `josemar-gbrain embed-backfill`; after both, `gbrain search` and `gbrain query --no-expand` use the hybrid/semantic provider path. See `docs/gbrain-operations.md` → "Issue #65" and `docs/memory-embeddings-evaluation.md` for the issue #86/#65 evaluation. |
-| `tailscale` | Private-network sidecar for Syncthing connectivity and (optionally) Tailscale Serve for browser control. |
-| `syncthing` | Syncs the Obsidian vault to trusted devices. |
-| `vault-recovery-uploader` | Encrypted vault-recovery uploader (default backup lane): reads the vault-recovery staging volume read-only, uploads generations through an rclone `crypt` remote, writes only its own state volume. Applied by default in the deploy workflow (`docker-compose.vault-recovery.yml`); replaces the retired plaintext `obsidian-backup` service. See `docs/vault-recovery-operations.md`. |
-| `mnemosyne-backup-uploader` | Optional separate rclone uploader for the Mnemosyne encrypted-backup lane. Reads the staging volume read-only, uploads through an rclone `crypt` remote to rotating Google Drive slots, writes only its own state volume. Only present when the `docker-compose.mnemosyne-backup.yml` overlay is applied (`MNEMOSYNE_DEPLOY_MODE=backup`). See `docs/mnemosyne-operations.md`. |
-| `browser-tunnel` | Optional hardened OpenSSH reverse-tunnel sidecar for remote browser control. Only started under the `browser-control` Compose overlay/profile. See `docs/browser-control.md`. |
+### Browser control
 
-| Volume | Purpose |
-| --- | --- |
-| `hermes-data` | Hermes runtime state and the private state git worktree at `/opt/data`. Includes gbrain state at `/opt/data/.gbrain` (PGLite database, config, cache). Runtime-private files are ignored by the state repo. |
-| `aux-ml-shared` | Dedicated handoff volume for files intentionally shared with aux-ml. |
-| `obsidian-vault` | Obsidian notes and attachments plus local-only Git history required by native gbrain sync. The history has no remote consumer and `.git/` is excluded from Syncthing. |
-| `syncthing-config` | Syncthing identity and folder/device config. |
-| `tailscale-state` | Tailscale node identity and login state. |
-| `obsidian-rclone-config` | rclone config used by the encrypted backup lanes (vault-recovery by default, Mnemosyne in `backup` mode). |
-| `vault-recovery-staging` | Vault-recovery export staging volume. Hermes writes immutable generations here (read-write); the `vault-recovery-uploader` mounts it read-only. Base feature (default-on). |
-| `vault-recovery-uploader-state` | Vault-recovery uploader state (ack ledger, retention). Writable only by the `vault-recovery-uploader` service. Defined in the default `docker-compose.vault-recovery.yml` overlay. |
-| `vault-recovery-recovery` | Disposable vault-recovery recovery handoff volume. Written only by the short-lived `vault-recovery-recover` step (`recovery` profile) and consumed transiently by short-lived `docker compose run hermes` invocations; never mounted into the long-running hermes service. |
-| `mnemosyne-backup-staging` | Optional Mnemosyne backup staging volume. Exporter writes immutable generations here (read-write in hermes, read-only in the uploader). Only present with the `docker-compose.mnemosyne-backup.yml` overlay. Local staging is not encrypted. |
-| `mnemosyne-backup-state` | Optional Mnemosyne uploader state (slot rotation, last-uploaded-generation). Writable only by the `mnemosyne-backup-uploader` service; mounted read-only into hermes. Only present with the `docker-compose.mnemosyne-backup.yml` overlay. |
-| `mnemosyne-backup-recovery` | Optional disposable Mnemosyne recovery handoff volume. Written only by the short-lived `mnemosyne-backup-recover` step (`recovery` profile) and consumed transiently by short-lived `docker compose run hermes` invocations; never mounted into the long-running hermes service. Only present with the `docker-compose.mnemosyne-backup.yml` overlay. |
-| `browser-tunnel-state` | Persistent Ed25519 SSH host key for the optional `browser-tunnel` sidecar so laptop `known_hosts` stays stable across redeploys. |
-| `embedding-model-cache` | Public embedding model weights cache for the optional `embeddings` service. Contains only downloaded public model weights; no private data. Only present with the `docker-compose.embeddings.yml` overlay. |
+Josemar distinguishes public search/extraction, the ordinary server-headless browser, and the optional externally connected browser used for authenticated/session-dependent work. The runtime routing contract is in [`skills-factory/browser-control/SKILL.md`](skills-factory/browser-control/SKILL.md); architecture and operator setup are in [`docs/browser-control.md`](docs/browser-control.md).
 
-## Skills
+### aux-ml
 
-Skills are intentionally split by ownership:
+The optional aux-ml service handles bounded auxiliary ML/OCR work. Architecture, configuration, and operations are in [`docs/aux-ml.md`](docs/aux-ml.md).
 
-| Scope | Location | Owner | Use |
-| --- | --- | --- | --- |
-| Core platform skills | `skills-factory/` copied to `/opt/josemar/skills` | This repo | Stable runtime capabilities shared by all deployments. |
-| User state skills | `agent-state/skills/` synced to `/opt/data/skills` | Private state repo | Personal workflows, user-specific automations, domain-specific processors. |
+## Development and validation
 
-Hermes discovers both scopes through `config/hermes-config.yaml` (`skills.external_dirs`).
-Runtime-created user skills should be written under `/opt/data/skills/<skill>/` with a
-`SKILL.md`; `workspace-sync` auto-registers those files in `.sync-manifest` so the
-private state repo versions them on the next sync.
-
-### Skill toggles and creation policy
-
-Josemar pins Hermes so that skill enable/disable toggles and the skill-creation
-policy are backed by git-tracked state instead of the noisy, sensitive
-`/opt/data/config.yaml` (which is deliberately untracked).
-
-- **Automatic skill patching/creation is disabled.** `config/hermes-config.yaml`
-  sets `skills.creation_nudge_interval: 0` (no creation nudges),
-  `skills.write_approval: true` (skill writes require approval), and
-  `curator.enabled: false` (no background skill curator). The user-owned
-  `creating-skills` skill is retained so manual/user-approved creation remains
-  possible. Memory nudge is untouched.
-- **Native dashboard/CLI toggles survive redeploys.** The Hermes dashboard
-  `PUT /api/skills/toggle` and the `hermes skills` CLI flow through a Josemar
-  helper (`scripts/josemar_skill_state.py`, copied into the image at
-  `/opt/hermes/hermes_cli/josemar_skill_state.py`) that atomically writes a
-  canonical JSON sidecar first and then invokes native `save_config` under one
-  advisory lock. A state write failure fails the dashboard/CLI save rather than
-  silently diverging.
-- **Per-profile sidecar paths.** Only the dedicated toggle JSON is versioned,
-  never the full config:
-  - Default (base `HERMES_HOME`) -> `hermes/skill-toggles/default.json`
-  - Named profile `<canonical>` -> `hermes/skill-toggles/profiles/<canonical>.json`
-  - Other `HERMES_HOME` paths are rejected. Sidecar schema is exactly
-    `{"version":1,"disabled":[...],"platform_disabled":{"<platform>":[...]}}`,
-    one line, sorted/deduped string lists, explicit empty arrays retained, and
-    arbitrary platform keys allowed.
-- **Persistence timing.** A dashboard/CLI toggle writes the local sidecar
-  immediately; remote durability happens at the next periodic workspace sync
-  (no Git/network inside dashboard requests). The periodic
-  `hermes-workspace-sync-cron.sh` delegates to the helper's
-  `sync-and-apply` operation so one advisory lock covers git sync, remote
-  merge, and the sidecar/policy apply — dashboard writes and sync never race.
-- **Remote-wins conflicts.** Workspace sync uses remote-wins merge resolution,
-  so a conflicting remote sidecar overwrites a local one on merge. This is
-  intentional for a single-user state repo.
-- **Redeploy restoration.** On startup, `docker-hermes-init.sh` migrates
-  existing toggle keys into absent sidecars (only when the keys exist and only
-  for absent sidecars, so a pre-feature deployment's toggles survive the
-  upgrade and an empty `default.json` is not created for a feature-less
-  config), overwrites the runtime config from the repo template, runs
-  workspace clone/sync/seed, and then applies the sidecars back to the
-  default/named configs while enforcing the policy keys and preserving
-  unrelated config. Malformed sidecars surface clearly and never modify config.
-- **Session reset.** Toggling a skill does not reset an already-built prompt
-  for the current session; the change takes effect on the next session/prompt
-  build. Run `hermes setup` or start a new session to pick up the new toggle
-  state immediately.
-- **Why full config stays untracked.** `config.yaml` contains secrets,
-  host-specific paths, and Hermes schema defaults that change across versions.
-  Tracking it would leak secrets and create noisy diffs. The narrow sidecars
-  contain only toggle state, so they are safe to version and survive
-  redeploys without dragging unrelated config along.
-
-### State-owned model selections
-
-Josemar pins Hermes so the agent's model selections are backed by
-git-tracked state instead of the sensitive, untracked `/opt/data/config.yaml`.
-
-- **Canonical state file.** `agent-state/hermes/models.yaml` is the single
-  root-only configuration. There are no profiles or multiplexing.
-  The template ships a matching `templates/agent-state-template/hermes/models.yaml`.
-- **Strict selection-only v1 contract.** ONLY `provider`/`model` selection is
-  allowed. The file carries exactly:
-  - `model.{provider, default}` — default model for primary agent turns
-  - `fallback_providers[].{provider, model}` — ordered fallback list
-  - `auxiliary.<task>.{provider, model}` — per-task model routing for exactly
-    the 11 allowlisted auxiliary tasks (upstream dashboard order): `vision`,
-    `web_extract`, `compression`, `skills_hub`, `approval`, `mcp`,
-    `title_generation`, `triage_specifier`, `kanban_decomposer`,
-    `profile_describer`, `curator`
-  - `cron.{model, model_provider}` — fleet cron defaults (blank = inherit default)
-  Individual cron job overrides remain in `cron/jobs.json` (per-job
-  `model`/`provider` fields) and are NOT duplicated here.
-- **Auxiliary auto rule.** `provider` is required and non-empty. When
-  `provider` is exactly `auto`, `model` must be exactly `""` (upstream
-  selects the model); every other provider requires a non-empty `model`.
-  This rule applies only to auxiliary entries — root/fallback/cron keep
-  their own semantics.
-- **Sparse overlay; no auto-migration.** Only explicitly present entries
-  overlay the runtime config; absent entries never clear runtime keys.
-  Existing sparse v1 files that carry only a subset of the auxiliary slots
-  remain valid and are never auto-mutated or auto-expanded. Adopting new
-  slots is a manual edit: copy the desired entries from the template.
-  Rollback remains whole-file delete/revert (below).
-- **Forbidden in this file.** `base_url`, `api_mode`, `extra_body`, timeouts,
-  token/context limits, `fallback_chain`, credentials/secret keys, provider
-  definitions, endpoints, security/deployment topology, or any other Hermes
-  config. Those stay in `config.yaml` / `.env` and are never versioned here.
-- **Ownership boundary (reassessed).** The full Hermes `config.yaml` was
-  reassessed and remains repo/operator/runtime-owned and unversioned: it
-  mixes operational, security, and deployment controls (credentials, provider
-  definitions, endpoints, security/topology settings). State ownership is
-  provider/model selection only.
-- **Validation.** State changes are validated before sync commit; invalid
-  files (unknown keys, forbidden fields, or schema violations) are rejected
-  and never reach the runtime config.
-- **Source of truth.** This file is the source of truth for model selections.
-  Dashboard model changes are NOT source of truth — they live only in the
-  untracked runtime `config.yaml` and are overwritten on the next
-  sync/restart. To change the model durably, edit
-  `agent-state/hermes/models.yaml`, commit, and let sync/restart apply it.
-- **Persistence timing.** State changes are applied at sync/start. The
-  workspace sync mirrors `hermes/models.yaml` to `/opt/data/hermes/models.yaml`
-  and the container init applies it to the runtime config on startup.
-- **Rollback.** Delete or revert `hermes/models.yaml` in the state repo, then
-  sync/restart. The runtime config restores the repo model defaults from
-  `config/hermes-config.yaml` on the next start.
-
-Current repo-shipped skills:
-
-- `gbrain`: native gbrain vault interface (search, get, capture, put, link, backlinks), agent-facing access via the public `gbrain` command, which is safe by default (issue #110 transparent wrapper). Keyword-only search by default (text keyword-only, image/cross-modal rejected, put/capture do not embed); opt-in TEI E5 semantic/hybrid retrieval via `gbrain query --no-expand` (issue #65) makes both `search` and `query` hybrid/semantic. Operator activation via `josemar-gbrain reindex`; periodic manual-edit reconciliation via `josemar-gbrain refresh` every 5 minutes by default. See `docs/gbrain-operations.md` → "Issue #65: Opt-in TEI E5 Semantic/Hybrid Retrieval".
-- `tasknotes`: bounded durable-task lifecycle through the `task_*` MCP tools. Native gbrain remains the backend and sole task writer. See `docs/tasknotes-mcp.md` for prerequisites and recovery.
-- `aux-ml`: skill interface for queue-based auxiliary ML jobs.
-- `workspace-sync`: skill interface for workspace git sync, status, commit, and push flows.
-
-## Agent State Sync
-
-```mermaid
-sequenceDiagram
-  participant Init as docker-hermes-init.sh
-  participant StateTree as Runtime /opt/data State Tree
-  participant Remote as Private State Repo
-  participant Hermes as Hermes
-
-  Init->>StateTree: Ensure state repo exists
-  Init->>StateTree: Run workspace-sync.sh
-  StateTree->>Remote: Pull/merge remote state
-  StateTree->>Remote: Push resulting state
-  Init->>Hermes: Ensure script-only workspace-sync cron job
-  Init->>Hermes: Start gateway
-```
-
-Important state-sync variables:
-
-- `WORKSPACE_STATE_REPO`
-- `WORKSPACE_REPO_TOKEN`
-- `WORKSPACE_GIT_BRANCH`
-- `WORKSPACE_SYNC_ON_START`
-- `WORKSPACE_SYNC_INTERVAL` - Hermes script-only cron interval in minutes; set `0` to disable periodic sync.
-- `WORKSPACE_GIT_USER_EMAIL`
-- `WORKSPACE_GIT_USER_NAME`
-
-## Development
-
-The local test environment is reproducible from tracked metadata. The
-authoritative manifest is `requirements-test.txt`; `scripts/setup-pre-commit.sh`
-creates the `venv/` and installs the pinned dependencies plus the pre-commit
-hooks. The `mcp` pin mirrors the Hermes runtime version (issue #91).
-
-Run the full unit suite (prefers `venv/` when present):
+Use the repository's named Make targets:
 
 ```bash
 make test
-# or, explicitly against the venv:
-venv/bin/python3 -m unittest discover -s tests -v
+make verify
 ```
 
-Run scoped contract tests:
+Use [`tests/README.md`](tests/README.md) to select focused/unit/contract/runtime gates and the correct timeout budget. Expensive Docker/runtime gates are intentionally opt-in or workflow-controlled; do not run every gate indiscriminately.
 
-```bash
-venv/bin/python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
-```
+## Documentation and coding-harness guidance
 
-Set up optional pre-commit hooks (creates `venv/`, installs
-`requirements-test.txt`, and registers the hooks):
+- [`AGENTS.md`](AGENTS.md) — repository-wide coding-harness rules and routing.
+- [`docs/documentation-policy.md`](docs/documentation-policy.md) — canonical documentation ownership, modularity, update, and context-placement policy.
+- [`docs/README.md`](docs/README.md) — documentation index with audience and **when to load** routing.
+- [`.github/workflows/AGENTS.md`](.github/workflows/AGENTS.md) — workflow-specific change constraints and documentation dependencies.
+- [`docs/github-workflows.md`](docs/github-workflows.md) — workflow catalog, secret/variable catalog, and operator-facing workflow summary.
+- [`tests/README.md`](tests/README.md) — supported validation procedures.
 
-```bash
-./scripts/setup-pre-commit.sh
-```
+A code/config/test change and its durable documentation are one change. Parent guidance is responsible for routing workers to the narrower documents that become relevant for a given class of change.
 
-Manual privacy checks:
+## Security and privacy
 
-```bash
-python3 scripts/pii_guard.py --staged --fail-on medium
-```
+- Never commit secrets, credential values, private state, PII, or private host/network details.
+- Keep the private state repository separate from this public repository.
+- Keep agent-facing gbrain access on the public safe wrapper and preserve the shared single-writer locking model.
+- Follow the dedicated runbooks for destructive recovery, dependency upgrades, remote browser access, or other high-risk operations.
+- Run the repository privacy/secret checks before publishing relevant changes.
 
-## Credentials
+## Documentation map
 
-Credentials go under `credentials/<service>/` and are mounted read-only into Hermes. Do not commit real credentials.
-
-## Documentation Index
-
-- `AGENTS.md`: root project architecture and assistant guidance.
-- `credentials/README.md`: credential setup and storage rules.
-- `docs/aux-ml.md`: auxiliary ML API, queue, model lifecycle, and OCR operations.
-- `docs/obsidian-operations.md`: Syncthing, Tailscale, encrypted backup (vault-recovery lane), retired-plaintext historical recovery, and restore runbook.
-- `docs/gbrain-operations.md`: gbrain activation, reindex, vault swap, schema pack workflow, issue #65 opt-in TEI E5 semantic/hybrid retrieval, and troubleshooting.
-- `docs/memory-embeddings-evaluation.md`: issue #86/#65 evaluation of the optional local embedding service and Mnemosyne memory layer (not enabled by default).
-- `docs/mnemosyne-operations.md`: Mnemosyne pilot activation, encrypted-backup overlay, recovery lane, deploy-mode validation, and security boundaries.
-- `docs/mnemosyne-retrieval-quality.md`: Mnemosyne Portuguese retrieval quality gate, activation thresholds, and the FaQuAD-IR benchmark.
-- `docs/tasknotes-mcp.md`: TaskNotes profile gate, local Git/Syncthing prerequisites, tool outcomes, locking, and recovery.
-- `docs/vault-recovery-operations.md`: vault-recovery export (default-on) — daily local staging generations of the vault + `.gbrain`, doctor preflight, convergence semantics, portability proof; encrypted upload/recovery/install lane (default deployment composition, 14 committed remote generations); Phase-3 migration sequence (crypt preflight, fail-closed deploy, operator-only plaintext retirement) and the full Docker-gated disaster-recovery drill.
-- `docs/browser-control.md`: optional remote browser control via a reverse SSH tunnel over Tailscale.
-- `.github/workflows/AGENTS.md`: deployment, stop, privacy scan, and runner workflow documentation.
-- `templates/agent-state-template/README.md`: starting point for a private state repo.
-
-## License
-
-MIT
+See [`docs/README.md`](docs/README.md) for the maintained document catalog. The index identifies each document's role/audience and when coding workers/operators should load it, allowing the repository to stay complete without filling routine agent context with every runbook.
