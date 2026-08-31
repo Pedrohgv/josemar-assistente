@@ -16,6 +16,7 @@ For documentation ownership, canonicality, context placement, and update require
 | Document | Role / audience | When to load |
 | --- | --- | --- |
 | [`documentation-policy.md`](documentation-policy.md) | Canonical documentation architecture and maintenance policy for coding workers/maintainers | When adding, moving, restructuring, or deciding ownership/canonicality of documentation; when a change has ambiguous documentation impact |
+| [`github-workflows.md`](github-workflows.md) | Canonical GitHub Actions workflow index, secret/variable catalog, and operator-facing workflow summary | When changing workflow interfaces/configuration or operating/troubleshooting CI/CD; `.github/workflows/AGENTS.md` determines which sections/runbooks become mandatory for a workflow change |
 | [`gbrain-operations.md`](gbrain-operations.md) | gbrain operator architecture, activation, reindex, embeddings, safe adapter, recovery/maintenance procedures | When changing gbrain runtime integration, wrappers, jobs, activation, embeddings, database/reindex behavior, or operator maintenance |
 | [`tasknotes-mcp.md`](tasknotes-mcp.md) | TaskNotes MCP architecture, profile gating, locking, reconciliation, recovery | When changing TaskNotes tools, task-file writes, Daily Note projection, TaskNotes/gbrain locking, task schema behavior, or recovery |
 | [`obsidian-operations.md`](obsidian-operations.md) | Obsidian/Syncthing operational flow | When changing vault sync behavior, Obsidian-facing operational procedures, or related recovery assumptions |
@@ -46,17 +47,24 @@ Notable deep-reference patterns:
 
 - `skills-factory/backup-operations/references/` — status observation and recovery checklists.
 - `skills-factory/tasknotes/references/` — custom-field details.
-- `skills-factory/gbrain/references/` — non-routine gbrain detail; routine note work must remain in the main skill.
+- `skills-factory/gbrain/references/` — non-routine page-model, Chronicle, and upstream-compatibility detail; routine note work stays in the main skill.
+- `skills-factory/browser-control/references/setup.md` — first-time/operator-side connected-browser setup, loaded only when setup or connection recovery is needed.
 
 ## Change-class routing examples
 
 These examples are navigation rules, not a substitute for applicable nested `AGENTS.md` files.
 
-- **Workflow variable, secret, input, deployment gate, or operator-visible deploy behavior:** read `.github/workflows/AGENTS.md` and the specific runbook(s) it routes to; update the canonical catalog/procedure in the same change.
+- **Workflow variable, secret, input, deployment gate, or operator-visible deploy behavior:** read `.github/workflows/AGENTS.md`; update the canonical catalog in `github-workflows.md` and each subsystem runbook routed by the scoped guidance.
 - **gbrain wrapper, cron, locking, PGLite, embeddings, reindex, or maintenance:** read root gbrain safety rules plus `gbrain-operations.md`; update the gbrain skill only if runtime-agent behavior changes.
 - **TaskNotes mutation/projection/reconciliation behavior:** read `tasknotes-mcp.md` and the TaskNotes skill; preserve the private-native-gbrain/shared-lock boundary.
 - **Skill behavior:** keep the routine contract in `SKILL.md`; use `references/` only for non-routine depth.
 - **Test command or validation-gate change:** update `tests/README.md` when the supported contributor/harness procedure changes.
 - **Top-level architecture/onboarding change:** update `README.md` only for the orientation-level representation; keep detailed specifications in their canonical runbooks.
+
+## Mechanical integrity check
+
+`scripts/docs_check.py` validates repository-local Markdown links, skill reference targets, required documentation architecture files, and egregious always-loaded context-size regressions. Its repository-contract test runs under normal unit-test discovery, so `make test` / `make verify` exercise the check without requiring a separate Markdown toolchain or network access.
+
+Context-size warnings remain review heuristics: the checker only fails a `SKILL.md` at an intentionally high guardrail, because routine self-containment is more important than satisfying an arbitrary line target.
 
 When a new documentation domain is introduced, add it here and update the nearest parent guidance that should route workers to it.
