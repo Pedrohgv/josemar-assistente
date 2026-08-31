@@ -1,4 +1,4 @@
-.PHONY: test test-runtime test-aux-runtime verify \
+.PHONY: test test-runtime test-aux-runtime verify docs-check \
 	test-browser-routing-runtime \
 	test-vault-recovery test-vault-recovery-portability test-vault-recovery-round-trip \
 	test-vault-recovery-dr-drill \
@@ -18,6 +18,9 @@ PYTHON ?= $(shell test -x venv/bin/python3 && echo venv/bin/python3 || echo pyth
 
 test:
 	$(PYTHON) -m unittest discover -s tests -v
+
+docs-check:
+	$(PYTHON) scripts/docs_check.py
 
 test-runtime:
 	RUN_DOCKER_TESTS=1 python3 -m unittest discover -s tests/runtime -v
