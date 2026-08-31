@@ -15,7 +15,7 @@ from urllib.parse import unquote
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
 SKILL_VIEW_RE = re.compile(r"skill_view\(\s*[\"']([^\"']+)[\"']\s*,\s*file_path\s*=\s*[\"']([^\"']+)[\"']\s*\)")
 REFERENCE_CODE_RE = re.compile(r"`(references/[A-Za-z0-9._/\-]+\.md)`")
-REPO_DOC_CODE_RE = re.compile(r"`((?:docs|tests|credentials|skills-factory|templates|\.github)/[A-Za-z0-9._*/\-]+\.md)`")
+REPO_DOC_CODE_RE = re.compile(r"`((?:(?:docs|tests|credentials|skills-factory|\.github)/|templates/agent-state-template/)[A-Za-z0-9._*/\-]+\.md)`")
 SKILL_WARN_LINES = 220
 SKILL_ERROR_LINES = 350
 AGENTS_WARN_LINES = 300
