@@ -68,6 +68,18 @@ class DocsCheckTests(unittest.TestCase):
         self.assertNotIn(private_doc, paths)
         self.assertNotIn(generated_doc, paths)
 
+    def test_repo_root_document_route_must_exist(self) -> None:
+        tempdir, root = self.make_root()
+        self.addCleanup(tempdir.cleanup)
+        source = root / "AGENTS.md"
+        source.write_text("Read `docs/missing.md` before changing it.\n", encoding="utf-8")
+
+        errors = docs_check.check_repo_doc_path_references(root, [source])
+        self.assertEqual(1, len(errors))
+
+        (root / "docs" / "missing.md").write_text("# Exists\n", encoding="utf-8")
+        self.assertEqual([], docs_check.check_repo_doc_path_references(root, [source]))
+
     def test_skill_view_reference_must_exist(self) -> None:
         tempdir, root = self.make_root()
         self.addCleanup(tempdir.cleanup)
