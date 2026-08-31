@@ -40,6 +40,22 @@ The `verify` target runs fast tests plus compose validation:
 make verify
 ```
 
+### Command-execution timeouts
+
+Configure the harness's command-execution timeout deliberately before launching
+known or documented long-running validation. Run `make test` and `make verify`
+as separate top-level commands, each with at least 30 minutes available on its
+first invocation. For intentionally expensive documented Docker image-build,
+runtime, real-system, or model-heavy gates, use approximately 45–60 minutes
+when the repository evidence supports that cost; short, focused commands keep
+normal timeouts. Do not rerun an otherwise identical command solely because a
+default or unnecessarily short timeout expired. A timeout is incomplete
+validation, not a test failure or success, unless independent conclusive failure
+output was already produced. Record completed validation only for commands that
+actually completed and their real results. Keep timeouts finite: exceeding the
+deliberate timeout remains incomplete and diagnosable rather than a way to mask
+a hang.
+
 ### gbrain reindex state preflight and native launcher fast gates (PR #132)
 
 The fail-closed reindex state preflight and the native launcher dotenv
