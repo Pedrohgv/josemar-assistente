@@ -1,15 +1,9 @@
 """Contract tests for the repo-owned browser-control skill.
 
-The skill is instruction-only (SKILL.md + SETUP.md, no executable) and is
-baked into the Hermes image so it is always registered, regardless of
-whether the browser-control Compose overlay is enabled. The overlay gates the
-optional connected-browser tunnel sidecar and network, not the skill. These
-tests enforce the agreed rev-2 design: valid frontmatter requiring
-``connected_browser_exec``, the three-route decision rule (search/extraction
-preferred for public research; ordinary server-headless ``browser_*`` tools
-for interactive/rendered work; explicit ``connected_browser_exec`` for the
-operator's externally connected browser — fail-closed, no fallback), the
-safety/recovery guidance, and image-baked registration.
+The skill is instruction-only and baked into the Hermes image so it is always
+registered regardless of whether the optional browser-control Compose overlay
+is enabled. Routine runtime-driving guidance stays in SKILL.md; operator-side
+first-time setup lives under references/setup.md and is loaded on demand.
 """
 
 from __future__ import annotations
@@ -30,7 +24,9 @@ from .helpers import ComposeRuntime
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL_DIR = REPO_ROOT / "skills-factory" / "browser-control"
 SKILL_MD = SKILL_DIR / "SKILL.md"
-SETUP_MD = SKILL_DIR / "SETUP.md"
+REFERENCES_DIR = SKILL_DIR / "references"
+SETUP_MD = REFERENCES_DIR / "setup.md"
+LEGACY_SETUP_MD = SKILL_DIR / "SETUP.md"
 DOCKERFILE = REPO_ROOT / "Dockerfile.hermes"
 BASE_COMPOSE = REPO_ROOT / "docker-compose.yml"
 OVERLAY = REPO_ROOT / "docker-compose.browser-control.yml"
@@ -66,12 +62,8 @@ def parse_frontmatter(text: str) -> dict:
     return data
 
 
-# Operator-specific / unsupported strings that must not leak into the
-# LLM-facing SKILL.md (runtime-driving guidance). Operator-specific setup
-# content lives in SETUP.md, which has its own content contract. Also
-# forbidden: the revision-1 `use_connected_browser` flag vocabulary and any
-# claim that the built-in browser_* tools are not part of the active surface
-# (they are now the ordinary server-headless route).
+# Operator-specific / unsupported strings must not leak into the always-loaded
+# runtime-driving SKILL.md. Setup details belong in references/setup.md.
 FORBIDDEN_SKILL_STRINGS = [
     "Josemar Browser", "josemar-browser-control", ".josemar-chrome-profile",
     "BROWSER_TUNNEL_AUTHORIZED_KEY", "BROWSER_CONTROL_ENABLED",
@@ -83,13 +75,6 @@ FORBIDDEN_SKILL_STRINGS = [
     "use_connected_browser", "not part of the active tool surface",
 ]
 
-# Required substrings in the SKILL.md body, grouped by concern. Each entry is
-# (label, needle) so failures name the missing concept, not just the string.
-# Wording matches the rev-2 skill (version 3.0.0): three intentionally
-# distinct routes — search/extraction first, ordinary server-headless
-# browser_* for interactive work, explicit connected_browser_exec for the
-# operator's externally connected browser (fail-closed, no fallback,
-# operator-controlled recovery).
 REQUIRED_SKILL_STRINGS = [
     ("three-route rule", "three intentionally distinct"),
     ("three-route rule", "different browsers with different state"),
@@ -123,11 +108,10 @@ REQUIRED_SKILL_STRINGS = [
     ("task scoping", "unrelated"),
     ("dedicated profile", "dedicated"),
     ("dedicated profile", "profile"),
-    ("setup pointer", "setup.md"),
+    ("setup pointer", "references/setup.md"),
+    ("setup loader", 'skill_view("browser-control", file_path="references/setup.md")'),
 ]
 
-# Required substrings in SETUP.md. Operator-specific setup content that is
-# forbidden in SKILL.md must be present here.
 REQUIRED_SETUP_STRINGS = [
     ("ssh keypair generation", "ssh-keygen"),
     ("ssh keypair path", "josemar_browser_tunnel"),
@@ -143,23 +127,16 @@ REQUIRED_SETUP_STRINGS = [
     ("dedicated profile warning", "dedicated"),
 ]
 
-# SETUP.md must not duplicate the runtime-driving workflow guidance that
-# belongs in SKILL.md. Keep setup focused on first-time enablement.
 FORBIDDEN_SETUP_STRINGS = [
     "snapshot first",
     "re-snapshot",
     "prompt-injection",
 ]
 
-# Affirmative headless phrasings the skill must not use (negation like
-# "not a headless scraper" is fine).
 FORBIDDEN_HEADLESS_PHRASES = [
     "use the headless", "drive headless", "run headless", "launch headless",
 ]
 
-# False claims the skill must not make: the skill is always registered
-# (baked into the image), so claims that it disappears when the overlay is off
-# are wrong. The overlay gates the tunnel sidecar, not the skill.
 FORBIDDEN_SKILL_CLAIMS = [
     "browser_* tools are not available",
     "browser_* tools are unavailable",
@@ -171,21 +148,20 @@ FORBIDDEN_SKILL_CLAIMS = [
 
 
 class BrowserControlSkillContractTests(unittest.TestCase):
-    """Frontmatter, content, and image-mount contract for the skill."""
+    """Frontmatter, content, modular layout, and image-bake contract."""
 
     def setUp(self) -> None:
         self.assertTrue(SKILL_MD.is_file(), f"missing skill file: {SKILL_MD}")
         self.text = SKILL_MD.read_text(encoding="utf-8")
         self.lower = self.text.lower()
 
-    def test_skill_dir_has_skill_md_and_setup_md(self) -> None:
-        self.assertEqual(
-            sorted(p.name for p in SKILL_DIR.iterdir()),
-            ["SETUP.md", "SKILL.md"],
+    def test_skill_layout_uses_references_directory(self) -> None:
+        self.assertFalse(
+            LEGACY_SETUP_MD.exists(),
+            "operator setup must live under references/, not as sibling SETUP.md",
         )
-
-    def test_setup_md_exists(self) -> None:
-        self.assertTrue(SETUP_MD.is_file(), f"missing setup file: {SETUP_MD}")
+        self.assertTrue(REFERENCES_DIR.is_dir(), f"missing references directory: {REFERENCES_DIR}")
+        self.assertTrue(SETUP_MD.is_file(), f"missing setup reference: {SETUP_MD}")
 
     def test_frontmatter_fields_and_required_tools(self) -> None:
         if yaml is None:
@@ -202,10 +178,6 @@ class BrowserControlSkillContractTests(unittest.TestCase):
         requires = hermes.get("requires_tools")
         self.assertIsInstance(requires, list, "metadata.hermes.requires_tools must be a list")
         assert isinstance(requires, list)
-        # Version 3.0.0 (issue #136 rev-2): the skill requires the explicit
-        # connected_browser_exec tool. The ordinary server-headless route is
-        # the built-in browser_* tools (not gated by requires_tools), and
-        # upstream browser_exec is hidden by browser.backend: "off".
         self.assertIn("connected_browser_exec", requires)
         self.assertNotIn("browser_exec", requires)
         self.assertNotIn("browser_navigate", requires)
@@ -224,7 +196,6 @@ class BrowserControlSkillContractTests(unittest.TestCase):
         for claim in FORBIDDEN_SKILL_CLAIMS:
             with self.subTest(kind="false claim", claim=claim):
                 self.assertNotIn(claim, self.lower)
-        # Recovery must ask the operator, not shell in.
         self.assertNotIn("ssh ", self.lower)
         self.assertNotIn("curl ", self.lower)
 
@@ -232,20 +203,16 @@ class BrowserControlSkillContractTests(unittest.TestCase):
         for label, needle in REQUIRED_SKILL_STRINGS:
             with self.subTest(concept=label, needle=needle):
                 self.assertIn(
-                    needle, self.lower,
+                    needle.lower(), self.lower,
                     f"missing required concept {label!r}: {needle!r}",
                 )
 
     def test_skill_baked_into_image(self) -> None:
         dockerfile = DOCKERFILE.read_text(encoding="utf-8")
-        # The browser-control skill is baked into the image (not overlay-
-        # mounted) so it is always registered and can guide first-time setup
-        # and self-diagnose when the overlay is disabled.
         self.assertIn(
             "COPY skills-factory/browser-control /opt/josemar/skills/browser-control",
             dockerfile,
         )
-        # Other repo-owned skills are still baked in.
         for skill in ("gbrain", "aux-ml", "workspace-sync"):
             with self.subTest(skill=skill):
                 self.assertIn(
@@ -254,15 +221,15 @@ class BrowserControlSkillContractTests(unittest.TestCase):
                 )
 
 
-class BrowserControlSetupMdContractTests(unittest.TestCase):
-    """SETUP.md holds operator-specific first-time setup content."""
+class BrowserControlSetupReferenceContractTests(unittest.TestCase):
+    """The on-demand setup reference owns operator-specific enablement content."""
 
     def setUp(self) -> None:
-        self.assertTrue(SETUP_MD.is_file(), f"missing setup file: {SETUP_MD}")
+        self.assertTrue(SETUP_MD.is_file(), f"missing setup reference: {SETUP_MD}")
         self.text = SETUP_MD.read_text(encoding="utf-8")
         self.lower = self.text.lower()
 
-    def test_setup_md_teaches_required_concepts(self) -> None:
+    def test_setup_reference_teaches_required_concepts(self) -> None:
         for label, needle in REQUIRED_SETUP_STRINGS:
             with self.subTest(concept=label, needle=needle):
                 self.assertIn(
@@ -270,24 +237,23 @@ class BrowserControlSetupMdContractTests(unittest.TestCase):
                     f"missing required setup concept {label!r}: {needle!r}",
                 )
 
-    def test_setup_md_does_not_duplicate_runtime_guidance(self) -> None:
+    def test_setup_reference_does_not_duplicate_runtime_guidance(self) -> None:
         for needle in FORBIDDEN_SETUP_STRINGS:
-            with self.subTest(kind="forbidden in setup", needle=needle):
+            with self.subTest(kind="forbidden in setup reference", needle=needle):
                 self.assertNotIn(
                     needle.lower(), self.lower,
-                    f"runtime-driving guidance must stay in SKILL.md, not SETUP.md: {needle!r}",
+                    f"runtime-driving guidance must stay in SKILL.md, not setup reference: {needle!r}",
                 )
 
 
 class BrowserControlComposeMountTests(unittest.TestCase):
-    """Skill is baked into the image; the overlay must NOT bind-mount it."""
+    """Skill is baked into the image; the overlay must not bind-mount it."""
 
     def setUp(self) -> None:
         self.base = BASE_COMPOSE.read_text(encoding="utf-8")
         self.overlay = OVERLAY.read_text(encoding="utf-8")
 
     def test_base_and_overlay_exclude_skill_bind_mount(self) -> None:
-        # No bind mount of the skill source in either base or overlay.
         self.assertNotIn(f"{SKILL_SOURCE}:", self.base)
         self.assertNotIn(f"{SKILL_SOURCE}:", self.overlay)
         self.assertNotIn(f"{SKILL_TARGET}:ro", self.overlay)
@@ -300,8 +266,7 @@ class BrowserControlComposeMountTests(unittest.TestCase):
 
 
 class BrowserControlRenderedComposeTests(unittest.TestCase):
-    """Rendered `docker compose config` proves neither base nor overlay
-    bind-mounts the skill (it is baked into the image)."""
+    """Rendered Compose must also exclude a browser-control skill bind mount."""
 
     def setUp(self) -> None:
         if shutil.which("docker") is None:
@@ -319,8 +284,13 @@ class BrowserControlRenderedComposeTests(unittest.TestCase):
             )
         cmd = ["docker", "compose", *file_flags, "-p", runtime.project, "config"]
         proc = subprocess.run(
-            cmd, cwd=REPO_ROOT, env=env,
-            capture_output=True, text=True, check=False, timeout=120,
+            cmd,
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
         )
         if proc.returncode != 0:
             self.fail(
@@ -335,15 +305,12 @@ class BrowserControlRenderedComposeTests(unittest.TestCase):
         self.assertNotIn(SKILL_TARGET, base)
 
         overlay = self._render(with_overlay=True)
-        # The skill is baked into the image; the overlay must not bind-mount
-        # the skill source directory.
         self.assertNotIn(SKILL_SOURCE, overlay)
         self.assertNotIn(SKILL_TARGET, overlay)
 
 
 class BrowserControlDocsAccuracyTests(unittest.TestCase):
-    """Docs must reflect that the skill is baked in (always registered) and
-    that the overlay gates the tunnel sidecar, not the skill."""
+    """Operator docs must reflect skill registration and separate connected route."""
 
     def setUp(self) -> None:
         self.assertTrue(DOCS.is_file(), f"missing docs: {DOCS}")
@@ -351,21 +318,17 @@ class BrowserControlDocsAccuracyTests(unittest.TestCase):
 
     def test_docs_accurate_about_disabled_deploy(self) -> None:
         self.assertNotIn(
-            "will not attempt browser actions", self.docs,
+            "will not attempt browser actions",
+            self.docs,
             "overlay gates the tunnel sidecar, not built-in browser tools",
         )
         self.assertNotIn(
-            "not registered", self.docs,
-            "the skill is baked into the image and always registered; docs must not claim it disappears when the overlay is off",
+            "not registered",
+            self.docs,
+            "the skill is baked into the image and always registered",
         )
-        self.assertIn(
-            "baked", self.docs,
-            "docs should state the repo-owned skill is baked into the image",
-        )
-        self.assertIn(
-            "connected_browser_exec", self.docs,
-            "docs should describe the separate connected_browser_exec route",
-        )
+        self.assertIn("baked", self.docs)
+        self.assertIn("connected_browser_exec", self.docs)
 
 
 if __name__ == "__main__":
