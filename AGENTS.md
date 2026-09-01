@@ -91,7 +91,7 @@ When changing state ownership, `.sync-manifest`, state bootstrap/template behavi
 - Repo-owned skills: `skills-factory/*` -> copied to `/opt/josemar/skills`.
 - User-owned skills: `agent-state/skills/*` -> synced into `/opt/data/skills`.
 - Native gbrain is the canonical general vault interface. Agent-facing general vault access uses the public `gbrain` command, which provides the safe adapter behavior.
-- The bounded `tasknotes` MCP is the only specialized task-write exception. It uses short-lived private native gbrain commands internally under the shared lock; it must never route through the public `gbrain` wrapper. Its direct vault-file write is limited to the documented derived Daily Note task-link projection. See `docs/tasknotes-mcp.md`.
+- The bounded `tasknotes` MCP is the only specialized task-write exception. It uses short-lived private native gbrain commands internally under the shared lock; it must never route through the public `gbrain` wrapper. Its only direct vault-file write is the default-on Daily Note task-link projection (issue #139): while owning its transaction lock it may create/edit only the derived Daily Note for the task's exact scheduled date, then reconciles that change through native incremental gbrain sync. It is never a generic note writer and never nests the public `gbrain` wrapper. Its bounded reconciliation keeps private cursor/pending structural metadata under `/opt/data/.gbrain`; task Markdown stays gbrain-only. See `docs/tasknotes-mcp.md`.
 - Internal private native gbrain paths are operator/implementation interfaces, never agent-facing commands. See `docs/gbrain-operations.md` and `skills-factory/gbrain/SKILL.md`.
 - Automatic skill creation/curation remains disabled until the repository's documented re-enable criteria are satisfied. Intentional user-skill authoring must be explicit and stay under `agent-state/skills/*`.
 
@@ -104,7 +104,7 @@ These invariants apply to every assistant, cron, skill, and operator path that t
 3. **No concurrent PGLite opens.** The gbrain database is single-writer PGLite.
 4. **Cooperative lock.** All Josemar-owned gbrain-touching paths cooperate on `/opt/data/.locks/tasknotes.lock`.
 5. **Maintenance windows must quiesce every documented owned writer/exporter before destructive recovery, reindex/rebuild, migration, or vault swap.** Follow the exact current checklist in `docs/gbrain-operations.md` / `docs/vault-recovery-operations.md`; do not rely on a stale copied job list in this root file.
-6. **TaskNotes never nests the public wrapper.** Task mutations use the `task_*` MCP tools; TaskNotes retains its transaction lock and private native invocation and exposes no generic note-write tool.
+6. **TaskNotes never nests the public wrapper.** Task mutations use the `task_*` MCP tools; TaskNotes retains its transaction lock and private native invocation. Its sole direct vault-file exception (issue #139, default on) is the derived, vault-confined Daily Note task-link projection for exact scheduled paths, followed by mandatory native incremental gbrain reconciliation under the same lock. It exposes no generic note-write tool.
 
 ## Skill Organization
 
