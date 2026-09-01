@@ -152,7 +152,17 @@ The deployment includes the documented encrypted vault/gbrain recovery lane. Rec
 
 ### Mnemosyne
 
-Mnemosyne is an optional conversation-memory subsystem separate from the curated vault. Its deployment modes, storage, embeddings dependency, backup/recovery, and rollback are documented in [`docs/mnemosyne-operations.md`](docs/mnemosyne-operations.md). Retrieval-quality evaluation lives in [`docs/mnemosyne-retrieval-quality.md`](docs/mnemosyne-retrieval-quality.md).
+Mnemosyne is an optional conversation-memory subsystem separate from the curated vault. The Obsidian/gbrain path remains the **canonical curated vault**; Mnemosyne is **not a vault replacement**. Its deployment modes, storage, embeddings dependency, backup/recovery, and rollback are documented in [`docs/mnemosyne-operations.md`](docs/mnemosyne-operations.md). Retrieval-quality evaluation lives in [`docs/mnemosyne-retrieval-quality.md`](docs/mnemosyne-retrieval-quality.md).
+
+`MNEMOSYNE_DEPLOY_MODE` has three supported values:
+
+| Value | Mnemosyne overlays / behavior | Additional backup requirements |
+| --- | --- | --- |
+| `off` | Mnemosyne overlays are not selected. | None for Mnemosyne. |
+| `pilot` | `docker-compose.embeddings.yml` + `docker-compose.mnemosyne.yml`. | None for the Mnemosyne backup lane. |
+| `backup` | Pilot overlays + `docker-compose.mnemosyne-backup.yml`. | `MNEMOSYNE_BACKUP_EXPORT_INTERVAL` must be a positive integer with no leading zeros and at most `10080` minutes; `RCLONE_CONFIG_B64` must provide the `mnemosyne-crypt` remote. The default vault-recovery lane independently requires `vault-recovery-crypt`. |
+
+The embeddings/TEI service is internal-only with **no host port**. In `backup` mode, `mnemosyne-backup-uploader` uses the `mnemosyne-backup-staging`, `mnemosyne-backup-state`, and `mnemosyne-backup-recovery` volumes. Local staging is **not encrypted**; encryption begins at the rclone `crypt` remote, and recovery is **operator-controlled**.
 
 ### Browser control
 
