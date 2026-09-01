@@ -1842,7 +1842,7 @@ sys.exit(result.returncode)
                 self.assertIn("disallowed wildcard", result.stderr)
 
     def test_manifest_allows_template_wildcard_avatars(self) -> None:
-        """avatars/* is one of the two intentional template wildcard forms."""
+        """avatars/* is one of the intentional template wildcard forms."""
         self.repo.set_manifest("avatars/*\n")
         # Un-ignore avatars/ in gitignore.
         gitignore = Path(self.repo.workspace) / ".gitignore"

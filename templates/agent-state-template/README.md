@@ -36,7 +36,7 @@ On the first run, if the state repo has no personality files (`SOUL.md`, `memori
 - `skills/`
 - `cron/jobs.json`
 - `avatars/`
-- `hermes/` (`models.yaml` + `skill-toggles/` sidecars — shipped template state, not personality)
+- `hermes/` (`models.yaml` + `skill-toggles/` sidecars — shipped template state, not personality; the `command-allowlist/` family ships no template files and appears only after the first permanent command approval is saved)
 
 Personality and memory files (`SOUL.md`, `memories/USER.md`, `AGENTS.md`, optionally `memories/MEMORY.md`) are created/maintained by Hermes and automatically versioned by periodic sync.
 
@@ -75,6 +75,7 @@ Do not copy user-specific skills into the main repository. Keep them in the stat
 | `cron/jobs.json` | Cron job definitions loaded by Hermes | Manual / agent |
 | `avatars/` | Agent avatar images | Manual |
 | `hermes/models.yaml` | State-owned Hermes model selections (strict selection-only v1: default, fallback, 11 allowlisted auxiliary tasks, cron defaults) | Manual |
+| `hermes/command-allowlist/` | State-owned Hermes runtime command allowlist sidecars (strict v1: `default.json` for the workspace root, `profiles/<canonical>.json` per named profile) | Runtime (permanent approval save) / manual |
 
 ## Mnemosyne Pilot: Archive Status of Memory Files
 
@@ -154,11 +155,74 @@ multiplexing.
   config restores the repo model defaults from `config/hermes-config.yaml`
   on the next start.
 
+## State-Owned Command Allowlist Sidecars
+
+`hermes/command-allowlist/` holds the state-owned runtime command
+allowlist. It follows the same profile layout as the skill toggles:
+
+- **Ownership and paths.** Exactly `hermes/command-allowlist/default.json`
+  mirrors the workspace root (base `HERMES_HOME`) and
+  `hermes/command-allowlist/profiles/<canonical>.json` mirrors one named
+  profile. Nothing else under `hermes/` is versioned: the deny-by-default
+  `.gitignore` un-ignores only these exact shapes, and `.sync-manifest`
+  carries exactly `hermes/command-allowlist/default.json` plus the
+  sanctioned `hermes/command-allowlist/profiles/*.json` wildcard. Broader
+  manifest globs are rejected by workspace-sync; the full Hermes
+  `config.yaml` remains repo/operator/runtime-owned and is never versioned
+  here or anywhere in this repo.
+- **Strict v1 schema.** Each sidecar is one canonical JSON line, exactly
+  `{"version": 1, "command_allowlist": ["..."]}` — both keys required,
+  sorted/deduped non-empty strings. Wrong version, unknown keys, wrong
+  types, missing keys, and empty/non-string entries are rejected.
+- **Presence semantics.** Presence is authoritative: an explicit `[]`
+  keeps the runtime ROOT-LEVEL `command_allowlist` key durably empty,
+  while an ABSENT sidecar removes that key. An empty sidecar file is
+  malformed, not an implicit clear.
+- **Profile isolation.** Each sidecar applies only to its own
+  `HERMES_HOME`; the default sidecar never affects named profiles and
+  vice versa.
+- **Permanent-write flows.** Dashboard/permanent command approvals go
+  through the stateful runtime helper: the sidecar is written first and
+  the runtime config second under one advisory lock, so a failed state
+  write fails the save instead of silently diverging. Saving an explicit
+  empty list is the durable way to keep the key empty; clearing the
+  approval removes the sidecar and the runtime key.
+- **Periodic sync validation.** Workspace sync validates every present
+  sidecar with the canonical helper before staging, validates the
+  committed sidecars before every push, and validates the remote
+  candidates before any merge/acceptance. Profile sidecars must use the
+  canonical profile filename contract: the manifest wildcard enumerates
+  the family but never authorizes noncanonical filenames — they are
+  rejected value-free (content never read or echoed) at every ingress.
+  Invalid or malformed sidecar state fails the sync closed (nonzero,
+  nothing staged or merged). A validator that is unavailable while
+  sidecars are present also fails closed. Absence and deletion are
+  always valid.
+- **Migration.** On startup (before the repo template overwrites the
+  runtime config) a NON-EMPTY runtime `command_allowlist` is extracted
+  into an absent sidecar. Migration never overwrites an existing sidecar
+  and never invents an explicit-empty one.
+- **Deletion / unset rollback.** Delete a sidecar (or clear the approval
+  in the dashboard) and sync: the absent sidecar removes the
+  corresponding runtime key on the next apply/reconcile. To roll back the
+  whole family, delete the sidecars, sync, and restart.
+- **Privacy.** Never store secrets, tokens, passwords, or
+  credential-bearing command literals in a sidecar: entries are plain
+  command allowlist patterns versioned in git (the repo is private, but
+  the files are still versioned history). Keep entries minimal and free
+  of anything sensitive.
+- **Validation errors.** Sync/validation errors identify the sidecar path
+  and the structural violation only — allowlist contents never appear in
+  errors, statuses, or logs.
+
 ## Security
 
 - This must be a **private** repository
 - `.gitignore` is deny-by-default, so only explicit state paths can be staged normally
-- `.sync-manifest` explicitly lists what gets synced (no wildcards)
+- `.sync-manifest` explicitly lists what gets synced; the only wildcard
+  entries are the three intentional template families (`avatars/*`,
+  `hermes/skill-toggles/profiles/*.json`, and
+  `hermes/command-allowlist/profiles/*.json`) — every broader form is rejected
 - Never store API keys, tokens, or passwords here
 
 ## Sync Strategy

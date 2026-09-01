@@ -51,3 +51,13 @@
 # fallback_chain, credentials, provider definitions, or topology. The lock
 # file and any other hermes/ artifacts stay ignored by deny-by-default.
 !hermes/models.yaml
+
+# Josemar state-owned Hermes runtime command allowlist sidecars. Same
+# narrow family as the skill toggles: ONLY the exact default.json and the
+# profiles/*.json sidecars are un-ignored. The shared lock file, the
+# runtime config, and any other hermes/ artifact stay ignored by
+# deny-by-default.
+!hermes/command-allowlist/
+!hermes/command-allowlist/default.json
+!hermes/command-allowlist/profiles/
+!hermes/command-allowlist/profiles/*.json
