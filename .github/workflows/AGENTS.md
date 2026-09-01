@@ -37,6 +37,14 @@ Required routing:
 
 The source change may reveal additional dependencies. This list is a discovery floor, not an exemption from the repository-wide documentation-impact review in `docs/documentation-policy.md`.
 
+## Deliberately duplicated deployment interface summaries
+
+Keep these short summaries here because workflow changes can invalidate them before a worker opens the deeper runbook. The canonical full catalogs remain in `docs/github-workflows.md` and the subsystem runbooks.
+
+- `MNEMOSYNE_DEPLOY_MODE` is the strict Mnemosyne mode selector with supported values `off`, `pilot`, and `backup`. Backup additionally requires `MNEMOSYNE_BACKUP_EXPORT_INTERVAL` under the workflow's bounded integer validation. The default encrypted vault-recovery lane independently validates `vault-recovery-crypt`. Mnemosyne selection/teardown remains fail-closed and must preserve the documented `aux-ml`/optional-overlay teardown behavior.
+- Post-start Hermes configuration validation uses `hermes_cli.config.load_config()` against `/opt/data/config.yaml`; workflow changes must preserve the executable/tested contract or update all dependent docs/tests together.
+- `TASKNOTES_DAILY_LINKS_ENABLED` is the strict master Daily Note projection switch, default `true` when missing/empty. `TASKNOTES_DAILY_LINKS_RECONCILE_ENABLED` is the strict reconciliation slave switch, also default `true`, and is effective only while `TASKNOTES_DAILY_LINKS_ENABLED` is also `true`. Both remain fail-closed strict booleans before mutation and in the runtime configuration path.
+
 ## Workflow safety invariants
 
 Preserve these unless the authoritative issue/plan explicitly changes them and all affected tests/docs are updated:
