@@ -144,7 +144,7 @@ Do not run Chronicle backfill/extraction jobs from chat. For the event model, el
 
 ## Other useful agent commands
 
-Where appropriate, the public command also exposes `gbrain tags`, `timeline`, `graph`, `delete`, `history`, `revert`, and `restore` (undo soft-delete). Use `gbrain <command> --help` for current per-command arguments rather than embedding exhaustive CLI help here.
+Where appropriate, the public command also exposes `gbrain tags`, `timeline`, `graph`, `delete`, `history`, `revert`, and soft-delete recovery with `gbrain restore <slug>`. Use `gbrain <command> --help` for current per-command arguments rather than embedding exhaustive CLI help here.
 
 ## What not to load for routine work
 
