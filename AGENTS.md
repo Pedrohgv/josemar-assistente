@@ -1,244 +1,162 @@
 # AGENTS.md
 
-Semantic gbrain embeddings are initialized by a manual backfill. The daily
-no-agent refresh follows that backfill; Josemar may invoke
-`josemar-gbrain refresh-embeddings` only after an explicit user request.
-
-Purpose: Root guidance for AI assistants working with the Josemar Assistente project.
+Purpose: root guidance for AI assistants working with Josemar Assistente. Keep this file focused on repository-wide rules and routing. Detailed subsystem guidance belongs in the narrowest applicable `AGENTS.md`, skill reference, or `docs/` runbook.
 
 ## Prompt Language Policy
 
 - Author all LLM-facing prompt and instruction files in English, even when the assistant is expected to interact with users in another language.
 - This applies to `AGENTS.md`, `SKILL.md`, playbooks, starter-state templates, harness instructions, and prompt examples committed to this repo.
-- Runtime interactions may still follow the user's preferred language; keep the source prompt files language-neutral by writing them in English.
+- Runtime interactions may still follow the user's preferred language; keep source prompt files language-neutral by writing them in English.
 
-## Project Overview
+## Repository Overview
 
 Josemar Assistente is a self-hosted AI assistant built on Hermes, running in Docker with Telegram integration.
 
 Core architecture:
 - Hermes gateway runtime (dashboard/API/Telegram/cron/skills)
-- Two-scope skills (repo-owned `skills-factory/` + user-owned `agent-state/skills/`)
+- two-scope skills (repo-owned `skills-factory/` + user-owned `agent-state/skills/`)
 - Git-backed state sync (`scripts/workspace_sync.py`)
-- Obsidian vault operations (native gbrain + bounded TaskNotes MCP + Syncthing)
-- Default encrypted vault-recovery lane for the vault plus complete gbrain state
-- Optional Mnemosyne semantic conversation memory backed by an internal TEI embeddings service
-- Optional browser-control reverse-tunnel overlay for on-demand laptop browser access
-- Optional `aux-ml` queue service for long OCR jobs
+- Obsidian vault operations through native gbrain plus the bounded TaskNotes MCP exception
+- encrypted vault recovery
+- optional Mnemosyne semantic conversation memory
+- optional browser-control reverse-tunnel overlay
+- optional aux-ml queue service
 
-## Directory Structure
+Important top-level paths:
+- `agent-state/`: nested private repo for user-owned state
+- `docs/`: architecture and operations documentation; start with `docs/README.md`
+- `scripts/`: runtime, sync, backup, privacy, and helper scripts
+- `skills-factory/`: repo-owned core skills
+- `tests/`: unit, contract, and gated runtime tests
+- `.github/workflows/`: CI/CD automation; obey `.github/workflows/AGENTS.md`
 
-```text
-josemar-assistente/
-├── agent-state/            # Nested private repo: user state (memory/persona/skills)
-├── credentials/            # Service credentials (not versioned)
-├── docs/                   # Operations runbooks
-├── scripts/                # Workspace sync, backup, privacy tooling, runtime helpers
-├── aux-ml/                 # Auxiliary ML service
-├── browser-tunnel/         # Optional browser-control tunnel sidecar
-├── skills-factory/         # Repo-owned core skills
-├── templates/              # Bootstrap template for private state repo
-├── tests/                  # Python unit, contract, and gated runtime tests
-├── .github/workflows/      # CI/CD automation
-├── docker-compose.yml      # Base runtime stack
-├── Dockerfile.hermes       # Hermes runtime image
-└── .env.example            # Environment template
-```
+## Repository-First Work
 
-## Runtime Storage
+- Read the applicable `AGENTS.md` files before editing a subtree.
+- Inspect source, config, tests, and relevant durable documentation before changing behavior.
+- Treat `graphify-out/` as a navigation aid only; verify conclusions against source. See `docs/graphify.md`.
+- Create feature branches for non-trivial work. Do not commit directly to `main` unless explicitly requested.
+- Keep commits focused and scoped.
 
-- `hermes-data`: Hermes runtime state plus private state git worktree (`/opt/data`). Includes gbrain state at `/opt/data/.gbrain` (PGLite database, config, cache).
-- `aux-ml-shared`: explicit file handoff area for aux-ml (`/shared` in both Hermes and aux-ml)
-- `obsidian-vault`: notes/attachments plus local-only Git history already required by native gbrain sync; there is no remote consumer, `.git/` is excluded from Syncthing, and the history is unrelated to agent-state sync
-- `syncthing-config`, `tailscale-state`, `obsidian-rclone-config`, `vault-recovery-staging`, `vault-recovery-uploader-state`, `vault-recovery-recovery`
+## Runtime Storage and Local Development Safety
 
-Docker named volumes default to `root:root 0755`, but the Hermes gateway runs as `HERMES_UID` (default 10000). `docker-hermes-init.sh` chowns an explicit allowlist of Hermes-writable volumes (`HERMES_HOME` and `/shared`) at startup and verifies write access. When adding a new Hermes-writable volume, add its mount path to `HERMES_WRITABLE_VOLUMES` in `docker-hermes-init.sh`. Do not chown bind mounts, read-only mounts, or cross-service volumes (e.g. `obsidian-vault`).
+Hermes runs as `HERMES_UID` (default 10000), while new Docker named volumes normally begin root-owned. `docker-hermes-init.sh` chowns only the explicit Hermes-writable allowlist. When adding a new Hermes-writable volume/mount, inspect and update `HERMES_WRITABLE_VOLUMES` in the init path and its tests. Never broadly chown bind mounts, read-only mounts, or cross-service volumes such as the Obsidian vault.
 
-## Local Development
+When starting a local Hermes service for validation, explicitly disable Telegram so the development container cannot contend with the production bot deployment. Set `TELEGRAM_BOT_TOKEN=`, `PRIMARY_TELEGRAM_ID=`, all applicable `HERMES_TELEGRAM_*` variables, and `HERMES_GATEWAY_ALLOWED_USERS=` to empty values for the local run.
 
-Use local Docker compose in this repo by default.
-
-When starting the Hermes service locally for validation, explicitly disable Telegram
-so the local container cannot contend with the production Telegram bot deployment.
-Set `TELEGRAM_BOT_TOKEN=`, `PRIMARY_TELEGRAM_ID=`, and the `HERMES_TELEGRAM_*`
-/ `HERMES_GATEWAY_ALLOWED_USERS` variants to empty values for the local run.
+Use local Compose by default:
 
 ```bash
 docker compose up -d
 docker compose logs -f hermes
 ```
 
-For optional aux-ml:
+Changes to runtime mounts, writable-volume initialization, or local startup safety must inspect the relevant Compose/init source and tests; update durable operator/development documentation if the supported procedure changes.
 
-```bash
-COMPOSE_PROFILES=aux-ml docker compose up -d
-```
+## Documentation Architecture and Maintenance
 
-## Git Workflow
+The canonical documentation architecture and update rules are in `docs/documentation-policy.md`. Read it when changing documentation or when code/config/test changes affect documented behavior.
 
-- Create feature branches for non-trivial work.
-- Do not commit directly to `main` unless explicitly requested.
-- Keep commits focused and scoped.
+Repository-wide rules:
 
-## Guidance Consistency
+1. **Executable truth first.** Source, config, schemas, tests, and generated/runtime checks define actual behavior. Documentation explains those contracts; do not make documentation the only implementation of a behavior.
+2. **Use the narrowest reliable scope.** Root guidance contains universal rules. Nested `AGENTS.md` files contain subtree-specific constraints and must route workers to narrower canonical docs when a class of change makes those docs relevant.
+3. **Parent guidance owns discovery.** A worker must not need to know a nested catalog/runbook exists before touching the behavior it documents. Parent guidance must identify which change classes require consulting or updating narrower docs.
+4. **Routine skill use stays self-contained.** A main `SKILL.md` must contain everything needed for normal day-to-day operations. Move uncommon schemas, compatibility matrices, recovery/upgrade procedures, and other deep material to `references/` and link it explicitly. Context-size targets are heuristics, not hard limits.
+5. **A behavior change and its durable documentation are one change.** Before completion, classify whether the change affects harness instructions, runtime-agent behavior, operator procedure, configuration, contributor/test procedure, onboarding, or templates. Update every affected canonical document and deliberately duplicated safety summary in the same PR. If no docs change is required, record why in the implementation report.
+6. **Do not use issue/PR discussion as the only shipped documentation.** Stable behavior belongs in repository documentation.
+7. **Distinguish defaults from runtime state.** Use the vocabulary defined in `docs/documentation-policy.md`: repository default, supported mode, operator-enabled state, current runtime state. Verify mutable current state mechanically when it matters rather than freezing it into static prose.
 
-Safety and operational invariants are intentionally repeated in a few places so
-agents encounter them at the point of use. When changing an invariant that is
-duplicated across `AGENTS.md`, skills, runbooks, workflows, or contract tests,
-inspect and update every applicable copy in the same change. Do not leave a
-narrower instruction that can bypass the root safety rule.
+Safety and operational invariants may be repeated intentionally so they are visible at the point of use. When changing a duplicated invariant across `AGENTS.md`, skills, runbooks, workflows, or contract tests, inspect and update every applicable copy in the same change.
 
 ## Pinned Dependency Upgrades
 
-Hermes, gbrain, Mnemosyne, Bun, container images, and selected helper tools are
-pinned, and Josemar carries local compatibility patches around some upstream
-components. Treat upgrades as compatibility changes, not isolated version
-bumps: verify the upstream release/ref, re-check local patches and runtime/config
-contracts, inspect affected runbooks/tests, and run the relevant focused and
-Docker/Compose validation before considering the upgrade complete.
+Hermes, gbrain, Mnemosyne, Bun, container images, and selected helper tools are pinned, and Josemar carries local compatibility patches around some upstream components. Treat upgrades as compatibility changes, not isolated version bumps: verify the upstream release/ref, re-check local patches and runtime/config contracts, inspect affected runbooks/tests, and run the relevant focused and Docker/Compose validation before considering the upgrade complete.
 
 ## Agent State Repo Rules
 
 `agent-state/` is a nested private repo and source of truth for user-owned state.
 
 - Personality/context files live there using Hermes-native paths (`SOUL.md`, `memories/MEMORY.md`, `memories/USER.md`, `AGENTS.md`, etc.).
-- User-owned skills live there (`agent-state/skills/*`).
+- User-owned skills live there under `agent-state/skills/*`.
 - Only paths in `.sync-manifest` are auto-versioned by sync.
+- When modifying user state, commit/push inside the `agent-state` repo when requested.
 
-When modifying user state, commit/push inside `agent-state` repo when requested.
+Never version the full Hermes `config.yaml`; it mixes operational, security, and deployment controls and remains repo/operator/runtime-owned and unversioned. State-owned provider/model selection is the sparse `hermes/models.yaml` overlay only.
 
-## Skills Ownership
+When changing state ownership, `.sync-manifest`, state bootstrap/template behavior, `hermes/models.yaml`, skill toggles, or state sync semantics, inspect `templates/agent-state-template/README.md`, the template files, sync implementation/tests, and any affected runtime docs. The template README is the canonical durable state-model description; do not duplicate its full schema here.
+
+## Skills Ownership and Boundaries
 
 - Repo-owned skills: `skills-factory/*` -> copied to `/opt/josemar/skills`.
 - User-owned skills: `agent-state/skills/*` -> synced into `/opt/data/skills`.
-- Keep native gbrain (`skills-factory/gbrain` + `scripts/josemar-gbrain`) as the canonical vault interface. The bounded `tasknotes` MCP is the only specialized exception and still uses short-lived native gbrain commands as the sole task-file writer. Its only direct vault-file write is the default-on Daily Note task-link projection (issue #139): while owning its transaction lock it may create/edit only the derived, vault-confined Daily Note file for a task's exact `scheduled` date, then reconciles that change through native incremental gbrain sync — it is never a generic note writer and never nests the public `gbrain` wrapper. Its bounded reconciliation additionally keeps private cursor/pending state files under `/opt/data/.gbrain` (structural metadata only, never vault or task content); task Markdown stays gbrain-only. `josemar-gbrain` provides operator-only `reindex` activation and lightweight `refresh` for periodic manual Obsidian edit reconciliation. Agent-facing vault access (chat, skills, external general vault actions) runs through the public `gbrain` command, which is safe by default (issue #110): it transparently provides the safe-adapter behavior — `hermes` runtime user, shared lock. The internal private native gbrain path is never presented as an agent command; it is limited to the locked operator/cron paths (`josemar-gbrain` wrapper and both refresh crons) and the TaskNotes MCP implementation, which cooperate on the same lock and do NOT use the public wrapper (see the safe-access non-negotiables below).
-- Automatic skill creation, patching, and curation are intentionally disabled (`skills.creation_nudge_interval: 0`, `skills.write_approval: true`, `curator.enabled: false`). Keep these guards until issue #69's re-enable criteria pass against a pinned Hermes release.
-- Until issue #69 is resolved, intentional user-skill authoring must be explicit and use the flat `/opt/data/skills/<name>/SKILL.md` layout so workspace sync can version it. Never route runtime writes into `/opt/josemar/skills`.
-- Per-profile skill enable/disable choices are user state under `hermes/skill-toggles/`; state-owned provider/model selection is user state in `hermes/models.yaml` (strict selection-only v1: exactly 11 allowlisted auxiliary tasks — `vision`, `web_extract`, `compression`, `skills_hub`, `approval`, `mcp`, `title_generation`, `triage_specifier`, `kanban_decomposer`, `profile_describer`, `curator`; `provider: auto` requires `model: ""`; sparse overlay — only explicitly present entries apply, existing sparse v1 files stay valid and are never auto-mutated; adopt new slots by manually copying them from the template). Never version the full Hermes `config.yaml`: it mixes operational, security, and deployment controls and stays repo/operator/runtime-owned and unversioned — state ownership is provider/model selection only.
+- Native gbrain is the canonical general vault interface. Agent-facing general vault access uses the public `gbrain` command, which provides the safe adapter behavior.
+- The bounded `tasknotes` MCP is the only specialized task-write exception. It uses short-lived private native gbrain commands internally under the shared lock; it must never route through the public `gbrain` wrapper. Its only direct vault-file write is the default-on Daily Note task-link projection (issue #139): while owning its transaction lock it may create/edit only the derived Daily Note for the task's exact scheduled date, then reconciles that change through native incremental gbrain sync. It is never a generic note writer and never nests the public `gbrain` wrapper. Its bounded reconciliation keeps private cursor/pending structural metadata under `/opt/data/.gbrain`; task Markdown stays gbrain-only. See `docs/tasknotes-mcp.md`.
+- Internal private native gbrain paths are operator/implementation interfaces, never agent-facing commands. See `docs/gbrain-operations.md` and `skills-factory/gbrain/SKILL.md`.
+- Automatic skill creation/curation remains disabled until the repository's documented re-enable criteria are satisfied. Intentional user-skill authoring must be explicit and stay under `agent-state/skills/*`.
 
-## gbrain Safe-Access Non-Negotiables (issue #110)
+## gbrain Safe-Access Non-Negotiables
 
-Applies to every assistant, cron, and skill that touches gbrain state. The
-operator runbook is `docs/gbrain-operations.md` → "Issue #110: Safe gbrain
-Adapter"; TaskNotes specifics are in `docs/tasknotes-mcp.md`.
+These invariants apply to every assistant, cron, skill, and operator path that touches gbrain state. Detailed operation/recovery procedures live in `docs/gbrain-operations.md`; TaskNotes specifics live in `docs/tasknotes-mcp.md`.
 
-1. **No root execution.** Never run gbrain, `josemar-gbrain`, or vault Git
-   operations as root. Always run as the Hermes runtime user (e.g.
-   `docker compose exec hermes su -s /bin/sh hermes -c '...'`). Runtime gbrain
-   state under `/opt/data/.gbrain` belongs to that user.
-2. **Public `gbrain` is the safe agent-facing command.** ALL chat, skill, and
-   external general vault actions use the public `gbrain` command, which
-   transparently provides the issue #110 safe-adapter behavior (runs as the
-   `hermes` runtime user under the shared lock). `gbrain-chat-run` is a
-   temporary compatibility alias for that behavior and is not recommended in
-   new instructions. The internal private native gbrain path
-   (`/opt/josemar/libexec/gbrain-native`; used by the `josemar-gbrain`
-   operator wrapper, both refresh crons, and the TaskNotes MCP) must never be
-   presented as an agent command; those paths cooperate on the same lock
-   (rules 4–6) and must avoid nesting. The wrapper prevents accidental,
-   prompt-driven, and cooperative-concurrency misuse — it is NOT a security
-   boundary against a compromised same-UID container/shell (defense in depth,
-   not a complete security boundary); do not overstate protection.
+1. **No root execution.** Run gbrain/vault Git operations as the Hermes runtime user. Runtime gbrain state under `/opt/data/.gbrain` belongs to that user.
+2. **Public `gbrain` is the agent-facing path.** Chat, skills, and external general vault actions use the public `gbrain` command. Do not present `/opt/josemar/libexec/gbrain-native` or other private native paths as agent commands.
 3. **No concurrent PGLite opens.** The gbrain database is single-writer PGLite.
-   Never open or mutate it from two processes at once.
-4. **Cooperative flock.** The global lock at `/opt/data/.locks/tasknotes.lock`
-   serializes cooperative access today: TaskNotes transactions, both refresh
-   crons, backfills, and every other gbrain-touching path cooperate on it.
-5. **Pause all owned jobs for maintenance windows.** For recovery, reindex/rebuild,
-   migrations, vault swaps, and unadapted/third-party diagnostics, the
-   operator pauses ALL THREE owned jobs: `gbrain-refresh`,
-   `gbrain-embedding-refresh`, AND the `vault-recovery-export` cron (a
-   lock-held export would repopulate state inside the window), plus stops
-   Hermes and server Syncthing before any destructive restore/install (the
-   full disaster-recovery drill asserts this exact ordering).
-   Routine adapted access does NOT require pausing the jobs.
-6. **No nested wrapper usage in TaskNotes.** TaskNotes remains a bounded MCP
-   adapter on short-lived native gbrain commands and is the sole task-file
-   writer: task Markdown is only written through gbrain. Its single direct
-   vault-file exception (issue #139, default on) is its own derived Daily
-   Note task-link projection — locked, vault-confined, exact-`scheduled`
-   paths only, followed by mandatory native incremental gbrain reconciliation
-   under the same lock (its bounded cursor/pending reconcile state under
-   `/opt/data/.gbrain` is private runtime metadata, never vault or task
-   content). It retains its transaction-level global lock and
-   internal native invocation; it must never route through the public `gbrain`
-   wrapper's lock path internally, nor be invoked from it, and it exposes no
-   generic note-write tool. Task mutations go through the `task_*` MCP tools
-   only.
+4. **Cooperative lock.** All Josemar-owned gbrain-touching paths cooperate on `/opt/data/.locks/tasknotes.lock`.
+5. **Maintenance windows must quiesce every documented owned writer/exporter before destructive recovery, reindex/rebuild, migration, or vault swap.** Follow the exact current checklist in `docs/gbrain-operations.md` / `docs/vault-recovery-operations.md`; do not rely on a stale copied job list in this root file.
+6. **TaskNotes never nests the public wrapper.** Task mutations use the `task_*` MCP tools; TaskNotes retains its transaction lock and private native invocation. Its sole direct vault-file exception (issue #139, default on) is the derived, vault-confined Daily Note task-link projection for exact scheduled paths, followed by mandatory native incremental gbrain reconciliation under the same lock. It exposes no generic note-write tool.
 
-### Skill Organization: SKILL.md vs. references/
+## Skill Organization
 
-**Policy: main `SKILL.md` is core, `references/` is deep-dive.** All skills (repo-owned and user-owned) should follow this split:
+Use `SKILL.md` for the routine path and `references/<topic>.md` for non-routine depth.
 
-- **`SKILL.md`** — short, core content. Always loaded when the skill is active. Contains: the skill's purpose, core commands/operations, critical rules, the most-used reference paths, and a pointer to the references/ directory for full details. Target: under ~150 lines so it fits comfortably in always-loaded context.
-- **`references/<topic>.md`** — detailed, rarely-needed content. Invisible to the skill system — loaded on demand via `skill_view("<skill>", file_path="references/<topic>.md")`. Contains: full schemas, taxonomies, edge cases, command output structures, deep-dive material that would bloat the main skill if always loaded.
+`SKILL.md` should contain the skill purpose, critical invariants, common operations, common reference paths, and enough guidance to complete normal requests without another file load. A frequently used skill may legitimately be longer than a rarely used skill. Rough line/section-size guidance is a review signal only; do not move common-path instructions out merely to satisfy a size target.
 
-This pattern keeps the always-loaded skill context small while making all information reachable when needed. The umbrella skill should state "for X details, load the reference" so the agent knows what's available.
+Move uncommon schemas/taxonomies, exhaustive command-output descriptions, compatibility matrices, recovery/upgrade procedures, and rare edge cases into `references/`. The main skill must explicitly tell the agent when to load each reference.
 
-Examples in this repo:
-- `skills-factory/backup-operations/SKILL.md` + `references/status-observation.md` / `references/recovery-checklist.md`
-- `skills-factory/tasknotes/SKILL.md` + `references/custom-fields.md`
-
-When adding or editing a skill, if a section exceeds ~30 lines of detail, consider moving it to `references/<topic>.md` and replacing it in the main skill with a brief summary + `skill_view` pointer.
+Good examples include `skills-factory/backup-operations/`, `skills-factory/tasknotes/`, and the gbrain/browser-control splits documented in `docs/README.md`.
 
 ## Security Rules
 
-1. Never commit secrets.
-2. Keep credentials under `credentials/<service>/`.
-3. Keep `agent-state` private.
-4. Respect `.sync-manifest` boundaries.
-5. Run staged PII checks before commit when requested.
+1. Never commit secrets, credentials, tokens, private user state, PII, or private host/network details.
+2. Keep credentials under `credentials/<service>/` and out of version control.
+3. Keep `agent-state` private and respect `.sync-manifest` boundaries.
+4. Public GitHub artifacts must describe system behavior impersonally and must not include user-specific private-state contents or anecdotes.
+5. Run the repository's staged privacy/PII checks where applicable before commit.
 
-## Testing
+## Testing and Validation
 
-- New and changed behavior must include new or updated tests, and relevant tests should pass during development cycles before work is considered complete. If a change is not practically testable, surface that limitation to the user before proceeding.
-- Prefer the repo's named Make targets (`make test`, `make verify`, and subsystem-specific targets in the Makefile) because they encode the supported environment and gates.
-- For direct local Python test invocation, prefer `venv/bin/python3` when the repo virtualenv exists. Venv-less environments such as CI may use system `python3` when dependencies are supplied as documented in `tests/README.md`; do not assume an arbitrary bare system Python has the test dependencies installed.
-- Docker/runtime suites are deliberately gated. Consult `tests/README.md` and run the focused gate appropriate to the change rather than enabling expensive runtime tests indiscriminately.
-- For known or documented long-running validation gates, configure the harness's command-execution timeout deliberately on the first invocation. Run `make test` and `make verify` as separate top-level commands, each with at least 30 minutes available. When repository evidence indicates an intentionally expensive Docker image build or gated runtime/real-system suite, use approximately 45–60 minutes; short, focused commands retain normal timeouts. Do not rerun an otherwise identical command solely because a default or unnecessarily short timeout expired. Record a timeout as incomplete validation, not a test failure or success, unless independent conclusive failure output was produced; record completed validation only for commands that actually completed and with their real outcomes. Timeouts remain finite: a command that exceeds its deliberate timeout is incomplete and diagnosable, not a way to mask a hang.
+- New and changed behavior must include new or updated tests where practical. If a change is not practically testable, record the limitation.
+- Prefer named Make targets because they encode supported environments and gates.
+- Use `tests/README.md` to select focused and Docker/runtime-gated validation; do not load/run every expensive suite indiscriminately.
+- For direct local Python tests, prefer `venv/bin/python3` when the repo virtualenv exists; CI/venv-less environments may use system Python only when dependencies are supplied as documented.
+- Run `make test` and `make verify` as separate top-level commands with deliberate timeouts of at least 30 minutes. Intentionally expensive Docker/runtime gates may need roughly 45–60 minutes when repository evidence supports that expectation.
+- A timeout is incomplete validation, not success or failure unless independent conclusive failure output was produced. Do not rerun an identical command solely because an unnecessarily short default timeout expired.
+- `scripts/docs_check.py` is exercised by the normal unit-test suite and validates documentation references/context guardrails without network access.
+
+Common commands:
 
 ```bash
 make test
 make verify
 venv/bin/python3 -m unittest tests.gbrain.test_gbrain_wrapper_contract -v
+python3 scripts/docs_check.py
 ```
 
-## Key References
+## Key Routing References
 
-- `README.md` - top-level runtime and operations guide
-- `tests/README.md` - supported fast, focused, and Docker-gated validation commands
-- `.github/workflows/AGENTS.md` - deploy/stop/privacy/test workflow documentation
-- `credentials/README.md` - credential setup
-- `docs/aux-ml.md` - aux-ml operations
-- `docs/browser-control.md` - optional remote browser-control architecture and operations
-- `docs/gbrain-operations.md` - gbrain activation, reindex, vault swap, embeddings, and schema workflow
-- `docs/memory-embeddings-evaluation.md` - embedding evaluation and activation context
-- `docs/mnemosyne-operations.md` - optional Mnemosyne deployment, backup, rollback, and recovery
-- `docs/tasknotes-mcp.md` - TaskNotes MCP prerequisites, profile gate, locking, and recovery
-- `docs/vault-recovery-operations.md` - vault-recovery export (default-on): daily local staged generations, doctor preflight, convergence semantics, portability proof; encrypted upload/recovery/install lane (DEFAULT deployment composition, 14 committed remote generations, fail-closed deploy when the crypt remote is missing); Phase-3 migration sequence and the full Docker-gated disaster-recovery drill
-- `docs/obsidian-operations.md` - Obsidian sync/backup runbook
-- `docs/graphify.md` - Graphify navigation, freshness, governance, and regeneration guidance
-
-## Graphify (codebase navigation, issue #116)
-
-This repo has a knowledge graph at `graphify-out/` (committed `graph.json` +
-`GRAPH_REPORT.md`) with god nodes, community structure, and cross-file
-relationships. Full operations guidance: `docs/graphify.md`.
-
-- Before relying on Graphify, compare the built-from commit recorded in
-  `graphify-out/GRAPH_REPORT.md` with current `HEAD`. A stale graph may still
-  be used as a navigation hint, but every conclusion must be verified against
-  current source; do not treat graph output as authoritative.
-- For codebase questions, first run `graphify query "<question>"` when
-  `graphify-out/graph.json` exists. Use `graphify path "<A>" "<B>"` for
-  relationships and `graphify explain "<concept>"` for focused concepts.
-  These return a scoped subgraph, usually much smaller than raw grep output.
-- Run the CLI via `dev-tools-venv/bin/graphify ...` (or `make graphify` to
-  regenerate). The venv is gitignored; the tool is dev-time only.
-- Read `graphify-out/GRAPH_REPORT.md` for broad architecture review; prefer
-  `query`/`path`/`explain` for focused questions.
-- **Never** run graphify on `/opt/data`, the vault, `workspace/`, or any
-  private state; never run it as root or inside the Hermes container. It maps
-  this repo's code only and is not a gbrain/mnemosyne replacement.
-- Regeneration is operator-initiated and deliberate; do **not** auto-regenerate
-  or commit graph changes in routine work.
+- `docs/README.md` — documentation map, audience, and load/update routing
+- `docs/documentation-policy.md` — canonical documentation architecture and maintenance contract
+- `README.md` — top-level orientation and operator onboarding
+- `templates/agent-state-template/README.md` — canonical private-state ownership/bootstrap/model-selection contract
+- `tests/README.md` — supported validation commands and test-suite routing
+- `.github/workflows/AGENTS.md` — workflow-specific change constraints and documentation dependencies
+- `docs/github-workflows.md` — workflow index and secret/variable catalog
+- `docs/gbrain-operations.md` — gbrain operator architecture and operations
+- `docs/tasknotes-mcp.md` — TaskNotes MCP contracts and operations
+- `docs/vault-recovery-operations.md` — vault-recovery architecture/recovery
+- `docs/obsidian-operations.md` — Obsidian sync/backup operations
+- `docs/browser-control.md` — browser-control architecture/operations
+- `docs/mnemosyne-operations.md` — Mnemosyne operations
+- `docs/aux-ml.md` — aux-ml operations
+- `docs/graphify.md` — Graphify navigation/freshness/governance
