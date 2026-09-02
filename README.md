@@ -77,7 +77,7 @@ flowchart TB
   Image --> Runtime[Hermes Runtime]
   CoreSkills --> Runtime
   Compose --> Runtime
-  PrivateRepo <--> StateTree[/opt/data Git worktree]
+  PrivateRepo <--> StateTree["/opt/data Git worktree"]
   StateTree --> Runtime
 ```
 
