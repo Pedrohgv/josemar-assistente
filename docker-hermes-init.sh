@@ -81,23 +81,84 @@ done
 SOURCE_CONFIG="/opt/josemar/hermes/config.yaml"
 RUNTIME_CONFIG="${HERMES_HOME}/config.yaml"
 JOSEMAR_SKILL_STATE="${JOSEMAR_SKILL_STATE:-/opt/hermes/hermes_cli/josemar_skill_state.py}"
+# Python used to run the state helper. Overridable so the fail-closed
+# migration flow is behaviorally testable; production always uses the
+# pinned Hermes venv interpreter.
+JOSEMAR_STATE_PYTHON="${JOSEMAR_STATE_PYTHON:-/opt/hermes/.venv/bin/python3}"
+
+# Narrow detection of command-allowlist state: ONLY the dedicated
+# allowlist sidecar trees are inspected (never a broad HERMES_HOME scan).
+# Presence is file-existence based, so malformed state files that would
+# need helper validation also count as present. Any present state
+# requires the helper (migration/validation/apply), so helper absence
+# with state present must fail closed rather than silently no-op.
+command_allowlist_state_present() {
+    local allowlist_base="${WORKSPACE_DIR}/hermes/command-allowlist"
+    if [ -e "${allowlist_base}/default.json" ]; then
+        return 0
+    fi
+    local allowlist_profiles="${allowlist_base}/profiles"
+    if [ -d "$allowlist_profiles" ]; then
+        local state_file
+        for state_file in "$allowlist_profiles"/*.json; do
+            if [ -e "$state_file" ]; then
+                return 0
+            fi
+        done
+    fi
+    return 1
+}
 
 # Before the repo template overwrites the runtime config, extract existing
-# default/named profile toggle keys into absent sidecars only when the keys
-# exist. This preserves a pre-feature deployment's toggles across the upgrade.
-# Does NOT create an empty default.json so production migration can preserve
-# pre-feature toggles. Malformed sidecars surface clearly and never modify
-# config.
+# default/named profile toggle keys and any non-empty runtime
+# command_allowlist into absent sidecars only when those keys exist. This
+# preserves a pre-feature deployment's toggles and allowlist across the
+# upgrade. Does NOT create empty sidecars so production migration can
+# preserve pre-feature state. Fail-closed: a command-allowlist migration
+# failure returns nonzero BEFORE the template overwrite, because the
+# template copy would otherwise erase the non-empty pre-feature runtime
+# allowlist. (Toggle-key migration failures keep the historical
+# warn-and-continue behavior inside the helper CLI.)
 migrate_existing_toggles() {
     if [ ! -f "$JOSEMAR_SKILL_STATE" ]; then
+        if command_allowlist_state_present; then
+            log "ERROR: command-allowlist state present but josemar_skill_state helper missing; cannot migrate safely"
+            return 1
+        fi
         log "josemar_skill_state helper missing; skipping toggle migration"
         return 0
     fi
 
-    log "Migrating existing skill toggles into sidecars (pre template overwrite)"
-    WORKSPACE_DIR="$WORKSPACE_DIR" /opt/hermes/.venv/bin/python3 "$JOSEMAR_SKILL_STATE" migrate \
-        --hermes-home "$HERMES_HOME" --config-path "$RUNTIME_CONFIG" \
-        || log "WARNING: default profile toggle migration failed; continuing"
+    log "Migrating existing skill toggles + command allowlist into sidecars (pre template overwrite)"
+    # The one-time migration marker is monotonic. marker-present exits 2 on
+    # a malformed/unreadable present marker (fatal). A valid present marker
+    # is logged but must NOT return early: the per-profile migrate
+    # invocations below still run on every pass because the helper performs
+    # legacy skill-toggle migration FIRST and independently self-gates the
+    # legacy command-allowlist import on the marker — so stale runtime
+    # values can never resurrect a deliberately deleted sidecar while
+    # legacy toggles are still projected into absent sidecars. NOTE: the
+    # exit status must be captured via "|| marker_rc=$?" — inside
+    # "if ! cmd; then", "$?" is always 0 and the rc==2 fatal branch could
+    # never fire.
+    marker_present=0
+    marker_rc=0
+    WORKSPACE_DIR="$WORKSPACE_DIR" "$JOSEMAR_STATE_PYTHON" "$JOSEMAR_SKILL_STATE" marker-present >/dev/null 2>&1 || marker_rc=$?
+    if [ "$marker_rc" -eq 2 ]; then
+        log "ERROR: migration marker is malformed/unreadable; refusing to overwrite runtime config (state history integrity cannot be confirmed)"
+        return 1
+    fi
+    if [ "$marker_rc" -eq 0 ]; then
+        marker_present=1
+        log "Migration marker present; skipping legacy runtime command-allowlist import for all profiles (toggle migration still runs)"
+    fi
+    # marker_rc == 1 (or any other nonzero) -> marker absent; proceed.
+
+    if ! WORKSPACE_DIR="$WORKSPACE_DIR" "$JOSEMAR_STATE_PYTHON" "$JOSEMAR_SKILL_STATE" migrate \
+            --hermes-home "$HERMES_HOME" --config-path "$RUNTIME_CONFIG"; then
+        log "ERROR: default profile migration failed; refusing to overwrite ${RUNTIME_CONFIG} (pre-feature command-allowlist state would be lost)"
+        return 1
+    fi
 
     profiles_root="${HERMES_HOME}/profiles"
     if [ -d "$profiles_root" ]; then
@@ -105,10 +166,27 @@ migrate_existing_toggles() {
             [ -d "$profile_dir" ] || continue
             profile_config="${profile_dir}config.yaml"
             [ -f "$profile_config" ] || continue
-            WORKSPACE_DIR="$WORKSPACE_DIR" /opt/hermes/.venv/bin/python3 "$JOSEMAR_SKILL_STATE" migrate \
-                --hermes-home "$profile_dir" --config-path "$profile_config" \
-                || log "WARNING: named profile toggle migration failed for ${profile_dir}; continuing"
+            if ! WORKSPACE_DIR="$WORKSPACE_DIR" "$JOSEMAR_STATE_PYTHON" "$JOSEMAR_SKILL_STATE" migrate \
+                    --hermes-home "$profile_dir" --config-path "$profile_config"; then
+                log "ERROR: named profile migration failed for ${profile_dir}; refusing to overwrite ${profile_config} (pre-feature command-allowlist state would be lost)"
+                return 1
+            fi
         done
+    fi
+
+    # Finalize the one-time migration-completion marker ONLY when it was
+    # initially absent AND every default/named profile above has been safely
+    # examined/migrated (any helper failure already returned nonzero), all
+    # BEFORE the template overwrite. A marker write/validation failure is
+    # fatal: the pre-feature runtime allowlist must never be erased by the
+    # template copy without first finalizing the migration boundary. An
+    # initially present marker was already validated above and is left
+    # exactly as-is.
+    if [ "$marker_present" -eq 0 ]; then
+        if ! WORKSPACE_DIR="$WORKSPACE_DIR" "$JOSEMAR_STATE_PYTHON" "$JOSEMAR_SKILL_STATE" finalize-migration-marker; then
+            log "ERROR: migration marker finalization failed; refusing to overwrite runtime config (pre-feature command-allowlist state would be lost)"
+            return 1
+        fi
     fi
 }
 
@@ -124,7 +202,15 @@ apply_sidecars_and_policy() {
             log "ERROR: models.yaml present but helper unavailable; cannot validate/apply"
             return 1
         fi
-        log "No models.yaml present; skipping toggle apply/policy"
+        # Fail-closed: present command-allowlist sidecar state (including
+        # malformed files) cannot be validated/reconciled without the
+        # helper, so helper absence with state present is an error, not a
+        # silent no-op.
+        if command_allowlist_state_present; then
+            log "ERROR: command-allowlist state present but helper unavailable; cannot validate/reconcile"
+            return 1
+        fi
+        log "No models.yaml and no command-allowlist state present; skipping toggle apply/policy"
         return 0
     fi
 
@@ -136,10 +222,10 @@ apply_sidecars_and_policy() {
     # error instead of silently continuing with template defaults.
     WORKSPACE_DIR="$WORKSPACE_DIR" \
     JOSEMAR_TEMPLATE_CONFIG="$SOURCE_CONFIG" \
-    /opt/hermes/.venv/bin/python3 "$JOSEMAR_SKILL_STATE" apply-all
+    "$JOSEMAR_STATE_PYTHON" "$JOSEMAR_SKILL_STATE" apply-all
 }
 
-migrate_existing_toggles
+migrate_existing_toggles || exit 1
 
 if [ -f "$SOURCE_CONFIG" ]; then
     if [ -f "$RUNTIME_CONFIG" ] && ! cmp -s "$SOURCE_CONFIG" "$RUNTIME_CONFIG" 2>/dev/null; then
@@ -760,18 +846,22 @@ fi
 apply_sidecars_and_policy
 
 # The migration/seed/apply steps above can create the dedicated
-# ${WORKSPACE_DIR}/hermes/skill-toggles tree as root (e.g. when there is
-# no WORKSPACE_STATE_REPO and the tree is seeded from the template, or
+# ${WORKSPACE_DIR}/hermes/skill-toggles and
+# ${WORKSPACE_DIR}/hermes/command-allowlist trees as root (e.g. when there
+# is no WORKSPACE_STATE_REPO and the tree is seeded from the template, or
 # when migration creates a sidecar before the final HERMES_HOME chown).
 # The dashboard runtime user must be able to atomically replace the
-# root-owned directory/file, so chown ONLY this dedicated toggle tree.
+# root-owned directory/file, so chown ONLY these dedicated state trees.
 # This does NOT broaden the writable-volume policy or chown bind mounts,
 # read-only mounts, or cross-service volumes.
 repair_skill_toggle_ownership() {
-    toggle_tree="${WORKSPACE_DIR}/hermes/skill-toggles"
-    if [ -d "$toggle_tree" ] && [ "$(id -u)" = "0" ]; then
-        chown -R "${HERMES_UID_VALUE}:${HERMES_GID_VALUE}" "$toggle_tree" 2>/dev/null || true
-    fi
+    for toggle_tree in \
+        "${WORKSPACE_DIR}/hermes/skill-toggles" \
+        "${WORKSPACE_DIR}/hermes/command-allowlist"; do
+        if [ -d "$toggle_tree" ] && [ "$(id -u)" = "0" ]; then
+            chown -R "${HERMES_UID_VALUE}:${HERMES_GID_VALUE}" "$toggle_tree" 2>/dev/null || true
+        fi
+    done
 }
 
 repair_skill_toggle_ownership

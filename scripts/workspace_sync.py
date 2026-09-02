@@ -97,14 +97,15 @@ BARE_GBRAIN_FORMS: tuple[str, ...] = (".gbrain", ".gbrain/", ".gbrain/*", ".gbra
 # Explicit allowed schema pack path.
 ALLOWED_SCHEMA_PACK = ".gbrain/schema-packs/josemar/pack.yaml"
 
-# Intentional template wildcard pathspecs (the only allowed globs).
-# ``hermes/models.yaml`` is a plain explicit path (no glob chars), so it
-# does not need to be allowlisted here — it is validated as a normal
-# manifest entry. The manifest/gitignore/template files that un-ignore it
-# are owned by another worker.
+# Intentional template wildcard pathspecs (the only allowed globs; exact
+# string membership, so every broader form is rejected). Plain explicit
+# paths such as ``hermes/models.yaml`` and
+# ``hermes/command-allowlist/default.json`` carry no glob chars and are
+# validated as normal manifest entries.
 ALLOWED_WILDCARD_PATHSPECS: frozenset[str] = frozenset({
     "avatars/*",
     "hermes/skill-toggles/profiles/*.json",
+    "hermes/command-allowlist/profiles/*.json",
 })
 
 VALID_ACTIONS = ("status", "diff", "log", "commit", "push", "pull", "sync", "gh")
@@ -132,6 +133,34 @@ JOSEMAR_SKILL_STATE_PATH = os.environ.get(
     "JOSEMAR_SKILL_STATE",
     "/opt/hermes/hermes_cli/josemar_skill_state.py",
 )
+
+# Canonical command-allowlist sidecar family (state-owned runtime command
+# allowlist, issue #151). Same default/profile layout as the skill-toggle
+# family: exactly ``default.json`` (workspace root profile) plus
+# ``profiles/<canonical>.json`` (named profiles). The manifest wildcard
+# enumerates the family; it never authorizes noncanonical filenames —
+# every profile sidecar must carry a canonical profile stem (the exact
+# W1 helper contract, consumed below, never duplicated). Only these exact
+# shapes are enumerated and transport-validated; every other ``hermes/``
+# artifact stays ignored/rejected by the deny-by-default gitignore and
+# manifest policy. Sidecar content schema is validated exclusively by the
+# canonical helper validator.
+ALLOWLIST_SIDECAR_REL_DIR = "hermes/command-allowlist"
+ALLOWLIST_DEFAULT_REL = "hermes/command-allowlist/default.json"
+ALLOWLIST_PROFILES_REL_DIR = "hermes/command-allowlist/profiles"
+
+# Value-free command-allowlist migration-completion marker (plan v2).
+# Architecture metadata only: exactly
+# ``{"version":1,"legacy_runtime_import_complete":true}``. Monotonic
+# durable state — once the marker exists in reachable state-repo history
+# it must never be removed: working-copy deletion (when HEAD has it),
+# a HEAD that removes it (before push), and a remote candidate that
+# removes it (before merge) are all rejected. A history that never
+# contained the marker is valid (first upgrade); normal merge semantics
+# retain a local first-time marker addition. Allowlist-sidecar deletion
+# is unaffected. Content is validated by the canonical helper marker
+# validator at the same three boundaries as the sidecars.
+ALLOWLIST_MARKER_REL = "hermes/command-allowlist/migration-v1.json"
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +454,20 @@ def _checked_push(refspec: str) -> subprocess.CompletedProcess[str]:
     """Perform an authenticated push, returning the CompletedProcess.
 
     Does NOT raise on failure — caller checks returncode.
+
+    Push gate (issue #151 / plan v2): validates HEAD-committed
+    command-allowlist sidecars BEFORE the push, plus the migration
+    marker (content when present, and the monotonic gate: a HEAD that
+    removes a marker previously contained in reachable history must not
+    push). Every push path in this module goes through this helper, so
+    committed allowlist state is always gated at the source — including
+    commits made by other paths (manual ``git commit``, lifecycle
+    auto-commit). Fail-closed: raises SyncError (nonzero) when HEAD
+    carries an invalid sidecar/marker or removes the marker; absence of
+    sidecars is valid and a markerless history is valid.
     """
+    _validate_head_command_allowlist_state()
+    _validate_head_command_allowlist_marker()
     _sanitize_origin()
     origin_url = _get_clean_remote_url()
     git_env = _make_git_env(origin_url)
@@ -624,14 +666,12 @@ def _validate_manifest_if_present() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _load_models_validator():
-    """Import the canonical models.yaml validator from the helper.
+def _load_skill_state_module():
+    """Import the canonical ``josemar_skill_state`` helper module.
 
-    Returns ``validate_models_state_from_text`` from
-    ``josemar_skill_state``, or ``None`` if the helper is unavailable.
-    Callers MUST treat ``None`` as fail-closed when a local or remote
-    ``hermes/models.yaml`` exists (validation cannot be skipped for a
-    present file). Absence of models.yaml remains valid regardless.
+    Returns the module, or ``None`` if the helper is unavailable. The
+    helper path is resolved lazily so the import only happens when
+    validated state is actually present.
     """
     helper = os.environ.get("JOSEMAR_SKILL_STATE", JOSEMAR_SKILL_STATE_PATH)
     if not helper or not os.path.exists(helper):
@@ -643,7 +683,61 @@ def _load_models_validator():
         return None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+def _load_models_validator():
+    """Import the canonical models.yaml validator from the helper.
+
+    Returns ``validate_models_state_from_text`` from
+    ``josemar_skill_state``, or ``None`` if the helper is unavailable.
+    Callers MUST treat ``None`` as fail-closed when a local or remote
+    ``hermes/models.yaml`` exists (validation cannot be skipped for a
+    present file). Absence of models.yaml remains valid regardless.
+    """
+    module = _load_skill_state_module()
+    if module is None:
+        return None
     return getattr(module, "validate_models_state_from_text", None)
+
+
+def _load_command_allowlist_validator():
+    """Import the canonical command-allowlist text validator from the helper.
+
+    Returns ``validate_command_allowlist_state_from_text`` from
+    ``josemar_skill_state``, or ``None`` if the helper is unavailable or
+    does not provide the validator. Callers MUST treat ``None`` as
+    fail-closed when any command-allowlist sidecar is present (local
+    working copy, committed HEAD, or remote candidate): validation cannot
+    be skipped for present state. Absence of every sidecar (including
+    after deletion) remains valid regardless.
+    """
+    module = _load_skill_state_module()
+    if module is None:
+        return None
+    return getattr(module, "validate_command_allowlist_state_from_text", None)
+
+
+def _load_command_allowlist_marker_validator():
+    """Import the canonical migration-marker text validator from the helper.
+
+    Documented expected W1 public API (plan v2):
+    ``validate_command_allowlist_migration_marker_from_text(text)`` parses
+    and validates the exact marker schema
+    ``{"version":1,"legacy_runtime_import_complete":true}`` and raises
+    ``ValueError`` with structural, value-free messages on any malformed
+    input. Returns ``None`` if the helper is unavailable or does not
+    provide the validator yet. Callers MUST treat ``None`` as fail-closed
+    when the marker is present (INTEGRATION DEPENDENCY: until W1 lands
+    this validator, any state carrying the marker fails sync closed).
+    Marker absence remains valid regardless.
+    """
+    module = _load_skill_state_module()
+    if module is None:
+        return None
+    return getattr(
+        module, "validate_command_allowlist_migration_marker_from_text", None
+    )
 
 
 def _validate_models_yaml_text(text: str) -> None:
@@ -718,6 +812,375 @@ def _validate_remote_models_yaml(remote_ref: str) -> None:
     _validate_models_yaml_text(proc.stdout)
 
 
+# ---------------------------------------------------------------------------
+# command-allowlist sidecar validation — reuse canonical helper (issue #151)
+# ---------------------------------------------------------------------------
+
+
+def _profiles_json_relpath_stem(rel: str) -> str | None:
+    """Return the raw stem if ``rel`` is ``<profiles dir>/<stem>.json``.
+
+    Returns ``None`` for anything else. The returned stem may be empty or
+    noncanonical — callers must still apply the canonical profile
+    contract; a stem containing ``/`` (deeper paths) is noncanonical by
+    definition.
+    """
+    prefix = ALLOWLIST_PROFILES_REL_DIR + "/"
+    if not rel.startswith(prefix) or not rel.endswith(".json"):
+        return None
+    return rel[len(prefix):-len(".json")]
+
+
+def _is_command_allowlist_family_relpath(rel: str) -> bool:
+    """True for the exact default sidecar or any ``profiles/*.json`` path."""
+    if rel == ALLOWLIST_DEFAULT_REL:
+        return True
+    return _profiles_json_relpath_stem(rel) is not None
+
+
+def _require_canonical_profile_id_pattern():
+    """Return the canonical profile-ID pattern from the W1 helper.
+
+    Single source of truth: the exact ``_PROFILE_ID_RE`` contract the
+    helper enforces for profile sidecar paths. Raises ``SyncError`` when
+    the helper (or the pattern) is unavailable — fail-closed, never a
+    skip.
+    """
+    module = _load_skill_state_module()
+    pattern = getattr(module, "_PROFILE_ID_RE", None) if module is not None else None
+    if pattern is None:
+        raise SyncError(
+            "command-allowlist sidecar validation required but the "
+            "josemar_skill_state helper is unavailable (JOSEMAR_SKILL_STATE "
+            "path missing, unreadable, or lacking the canonical validator)"
+        )
+    return pattern
+
+
+def _canonical_command_allowlist_relpaths(rels: list[str], pattern) -> list[str]:
+    """Value-free name gate over family relpaths.
+
+    Every family path must be the exact ``default.json`` shape or
+    ``profiles/<canonical>.json`` (single-level stem matching the
+    canonical profile contract). Noncanonical filenames are rejected
+    value-free — before any content is read or echoed. Returns the
+    canonical sidecar relpaths.
+    """
+    canonical: list[str] = []
+    for rel in rels:
+        if rel == ALLOWLIST_DEFAULT_REL:
+            canonical.append(rel)
+            continue
+        stem = _profiles_json_relpath_stem(rel)
+        if stem and pattern.match(stem):
+            canonical.append(rel)
+            continue
+        raise SyncError(
+            "noncanonical command-allowlist profile sidecar filename "
+            f"rejected (must match the canonical profile contract): {rel}"
+        )
+    return canonical
+
+
+def _validate_command_allowlist_entries(entries: list[tuple[str, str]]) -> None:
+    """Validate enumerated ``(relpath, text)`` allowlist sidecars fail-closed.
+
+    Every enumerated sidecar must fully validate (canonical helper, strict
+    v1 schema) before any staging, push, or remote merge proceeds. When
+    any sidecar is present, a missing/unusable helper is an error, never
+    a skip. An empty entry list (absence/deletion) is valid without
+    consulting the helper. The canonical validator's error messages are
+    structural only and never include allowlist contents; the labels here
+    are sidecar paths only.
+    """
+    if not entries:
+        return
+    validator = _load_command_allowlist_validator()
+    if validator is None:
+        raise SyncError(
+            "command-allowlist sidecar validation required but the "
+            "josemar_skill_state helper is unavailable (JOSEMAR_SKILL_STATE "
+            "path missing, unreadable, or lacking the canonical validator)"
+        )
+    for rel, text in entries:
+        try:
+            validator(text)
+        except ValueError as exc:
+            raise SyncError(
+                f"command-allowlist sidecar validation failed for {rel}: {exc}"
+            ) from exc
+
+
+def _local_command_allowlist_entries() -> list[tuple[str, str]]:
+    """Enumerate present local allowlist sidecars as ``(relpath, text)``.
+
+    Name gate first: every ``profiles/*.json`` present in the working
+    copy must carry a canonical profile stem (value-free rejection before
+    any content is read). Reads the working copy directly (not the
+    index/HEAD) so every present sidecar is validated BEFORE it can be
+    staged or committed.
+    """
+    entries: list[tuple[str, str]] = []
+    default_path = WORKSPACE_DIR / ALLOWLIST_DEFAULT_REL
+    if default_path.is_file():
+        entries.append(
+            (ALLOWLIST_DEFAULT_REL, default_path.read_text(encoding="utf-8"))
+        )
+    profiles_dir = WORKSPACE_DIR / ALLOWLIST_PROFILES_REL_DIR
+    if profiles_dir.is_dir():
+        json_children = [
+            path for path in sorted(profiles_dir.glob("*.json")) if path.is_file()
+        ]
+        if json_children:
+            pattern = _require_canonical_profile_id_pattern()
+            rels = [
+                path.relative_to(WORKSPACE_DIR).as_posix()
+                for path in json_children
+            ]
+            _canonical_command_allowlist_relpaths(rels, pattern)
+            for rel, path in zip(rels, json_children):
+                entries.append((rel, path.read_text(encoding="utf-8")))
+    return entries
+
+
+def _validate_local_command_allowlist_state() -> None:
+    """Validate every present local allowlist sidecar before staging/commit.
+
+    Name gate first (value-free noncanonical filename rejection), then
+    full content validation via the canonical helper. Fail-closed: any
+    violation raises SyncError (nonzero) with nothing staged and the
+    working copy unchanged. Absence of every sidecar (including after
+    deletion) is valid and needs no helper.
+    """
+    _validate_command_allowlist_entries(_local_command_allowlist_entries())
+
+
+def _head_command_allowlist_relpaths() -> list[str]:
+    """List command-allowlist family paths carried by ``HEAD`` (empty if none)."""
+    proc = _git(
+        "ls-tree", "-r", "--name-only", "HEAD", "--", ALLOWLIST_SIDECAR_REL_DIR,
+        cwd=WORKSPACE_DIR, check=False,
+    )
+    if proc.returncode != 0:
+        # No resolvable HEAD tree — nothing committed to validate.
+        return []
+    return [
+        line.strip()
+        for line in proc.stdout.splitlines()
+        if _is_command_allowlist_family_relpath(line.strip())
+    ]
+
+
+def _validate_head_command_allowlist_state() -> None:
+    """Validate HEAD-committed allowlist sidecars before every push.
+
+    Covers commits made by other paths (manual ``git commit``, lifecycle
+    auto-commit): invalid or malformed committed sidecar state must never
+    reach the remote via a pure push. Name gate first: noncanonical
+    profile sidecar filenames are rejected value-free. Then every
+    canonical sidecar's content is validated with the canonical helper.
+    Fail-closed: raises SyncError when HEAD carries a noncanonical
+    filename, an invalid sidecar, or a present sidecar that cannot be
+    read or validated. HEAD absence is valid (deletion/rollback).
+    """
+    rels = _head_command_allowlist_relpaths()
+    if not rels:
+        return
+    pattern = _require_canonical_profile_id_pattern()
+    canonical = _canonical_command_allowlist_relpaths(rels, pattern)
+    entries: list[tuple[str, str]] = []
+    for rel in canonical:
+        proc = _git("show", f"HEAD:{rel}", cwd=WORKSPACE_DIR, check=False)
+        if proc.returncode != 0:
+            raise SyncError(
+                f"cannot read committed command-allowlist sidecar {rel} from HEAD"
+            )
+        entries.append((rel, proc.stdout))
+    _validate_command_allowlist_entries(entries)
+
+
+def _validate_remote_command_allowlist_state(
+    remote_ref: str, remote_paths: list[str]
+) -> None:
+    """Validate the candidate remote allowlist sidecars before merge/acceptance.
+
+    ``remote_paths`` is the already-listed remote tree from
+    ``_assert_remote_tree_safe``. Name gate first: noncanonical profile
+    sidecar filenames are rejected value-free. Then every canonical
+    sidecar's content is validated with the canonical helper. Fail-closed:
+    invalid or malformed remote sidecar state must make sync fail nonzero
+    before the merge, leaving the working/runtime config unchanged.
+    Remote absence is valid (deletion/rollback merges cleanly).
+    """
+    rels = [p for p in remote_paths if _is_command_allowlist_family_relpath(p)]
+    if not rels:
+        return
+    pattern = _require_canonical_profile_id_pattern()
+    canonical = _canonical_command_allowlist_relpaths(rels, pattern)
+    entries: list[tuple[str, str]] = []
+    for rel in canonical:
+        proc = _git("show", f"{remote_ref}:{rel}", cwd=WORKSPACE_DIR, check=False)
+        if proc.returncode != 0:
+            raise SyncError(
+                f"cannot read remote command-allowlist sidecar {rel} "
+                f"from {remote_ref}"
+            )
+        entries.append((rel, proc.stdout))
+    _validate_command_allowlist_entries(entries)
+
+
+# ---------------------------------------------------------------------------
+# command-allowlist migration marker — value-free monotonic state (plan v2)
+# ---------------------------------------------------------------------------
+
+
+def _validate_command_allowlist_marker_text(rel: str, text: str) -> None:
+    """Validate marker content with the canonical helper marker validator.
+
+    Fail-closed: when the marker is present, a missing/unusable helper is
+    an error, never a skip. Errors are structural (path + shape) and
+    never echo marker or allowlist values.
+    """
+    validator = _load_command_allowlist_marker_validator()
+    if validator is None:
+        raise SyncError(
+            "command-allowlist migration marker validation required but the "
+            "josemar_skill_state helper is unavailable (JOSEMAR_SKILL_STATE "
+            "path missing, unreadable, or lacking the canonical marker "
+            "validator)"
+        )
+    try:
+        validator(text)
+    except ValueError as exc:
+        raise SyncError(
+            f"command-allowlist migration marker validation failed for {rel}: "
+            f"{exc}"
+        ) from exc
+
+
+def _history_contains_path(rev: str, rel: str) -> bool:
+    """True if any commit reachable from ``rev`` touches ``rel``.
+
+    Used for the marker's history-aware monotonicity gate only. Fail-closed:
+    an unresolvable/failing history query raises SyncError rather than
+    reporting "no history".
+    """
+    proc = _git(
+        "rev-list", "-n", "1", rev, "--", rel, cwd=WORKSPACE_DIR, check=False
+    )
+    if proc.returncode != 0:
+        raise SyncError(
+            f"cannot inspect history of {rev} for {rel}: {proc.stderr.strip()}"
+        )
+    return bool(proc.stdout.strip())
+
+
+def _head_has_path(rel: str) -> bool | None:
+    """Return True/False when ``HEAD`` carries ``rel``, None if no HEAD.
+
+    ``None`` (fresh workspace, no commits yet) means the marker gates are
+    trivially satisfied — there is no committed state to lose.
+    """
+    if not _rev_parse("HEAD"):
+        return None
+    proc = _git(
+        "cat-file", "-e", f"HEAD:{rel}", cwd=WORKSPACE_DIR, check=False
+    )
+    return proc.returncode == 0
+
+
+def _validate_local_command_allowlist_marker() -> None:
+    """Validate the local migration marker before staging/commit.
+
+    Monotonicity (plan v2): a working-copy deletion is rejected iff
+    committed HEAD contains the marker. First-time addition (marker
+    present, HEAD without it) and unchanged presence are valid; present
+    content is always validated with the canonical helper (fail-closed).
+    Marker absence with no committed marker is valid and needs no helper.
+    """
+    marker_path = WORKSPACE_DIR / ALLOWLIST_MARKER_REL
+    local_has = marker_path.is_file()
+    head_has = _head_has_path(ALLOWLIST_MARKER_REL)
+    if head_has is None:
+        # No HEAD yet: nothing committed to delete; only content applies.
+        head_has = False
+    if head_has and not local_has:
+        raise SyncError(
+            "command-allowlist migration marker deletion rejected: the marker "
+            f"is committed at HEAD and must remain present ({ALLOWLIST_MARKER_REL})"
+        )
+    if local_has:
+        _validate_command_allowlist_marker_text(
+            ALLOWLIST_MARKER_REL, marker_path.read_text(encoding="utf-8")
+        )
+
+
+def _validate_head_command_allowlist_marker() -> None:
+    """Validate the committed marker before every push.
+
+    Content gate: a marker carried by HEAD is validated with the
+    canonical helper (covers commits made by other paths). Monotonicity
+    gate: a HEAD that no longer carries the marker is invalid when the
+    reachable state-repo history previously contained it (manually
+    committed deletion) and must not push. A history that never contained
+    the marker is valid (first upgrade).
+    """
+    head_has = _head_has_path(ALLOWLIST_MARKER_REL)
+    if head_has is None:
+        return
+    if head_has:
+        proc = _git(
+            "show", f"HEAD:{ALLOWLIST_MARKER_REL}", cwd=WORKSPACE_DIR, check=False
+        )
+        if proc.returncode != 0:
+            raise SyncError(
+                f"cannot read committed command-allowlist migration marker "
+                f"{ALLOWLIST_MARKER_REL} from HEAD"
+            )
+        _validate_command_allowlist_marker_text(ALLOWLIST_MARKER_REL, proc.stdout)
+        return
+    if _history_contains_path("HEAD", ALLOWLIST_MARKER_REL):
+        raise SyncError(
+            "command-allowlist migration marker deletion rejected: reachable "
+            f"history contains {ALLOWLIST_MARKER_REL}; a commit that removes "
+            "it must not be pushed"
+        )
+
+
+def _validate_remote_command_allowlist_marker(
+    remote_ref: str, remote_paths: list[str]
+) -> None:
+    """Validate the candidate remote marker before merge/acceptance.
+
+    Content gate: a marker on the remote candidate is validated with the
+    canonical helper. Monotonicity gate: a remote candidate that no longer
+    carries the marker is rejected when the remote history previously
+    contained it. A remote history that never contained the marker is
+    valid (first upgrade/old remote) — normal merge semantics then retain
+    a local first-time marker addition; no remote-wins deletion is
+    implemented. Remote absence with markerless history is valid.
+    """
+    remote_has = ALLOWLIST_MARKER_REL in remote_paths
+    if remote_has:
+        proc = _git(
+            "show", f"{remote_ref}:{ALLOWLIST_MARKER_REL}",
+            cwd=WORKSPACE_DIR, check=False,
+        )
+        if proc.returncode != 0:
+            raise SyncError(
+                f"cannot read remote command-allowlist migration marker "
+                f"{ALLOWLIST_MARKER_REL} from {remote_ref}"
+            )
+        _validate_command_allowlist_marker_text(ALLOWLIST_MARKER_REL, proc.stdout)
+        return
+    if _history_contains_path(remote_ref, ALLOWLIST_MARKER_REL):
+        raise SyncError(
+            "command-allowlist migration marker deletion rejected: remote "
+            f"history contains {ALLOWLIST_MARKER_REL}; a remote candidate "
+            "that removes it must not be merged"
+        )
+
+
 def _stage_manifest_files() -> None:
     if not MANIFEST_PATH.exists():
         _warn("No .sync-manifest found, skipping selective staging")
@@ -726,6 +1189,18 @@ def _stage_manifest_files() -> None:
     # secret model state never reaches the remote. Fail-closed: raises
     # SyncError (nonzero) and leaves the working copy unchanged.
     _validate_local_models_yaml()
+    # Validate every present command-allowlist sidecar before staging so
+    # invalid/malformed allowlist state never reaches the remote (issue
+    # #151). Fail-closed: raises SyncError (nonzero) and leaves the
+    # working copy unchanged with nothing staged. Absence/deletion is
+    # valid and requires no helper.
+    _validate_local_command_allowlist_state()
+    # Validate the command-allowlist migration marker (plan v2): content
+    # when present, plus the monotonic working-copy deletion gate
+    # (deletion rejected iff HEAD contains the marker). Fail-closed:
+    # raises SyncError (nonzero) with nothing staged. First-time addition
+    # and marker absence are valid.
+    _validate_local_command_allowlist_marker()
     _register_user_skill_files()
     validated = _validate_manifest()
     _git("add", "-A", "--", ".gitignore", ".sync-manifest", cwd=WORKSPACE_DIR, check=False)
@@ -764,7 +1239,12 @@ def _assert_remote_tree_safe(remote_ref: str) -> None:
     Also validates the candidate remote ``hermes/models.yaml`` content
     using the canonical helper so invalid/malformed/secret model state is
     rejected before merge (fail-closed: nonzero, working/runtime config
-    unchanged).
+    unchanged), the candidate remote command-allowlist sidecars
+    (issue #151) so invalid/malformed/noncanonically named allowlist
+    state is rejected before merge/acceptance, and the candidate remote
+    migration marker (plan v2: content plus monotonic remote-deletion
+    gate); remote absence (deletion) is valid for sidecars, and a
+    markerless remote history is valid for the marker.
 
     Fail-closed: if ``git ls-tree`` fails for a ref that is expected to
     exist after a successful fetch, raises SyncError (not RemoteTreeError)
@@ -787,6 +1267,17 @@ def _assert_remote_tree_safe(remote_ref: str) -> None:
             raise RemoteTreeError("State repo tracks protected runtime path: .gbrain")
     # Validate the candidate remote models.yaml before accepting/merging.
     _validate_remote_models_yaml(remote_ref)
+    # Validate the candidate remote command-allowlist sidecars before
+    # accepting/merging (issue #151). Fail-closed: invalid or malformed
+    # remote allowlist state is rejected before the merge; remote absence
+    # (deletion) is valid.
+    _validate_remote_command_allowlist_state(remote_ref, paths)
+    # Validate the candidate remote migration marker (plan v2): content
+    # when present, plus the monotonic gate — a remote candidate that
+    # removes a marker previously contained in the remote history must
+    # not merge. A remote history that never contained the marker is
+    # valid; the merge then retains a local first-time marker.
+    _validate_remote_command_allowlist_marker(remote_ref, paths)
 
 
 # ---------------------------------------------------------------------------

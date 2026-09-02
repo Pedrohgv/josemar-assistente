@@ -35,6 +35,38 @@ Architecture (fixed, do not redesign):
   config) extracts existing toggle keys into absent sidecars only when
   the keys exist. After template overwrite + workspace sync/seed, the
   sidecars are applied back and the policy keys are enforced.
+- A second profile-aware sidecar family, ``hermes/command-allowlist/``,
+  holds the state-owned runtime command allowlist with the strict v1
+  schema ``{"version": 1, "command_allowlist": ["..."]}`` (exactly these
+  keys, both required; sorted/deduped non-empty strings). ``default.json``
+  mirrors the workspace root and ``profiles/<canonical>.json`` a named
+  profile. Presence is authoritative: an explicit ``[]`` keeps the
+  ROOT-LEVEL runtime ``command_allowlist`` key durably empty while an
+  ABSENT sidecar removes that key. Every present allowlist sidecar is
+  validated BEFORE any runtime config write in an apply cycle
+  (fail-closed, no partial apply), and errors/statuses never include
+  allowlist contents. ``validate_command_allowlist_state_from_text`` is
+  the canonical text validator, reused by workspace_sync (local staging
+  and remote candidate validation) so the schema rules are never
+  duplicated.
+- Startup migration also extracts a NON-EMPTY runtime command_allowlist
+  into an absent allowlist sidecar before the template overwrite (never
+  overwrites an existing sidecar, never invents an explicit-empty one).
+- ``save_command_allowlist_stateful`` is the stateful runtime write path:
+  it accepts ONLY a real list (str/tuple/set/generators are rejected
+  before any write; W2 explicitly converts its set to list). Under the
+  shared advisory lock it atomically writes the sidecar FIRST and then
+  the raw runtime config via native ``save_config``, passing
+  ``preserve_keys={("command_allowlist",)}`` per the pinned upstream
+  signature so an explicit empty ``command_allowlist: []`` survives
+  upstream persistence. A state write failure fails the save
+  before the runtime config is touched; a runtime failure afterward
+  propagates and the next reconcile cycle repairs the runtime config
+  from the durable sidecar.
+  ``clear_command_allowlist_stateful`` is the exact-key unset path: under
+  the same lock it deletes the sidecar first, then removes only the
+  root-level ``command_allowlist`` key from the raw runtime config and
+  persists it natively (absent-sidecar deletion is a no-op success).
 - Periodic workspace sync holds the same advisory lock around git sync
   plus applying merged sidecars so dashboard writes and sync never race.
 
@@ -54,13 +86,22 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 SCHEMA_VERSION = 1
 SIDECAR_DIR_NAME = "hermes"
 SIDECAR_SUBDIR = "skill-toggles"
 DEFAULT_SIDECAR_NAME = "default.json"
 PROFILES_SUBDIR = "profiles"
+# Command-allowlist sidecar family: <workspace>/hermes/command-allowlist/.
+# Same default/profile layout as the skill-toggle family.
+ALLOWLIST_SIDECAR_SUBDIR = "command-allowlist"
+# One value-free global migration-completion marker (exact filename, strict v1
+# schema). Presence means the one-time legacy runtime import has been finalized
+# for this state history; runtime config must never again be treated as a
+# command-allowlist source. See the migration-marker section below.
+MIGRATION_MARKER_VERSION = 1
+MIGRATION_MARKER_NAME = "migration-v1.json"
 
 # Advisory lock file lives next to the sidecar directory so dashboard
 # writes and the periodic workspace sync never race. Named explicitly to
@@ -195,6 +236,24 @@ def _models_sidecar_path() -> Path:
     return _workspace_root() / SIDECAR_DIR_NAME / MODELS_SIDECAR_NAME
 
 
+def _allowlist_sidecar_root() -> Path:
+    """Return ``<workspace>/hermes/command-allowlist``."""
+    return _workspace_root() / SIDECAR_DIR_NAME / ALLOWLIST_SIDECAR_SUBDIR
+
+
+def _allowlist_default_sidecar_path() -> Path:
+    return _allowlist_sidecar_root() / DEFAULT_SIDECAR_NAME
+
+
+def _allowlist_profiles_sidecar_dir() -> Path:
+    return _allowlist_sidecar_root() / PROFILES_SUBDIR
+
+
+def _migration_marker_path() -> Path:
+    """Return ``<workspace>/hermes/command-allowlist/migration-v1.json``."""
+    return _allowlist_sidecar_root() / MIGRATION_MARKER_NAME
+
+
 def _template_config_path() -> Path:
     """Return the repo template config path (for rollback defaults).
 
@@ -220,10 +279,10 @@ def _canonical_profile_name(name: Optional[str]) -> str:
     return canon
 
 
-def resolve_sidecar_for_hermes_home(hermes_home: Path) -> Path:
-    """Map a ``HERMES_HOME`` directory to its sidecar path.
+def _resolve_state_path_for_hermes_home(hermes_home: Path, sidecar_root: Path) -> Path:
+    """Shared mapping of a ``HERMES_HOME`` directory to its sidecar path.
 
-    Mapping:
+    Mapping (relative to ``sidecar_root``):
       - workspace root (base ``HERMES_HOME``) -> ``default.json``
       - ``<workspace>/profiles/<canonical>`` -> ``profiles/<canonical>.json``
       - any other path -> ``ValueError``
@@ -236,7 +295,7 @@ def resolve_sidecar_for_hermes_home(hermes_home: Path) -> Path:
         raise ValueError(f"Cannot resolve paths: {exc}") from exc
 
     if home_resolved == workspace_resolved:
-        return _default_sidecar_path()
+        return sidecar_root / DEFAULT_SIDECAR_NAME
 
     try:
         rel = home_resolved.relative_to(workspace_resolved / PROFILES_SUBDIR)
@@ -252,7 +311,25 @@ def resolve_sidecar_for_hermes_home(hermes_home: Path) -> Path:
     canonical = parts[0]
     if not _PROFILE_ID_RE.match(canonical):
         raise ValueError(f"Invalid profile id in path {hermes_home}")
-    return _profile_sidecar_path(canonical)
+    return sidecar_root / PROFILES_SUBDIR / f"{canonical}.json"
+
+
+def resolve_sidecar_for_hermes_home(hermes_home: Path) -> Path:
+    """Map a ``HERMES_HOME`` directory to its skill-toggle sidecar path."""
+    return _resolve_state_path_for_hermes_home(hermes_home, _sidecar_root())
+
+
+def resolve_allowlist_sidecar_for_hermes_home(hermes_home: Path) -> Path:
+    """Map a ``HERMES_HOME`` directory to its command-allowlist sidecar path."""
+    return _resolve_state_path_for_hermes_home(hermes_home, _allowlist_sidecar_root())
+
+
+def resolve_allowlist_sidecar_for_profile(profile: Optional[str]) -> Path:
+    """Map a profile name (or None/empty for default) to its allowlist sidecar."""
+    canonical = _canonical_profile_name(profile)
+    if canonical == "default":
+        return _allowlist_default_sidecar_path()
+    return _allowlist_profiles_sidecar_dir() / f"{canonical}.json"
 
 
 def resolve_sidecar_for_profile(profile: Optional[str]) -> Path:
@@ -419,6 +496,259 @@ def deserialize_sidecar(text: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Command-allowlist state (strict v1)
+# ---------------------------------------------------------------------------
+#
+# Sidecar schema (exactly, one line, sorted/deduped non-empty strings):
+#
+#     {"version": 1, "command_allowlist": ["..."]}
+#
+# BOTH keys are required: a document missing ``command_allowlist`` is
+# malformed (rejected), not an implicit empty allowlist. The runtime
+# projection is the ROOT-LEVEL ``command_allowlist`` key. Presence
+# semantics: an explicit empty list is authoritative (the runtime key is
+# kept durably empty) while an ABSENT sidecar removes that key.
+# Validation rejects a wrong version, unknown keys, wrong types, and
+# empty/non-string entries. Error messages and statuses NEVER include
+# allowlist contents. ``_canonical_allowlist_items`` is the single rule
+# source shared by validation, runtime-config extraction, and the
+# canonical text validator reused by workspace_sync.
+
+
+def _canonical_allowlist_items(value: Any) -> List[str]:
+    """Validate and canonicalize a raw allowlist value.
+
+    Strict: must be a list whose entries are all non-empty strings (empty
+    and whitespace-only entries are rejected, not silently dropped).
+    Returns a sorted, deduped list. Raises ``ValueError`` otherwise; error
+    messages identify the offending index but never include the value.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(
+            f"'command_allowlist' must be a list of strings, got {type(value).__name__}"
+        )
+    seen: Set[str] = set()
+    out: List[str] = []
+    for idx, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ValueError(f"command_allowlist[{idx}]: must be a string")
+        if not item.strip():
+            raise ValueError(
+                f"command_allowlist[{idx}]: must be a non-empty string"
+            )
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return sorted(out)
+
+
+def validate_command_allowlist_state(data: Any) -> Dict[str, Any]:
+    """Validate a parsed command-allowlist sidecar against the strict v1 schema.
+
+    Returns the canonical ``{"version": 1, "command_allowlist": [...]}``
+    dict. BOTH keys are required: a document missing ``command_allowlist``
+    is rejected rather than defaulted to empty. Raises ``ValueError`` on
+    any violation (wrong version, missing keys, unknown keys, wrong types,
+    empty/non-string entries) so callers can fail closed and leave the
+    runtime config untouched.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"command-allowlist sidecar root must be an object, got "
+            f"{type(data).__name__}"
+        )
+    version = data.get("version")
+    # Strict integer check (bool is an int subclass and must be rejected).
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != SCHEMA_VERSION
+    ):
+        raise ValueError(
+            f"unsupported command-allowlist sidecar version: {version!r} "
+            f"(expected {SCHEMA_VERSION})"
+        )
+    _reject_unknown_keys(
+        data, {"version", "command_allowlist"}, "command-allowlist sidecar"
+    )
+    if "command_allowlist" not in data:
+        raise ValueError(
+            "command-allowlist sidecar must contain 'command_allowlist'"
+        )
+    raw_items = data["command_allowlist"]
+    if raw_items is None:
+        # Explicit JSON null is a wrong type, not an implicit empty list.
+        raise ValueError(
+            f"'command_allowlist' must be a list of strings, got "
+            f"{type(raw_items).__name__}"
+        )
+    return {
+        "version": SCHEMA_VERSION,
+        "command_allowlist": _canonical_allowlist_items(raw_items),
+    }
+
+
+def serialize_command_allowlist_state(state: Dict[str, Any]) -> str:
+    """Render a command-allowlist state dict as one canonical JSON line."""
+    validated = validate_command_allowlist_state(state)
+    return json.dumps(validated, separators=(",", ":"), ensure_ascii=False)
+
+
+def validate_command_allowlist_state_from_text(text: str) -> Dict[str, Any]:
+    """Parse and validate a command-allowlist sidecar from raw text.
+
+    Canonical single validation entry point, reused by sidecar reads and
+    by workspace_sync so the schema rules are never duplicated.
+    Raises ``ValueError`` on empty content, malformed JSON, or any schema
+    violation. Unlike models.yaml, an empty document is NOT valid: absence
+    semantics are file-level (an absent file removes the runtime key), so
+    an empty file is malformed, not a rollback signal.
+    """
+    if not text or not text.strip():
+        raise ValueError("empty command-allowlist sidecar content")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid command-allowlist sidecar JSON: {exc}") from exc
+    return validate_command_allowlist_state(data)
+
+
+# ---------------------------------------------------------------------------
+# One-time legacy migration-completion marker (strict v1, value-free)
+# ---------------------------------------------------------------------------
+#
+# Marker schema (exactly, one line, no command values / profile names /
+# timestamps / host identifiers or any other mutable metadata):
+#
+#     {"version": 1, "legacy_runtime_import_complete": true}
+#
+# BOTH keys are required and the marker root must contain no other keys. It
+# is monotonic: presence means the one-time legacy runtime import has been
+# finalized for this state history and ``config.yaml`` must never again be
+# treated as a command-allowlist source. It is architecture metadata (safe to
+# ship in the public template) and never holds private state. Errors are
+# structural/value-free.
+
+
+def validate_migration_marker(data: Any) -> Dict[str, Any]:
+    """Validate a parsed migration marker against the strict v1 schema.
+
+    Returns the canonical ``{"version": 1, "legacy_runtime_import_complete":
+    true}`` dict. Both keys are required and no other keys are allowed.
+    Raises ``ValueError`` on any violation (wrong version, missing keys,
+    unknown keys, wrong types) so callers can fail closed. Errors are
+    VALUE-FREE: no marker-controlled value (e.g. a wrong ``version``) and
+    no unknown key NAME is ever included — only fixed schema key names and
+    structural/type-level diagnostics.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"migration marker root must be an object, got {type(data).__name__}"
+        )
+    version = data.get("version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        # Type-level diagnostic only: the marker-controlled value is
+        # never echoed back.
+        raise ValueError(
+            "migration marker version must be an integer "
+            f"(expected {MIGRATION_MARKER_VERSION})"
+        )
+    if version != MIGRATION_MARKER_VERSION:
+        # Value-free: a malformed marker-controlled version must never
+        # appear in the error text.
+        raise ValueError(
+            "unsupported migration marker version "
+            f"(expected {MIGRATION_MARKER_VERSION})"
+        )
+    # Unknown keys are counted, never named: marker-controlled key names
+    # must not flow into validation errors. Deliberately does NOT delegate
+    # to _reject_unknown_keys, which formats the raw key names.
+    extra_keys = set(data.keys()) - {"version", "legacy_runtime_import_complete"}
+    if extra_keys:
+        raise ValueError(
+            f"migration marker: {len(extra_keys)} unknown key(s) present"
+        )
+    if "legacy_runtime_import_complete" not in data:
+        raise ValueError(
+            "migration marker must contain 'legacy_runtime_import_complete'"
+        )
+    if data["legacy_runtime_import_complete"] is not True:
+        raise ValueError(
+            "'legacy_runtime_import_complete' must be exactly true"
+        )
+    return {
+        "version": MIGRATION_MARKER_VERSION,
+        "legacy_runtime_import_complete": True,
+    }
+
+
+def serialize_migration_marker() -> str:
+    """Render the canonical migration-marker JSON as one line."""
+    state = {
+        "version": MIGRATION_MARKER_VERSION,
+        "legacy_runtime_import_complete": True,
+    }
+    return json.dumps(state, separators=(",", ":"), ensure_ascii=False)
+
+
+def validate_command_allowlist_migration_marker_from_text(text: str) -> Dict[str, Any]:
+    """Parse and validate a migration marker from raw text.
+
+    Canonical single validation entry point for the marker. Raises
+    ``ValueError`` on empty content, malformed JSON, or any schema violation.
+    Errors are value-free: no marker-controlled value or unknown key name is
+    ever included (malformed-JSON errors carry position info only).
+    """
+    if not text or not text.strip():
+        raise ValueError("empty migration marker content")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid migration marker JSON: {exc}") from exc
+    return validate_migration_marker(data)
+
+
+# Alias matching the documented W2 workspace_sync import surface.
+validate_migration_marker_from_text = validate_command_allowlist_migration_marker_from_text
+
+
+def read_migration_marker(path: Path) -> Optional[Dict[str, Any]]:
+    """Read and validate the migration marker. ``None`` if the file is absent.
+
+    A present but malformed/unreadable marker raises ``ValueError`` so callers
+    fail closed before template overwrite. Errors are value-free.
+    """
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"cannot read migration marker {path}: {exc}") from exc
+    return validate_migration_marker_from_text(text)
+
+
+def finalize_migration_marker() -> None:
+    """Atomically write the one-time migration-completion marker under the lock.
+
+    Validates the existing marker if present (a malformed present marker is
+    fatal) and otherwise writes the canonical marker atomically. Called by
+    the init script only after every existing default/named profile has been
+    safely examined/migrated and BEFORE the template overwrite. A write
+    failure raises so init aborts. Errors are value-free.
+    """
+    marker_path = _migration_marker_path()
+    with SkillStateLock():
+        # Validate a present marker first; malformed/unreadable is fatal.
+        if marker_path.exists():
+            read_migration_marker(marker_path)
+            return
+        _atomic_write(marker_path, serialize_migration_marker() + "\n")
+
+
+# ---------------------------------------------------------------------------
 # Atomic sidecar I/O
 # ---------------------------------------------------------------------------
 
@@ -476,6 +806,29 @@ def read_sidecar(path: Path) -> Optional[Dict[str, Any]]:
     return deserialize_sidecar(text)
 
 
+def write_command_allowlist_sidecar(path: Path, state: Dict[str, Any]) -> None:
+    """Atomically write a canonical command-allowlist sidecar to ``path``."""
+    _atomic_write(path, serialize_command_allowlist_state(state))
+
+
+def read_command_allowlist_sidecar(path: Path) -> Optional[Dict[str, Any]]:
+    """Read and validate a command-allowlist sidecar. ``None`` if absent.
+
+    Malformed sidecars raise ``ValueError`` so callers can surface a clear
+    error (never containing allowlist contents) and leave the runtime
+    config untouched.
+    """
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(
+            f"cannot read command-allowlist sidecar {path}: {exc}"
+        ) from exc
+    return validate_command_allowlist_state_from_text(text)
+
+
 # ---------------------------------------------------------------------------
 # Config <-> state projection
 # ---------------------------------------------------------------------------
@@ -503,6 +856,46 @@ def config_has_toggle_keys(config: Dict[str, Any]) -> bool:
     """Return True if the config has ``disabled`` or ``platform_disabled`` keys."""
     skills = _skills_section(config)
     return "disabled" in skills or "platform_disabled" in skills
+
+
+def config_has_command_allowlist(config: Dict[str, Any]) -> bool:
+    """Return True if the config has a ROOT-LEVEL ``command_allowlist`` key."""
+    return "command_allowlist" in config
+
+
+def extract_command_allowlist_from_config(config: Dict[str, Any]) -> List[str]:
+    """Project the runtime ROOT-LEVEL ``command_allowlist`` (canonical, strict).
+
+    Raises ``ValueError`` on a malformed runtime value so migration and
+    reconcile fail closed instead of persisting invalid state. Unrelated
+    keys (including the whole ``skills`` section) are never consulted.
+    """
+    return _canonical_allowlist_items(config.get("command_allowlist"))
+
+
+def apply_command_allowlist_to_config(
+    config: Dict[str, Any], items: List[str]
+) -> Dict[str, Any]:
+    """Set the ROOT-LEVEL ``command_allowlist`` preserving every unrelated key.
+
+    An explicit empty list is authoritative: the key is kept with ``[]``
+    so the clear is durable (only an ABSENT sidecar removes the key).
+    Top-level and ``skills`` sibling fields are never touched.
+    """
+    config["command_allowlist"] = list(items)
+    return config
+
+
+def remove_command_allowlist_from_config(config: Dict[str, Any]) -> bool:
+    """Remove the ROOT-LEVEL ``command_allowlist`` (absent-sidecar semantics).
+
+    Returns True if the key was present and removed. Every unrelated
+    top-level and ``skills`` key is preserved.
+    """
+    if "command_allowlist" in config:
+        del config["command_allowlist"]
+        return True
+    return False
 
 
 def apply_state_to_config(
@@ -1167,6 +1560,82 @@ def save_disabled_skills_stateful(
         _native_save_config(config)
 
 
+def save_command_allowlist_stateful(
+    config: Dict[str, Any],
+    commands: List[str],
+) -> None:
+    """Stateful replacement for a raw runtime command-allowlist save.
+
+    ``commands`` must be a REAL list (strict schema input): ``str``,
+    ``tuple``, ``set``, generators, and any other non-list type are
+    rejected BEFORE any sidecar or runtime write. The W2 permanent
+    approval path explicitly converts its set to ``list`` first.
+
+    Validates and canonicalizes ``commands``, sets the ROOT-LEVEL
+    ``config["command_allowlist"]``, then — under one advisory lock shared
+    with the toggle writes and reconcile — atomically writes the allowlist
+    sidecar FIRST and only then invokes the native raw ``save_config``
+    with ``preserve_keys={("command_allowlist",)}`` (pinned upstream
+    signature) so an explicit empty ``[]`` survives upstream persistence
+    (SET path only; the clear path never preserves).
+
+    Failure ordering (fixed, do not redesign):
+      - A state (sidecar) write failure propagates BEFORE the runtime
+        config is touched, so the caller's save fails and runtime state
+        never silently diverges from tracked state.
+      - If the native runtime save fails afterward, the sidecar is
+        already durable; the error propagates and the next reconcile
+        cycle repairs the runtime config from the sidecar.
+    """
+    if not isinstance(commands, list):
+        raise ValueError(
+            "commands must be a real list of strings (str/tuple/set/"
+            "generators are rejected; convert sets with list(...) explicitly)"
+        )
+    if not isinstance(config, dict):
+        raise ValueError("config must be a mapping")
+    items = _canonical_allowlist_items(commands)
+    config["command_allowlist"] = items
+    sidecar = resolve_allowlist_sidecar_for_hermes_home(_active_hermes_home())
+    state = {"version": SCHEMA_VERSION, "command_allowlist": items}
+    with SkillStateLock():
+        write_command_allowlist_sidecar(sidecar, state)
+        _native_save_config(
+            config, preserve_keys=_stateful_allowlist_preserve_keys()
+        )
+
+
+def clear_command_allowlist_stateful(config: Dict[str, Any]) -> None:
+    """Stateful exact-key unset of the runtime command allowlist (W2).
+
+    Under one advisory lock shared with the toggle writes and reconcile:
+    deletes the allowlist sidecar FIRST (an absent sidecar is a no-op
+    success), then removes ONLY the root-level ``command_allowlist`` key
+    from the passed raw config and persists it via the native save helper.
+    Unlike the SET path, NO ``preserve_keys`` argument is passed: the
+    key must be dropped from the saved config.
+
+    Failure ordering (fixed, do not redesign):
+      - A state-deletion failure propagates before the runtime config is
+        persisted, so the clear fails without diverging tracked state.
+      - If the native runtime save fails afterward, the sidecar is
+        already deleted; the error propagates and the next reconcile
+        cycle repairs the runtime config (the absent-sidecar rule removes
+        the key; migration can never resurrect it — non-empty value only,
+        absent sidecar only).
+    """
+    if not isinstance(config, dict):
+        raise ValueError("config must be a mapping")
+    sidecar = resolve_allowlist_sidecar_for_hermes_home(_active_hermes_home())
+    with SkillStateLock():
+        try:
+            sidecar.unlink()
+        except FileNotFoundError:
+            pass
+        remove_command_allowlist_from_config(config)
+        _native_save_config(config)
+
+
 def _active_hermes_home() -> Path:
     """Return the currently active ``HERMES_HOME``.
 
@@ -1182,11 +1651,38 @@ def _active_hermes_home() -> Path:
         return Path(value) if value else _workspace_root()
 
 
-def _native_save_config(config: Dict[str, Any]) -> None:
-    """Invoke the upstream ``save_config`` from ``hermes_cli.config``."""
+def _native_save_config(
+    config: Dict[str, Any],
+    *,
+    preserve_keys: Optional[Set[Tuple[str, ...]]] = None,
+) -> None:
+    """Invoke the upstream ``save_config`` from ``hermes_cli.config``.
+
+    Pinned upstream signature (Hermes v2026.8.18)::
+
+        save_config(config, *, strip_defaults=True,
+                    preserve_keys: Optional[Set[Tuple[str, ...]]] = None,
+                    merge_existing=False)
+
+    ``preserve_keys`` names root-relative key paths (a set of tuples) that
+    upstream ``save_config`` must keep even when they hold default/empty
+    values (it otherwise strips such keys). Only the stateful
+    command-allowlist SET path passes it (``{("command_allowlist",)}``), so
+    an explicit ``command_allowlist: []`` is durably persisted; the UNSET
+    (clear) path and the toggle path never pass it — there the key must be
+    dropped from the saved config / nothing needs preserving.
+    """
     from hermes_cli.config import save_config  # type: ignore
 
+    if preserve_keys is not None:
+        save_config(config, preserve_keys=preserve_keys)
+        return
     save_config(config)
+
+
+def _stateful_allowlist_preserve_keys() -> Set[Tuple[str, ...]]:
+    """Root key paths preserved through the stateful SET persistence path."""
+    return {("command_allowlist",)}
 
 
 # ---------------------------------------------------------------------------
@@ -1223,35 +1719,103 @@ def migrate_existing_toggles_to_absent_sidecars(
     return True
 
 
+def migrate_existing_command_allowlist_to_absent_sidecar(
+    config_path: Path, hermes_home: Path
+) -> bool:
+    """Extract a non-empty runtime command_allowlist into an absent sidecar.
+
+    Used BEFORE the repo template overwrites the runtime config so a
+    pre-feature deployment's allowlist survives the upgrade. Migrates a
+    NON-EMPTY runtime value only: an absent or empty runtime allowlist
+    must NOT create an explicit-empty sidecar (presence is authoritative).
+    Never overwrites an existing sidecar. Returns True if a sidecar was
+    created.
+
+    If the one-time migration marker is present, legacy runtime import has
+    been finalized: this function is a no-op (returns False) so stale
+    runtime values can never resurrect a deliberately deleted sidecar. This
+    is the authoritative marker gate, independent of any caller-level guard.
+    """
+    if read_migration_marker(_migration_marker_path()) is not None:
+        # Legacy import already finalized — never re-read stale runtime state.
+        return False
+    if not config_path.exists():
+        return False
+    config = _load_yaml(config_path)
+    if not config_has_command_allowlist(config):
+        return False
+    items = extract_command_allowlist_from_config(config)
+    if not items:
+        return False
+    sidecar = resolve_allowlist_sidecar_for_hermes_home(hermes_home)
+    if sidecar.exists():
+        # Sidecar already present — never overwrite (e.g. a named profile
+        # that was already migrated, or state that predates this run).
+        return False
+    write_command_allowlist_sidecar(
+        sidecar, {"version": SCHEMA_VERSION, "command_allowlist": items}
+    )
+    return True
+
+
 def apply_sidecar_and_enforce_policy(
     config_path: Path, hermes_home: Path
 ) -> str:
-    """Apply the sidecar for ``hermes_home`` to ``config_path`` and enforce policy.
+    """Apply toggle sidecar + command-allowlist state and enforce policy.
 
-    Preserves all unrelated config keys. Malformed sidecar leaves the
-    config untouched and surfaces a clear error. Returns a short status
-    string for logging.
+    Applies the skill-toggle sidecar when present, applies the
+    command-allowlist state for ``hermes_home``, and enforces the Josemar
+    policy — one config load, one write. Allowlist presence semantics: a
+    present sidecar is authoritative (canonical items written to the
+    ROOT-LEVEL ``command_allowlist`` key); an ABSENT sidecar removes that
+    key while an explicit-empty sidecar keeps it durably empty. Preserves
+    all unrelated top-level and ``skills`` config keys. Malformed sidecars
+    (either family) leave the config untouched and surface a clear error.
+    Returns a short status string for logging that never includes
+    allowlist contents.
     """
     sidecar = resolve_sidecar_for_hermes_home(hermes_home)
+    allowlist_sidecar = resolve_allowlist_sidecar_for_hermes_home(hermes_home)
     config = _load_yaml(config_path) if config_path.exists() else {}
     if not isinstance(config, dict):
         raise ValueError(f"{config_path} does not contain a YAML mapping")
 
+    # Validate both sidecar families fully BEFORE mutating the config
+    # (fail-closed: no partial apply).
     state: Optional[Dict[str, Any]] = None
     if sidecar.exists():
         state = read_sidecar(sidecar)  # raises on malformed
-        apply_state_to_config(config, state)  # type: ignore[arg-type]
+    allowlist_items: Optional[List[str]] = None
+    if allowlist_sidecar.exists():
+        allowlist_state = read_command_allowlist_sidecar(allowlist_sidecar)
+        assert allowlist_state is not None  # sidecar exists; read returns dict
+        allowlist_items = allowlist_state["command_allowlist"]
+
+    if state is not None:
+        apply_state_to_config(config, state)
+
+    # Command-allowlist state application (absent sidecar removes the key).
+    allowlist_suffix = ""
+    if allowlist_items is None:
+        if remove_command_allowlist_from_config(config):
+            allowlist_suffix = "+command-allowlist-removed"
+    else:
+        if config.get("command_allowlist") != allowlist_items:
+            apply_command_allowlist_to_config(config, allowlist_items)
+            allowlist_suffix = "+command-allowlist"
 
     policy_changed = enforce_policy(config)
 
-    if state is None and not policy_changed:
+    if state is None and not policy_changed and not allowlist_suffix:
         return "no-sidecar-no-policy-change"
     _dump_yaml(config_path, config)
     if state is not None and policy_changed:
-        return "applied-sidecar-and-policy"
-    if state is not None:
-        return "applied-sidecar"
-    return "enforced-policy"
+        base = "applied-sidecar-and-policy"
+    elif state is not None:
+        base = "applied-sidecar"
+    else:
+        base = "enforced-policy"
+    return base + allowlist_suffix
 
 
 # ---------------------------------------------------------------------------
@@ -1289,18 +1853,52 @@ def _iter_reconcilable_profiles() -> List[Tuple[str, Path, Path]]:
     return out
 
 
+def _prevalidate_command_allowlist_sidecars_unlocked() -> None:
+    """Validate every present command-allowlist sidecar; raise before writes.
+
+    Fail-closed pre-pass for an apply cycle: every present allowlist
+    sidecar (default + every canonically named profile, including sidecars
+    whose profile config is currently absent) and the migration marker (if
+    present) is fully validated BEFORE any runtime config is written in that
+    cycle, so a malformed sidecar/marker can never produce a partial apply.
+    Must be called while holding :class:`SkillStateLock`. Validation errors
+    never include allowlist contents. Non-canonical filenames are skipped
+    (they cannot map to a reconcilable profile).
+    """
+    marker = _migration_marker_path()
+    if marker.exists():
+        read_migration_marker(marker)  # raises on malformed/unreadable
+    default_sidecar = _allowlist_default_sidecar_path()
+    if default_sidecar.exists():
+        read_command_allowlist_sidecar(default_sidecar)
+    profiles_dir = _allowlist_profiles_sidecar_dir()
+    if profiles_dir.is_dir():
+        for sidecar in sorted(profiles_dir.glob("*.json")):
+            if not _PROFILE_ID_RE.match(sidecar.stem):
+                continue
+            read_command_allowlist_sidecar(sidecar)
+
+
 def _apply_all_sidecars_and_policy_unlocked() -> List[str]:
     """Unlocked internal apply: reconcile every reconcilable profile config.
 
-    For each profile with a ``config.yaml``: apply its sidecar when present
-    and enforce the Josemar policy. Named profiles without a sidecar get
-    policy enforcement alone. Orphan sidecars (no matching config) are
-    reported. Must be called while holding :class:`SkillStateLock` (or
-    inside a critical section that already holds it) to avoid racing with
-    dashboard writes.
+    Fail-closed first: every present command-allowlist sidecar is
+    prevalidated BEFORE any runtime config write in this cycle. Then, for
+    each profile with a ``config.yaml``: apply its toggle sidecar and
+    command-allowlist state when present (an absent allowlist sidecar
+    removes the runtime key) and enforce the Josemar policy. Named
+    profiles without a toggle sidecar still get allowlist reconciliation
+    and policy enforcement. Orphan toggle sidecars (no matching config)
+    are reported. Must be called while holding :class:`SkillStateLock`
+    (or inside a critical section that already holds it) to avoid racing
+    with dashboard writes.
     """
     statuses: List[str] = []
     workspace = _workspace_root()
+    # Fail-closed: validate every present command-allowlist sidecar BEFORE
+    # any runtime config write in this cycle (toggle/policy/models applies
+    # below must never run against unvalidated allowlist state).
+    _prevalidate_command_allowlist_sidecars_unlocked()
     reconciled = {canonical: hermes_home for canonical, hermes_home, _ in _iter_reconcilable_profiles()}
 
     for canonical, hermes_home, config_path in _iter_reconcilable_profiles():
@@ -1423,15 +2021,95 @@ def sync_and_apply(
 def _cli_migrate(args: argparse.Namespace) -> int:
     hermes_home = Path(args.hermes_home) if args.hermes_home else _workspace_root()
     config_path = Path(args.config_path) if args.config_path else hermes_home / "config.yaml"
-    created = migrate_existing_toggles_to_absent_sidecars(config_path, hermes_home)
-    print(f"migrate: {'created' if created else 'no-op'} {config_path}")
+    # Toggle-key migration keeps the historical non-fatal behavior: ANY
+    # ordinary failure (including a sidecar-write OSError) is warned about
+    # and migration continues. KeyboardInterrupt/SystemExit are NOT caught.
+    created = False
+    try:
+        created = migrate_existing_toggles_to_absent_sidecars(config_path, hermes_home)
+    except Exception as exc:  # noqa: BLE001 - ordinary toggle failures are non-fatal
+        print(f"migrate: warning: toggle migration failed: {exc}", file=sys.stderr)
+    # Command-allowlist migration runs INDEPENDENTLY of the toggle path: a
+    # toggle failure must not mask a command-allowlist failure, and a
+    # command-allowlist-safe config with a toggle-only failure must not make
+    # startup unavailable.
+    #
+    # Fail-closed: a command-allowlist migration failure must return nonzero
+    # so the init caller aborts BEFORE the template overwrite (the template
+    # copy would otherwise erase a non-empty pre-feature runtime allowlist).
+    # Error text is sanitized/structural/value-free: it never includes
+    # allowlist contents or raw config/YAML content.
+    #
+    # If the one-time migration marker is present, legacy runtime import is
+    # already finalized: skip it for this profile (the shell gates the whole
+    # loop on marker status, but this keeps the CLI defensively correct).
+    created_allowlist = False
+    try:
+        if read_migration_marker(_migration_marker_path()) is not None:
+            created_allowlist = False
+        else:
+            created_allowlist = migrate_existing_command_allowlist_to_absent_sidecar(
+                config_path, hermes_home
+            )
+    except ValueError as exc:
+        print(
+            f"migrate: error: command-allowlist migration failed: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001 - ordinary failure is fatal, value-free
+        print(
+            f"migrate: error: command-allowlist migration failed: "
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"migrate: {'created' if (created or created_allowlist) else 'no-op'} {config_path}"
+    )
+    return 0
+
+
+def _cli_marker_present(args: argparse.Namespace) -> int:
+    """Exit 0 if the one-time migration marker is present and valid.
+
+    A malformed/unreadable present marker is fatal (exit 2) so the init
+    script fails closed before template overwrite. Exit 1 means the marker
+    is absent (legacy runtime import still pending).
+    """
+    try:
+        present = read_migration_marker(_migration_marker_path()) is not None
+    except ValueError as exc:
+        print(f"marker-present: error: {exc}", file=sys.stderr)
+        return 2
+    return 0 if present else 1
+
+
+def _cli_finalize_migration_marker(args: argparse.Namespace) -> int:
+    """Write/validate the one-time migration-completion marker (fatal on error)."""
+    try:
+        finalize_migration_marker()
+    except ValueError as exc:
+        print(f"finalize-migration-marker: error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        # A marker write failure must be a clean fatal (nonzero) so the
+        # init caller aborts BEFORE the template overwrite; never leak
+        # allowlist contents (the marker holds none).
+        print(f"finalize-migration-marker: error: {exc}", file=sys.stderr)
+        return 2
+    print(f"finalize-migration-marker: {'created' if _migration_marker_path().exists() else 'present'}")
     return 0
 
 
 def _cli_apply(args: argparse.Namespace) -> int:
     hermes_home = Path(args.hermes_home) if args.hermes_home else _workspace_root()
     config_path = Path(args.config_path) if args.config_path else hermes_home / "config.yaml"
-    status = apply_sidecar_and_enforce_policy(config_path, hermes_home)
+    # Stateful runtime-write invariant: this one-profile reconcile mutates
+    # the runtime config, so it holds the same shared advisory lock as
+    # apply-all, sync-and-apply, and the dashboard stateful writes.
+    with SkillStateLock():
+        status = apply_sidecar_and_enforce_policy(config_path, hermes_home)
     print(f"apply: {status} {config_path}")
     return 0
 
@@ -1574,15 +2252,30 @@ def build_cli() -> argparse.ArgumentParser:
 
     p_migrate = sub.add_parser(
         "migrate",
-        help="Extract existing toggle keys into an absent sidecar (init pre-overwrite).",
+        help="Extract existing toggle/allowlist keys into absent sidecars (init pre-overwrite).",
     )
     p_migrate.add_argument("--hermes-home", default=None)
     p_migrate.add_argument("--config-path", default=None)
     p_migrate.set_defaults(func=_cli_migrate)
 
+    p_marker_present = sub.add_parser(
+        "marker-present",
+        help="Exit 0 if the migration marker is present+valid; 1 absent; 2 malformed.",
+    )
+    p_marker_present.set_defaults(func=_cli_marker_present)
+
+    p_finalize = sub.add_parser(
+        "finalize-migration-marker",
+        help="Write/validate the one-time migration marker (init pre-overwrite).",
+    )
+    p_finalize.set_defaults(func=_cli_finalize_migration_marker)
+
     p_apply = sub.add_parser(
         "apply",
-        help="Apply a sidecar + policy to a single profile config (init post-sync).",
+        help=(
+            "Apply toggle sidecar, command-allowlist state, and policy for "
+            "one profile config (under the shared lock)."
+        ),
     )
     p_apply.add_argument("--hermes-home", default=None)
     p_apply.add_argument("--config-path", default=None)

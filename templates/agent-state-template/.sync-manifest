@@ -36,3 +36,23 @@ hermes/skill-toggles/profiles/*.json
 # changes are validated before sync commit; invalid files are rejected.
 # Dashboard model changes are not source of truth.
 hermes/models.yaml
+
+# Josemar state-owned Hermes runtime command allowlist sidecars. Same
+# default/profile layout as the skill toggles: default.json mirrors the
+# workspace root and profiles/*.json mirrors named profiles. Presence is
+# authoritative: an explicit [] keeps the runtime root-level
+# command_allowlist key durably empty while an absent sidecar removes
+# that key. Sidecars are validated by workspace-sync before staging,
+# before every push, and before remote merge (fail-closed); deletion is
+# a valid rollback path. Nothing else under hermes/ is versioned — the
+# full config.yaml is never tracked.
+hermes/command-allowlist/default.json
+hermes/command-allowlist/profiles/*.json
+
+# Josemar value-free command-allowlist migration-completion marker.
+# Architecture metadata only (no allowlist values). Monotonic: once the
+# marker exists in state-repo history it must never be removed —
+# workspace-sync rejects working-copy deletion, manually committed
+# deletion before push, and remote-candidate deletion before merge.
+# Allowlist sidecar deletion is unaffected.
+hermes/command-allowlist/migration-v1.json

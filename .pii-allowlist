@@ -8,6 +8,11 @@
 # patch; its numeric run is provenance, not a personal phone number.
 scripts/patch-hermes-browser-routing\.py:\d+:phone:9388[3]84012:.*e624e9fde561e1add9388[3]84012b295fde669ade
 
+# Pinned Hermes v2026.8.18 upstream commit used by the issue #151 W2 command-
+# allowlist patch; its numeric run is provenance, not a personal phone number.
+scripts/patch-hermes-command-allowlist\.py:\d+:phone:9388[3]84012:.*e624e9fde561e1add9388[3]84012b295fde669ade
+tests/skill_state/test_command_allowlist_patch\.py:\d+:phone:9388[3]84012:.*e624e9fde561e1add9388[3]84012b295fde669ade
+
 agent@josemar\.local
 token@github\.com
 YOUR_GATEWAY_AUTH_PASSWORD@your-domain\.com

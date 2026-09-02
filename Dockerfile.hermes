@@ -258,6 +258,22 @@ RUN python3 /tmp/patch-hermes-browser-routing.py \
         /opt/hermes/model_tools.py \
     && rm /tmp/patch-hermes-browser-routing.py
 
+# Josemar state-backed command-allowlist runtime wiring (issue #151, W2):
+# route the permanent-approval save and the CLI config set/unset of the exact
+# root key ``command_allowlist`` through the same stateful helper baked above
+# (josemar_skill_state.py), which atomically writes the canonical JSON sidecar
+# before the native runtime config. Fail-loud like the other patchers: the
+# script raises if any upstream anchor is missing, on accidental second apply,
+# or if the patched modules fail py_compile. The helper is compile-checked here
+# too so an import/syntax break fails the build loudly.
+COPY scripts/patch-hermes-command-allowlist.py /tmp/patch-hermes-command-allowlist.py
+RUN python3 /tmp/patch-hermes-command-allowlist.py \
+    && /opt/hermes/.venv/bin/python3 -m py_compile \
+        /opt/hermes/tools/approval.py \
+        /opt/hermes/hermes_cli/config.py \
+        /opt/hermes/hermes_cli/josemar_skill_state.py \
+    && rm /tmp/patch-hermes-command-allowlist.py
+
 COPY --from=gogcli-builder /build/bin/gog /usr/local/bin/gog
 RUN chmod +x /usr/local/bin/gog
 
