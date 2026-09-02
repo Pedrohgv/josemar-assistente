@@ -35,6 +35,7 @@ Contract under test:
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -709,6 +710,670 @@ class AllowlistMigrateCliTests(WorkspaceTestCase):
 
 
 # ---------------------------------------------------------------------------
+# One-time migration marker (strict v1, value-free, monotonic)
+# ---------------------------------------------------------------------------
+
+
+class MigrationMarkerSchemaTests(unittest.TestCase):
+    """validate_migration_marker: exact schema, value-free errors."""
+
+    def setUp(self) -> None:
+        self.m = _load_helper()
+
+    def test_valid_marker(self) -> None:
+        result = self.m.validate_migration_marker(
+            {"version": 1, "legacy_runtime_import_complete": True}
+        )
+        self.assertEqual(
+            result, {"version": 1, "legacy_runtime_import_complete": True}
+        )
+
+    def test_rejects_missing_version(self) -> None:
+        with self.assertRaises(ValueError):
+            self.m.validate_migration_marker({"legacy_runtime_import_complete": True})
+
+    def test_rejects_wrong_version(self) -> None:
+        with self.assertRaises(ValueError) as cm:
+            self.m.validate_migration_marker(
+                {"version": 2, "legacy_runtime_import_complete": True}
+            )
+        self.assertIn("unsupported", str(cm.exception))
+
+    def test_rejects_bool_version(self) -> None:
+        with self.assertRaises(ValueError):
+            self.m.validate_migration_marker(
+                {"version": True, "legacy_runtime_import_complete": True}
+            )
+
+    def test_rejects_string_version(self) -> None:
+        with self.assertRaises(ValueError):
+            self.m.validate_migration_marker(
+                {"version": "1", "legacy_runtime_import_complete": True}
+            )
+
+    def test_rejects_missing_complete_key(self) -> None:
+        with self.assertRaises(ValueError):
+            self.m.validate_migration_marker({"version": 1})
+
+    def test_rejects_complete_not_true(self) -> None:
+        for bad in (False, 1, "yes", None, []):
+            with self.assertRaises(ValueError):
+                self.m.validate_migration_marker(
+                    {"version": 1, "legacy_runtime_import_complete": bad}
+                )
+
+    def test_rejects_unknown_keys(self) -> None:
+        with self.assertRaises(ValueError):
+            self.m.validate_migration_marker(
+                {
+                    "version": 1,
+                    "legacy_runtime_import_complete": True,
+                    "bogus": 1,
+                }
+            )
+
+    def test_rejects_non_mapping_root(self) -> None:
+        with self.assertRaises(ValueError):
+            self.m.validate_migration_marker([1])
+
+    def test_rejects_command_values_present(self) -> None:
+        # The marker must be value-free: an attempt to carry command values
+        # is a schema violation (unknown keys).
+        with self.assertRaises(ValueError):
+            self.m.validate_migration_marker(
+                {
+                    "version": 1,
+                    "legacy_runtime_import_complete": True,
+                    "command_allowlist": ["a"],
+                }
+            )
+
+    def test_wrong_version_error_never_contains_marker_value(self) -> None:
+        # Secret-like (and other malformed) wrong versions must be rejected
+        # fail-closed WITHOUT ever being echoed into the error text.
+        secret = "TOPSECRET-marker-version"
+        bad_versions: list = [
+            secret,
+            999,
+            "2",
+            True,
+            1.5,
+            ["2"],
+            {"v": 2},
+            None,  # missing version key
+        ]
+        for bad in bad_versions:
+            with self.subTest(bad_type=type(bad).__name__):
+                doc: dict = {"legacy_runtime_import_complete": True}
+                if bad is not None:
+                    doc["version"] = bad
+                with self.assertRaises(ValueError) as cm:
+                    self.m.validate_migration_marker(doc)
+                message = str(cm.exception)
+                self.assertNotIn(secret, message)
+                # Structural diagnostic retained (fixed schema key name).
+                self.assertIn("version", message)
+
+    def test_unknown_key_error_never_contains_key_name(self) -> None:
+        # Unknown marker keys are counted, never named: a secret-like key
+        # name (or value) must be rejected fail-closed without appearing
+        # in the error.
+        secret_key = "TOPSECRET-key-name"
+        with self.assertRaises(ValueError) as cm:
+            self.m.validate_migration_marker(
+                {
+                    "version": 1,
+                    "legacy_runtime_import_complete": True,
+                    secret_key: "TOPSECRET-value",
+                }
+            )
+        message = str(cm.exception)
+        # Structural diagnostic retained, but the raw key is never named.
+        self.assertIn("unknown key", message)
+        self.assertNotIn(secret_key, message)
+        self.assertNotIn("TOPSECRET-value", message)
+
+    def test_combined_malformed_marker_is_value_free(self) -> None:
+        # Wrong version AND an unknown secret key: still fail-closed, and
+        # neither marker-controlled string appears in the error.
+        secret_version = "TOPSECRET-version-9"
+        secret_key = "TOPSECRET-key-name"
+        with self.assertRaises(ValueError) as cm:
+            self.m.validate_migration_marker(
+                {
+                    "version": secret_version,
+                    "legacy_runtime_import_complete": True,
+                    secret_key: 1,
+                }
+            )
+        message = str(cm.exception)
+        self.assertNotIn(secret_version, message)
+        self.assertNotIn(secret_key, message)
+
+    def test_text_validator_error_is_value_free(self) -> None:
+        # Sync-facing text entry point (W2 import surface): well-formed
+        # JSON with a secret-like wrong version must be rejected without
+        # leaking the value.
+        secret = "TOPSECRET-text-version"
+        text = json.dumps(
+            {"version": secret, "legacy_runtime_import_complete": True}
+        )
+        with self.assertRaises(ValueError) as cm:
+            self.m.validate_migration_marker_from_text(text)
+        message = str(cm.exception)
+        self.assertNotIn(secret, message)
+        # Structural diagnostic retained (fixed schema key name).
+        self.assertIn("version", message)
+
+    def test_canonical_line_is_exact(self) -> None:
+        line = self.m.serialize_migration_marker()
+        self.assertEqual(
+            line, '{"version":1,"legacy_runtime_import_complete":true}'
+        )
+        self.assertEqual(line.count("\n"), 0)
+
+
+class MigrationMarkerIOTests(WorkspaceTestCase):
+    """read/finalize marker behavior."""
+
+    def _marker(self) -> Path:
+        return self.workspace / "hermes" / "command-allowlist" / "migration-v1.json"
+
+    def test_read_absent_returns_none(self) -> None:
+        self.assertIsNone(self.m.read_migration_marker(self._marker()))
+
+    def test_read_valid(self) -> None:
+        self._marker().parent.mkdir(parents=True, exist_ok=True)
+        self._marker().write_text(
+            '{"version":1,"legacy_runtime_import_complete":true}\n', encoding="utf-8"
+        )
+        state = self.m.read_migration_marker(self._marker())
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(
+            state, {"version": 1, "legacy_runtime_import_complete": True}
+        )
+
+    def test_read_malformed_raises(self) -> None:
+        self._marker().parent.mkdir(parents=True, exist_ok=True)
+        self._marker().write_text("{not json", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.m.read_migration_marker(self._marker())
+
+    def test_read_unreadable_raises(self) -> None:
+        self._marker().parent.mkdir(parents=True, exist_ok=True)
+        self._marker().write_text('{"version":1,"legacy_runtime_import_complete":true}\n', encoding="utf-8")
+        with mock.patch.object(Path, "read_text", side_effect=OSError("unreadable")):
+            with self.assertRaises(ValueError):
+                self.m.read_migration_marker(self._marker())
+
+    def test_finalize_writes_canonical_marker(self) -> None:
+        self.m.finalize_migration_marker()
+        self.assertEqual(
+            self._marker().read_text(encoding="utf-8"),
+            '{"version":1,"legacy_runtime_import_complete":true}\n',
+        )
+
+    def test_finalize_uses_shared_lock(self) -> None:
+        self.m.finalize_migration_marker()
+        lock_file = (
+            self.workspace / "hermes" / "skill-toggles" / ".skill-toggles.lock"
+        )
+        self.assertTrue(lock_file.exists())
+
+    def test_finalize_validates_present_marker(self) -> None:
+        # A malformed present marker is fatal, not silently overwritten.
+        self._marker().parent.mkdir(parents=True, exist_ok=True)
+        self._marker().write_text("{broken", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.m.finalize_migration_marker()
+        # Original (malformed) content untouched by the failed finalize.
+        self.assertEqual(self._marker().read_text(encoding="utf-8"), "{broken")
+
+    def test_finalize_write_failure_raises(self) -> None:
+        with mock.patch.object(
+            self.m, "_atomic_write", side_effect=OSError("disk full")
+        ):
+            with self.assertRaises(OSError):
+                self.m.finalize_migration_marker()
+        self.assertFalse(self._marker().exists())
+
+
+class MigrationMarkerCliTests(WorkspaceTestCase):
+    """marker-present / finalize-migration-marker CLI subcommands."""
+
+    def _marker(self) -> Path:
+        return self.workspace / "hermes" / "command-allowlist" / "migration-v1.json"
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess:
+        env = os.environ.copy()
+        env["WORKSPACE_DIR"] = str(self.workspace)
+        return subprocess.run(
+            [sys.executable, str(HELPER_PATH), *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_marker_present_exit_one_when_absent(self) -> None:
+        proc = self._run("marker-present")
+        self.assertEqual(proc.returncode, 1)
+
+    def test_marker_present_exit_zero_when_valid(self) -> None:
+        self._marker().parent.mkdir(parents=True, exist_ok=True)
+        self._marker().write_text(
+            '{"version":1,"legacy_runtime_import_complete":true}\n', encoding="utf-8"
+        )
+        proc = self._run("marker-present")
+        self.assertEqual(proc.returncode, 0)
+
+    def test_marker_present_malformed_exit_two(self) -> None:
+        self._marker().parent.mkdir(parents=True, exist_ok=True)
+        self._marker().write_text("{bad", encoding="utf-8")
+        proc = self._run("marker-present")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("error:", proc.stderr)
+
+    def test_marker_present_wrong_version_value_free_stderr(self) -> None:
+        # Fail-closed CLI path: a well-formed marker with a secret-like
+        # wrong version exits 2 and the value never reaches stderr/stdout.
+        secret = "TOPSECRET-cli-version"
+        self._marker().parent.mkdir(parents=True, exist_ok=True)
+        self._marker().write_text(
+            json.dumps(
+                {"version": secret, "legacy_runtime_import_complete": True}
+            ),
+            encoding="utf-8",
+        )
+        proc = self._run("marker-present")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("error:", proc.stderr)
+        self.assertNotIn(secret, proc.stderr)
+        self.assertNotIn(secret, proc.stdout)
+
+    def test_marker_present_unknown_key_value_free_stderr(self) -> None:
+        # Unknown marker keys are rejected without naming them on stderr.
+        secret_key = "TOPSECRET-cli-key"
+        self._marker().parent.mkdir(parents=True, exist_ok=True)
+        self._marker().write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "legacy_runtime_import_complete": True,
+                    secret_key: 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        proc = self._run("marker-present")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("error:", proc.stderr)
+        self.assertNotIn(secret_key, proc.stderr)
+        self.assertNotIn(secret_key, proc.stdout)
+
+    def test_finalize_malformed_marker_value_free_stderr(self) -> None:
+        # finalize-migration-marker on a schema-violating present marker
+        # exits 2 (fatal before template overwrite) and never echoes
+        # marker-controlled data.
+        secret = "TOPSECRET-finalize-version"
+        secret_key = "TOPSECRET-finalize-key"
+        self._marker().parent.mkdir(parents=True, exist_ok=True)
+        self._marker().write_text(
+            json.dumps(
+                {
+                    "version": secret,
+                    "legacy_runtime_import_complete": True,
+                    secret_key: 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        proc = self._run("finalize-migration-marker")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("error:", proc.stderr)
+        self.assertNotIn(secret, proc.stderr)
+        self.assertNotIn(secret_key, proc.stderr)
+
+    def test_finalize_creates_marker_exit_zero(self) -> None:
+        proc = self._run("finalize-migration-marker")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(self._marker().exists())
+
+    def test_finalize_malformed_present_marker_exit_two(self) -> None:
+        self._marker().parent.mkdir(parents=True, exist_ok=True)
+        self._marker().write_text("{bad", encoding="utf-8")
+        proc = self._run("finalize-migration-marker")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("error:", proc.stderr)
+
+    def test_finalize_write_failure_exit_two_clean_fatal(self) -> None:
+        # A marker WRITE failure (OSError) is a clean fatal exit 2 (no
+        # traceback), so the init caller aborts BEFORE the template
+        # overwrite, and no marker is left behind.
+        with mock.patch.object(
+            self.m, "_atomic_write", side_effect=OSError("disk full")
+        ):
+            rc = self.m.main(["finalize-migration-marker"])
+        self.assertEqual(rc, 2)
+        self.assertFalse(self._marker().exists())
+
+
+# ---------------------------------------------------------------------------
+# Marker lifecycle: first upgrade migration + marker gating (W1)
+# ---------------------------------------------------------------------------
+
+
+@_requires_yaml
+class MarkerLifecycleTests(WorkspaceTestCase):
+    """First-upgrade migration and marker-gated skip semantics."""
+
+    def _marker(self) -> Path:
+        return self.workspace / "hermes" / "command-allowlist" / "migration-v1.json"
+
+    def test_first_upgrade_migrates_and_creates_marker(self) -> None:
+        # Default + named profile both carry a non-empty runtime allowlist.
+        self._write_config("config.yaml", "command_allowlist: ['d1', 'd2']\n")
+        profile_home = self.workspace / "profiles" / "coder"
+        (profile_home / "config.yaml").parent.mkdir(parents=True)
+        (profile_home / "config.yaml").write_text(
+            "command_allowlist: ['c1']\n", encoding="utf-8"
+        )
+        # Simulate the init flow: migrate default, migrate profile, finalize.
+        self.m.migrate_existing_command_allowlist_to_absent_sidecar(
+            self.workspace / "config.yaml", self.workspace
+        )
+        self.m.migrate_existing_command_allowlist_to_absent_sidecar(
+            profile_home / "config.yaml", profile_home
+        )
+        # Marker is finalized ONLY after all profiles are migrated.
+        self.assertFalse(self._marker().exists())
+        self.m.finalize_migration_marker()
+        self.assertTrue(self._marker().exists())
+        default_state = self.m.read_command_allowlist_sidecar(
+            self._allowlist_sidecar()
+        )
+        assert default_state is not None
+        self.assertEqual(default_state["command_allowlist"], ["d1", "d2"])
+        coder_state = self.m.read_command_allowlist_sidecar(
+            self._allowlist_sidecar("coder")
+        )
+        assert coder_state is not None
+        self.assertEqual(coder_state["command_allowlist"], ["c1"])
+
+    def test_no_legacy_values_still_finalizes_marker(self) -> None:
+        self._write_config("config.yaml", "model:\n  default: x\n")
+        self.m.finalize_migration_marker()
+        self.assertTrue(self._marker().exists())
+        # No sidecars were invented.
+        self.assertFalse(self._allowlist_sidecar().exists())
+
+    def test_partial_first_migration_retry_is_idempotent(self) -> None:
+        # Default migrates successfully; profile finalize not yet reached.
+        self._write_config("config.yaml", "command_allowlist: ['d1']\n")
+        profile_home = self.workspace / "profiles" / "coder"
+        (profile_home / "config.yaml").parent.mkdir(parents=True)
+        (profile_home / "config.yaml").write_text(
+            "command_allowlist: ['c1']\n", encoding="utf-8"
+        )
+        # First attempt: default migrated, marker NOT finalized (e.g. crash).
+        self.m.migrate_existing_command_allowlist_to_absent_sidecar(
+            self.workspace / "config.yaml", self.workspace
+        )
+        # Retry: existing sidecars are never overwritten.
+        created_default = (
+            self.m.migrate_existing_command_allowlist_to_absent_sidecar(
+                self.workspace / "config.yaml", self.workspace
+            )
+        )
+        self.assertFalse(created_default)
+        state = self.m.read_command_allowlist_sidecar(self._allowlist_sidecar())
+        assert state is not None
+        self.assertEqual(state["command_allowlist"], ["d1"])
+        # Now complete the profile + finalize.
+        self.m.migrate_existing_command_allowlist_to_absent_sidecar(
+            profile_home / "config.yaml", profile_home
+        )
+        self.m.finalize_migration_marker()
+        self.assertTrue(self._marker().exists())
+
+    def test_marker_present_skips_runtime_import(self) -> None:
+        # Stale runtime values that were deliberately cleared must not be
+        # re-imported once the marker is present (R1 resurrection guard).
+        self._write_config("config.yaml", "command_allowlist: ['stale']\n")
+        self.m.finalize_migration_marker()
+        created = self.m.migrate_existing_command_allowlist_to_absent_sidecar(
+            self.workspace / "config.yaml", self.workspace
+        )
+        self.assertFalse(created)
+        self.assertFalse(self._allowlist_sidecar().exists())
+
+    def test_malformed_present_marker_is_fatal(self) -> None:
+        # A malformed marker must abort migration before overwrite.
+        self._marker().parent.mkdir(parents=True, exist_ok=True)
+        self._marker().write_text("{broken", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.m.finalize_migration_marker()
+
+    def test_marker_never_removed_by_clear(self) -> None:
+        # clear_command_allowlist_stateful must never delete the marker.
+        self._write_allowlist(["legacy"])
+        self.m.finalize_migration_marker()
+        config: dict = {"command_allowlist": ["legacy"]}
+        with mock.patch.object(self.m, "_native_save_config"):
+            self.m.clear_command_allowlist_stateful(config)
+        self.assertTrue(self._marker().exists())
+        self.assertFalse(self._allowlist_sidecar().exists())
+
+
+# ---------------------------------------------------------------------------
+# R1 exact regression: clear -> native save failure -> restart -> reconcile
+# ---------------------------------------------------------------------------
+
+
+@_requires_yaml
+class R1RestartRegressionTests(WorkspaceTestCase):
+    """Exact-order R1 sequence with the marker present."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.environ["HERMES_HOME"] = str(self.workspace)
+        # Capture stderr so value-free assertions can inspect CLI output.
+        self._stderr = io.StringIO()
+        self._orig_stderr = sys.stderr
+        sys.stderr = self._stderr
+        self.addCleanup(self._restore_stderr)
+
+    def _restore_stderr(self) -> None:
+        sys.stderr = self._orig_stderr
+
+    @property
+    def m_capture(self) -> str:
+        return self._stderr.getvalue()
+
+    def _marker(self) -> Path:
+        return self.workspace / "hermes" / "command-allowlist" / "migration-v1.json"
+
+    def test_marker_prevents_resurrection_across_restart(self) -> None:
+        # Initial durable state: sidecar present with a value, marker present
+        # (post-feature history). The runtime config holds a matching value.
+        self._write_allowlist(["approved-cmd"])
+        self._write_config(
+            "config.yaml", "command_allowlist: ['approved-cmd']\n"
+        )
+        self.m.finalize_migration_marker()
+
+        # 1) User clears via W2: sidecar deleted first.
+        config = self._load_config(self.workspace / "config.yaml")
+        # 2) Native runtime save FAILS after the sidecar deletion.
+        def failing_native_save(cfg: dict, **kwargs) -> None:
+            raise RuntimeError("native save failed")
+
+        with mock.patch.object(
+            self.m, "_native_save_config", side_effect=failing_native_save
+        ):
+            with self.assertRaises(RuntimeError):
+                self.m.clear_command_allowlist_stateful(config)
+        # Sidecar already deleted, but the stale runtime key remains in the
+        # persisted config (the failed native save left the file untouched).
+        self.assertFalse(self._allowlist_sidecar().exists())
+        stale_cfg = self._load_config(self.workspace / "config.yaml")
+        self.assertIn("command_allowlist", stale_cfg)
+
+        # 3) Simulated immediate restart: legacy migration runs. The marker
+        #    is present, so runtime import is SKIPPED — the stale key must
+        #    never resurrect the deleted sidecar.
+        rc = self.m.main(["migrate", "--hermes-home", str(self.workspace)])
+        self.assertEqual(rc, 0)
+        self.assertFalse(self._allowlist_sidecar().exists())
+
+        # 4) Template/apply reconciliation removes the stale runtime key
+        #    (absent-sidecar rule) and the deleted sidecar stays absent.
+        self._write_config(
+            "config.yaml", "command_allowlist: ['stale']\nmodel:\n  default: x\n"
+        )
+        statuses = self.m.apply_all_sidecars_and_policy()
+        self.assertTrue(any(s.startswith("default:") for s in statuses))
+        cfg = self._load_config(self.workspace / "config.yaml")
+        self.assertNotIn("command_allowlist", cfg)
+        self.assertFalse(self._allowlist_sidecar().exists())
+        self.assertTrue(self._marker().exists())
+
+    def test_remote_sidecar_deletion_stays_absent_across_restart(self) -> None:
+        # A remotely deleted sidecar (absent here) plus a stale runtime key
+        # with the marker present must not be re-imported on restart.
+        self.m.finalize_migration_marker()
+        self._write_config(
+            "config.yaml", "command_allowlist: ['stale-remote']\n"
+        )
+        rc = self.m.main(["migrate", "--hermes-home", str(self.workspace)])
+        self.assertEqual(rc, 0)
+        self.assertFalse(self._allowlist_sidecar().exists())
+        # Reconcile removes the stale runtime key.
+        self.m.apply_all_sidecars_and_policy()
+        cfg = self._load_config(self.workspace / "config.yaml")
+        self.assertNotIn("command_allowlist", cfg)
+        self.assertTrue(self._marker().exists())
+
+
+# ---------------------------------------------------------------------------
+# R2: toggle failures warn-and-continue; command migration independently fatal
+# ---------------------------------------------------------------------------
+
+
+@_requires_yaml
+class R2ToggleCommandMigrationTests(WorkspaceTestCase):
+    """Toggle OSError warns + continues; command migration failures fatal."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Capture stderr so value-free assertions can inspect CLI output.
+        self._stderr = io.StringIO()
+        self._orig_stderr = sys.stderr
+        sys.stderr = self._stderr
+        self.addCleanup(self._restore_stderr)
+
+    def _restore_stderr(self) -> None:
+        sys.stderr = self._orig_stderr
+
+    @property
+    def m_capture(self) -> str:
+        return self._stderr.getvalue()
+
+    def _run_cli(self, *args: str) -> subprocess.CompletedProcess:
+        env = os.environ.copy()
+        env["WORKSPACE_DIR"] = str(self.workspace)
+        return subprocess.run(
+            [sys.executable, str(HELPER_PATH), "migrate", *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_toggle_sidecar_oserror_warns_and_exit_zero(self) -> None:
+        # A valid config with NO command allowlist and a toggle write OSError
+        # must warn and proceed (exit 0): startup stays available.
+        self._write_config("config.yaml", "skills:\n  disabled: ['d']\n")
+        with mock.patch.object(
+            self.m, "write_sidecar", side_effect=OSError("permission denied")
+        ):
+            proc = self.m.main(
+                ["migrate", "--hermes-home", str(self.workspace)]
+            )
+        self.assertEqual(proc, 0)
+        self.assertFalse(self._allowlist_sidecar().exists())
+
+    def test_toggle_sidecar_oserror_no_allowlist_exit_zero_subprocess(self) -> None:
+        # End-to-end: a config with toggle keys but NO command allowlist
+        # migrates the toggle sidecar and exits 0; no allowlist sidecar is
+        # ever created.
+        self._write_config("config.yaml", "skills:\n  disabled: ['d']\n")
+        proc = self._run_cli("--hermes-home", str(self.workspace))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(self._allowlist_sidecar().exists())
+        self.assertTrue(
+            (self.workspace / "hermes" / "skill-toggles" / "default.json").exists()
+        )
+
+    def test_command_migration_unreadable_config_is_fatal_value_free(self) -> None:
+        self._write_config("config.yaml", "command_allowlist: ['SECRET']\n")
+        with mock.patch.object(
+            self.m,
+            "migrate_existing_command_allowlist_to_absent_sidecar",
+            side_effect=OSError("unreadable config"),
+        ):
+            proc = self.m.main(
+                ["migrate", "--hermes-home", str(self.workspace)]
+            )
+        self.assertEqual(proc, 1)
+        # Value-free: the secret command must not leak into stderr.
+        self.assertNotIn("SECRET", self.m_capture)
+
+    def test_command_migration_malformed_fatal(self) -> None:
+        self._write_config("config.yaml", "command_allowlist: ['a', 5]\n")
+        proc = self._run_cli("--hermes-home", str(self.workspace))
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("command-allowlist migration failed", proc.stderr)
+        self.assertFalse(self._allowlist_sidecar().exists())
+
+    def test_command_migration_oserror_fatal(self) -> None:
+        # An ordinary non-ValueError command failure must be fatal and
+        # sanitized (type-only, value-free).
+        self._write_config("config.yaml", "command_allowlist: ['TOPSECRET-cmd']\n")
+        with mock.patch.object(
+            self.m,
+            "migrate_existing_command_allowlist_to_absent_sidecar",
+            side_effect=OSError("disk failure"),
+        ):
+            proc = self.m.main(
+                ["migrate", "--hermes-home", str(self.workspace)]
+            )
+        self.assertEqual(proc, 1)
+        self.assertIn("command-allowlist migration failed", self.m_capture)
+        self.assertNotIn("TOPSECRET-cmd", self.m_capture)
+
+    def test_toggle_failure_does_not_mask_command_failure(self) -> None:
+        # A toggle failure alone must not make a command-safe config fatal,
+        # and a command failure must be fatal even if toggle also fails.
+        self._write_config("config.yaml", "command_allowlist: ['a']\n")
+        with mock.patch.object(
+            self.m,
+            "migrate_existing_toggles_to_absent_sidecars",
+            side_effect=OSError("toggle write failed"),
+        ), mock.patch.object(
+            self.m,
+            "migrate_existing_command_allowlist_to_absent_sidecar",
+            side_effect=OSError("command write failed"),
+        ):
+            proc = self.m.main(
+                ["migrate", "--hermes-home", str(self.workspace)]
+            )
+        self.assertEqual(proc, 1)
+        self.assertIn("command-allowlist migration failed", self.m_capture)
+
+
+# ---------------------------------------------------------------------------
 # W2 stateful helper surface (save + clear)
 # ---------------------------------------------------------------------------
 
@@ -1183,6 +1848,93 @@ class AllowlistReconcileTests(WorkspaceTestCase):
             original_coder,
         )
 
+    def test_apply_all_validates_present_marker_before_any_config_write(self) -> None:
+        # The migration marker is part of the fail-closed prevalidation
+        # pass: a malformed present marker must fail the whole apply cycle
+        # BEFORE any runtime config mutation, even when every sidecar is
+        # absent (the marker is validated by itself).
+        default_cfg = self._write_config(
+            "config.yaml",
+            "command_allowlist: ['stale']\n"
+            "skills:\n  creation_nudge_interval: 15\nmemory:\n  nudge_interval: 10\n",
+        )
+        original = default_cfg.read_text(encoding="utf-8")
+        marker = (
+            self.workspace / "hermes" / "command-allowlist" / "migration-v1.json"
+        )
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("{broken", encoding="utf-8")
+
+        with self.assertRaises(ValueError):
+            self.m.apply_all_sidecars_and_policy()
+
+        # No runtime config mutation (the stale key would otherwise be
+        # removed by the absent-sidecar rule).
+        self.assertEqual(default_cfg.read_text(encoding="utf-8"), original)
+        # The marker itself is never repaired or rewritten by apply-all.
+        self.assertEqual(marker.read_text(encoding="utf-8"), "{broken")
+
+    def test_apply_all_malformed_marker_error_is_value_free(self) -> None:
+        # The prevalidation pass validates the marker BEFORE any config
+        # write; a marker with secret-like data fails the cycle fail-closed
+        # and value-free.
+        secret_version = "TOPSECRET-sync-version"
+        secret_key = "TOPSECRET-sync-key"
+        default_cfg = self._write_config(
+            "config.yaml", "command_allowlist: ['stale']\n"
+        )
+        marker = (
+            self.workspace / "hermes" / "command-allowlist" / "migration-v1.json"
+        )
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps(
+                {
+                    "version": secret_version,
+                    "legacy_runtime_import_complete": True,
+                    secret_key: 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        original = default_cfg.read_text(encoding="utf-8")
+
+        with self.assertRaises(ValueError) as cm:
+            self.m.apply_all_sidecars_and_policy()
+        message = str(cm.exception)
+        self.assertNotIn(secret_version, message)
+        self.assertNotIn(secret_key, message)
+        # Fail-closed: no runtime config mutation happened.
+        self.assertEqual(default_cfg.read_text(encoding="utf-8"), original)
+
+    def test_sync_and_apply_malformed_marker_error_is_value_free(self) -> None:
+        # End-to-end cron surface: the apply-failure status derived from
+        # the marker exception must not carry marker-controlled data.
+        secret = "TOPSECRET-cron-version"
+        self._write_config("config.yaml", "command_allowlist: ['stale']\n")
+        marker = (
+            self.workspace / "hermes" / "command-allowlist" / "migration-v1.json"
+        )
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps(
+                {"version": secret, "legacy_runtime_import_complete": True}
+            ),
+            encoding="utf-8",
+        )
+        script = self.workspace / "fake-sync.sh"
+        script.write_text("#!/bin/sh\necho SYNC_OK\n", encoding="utf-8")
+        script.chmod(0o755)
+        exit_status, statuses, output = self.m.sync_and_apply([str(script)])
+        self.assertNotEqual(exit_status, 0)
+        self.assertTrue(any("apply:error:" in s for s in statuses))
+        joined = " ".join(statuses) + output
+        self.assertNotIn(secret, joined)
+        # Fail-closed: the stale runtime key was NOT removed (no partial
+        # apply happened).
+        cfg = self._load_config(self.workspace / "config.yaml")
+        self.assertIn("command_allowlist", cfg)
+
     def test_apply_all_applies_allowlist_state(self) -> None:
         self._write_config(
             "config.yaml",
@@ -1629,6 +2381,7 @@ class AllowlistInitFailClosedBehavioralTests(unittest.TestCase):
         workspace: Path,
         helper_path: str,
         source_config: Path,
+        state_python: str | None = None,
     ) -> Path:
         fn = self._extract_functions(
             ["command_allowlist_state_present", "migrate_existing_toggles"], tmpdir
@@ -1642,7 +2395,7 @@ HERMES_HOME="{workspace}"
 RUNTIME_CONFIG="{workspace}/config.yaml"
 SOURCE_CONFIG="{source_config}"
 JOSEMAR_SKILL_STATE="{helper_path}"
-JOSEMAR_STATE_PYTHON="{sys.executable}"
+JOSEMAR_STATE_PYTHON="{state_python if state_python is not None else sys.executable}"
 log() {{ echo "[init-test] $1"; }}
 . "{fn}"
 migrate_existing_toggles || exit 1
@@ -1736,6 +2489,7 @@ echo "TEMPLATE_COPIED"
         *,
         workspace: Path,
         helper_path: str,
+        state_python: str | None = None,
     ) -> Path:
         fn = self._extract_functions(
             ["command_allowlist_state_present", "migrate_existing_toggles"],
@@ -1749,7 +2503,7 @@ WORKSPACE_DIR="{workspace}"
 HERMES_HOME="{workspace}"
 RUNTIME_CONFIG="{workspace}/config.yaml"
 JOSEMAR_SKILL_STATE="{helper_path}"
-JOSEMAR_STATE_PYTHON="{sys.executable}"
+JOSEMAR_STATE_PYTHON="{state_python if state_python is not None else sys.executable}"
 log() {{ echo "[init-test] $1"; }}
 . "{fn}"
 migrate_existing_toggles || exit 1
@@ -1818,6 +2572,41 @@ echo "MIGRATE_CONTINUED"
             self.assertIn("MIGRATE_CONTINUED", proc.stdout)
             self.assertIn("skipping toggle migration", proc.stdout)
 
+    def test_marker_present_rc2_is_fatal_in_shell_gate(self) -> None:
+        # Regression: marker-present exit 2 (malformed/unreadable marker)
+        # must be treated as FATAL by the shell gate itself. "$?" inside
+        # "if ! cmd; then" is always 0, so the gate must capture the status
+        # via "|| marker_rc=$?". A stub helper whose marker-present exits 2
+        # must abort BEFORE the template overwrite even though the runtime
+        # config would migrate cleanly.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+            (workspace / "config.yaml").write_text(
+                "command_allowlist: ['a']\n", encoding="utf-8"
+            )
+            stub_python = Path(tmp) / "stub-marker-fatal-python.sh"
+            stub_python.write_text(
+                '#!/bin/sh\n'
+                '# Mimics: python <helper> <subcommand> ... ($1=helper, $2=subcommand)\n'
+                'if [ "$2" = "marker-present" ]; then exit 2; fi\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            stub_python.chmod(0o755)
+            wrapper = self._write_gate_wrapper(
+                tmp,
+                workspace=workspace,
+                helper_path=str(HELPER_PATH),
+                state_python=str(stub_python),
+            )
+            proc = subprocess.run(
+                ["sh", str(wrapper)], capture_output=True, text=True, check=False
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertNotIn("MIGRATE_CONTINUED", proc.stdout)
+            self.assertIn("malformed/unreadable", proc.stdout)
+
     def test_apply_helper_missing_with_state_fails_closed(self) -> None:
         fn = None
         with tempfile.TemporaryDirectory() as tmp:
@@ -1875,6 +2664,93 @@ echo "APPLY_CONTINUED"
             )
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertIn("APPLY_CONTINUED", proc.stdout)
+
+    def test_marker_finalized_before_template_overwrite(self) -> None:
+        # First-upgrade: non-empty default allowlist migrates, then the
+        # marker is finalized BEFORE the template is copied over the runtime.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+            (workspace / "config.yaml").write_text(
+                "command_allowlist: ['b', 'a']\n", encoding="utf-8"
+            )
+            template = Path(tmp) / "template.yaml"
+            template.write_text("model:\n  default: template\n", encoding="utf-8")
+            wrapper = self._write_migrate_wrapper(
+                tmp, workspace=workspace, helper_path=str(HELPER_PATH),
+                source_config=template,
+            )
+            proc = subprocess.run(
+                ["sh", str(wrapper)], capture_output=True, text=True, check=False
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("TEMPLATE_COPIED", proc.stdout)
+            marker = (
+                workspace / "hermes" / "command-allowlist" / "migration-v1.json"
+            )
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"),
+                '{"version":1,"legacy_runtime_import_complete":true}\n',
+            )
+
+    def test_marker_present_skips_runtime_import_all_profiles(self) -> None:
+        # Post-feature restart with a present marker: stale runtime values
+        # must NOT create sidecars; migration proceeds straight to template.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+            # A deliberately cleared allowlist leaves a stale runtime key.
+            (workspace / "config.yaml").write_text(
+                "command_allowlist: ['stale']\n", encoding="utf-8"
+            )
+            marker_dir = workspace / "hermes" / "command-allowlist"
+            marker_dir.mkdir(parents=True)
+            (marker_dir / "migration-v1.json").write_text(
+                '{"version":1,"legacy_runtime_import_complete":true}\n',
+                encoding="utf-8",
+            )
+            template = Path(tmp) / "template.yaml"
+            template.write_text("model:\n  default: template\n", encoding="utf-8")
+            wrapper = self._write_migrate_wrapper(
+                tmp, workspace=workspace, helper_path=str(HELPER_PATH),
+                source_config=template,
+            )
+            proc = subprocess.run(
+                ["sh", str(wrapper)], capture_output=True, text=True, check=False
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("TEMPLATE_COPIED", proc.stdout)
+            # No sidecar was resurrected from the stale runtime value.
+            self.assertFalse(
+                (marker_dir / "default.json").exists()
+            )
+            # The marker is still present (validated, not rewritten).
+            self.assertTrue((marker_dir / "migration-v1.json").exists())
+
+    def test_malformed_marker_is_fatal_before_template_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+            (workspace / "config.yaml").write_text(
+                "model:\n  default: x\n", encoding="utf-8"
+            )
+            marker_dir = workspace / "hermes" / "command-allowlist"
+            marker_dir.mkdir(parents=True)
+            (marker_dir / "migration-v1.json").write_text(
+                "{broken", encoding="utf-8"
+            )
+            template = Path(tmp) / "template.yaml"
+            template.write_text("model:\n  default: template\n", encoding="utf-8")
+            wrapper = self._write_migrate_wrapper(
+                tmp, workspace=workspace, helper_path=str(HELPER_PATH),
+                source_config=template,
+            )
+            proc = subprocess.run(
+                ["sh", str(wrapper)], capture_output=True, text=True, check=False
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertNotIn("TEMPLATE_COPIED", proc.stdout)
+            self.assertIn("ERROR", proc.stdout)
 
 
 if __name__ == "__main__":

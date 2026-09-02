@@ -149,6 +149,19 @@ ALLOWLIST_SIDECAR_REL_DIR = "hermes/command-allowlist"
 ALLOWLIST_DEFAULT_REL = "hermes/command-allowlist/default.json"
 ALLOWLIST_PROFILES_REL_DIR = "hermes/command-allowlist/profiles"
 
+# Value-free command-allowlist migration-completion marker (plan v2).
+# Architecture metadata only: exactly
+# ``{"version":1,"legacy_runtime_import_complete":true}``. Monotonic
+# durable state — once the marker exists in reachable state-repo history
+# it must never be removed: working-copy deletion (when HEAD has it),
+# a HEAD that removes it (before push), and a remote candidate that
+# removes it (before merge) are all rejected. A history that never
+# contained the marker is valid (first upgrade); normal merge semantics
+# retain a local first-time marker addition. Allowlist-sidecar deletion
+# is unaffected. Content is validated by the canonical helper marker
+# validator at the same three boundaries as the sidecars.
+ALLOWLIST_MARKER_REL = "hermes/command-allowlist/migration-v1.json"
+
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -442,15 +455,19 @@ def _checked_push(refspec: str) -> subprocess.CompletedProcess[str]:
 
     Does NOT raise on failure — caller checks returncode.
 
-    Push gate (issue #151): validates HEAD-committed command-allowlist
-    sidecars BEFORE the push. Every push path in this module goes through
-    this helper, so committed allowlist state is always gated at the
-    source — including commits made by other paths (manual ``git
-    commit``, lifecycle auto-commit). Fail-closed: raises SyncError
-    (nonzero) when HEAD carries an invalid sidecar; HEAD absence is
-    valid.
+    Push gate (issue #151 / plan v2): validates HEAD-committed
+    command-allowlist sidecars BEFORE the push, plus the migration
+    marker (content when present, and the monotonic gate: a HEAD that
+    removes a marker previously contained in reachable history must not
+    push). Every push path in this module goes through this helper, so
+    committed allowlist state is always gated at the source — including
+    commits made by other paths (manual ``git commit``, lifecycle
+    auto-commit). Fail-closed: raises SyncError (nonzero) when HEAD
+    carries an invalid sidecar/marker or removes the marker; absence of
+    sidecars is valid and a markerless history is valid.
     """
     _validate_head_command_allowlist_state()
+    _validate_head_command_allowlist_marker()
     _sanitize_origin()
     origin_url = _get_clean_remote_url()
     git_env = _make_git_env(origin_url)
@@ -699,6 +716,28 @@ def _load_command_allowlist_validator():
     if module is None:
         return None
     return getattr(module, "validate_command_allowlist_state_from_text", None)
+
+
+def _load_command_allowlist_marker_validator():
+    """Import the canonical migration-marker text validator from the helper.
+
+    Documented expected W1 public API (plan v2):
+    ``validate_command_allowlist_migration_marker_from_text(text)`` parses
+    and validates the exact marker schema
+    ``{"version":1,"legacy_runtime_import_complete":true}`` and raises
+    ``ValueError`` with structural, value-free messages on any malformed
+    input. Returns ``None`` if the helper is unavailable or does not
+    provide the validator yet. Callers MUST treat ``None`` as fail-closed
+    when the marker is present (INTEGRATION DEPENDENCY: until W1 lands
+    this validator, any state carrying the marker fails sync closed).
+    Marker absence remains valid regardless.
+    """
+    module = _load_skill_state_module()
+    if module is None:
+        return None
+    return getattr(
+        module, "validate_command_allowlist_migration_marker_from_text", None
+    )
 
 
 def _validate_models_yaml_text(text: str) -> None:
@@ -990,6 +1029,158 @@ def _validate_remote_command_allowlist_state(
     _validate_command_allowlist_entries(entries)
 
 
+# ---------------------------------------------------------------------------
+# command-allowlist migration marker — value-free monotonic state (plan v2)
+# ---------------------------------------------------------------------------
+
+
+def _validate_command_allowlist_marker_text(rel: str, text: str) -> None:
+    """Validate marker content with the canonical helper marker validator.
+
+    Fail-closed: when the marker is present, a missing/unusable helper is
+    an error, never a skip. Errors are structural (path + shape) and
+    never echo marker or allowlist values.
+    """
+    validator = _load_command_allowlist_marker_validator()
+    if validator is None:
+        raise SyncError(
+            "command-allowlist migration marker validation required but the "
+            "josemar_skill_state helper is unavailable (JOSEMAR_SKILL_STATE "
+            "path missing, unreadable, or lacking the canonical marker "
+            "validator)"
+        )
+    try:
+        validator(text)
+    except ValueError as exc:
+        raise SyncError(
+            f"command-allowlist migration marker validation failed for {rel}: "
+            f"{exc}"
+        ) from exc
+
+
+def _history_contains_path(rev: str, rel: str) -> bool:
+    """True if any commit reachable from ``rev`` touches ``rel``.
+
+    Used for the marker's history-aware monotonicity gate only. Fail-closed:
+    an unresolvable/failing history query raises SyncError rather than
+    reporting "no history".
+    """
+    proc = _git(
+        "rev-list", "-n", "1", rev, "--", rel, cwd=WORKSPACE_DIR, check=False
+    )
+    if proc.returncode != 0:
+        raise SyncError(
+            f"cannot inspect history of {rev} for {rel}: {proc.stderr.strip()}"
+        )
+    return bool(proc.stdout.strip())
+
+
+def _head_has_path(rel: str) -> bool | None:
+    """Return True/False when ``HEAD`` carries ``rel``, None if no HEAD.
+
+    ``None`` (fresh workspace, no commits yet) means the marker gates are
+    trivially satisfied — there is no committed state to lose.
+    """
+    if not _rev_parse("HEAD"):
+        return None
+    proc = _git(
+        "cat-file", "-e", f"HEAD:{rel}", cwd=WORKSPACE_DIR, check=False
+    )
+    return proc.returncode == 0
+
+
+def _validate_local_command_allowlist_marker() -> None:
+    """Validate the local migration marker before staging/commit.
+
+    Monotonicity (plan v2): a working-copy deletion is rejected iff
+    committed HEAD contains the marker. First-time addition (marker
+    present, HEAD without it) and unchanged presence are valid; present
+    content is always validated with the canonical helper (fail-closed).
+    Marker absence with no committed marker is valid and needs no helper.
+    """
+    marker_path = WORKSPACE_DIR / ALLOWLIST_MARKER_REL
+    local_has = marker_path.is_file()
+    head_has = _head_has_path(ALLOWLIST_MARKER_REL)
+    if head_has is None:
+        # No HEAD yet: nothing committed to delete; only content applies.
+        head_has = False
+    if head_has and not local_has:
+        raise SyncError(
+            "command-allowlist migration marker deletion rejected: the marker "
+            f"is committed at HEAD and must remain present ({ALLOWLIST_MARKER_REL})"
+        )
+    if local_has:
+        _validate_command_allowlist_marker_text(
+            ALLOWLIST_MARKER_REL, marker_path.read_text(encoding="utf-8")
+        )
+
+
+def _validate_head_command_allowlist_marker() -> None:
+    """Validate the committed marker before every push.
+
+    Content gate: a marker carried by HEAD is validated with the
+    canonical helper (covers commits made by other paths). Monotonicity
+    gate: a HEAD that no longer carries the marker is invalid when the
+    reachable state-repo history previously contained it (manually
+    committed deletion) and must not push. A history that never contained
+    the marker is valid (first upgrade).
+    """
+    head_has = _head_has_path(ALLOWLIST_MARKER_REL)
+    if head_has is None:
+        return
+    if head_has:
+        proc = _git(
+            "show", f"HEAD:{ALLOWLIST_MARKER_REL}", cwd=WORKSPACE_DIR, check=False
+        )
+        if proc.returncode != 0:
+            raise SyncError(
+                f"cannot read committed command-allowlist migration marker "
+                f"{ALLOWLIST_MARKER_REL} from HEAD"
+            )
+        _validate_command_allowlist_marker_text(ALLOWLIST_MARKER_REL, proc.stdout)
+        return
+    if _history_contains_path("HEAD", ALLOWLIST_MARKER_REL):
+        raise SyncError(
+            "command-allowlist migration marker deletion rejected: reachable "
+            f"history contains {ALLOWLIST_MARKER_REL}; a commit that removes "
+            "it must not be pushed"
+        )
+
+
+def _validate_remote_command_allowlist_marker(
+    remote_ref: str, remote_paths: list[str]
+) -> None:
+    """Validate the candidate remote marker before merge/acceptance.
+
+    Content gate: a marker on the remote candidate is validated with the
+    canonical helper. Monotonicity gate: a remote candidate that no longer
+    carries the marker is rejected when the remote history previously
+    contained it. A remote history that never contained the marker is
+    valid (first upgrade/old remote) — normal merge semantics then retain
+    a local first-time marker addition; no remote-wins deletion is
+    implemented. Remote absence with markerless history is valid.
+    """
+    remote_has = ALLOWLIST_MARKER_REL in remote_paths
+    if remote_has:
+        proc = _git(
+            "show", f"{remote_ref}:{ALLOWLIST_MARKER_REL}",
+            cwd=WORKSPACE_DIR, check=False,
+        )
+        if proc.returncode != 0:
+            raise SyncError(
+                f"cannot read remote command-allowlist migration marker "
+                f"{ALLOWLIST_MARKER_REL} from {remote_ref}"
+            )
+        _validate_command_allowlist_marker_text(ALLOWLIST_MARKER_REL, proc.stdout)
+        return
+    if _history_contains_path(remote_ref, ALLOWLIST_MARKER_REL):
+        raise SyncError(
+            "command-allowlist migration marker deletion rejected: remote "
+            f"history contains {ALLOWLIST_MARKER_REL}; a remote candidate "
+            "that removes it must not be merged"
+        )
+
+
 def _stage_manifest_files() -> None:
     if not MANIFEST_PATH.exists():
         _warn("No .sync-manifest found, skipping selective staging")
@@ -1004,6 +1195,12 @@ def _stage_manifest_files() -> None:
     # working copy unchanged with nothing staged. Absence/deletion is
     # valid and requires no helper.
     _validate_local_command_allowlist_state()
+    # Validate the command-allowlist migration marker (plan v2): content
+    # when present, plus the monotonic working-copy deletion gate
+    # (deletion rejected iff HEAD contains the marker). Fail-closed:
+    # raises SyncError (nonzero) with nothing staged. First-time addition
+    # and marker absence are valid.
+    _validate_local_command_allowlist_marker()
     _register_user_skill_files()
     validated = _validate_manifest()
     _git("add", "-A", "--", ".gitignore", ".sync-manifest", cwd=WORKSPACE_DIR, check=False)
@@ -1042,9 +1239,12 @@ def _assert_remote_tree_safe(remote_ref: str) -> None:
     Also validates the candidate remote ``hermes/models.yaml`` content
     using the canonical helper so invalid/malformed/secret model state is
     rejected before merge (fail-closed: nonzero, working/runtime config
-    unchanged), and the candidate remote command-allowlist sidecars
-    (issue #151) so invalid/malformed allowlist state is rejected before
-    merge/acceptance; remote absence (deletion) is valid for both.
+    unchanged), the candidate remote command-allowlist sidecars
+    (issue #151) so invalid/malformed/noncanonically named allowlist
+    state is rejected before merge/acceptance, and the candidate remote
+    migration marker (plan v2: content plus monotonic remote-deletion
+    gate); remote absence (deletion) is valid for sidecars, and a
+    markerless remote history is valid for the marker.
 
     Fail-closed: if ``git ls-tree`` fails for a ref that is expected to
     exist after a successful fetch, raises SyncError (not RemoteTreeError)
@@ -1072,6 +1272,12 @@ def _assert_remote_tree_safe(remote_ref: str) -> None:
     # remote allowlist state is rejected before the merge; remote absence
     # (deletion) is valid.
     _validate_remote_command_allowlist_state(remote_ref, paths)
+    # Validate the candidate remote migration marker (plan v2): content
+    # when present, plus the monotonic gate — a remote candidate that
+    # removes a marker previously contained in the remote history must
+    # not merge. A remote history that never contained the marker is
+    # valid; the merge then retains a local first-time marker.
+    _validate_remote_command_allowlist_marker(remote_ref, paths)
 
 
 # ---------------------------------------------------------------------------

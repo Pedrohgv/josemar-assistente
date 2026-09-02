@@ -1,7 +1,8 @@
-"""Focused tests for workspace-sync command-allowlist state gating (issue #151 W3).
+"""Focused tests for workspace-sync command-allowlist state gating (issue #151).
 
 These tests exercise the workspace-sync ingress/egress validation for the
-state-owned Hermes runtime command-allowlist sidecars added in W1:
+state-owned Hermes runtime command-allowlist sidecars and the value-free
+migration-completion marker:
 
 - Every present sidecar (``hermes/command-allowlist/default.json`` plus
   ``hermes/command-allowlist/profiles/*.json``) is validated with the
@@ -13,13 +14,31 @@ state-owned Hermes runtime command-allowlist sidecars added in W1:
   helper ``_PROFILE_ID_RE`` contract): noncanonical filenames are
   rejected value-free at every ingress — the manifest wildcard enumerates
   the family, it never authorizes noncanonical filenames.
-- Absence/deletion is always valid and needs no helper.
+- The migration marker (``hermes/command-allowlist/migration-v1.json``,
+  exactly ``{"version":1,"legacy_runtime_import_complete":true}``) is
+  validated at the same three boundaries and is MONOTONIC, history-aware:
+  initial first-time addition is valid; working-copy deletion is rejected
+  iff HEAD contains the marker; a manually committed deletion is blocked
+  before push when reachable history previously contained the marker; a
+  remote candidate deletion is rejected when the remote history previously
+  contained it; a remote history that never contained the marker is valid
+  and the merge must retain a local first-time marker. Normal sidecar
+  deletion remains valid.
+- Absence (sidecars; marker with markerless history) is always valid and
+  needs no helper.
 - A missing/unusable helper with present state fails closed.
-- Error output never contains allowlist values.
-- Manifest/gitignore/template ownership stays narrow: the exact
-  ``default.json`` entry plus the sanctioned ``profiles/*.json`` wildcard;
-  broader forms, ``config.yaml``, arbitrary json, and lock/temp files stay
-  rejected/ignored. The template ships no allowlist sidecar.
+- Error output never contains allowlist values or marker/allowlist values.
+- Manifest/gitignore/template ownership stays narrow: the exact marker,
+  ``default.json``, and the sanctioned ``profiles/*.json`` wildcard; only
+  the profiles entry is a wildcard; broader forms, ``config.yaml``,
+  arbitrary json, and lock/temp files stay rejected/ignored. The template
+  ships ONLY the value-free marker — no sidecar values.
+
+The canonical marker validator
+(``validate_command_allowlist_migration_marker_from_text``) is W1's
+public API in ``scripts/josemar_skill_state.py``; these tests always run
+the sync tool against that real helper — schema rules are never
+duplicated or stubbed here.
 
 All tests use local bare remotes and temp git workspaces; no network. All
 command values used here are generic synthetic samples, never real user
@@ -50,20 +69,26 @@ HELPER_PATH = REPO_ROOT / "scripts" / "josemar_skill_state.py"
 TEMPLATE_DIR = REPO_ROOT / "templates" / "agent-state-template"
 TEMPLATE_MANIFEST = TEMPLATE_DIR / ".sync-manifest"
 TEMPLATE_GITIGNORE = TEMPLATE_DIR / ".gitignore"
+TEMPLATE_MARKER = TEMPLATE_DIR / "hermes" / "command-allowlist" / "migration-v1.json"
 
 FAMILY_DIR = "hermes/command-allowlist"
 FAMILY_DEFAULT = "hermes/command-allowlist/default.json"
 FAMILY_PROFILES = "hermes/command-allowlist/profiles"
+FAMILY_MARKER = "hermes/command-allowlist/migration-v1.json"
 
 # Exact deny-by-default unignore chain required for the family (parents
-# first, then the exact sidecar shapes).
+# first, then the exact admitted shapes: marker, default, profiles glob).
 FAMILY_GITIGNORE_CHAIN = (
     "!hermes/",
     "!hermes/command-allowlist/",
     "!hermes/command-allowlist/default.json",
+    "!hermes/command-allowlist/migration-v1.json",
     "!hermes/command-allowlist/profiles/",
     "!hermes/command-allowlist/profiles/*.json",
 )
+
+# Exact value-free migration marker document (plan v2).
+MARKER_TEXT = '{"version":1,"legacy_runtime_import_complete":true}'
 
 # Generic synthetic allowlist values (never real user patterns).
 SAMPLE_ITEMS = ["sample-cmd-alpha", "sample-cmd-beta"]
@@ -72,6 +97,15 @@ SAMPLE_ITEMS = ["sample-cmd-alpha", "sample-cmd-beta"]
 INVALID_MISSING_KEY = '{"version":1}'
 INVALID_MALFORMED = "{not json"
 INVALID_EMPTY = ""
+
+# Malformed marker variants (wrong shape/value/type — all rejected).
+INVALID_MARKERS = (
+    "{not json",
+    '{"version":1}',
+    '{"version":1,"legacy_runtime_import_complete":false}',
+    '{"version":2,"legacy_runtime_import_complete":true}',
+    '{"version":1,"legacy_runtime_import_complete":true,"extra":1}',
+)
 
 
 def _load_helper():
@@ -108,7 +142,12 @@ VALID_SIDECAR_TEXT = HELPER.serialize_command_allowlist_state(
 
 
 class _CommandAllowlistSyncTest(GitEnvIsolation, unittest.TestCase):
-    """Base: WorkspaceRepo fixture, temp-dir cleanup, script runners."""
+    """Base: WorkspaceRepo fixture, temp-dir cleanup, script runners.
+
+    Runs the sync tool against the REAL canonical helper
+    (``scripts/josemar_skill_state.py``), so sidecar and marker
+    validation always exercise genuine W1 code.
+    """
 
     def setUp(self) -> None:
         self._isolate_git_environment()
@@ -126,7 +165,7 @@ class _CommandAllowlistSyncTest(GitEnvIsolation, unittest.TestCase):
         self._extra_temp_dirs.append(td)
         return td.name
 
-    # -- sidecar writers --
+    # -- sidecar/marker writers --
 
     def _sidecar_path(self, profile: str | None = None) -> Path:
         if profile in (None, "default"):
@@ -152,10 +191,20 @@ class _CommandAllowlistSyncTest(GitEnvIsolation, unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
+    def _marker_path(self) -> Path:
+        return Path(self.repo.workspace) / FAMILY_MARKER
+
+    def _write_marker(self, text: str = MARKER_TEXT) -> Path:
+        path = self._marker_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text + "\n", encoding="utf-8")
+        return path
+
     # -- ownership helpers (manifest + gitignore chain) --
 
     def _allow_family_in_workspace(self) -> None:
-        """Append the exact unignore chain and the exact manifest entries."""
+        """Append the exact unignore chain and the exact manifest entries
+        (sidecars + marker), mirroring the shipped template contract."""
         gitignore = Path(self.repo.workspace) / ".gitignore"
         existing = gitignore.read_text(encoding="utf-8")
         lines = existing.rstrip("\n").splitlines()
@@ -165,7 +214,9 @@ class _CommandAllowlistSyncTest(GitEnvIsolation, unittest.TestCase):
         gitignore.write_text("\n".join(lines) + "\n", encoding="utf-8")
         manifest = Path(self.repo.workspace) / ".sync-manifest"
         with manifest.open("a", encoding="utf-8") as fh:
-            fh.write(f"{FAMILY_DEFAULT}\n{FAMILY_PROFILES}/*.json\n")
+            fh.write(
+                f"{FAMILY_DEFAULT}\n{FAMILY_PROFILES}/*.json\n{FAMILY_MARKER}\n"
+            )
 
     # -- runners --
 
@@ -230,6 +281,24 @@ class _CommandAllowlistSyncTest(GitEnvIsolation, unittest.TestCase):
         self.repo.git(["add", "-f", rel])
         self.repo.git(["commit", "--amend", "--no-edit"])
 
+    def _advance_remote_deleting(self, relative_path: str) -> None:
+        """Advance the bare remote with an independent commit that deletes
+        ``relative_path`` (simulates a remote-authored deletion)."""
+        clone_dir = self._mk_temp_dir()
+        _run = subprocess.run
+        _run(["git", "clone", "-q", self.repo.remote, clone_dir], check=True,
+             capture_output=True, text=True)
+        _run(["git", "-C", clone_dir, "rm", "-q", relative_path], check=True,
+             capture_output=True, text=True)
+        _run(["git", "-C", clone_dir, "commit", "-qm", "remote deletes marker"],
+             check=True, capture_output=True, text=True)
+        _run(["git", "-C", clone_dir, "push", "-q", "origin", "HEAD:main"],
+             check=True, capture_output=True, text=True)
+
+    def _head_has(self, rel: str) -> bool:
+        proc = self.repo.git_check(["cat-file", "-e", f"HEAD:{rel}"])
+        return proc.returncode == 0
+
 
 # ---------------------------------------------------------------------------
 # Template ownership contract (no git required)
@@ -238,24 +307,37 @@ class _CommandAllowlistSyncTest(GitEnvIsolation, unittest.TestCase):
 
 class TemplateOwnershipContractTests(unittest.TestCase):
     """Narrow template ownership: exact manifest entries, exact gitignore
-    chain, and NO shipped allowlist sidecar."""
+    chain, and a template that ships ONLY the value-free migration marker
+    (no sidecar values)."""
 
-    def test_template_ships_no_allowlist_sidecar(self) -> None:
-        """The template must not ship any command-allowlist sidecar/directory."""
+    def test_template_ships_exact_marker_only(self) -> None:
+        """The template family directory carries exactly the migration
+        marker with the exact value-free document — no sidecar values."""
+        self.assertTrue(
+            TEMPLATE_MARKER.exists(),
+            "template must ship hermes/command-allowlist/migration-v1.json "
+            "with the exact value-free marker document",
+        )
+        self.assertEqual(
+            MARKER_TEXT + "\n", TEMPLATE_MARKER.read_text(encoding="utf-8")
+        )
         family = TEMPLATE_DIR / "hermes" / "command-allowlist"
-        self.assertFalse(
-            family.exists(),
-            "template must not ship a command-allowlist sidecar; absence is "
-            "the default (an absent sidecar removes the runtime key)",
+        self.assertEqual(
+            {"migration-v1.json"},
+            {entry.name for entry in family.iterdir()},
+            "template must ship only the marker — no default.json, no "
+            "profiles/, no allowlist values",
         )
 
     def test_template_manifest_family_entries_exact(self) -> None:
-        """Manifest carries exactly the default entry + the sanctioned wildcard."""
+        """Manifest carries exactly the marker, the default entry, and the
+        sanctioned profiles wildcard."""
         lines = [
             line.strip()
             for line in TEMPLATE_MANIFEST.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.strip().startswith("#")
         ]
+        self.assertIn(FAMILY_MARKER, lines)
         self.assertIn(FAMILY_DEFAULT, lines)
         self.assertIn(f"{FAMILY_PROFILES}/*.json", lines)
         for broader in (
@@ -687,6 +769,257 @@ class RemoteAcceptanceValidationTests(_CommandAllowlistSyncTest):
         """A remote that never carried sidecars passes acceptance."""
         result = self._run_lifecycle("startup")
         self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_old_remote_history_without_marker_is_valid_and_merge_retains_local_marker(
+        self,
+    ) -> None:
+        """A remote whose reachable history never contained the marker is
+        valid; merging it must retain the local first-time marker, and the
+        merged result pushes."""
+        # Local first-time marker commit (unpushed; remote has no marker).
+        self._allow_family_in_workspace()
+        self._write_marker()
+        result = self._run_tool({"action": "commit", "message": "first marker"})
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        # Remote advances independently — its history never had the marker.
+        self.repo._advance_remote_with_file("notes/remote.md", "from-remote\n")
+        self.repo.git(["fetch", "origin"])
+
+        result = self._run_lifecycle("periodic")
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        # The local first-time marker survived the remote-wins merge.
+        self.assertTrue(self._marker_path().exists())
+        self.assertEqual(
+            MARKER_TEXT + "\n", self._marker_path().read_text(encoding="utf-8")
+        )
+        self.assertTrue(self._head_has(FAMILY_MARKER))
+        # Periodic pushed the merged result: remote now tracks both.
+        self.repo.assert_remote_tracks_file(FAMILY_MARKER, MARKER_TEXT + "\n")
+        self.repo.assert_remote_tracks_file("notes/remote.md", "from-remote\n")
+
+
+# ---------------------------------------------------------------------------
+# Migration marker (plan v2): content validation + monotonicity
+# ---------------------------------------------------------------------------
+
+
+class MarkerStagingValidationTests(_CommandAllowlistSyncTest):
+    """Marker content validation and working-copy monotonicity at staging."""
+
+    def test_first_time_marker_addition_commits_and_pushes(self) -> None:
+        """Initial first-time marker addition is valid end to end."""
+        self._init_bare_remote_with_initial_push()
+        self._allow_family_in_workspace()
+        self._write_marker()
+
+        result = self._run_tool({"action": "commit", "message": "first marker"})
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(FAMILY_MARKER, self._tracked_files())
+
+        result = self._run_tool({"action": "push"})
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.repo.assert_remote_tracks_file(FAMILY_MARKER, MARKER_TEXT + "\n")
+
+    def test_marker_absence_is_valid(self) -> None:
+        """A manifest-admitted marker that is absent (and never committed)
+        is valid — absence needs no marker validator."""
+        self._allow_family_in_workspace()
+        result = self._run_tool({"action": "commit", "message": "no marker"})
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_malformed_marker_rejected_before_stage(self) -> None:
+        """Every malformed marker shape fails staging closed, value-free,
+        with nothing staged."""
+        for bad in INVALID_MARKERS:
+            with self.subTest(bad=bad):
+                self._write_marker(bad)
+                result = self._run_tool(
+                    {"action": "commit", "message": "bad marker"}
+                )
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(
+                    "migration marker validation failed", result.stderr
+                )
+                staged = self.repo.git_check(["diff", "--cached", "--name-only"])
+                self.assertNotIn(FAMILY_MARKER, staged.stdout)
+                self.assertNotIn(FAMILY_MARKER, self._tracked_files())
+                self._marker_path().unlink()
+
+    def test_marker_error_values_never_appear(self) -> None:
+        """Marker validation errors are structural only — a wrong-typed
+        value never appears in stdout/stderr or the error JSON."""
+        secret_value = "secret-marker-value-xyz"
+        self._write_marker(
+            json.dumps(
+                {"version": 1, "legacy_runtime_import_complete": secret_value}
+            )
+        )
+
+        result = self._run_tool({"action": "commit", "message": "leak check"})
+
+        self.assertNotEqual(0, result.returncode)
+        combined = result.stdout + result.stderr
+        self.assertIn("migration marker validation failed", combined)
+        self.assertNotIn(secret_value, combined)
+        doc = json.loads(result.stdout)
+        self.assertFalse(doc["success"])
+        self.assertNotIn(secret_value, doc["error"])
+
+    def test_marker_validator_unavailable_fails_closed_when_present(self) -> None:
+        """A present marker with an unavailable helper fails closed —
+        validation is never skipped when the marker is present."""
+        self._write_marker()
+        result = self._run_tool(
+            {"action": "commit", "message": "no validator"},
+            JOSEMAR_SKILL_STATE="/nonexistent/helper.py",
+        )
+        self.assertNotEqual(0, result.returncode)
+        doc = json.loads(result.stdout)
+        self.assertFalse(doc["success"])
+        self.assertIn("unavailable", doc["error"].lower())
+
+    def test_working_copy_marker_deletion_rejected_iff_head_has_marker(
+        self,
+    ) -> None:
+        """Working-copy deletion is rejected iff HEAD contains the marker:
+        after the marker is committed, deleting the file must fail
+        staging; with a markerless HEAD the same absence is valid."""
+        self._init_bare_remote_with_initial_push()
+        self._allow_family_in_workspace()
+        self._write_marker()
+        result = self._run_tool({"action": "commit", "message": "marker"})
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(self._head_has(FAMILY_MARKER))
+
+        self._marker_path().unlink()
+        result = self._run_tool({"action": "commit", "message": "delete marker"})
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("marker deletion rejected", result.stderr)
+        # HEAD still carries the marker (nothing was committed).
+        self.assertTrue(self._head_has(FAMILY_MARKER))
+
+
+class MarkerMonotonicityBoundaryTests(_CommandAllowlistSyncTest):
+    """History-aware marker monotonicity at the push and remote-merge
+    boundaries."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._init_bare_remote_with_initial_push()
+        self._allow_family_in_workspace()
+        self._write_marker()
+        result = self._run_tool({"action": "commit", "message": "marker"})
+        self.assertEqual(0, result.returncode, result.stderr)
+        result = self._run_tool({"action": "push"})
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_manually_committed_marker_deletion_blocked_before_push(self) -> None:
+        """A deletion committed by another path (direct git) must not push
+        when reachable history previously contained the marker; the remote
+        keeps the marker."""
+        self._marker_path().unlink()
+        self.repo.git(["add", "-A", "--", FAMILY_MARKER])
+        self.repo.git(["commit", "-qm", "manually remove marker"])
+        self.assertFalse(self._head_has(FAMILY_MARKER))
+
+        result = self._run_tool({"action": "push"})
+
+        self.assertNotEqual(0, result.returncode)
+        doc = json.loads(result.stdout)
+        self.assertFalse(doc["success"])
+        self.assertIn("marker deletion rejected", doc["error"])
+        # The remote still tracks the marker (push was blocked).
+        self.repo.assert_remote_tracks_file(FAMILY_MARKER, MARKER_TEXT + "\n")
+
+    def test_head_marker_content_validated_before_push(self) -> None:
+        """A malformed marker committed by another path must fail the push
+        closed (HEAD content gate)."""
+        self._write_marker('{"version":1}')
+        self.repo.git(["add", "-f", FAMILY_MARKER])
+        self.repo.git(["commit", "--amend", "--no-edit"])
+
+        result = self._run_tool({"action": "push"})
+
+        self.assertNotEqual(0, result.returncode)
+        doc = json.loads(result.stdout)
+        self.assertFalse(doc["success"])
+        self.assertIn("migration marker validation failed", doc["error"])
+
+    def test_remote_malformed_marker_rejected_before_merge(self) -> None:
+        """A remote candidate carrying a malformed marker fails startup
+        closed before any merge; the local marker is unchanged and no
+        remote content is merged."""
+        bad_remote = WorkspaceRepo.build_bare_remote_with_state(
+            self._extra_temp_dirs,
+            initial_commit_subject="bad marker remote",
+            extra_tracked={FAMILY_MARKER: '{"version":1}'},
+        )
+        self.repo.git(["remote", "set-url", "origin", bad_remote])
+        self.repo.git(["fetch", "origin"])
+
+        result = self._run_lifecycle("startup")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("migration marker validation failed", result.stderr)
+        # No merge occurred: the local marker is exactly as committed.
+        self.assertEqual(
+            MARKER_TEXT + "\n", self._marker_path().read_text(encoding="utf-8")
+        )
+
+    def test_remote_valid_marker_accepted_on_clone(self) -> None:
+        """A remote carrying the exact marker clones and restores it."""
+        good_remote = WorkspaceRepo.build_bare_remote_with_state(
+            self._extra_temp_dirs,
+            initial_commit_subject="good marker remote",
+            extra_tracked={FAMILY_MARKER: MARKER_TEXT + "\n"},
+        )
+        empty_workspace = self._mk_temp_dir()
+
+        result = self._run_lifecycle(
+            "startup", workspace=empty_workspace, remote=good_remote
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            MARKER_TEXT + "\n",
+            (Path(empty_workspace) / FAMILY_MARKER).read_text(encoding="utf-8"),
+        )
+
+    def test_remote_marker_deletion_rejected_before_merge(self) -> None:
+        """A remote candidate that removes the marker when the remote
+        history previously contained it must not merge; the local marker
+        is retained untouched."""
+        self._advance_remote_deleting(FAMILY_MARKER)
+        self.repo.git(["fetch", "origin"])
+
+        result = self._run_lifecycle("periodic")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("marker deletion rejected", result.stderr)
+        # Local marker retained; no merge occurred.
+        self.assertTrue(self._marker_path().exists())
+        self.assertTrue(self._head_has(FAMILY_MARKER))
+
+    def test_sidecar_deletion_still_allowed_while_marker_present(self) -> None:
+        """Normal allowlist-sidecar deletion is unaffected by the marker:
+        only the marker is monotonic."""
+        self._write_valid_sidecar()
+        result = self._run_tool({"action": "commit", "message": "sidecar"})
+        self.assertEqual(0, result.returncode, result.stderr)
+        result = self._run_tool({"action": "push"})
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        self._sidecar_path().unlink()
+        result = self._run_tool({"action": "sync", "message": "delete sidecar"})
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        proc = self.repo.remote_show_file(FAMILY_DEFAULT)
+        self.assertNotEqual(0, proc.returncode, "sidecar deletion must propagate")
+        # The marker remains present locally and on the remote.
+        self.assertTrue(self._marker_path().exists())
+        self.repo.assert_remote_tracks_file(FAMILY_MARKER, MARKER_TEXT + "\n")
 
 
 # ---------------------------------------------------------------------------

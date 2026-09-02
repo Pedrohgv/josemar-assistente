@@ -48,3 +48,11 @@ hermes/models.yaml
 # full config.yaml is never tracked.
 hermes/command-allowlist/default.json
 hermes/command-allowlist/profiles/*.json
+
+# Josemar value-free command-allowlist migration-completion marker.
+# Architecture metadata only (no allowlist values). Monotonic: once the
+# marker exists in state-repo history it must never be removed —
+# workspace-sync rejects working-copy deletion, manually committed
+# deletion before push, and remote-candidate deletion before merge.
+# Allowlist sidecar deletion is unaffected.
+hermes/command-allowlist/migration-v1.json

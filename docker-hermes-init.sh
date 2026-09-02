@@ -130,6 +130,31 @@ migrate_existing_toggles() {
     fi
 
     log "Migrating existing skill toggles + command allowlist into sidecars (pre template overwrite)"
+    # The one-time migration marker is monotonic. When present, legacy
+    # runtime import has already been finalized: validate it and skip all
+    # runtime allowlist import for every profile (stale runtime values must
+    # never resurrect a deliberately deleted sidecar). When absent, run the
+    # per-profile migration below. marker-present exits 2 on a malformed/
+    # unreadable present marker (fatal). NOTE: the exit status must be
+    # captured via "|| marker_rc=$?" — inside "if ! cmd; then", "$?" is
+    # always 0 and the rc==2 fatal branch could never fire.
+    marker_present=0
+    marker_rc=0
+    WORKSPACE_DIR="$WORKSPACE_DIR" "$JOSEMAR_STATE_PYTHON" "$JOSEMAR_SKILL_STATE" marker-present >/dev/null 2>&1 || marker_rc=$?
+    if [ "$marker_rc" -eq 2 ]; then
+        log "ERROR: migration marker is malformed/unreadable; refusing to overwrite runtime config (state history integrity cannot be confirmed)"
+        return 1
+    fi
+    if [ "$marker_rc" -eq 0 ]; then
+        marker_present=1
+    fi
+    # marker_rc == 1 (or any other nonzero) -> marker absent; proceed.
+
+    if [ "$marker_present" -eq 1 ]; then
+        log "Migration marker present; skipping legacy runtime command-allowlist import for all profiles"
+        return 0
+    fi
+
     if ! WORKSPACE_DIR="$WORKSPACE_DIR" "$JOSEMAR_STATE_PYTHON" "$JOSEMAR_SKILL_STATE" migrate \
             --hermes-home "$HERMES_HOME" --config-path "$RUNTIME_CONFIG"; then
         log "ERROR: default profile migration failed; refusing to overwrite ${RUNTIME_CONFIG} (pre-feature command-allowlist state would be lost)"
@@ -148,6 +173,16 @@ migrate_existing_toggles() {
                 return 1
             fi
         done
+    fi
+
+    # Finalize the one-time migration-completion marker ONLY after every
+    # default/named profile has been safely examined/migrated and BEFORE the
+    # template overwrite. A marker write/validation failure is fatal: the
+    # pre-feature runtime allowlist must never be erased by the template copy
+    # without first finalizing the migration boundary.
+    if ! WORKSPACE_DIR="$WORKSPACE_DIR" "$JOSEMAR_STATE_PYTHON" "$JOSEMAR_SKILL_STATE" finalize-migration-marker; then
+        log "ERROR: migration marker finalization failed; refusing to overwrite runtime config (pre-feature command-allowlist state would be lost)"
+        return 1
     fi
 }
 

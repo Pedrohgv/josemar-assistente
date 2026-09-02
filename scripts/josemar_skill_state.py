@@ -96,6 +96,12 @@ PROFILES_SUBDIR = "profiles"
 # Command-allowlist sidecar family: <workspace>/hermes/command-allowlist/.
 # Same default/profile layout as the skill-toggle family.
 ALLOWLIST_SIDECAR_SUBDIR = "command-allowlist"
+# One value-free global migration-completion marker (exact filename, strict v1
+# schema). Presence means the one-time legacy runtime import has been finalized
+# for this state history; runtime config must never again be treated as a
+# command-allowlist source. See the migration-marker section below.
+MIGRATION_MARKER_VERSION = 1
+MIGRATION_MARKER_NAME = "migration-v1.json"
 
 # Advisory lock file lives next to the sidecar directory so dashboard
 # writes and the periodic workspace sync never race. Named explicitly to
@@ -241,6 +247,11 @@ def _allowlist_default_sidecar_path() -> Path:
 
 def _allowlist_profiles_sidecar_dir() -> Path:
     return _allowlist_sidecar_root() / PROFILES_SUBDIR
+
+
+def _migration_marker_path() -> Path:
+    """Return ``<workspace>/hermes/command-allowlist/migration-v1.json``."""
+    return _allowlist_sidecar_root() / MIGRATION_MARKER_NAME
 
 
 def _template_config_path() -> Path:
@@ -603,6 +614,138 @@ def validate_command_allowlist_state_from_text(text: str) -> Dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid command-allowlist sidecar JSON: {exc}") from exc
     return validate_command_allowlist_state(data)
+
+
+# ---------------------------------------------------------------------------
+# One-time legacy migration-completion marker (strict v1, value-free)
+# ---------------------------------------------------------------------------
+#
+# Marker schema (exactly, one line, no command values / profile names /
+# timestamps / host identifiers or any other mutable metadata):
+#
+#     {"version": 1, "legacy_runtime_import_complete": true}
+#
+# BOTH keys are required and the marker root must contain no other keys. It
+# is monotonic: presence means the one-time legacy runtime import has been
+# finalized for this state history and ``config.yaml`` must never again be
+# treated as a command-allowlist source. It is architecture metadata (safe to
+# ship in the public template) and never holds private state. Errors are
+# structural/value-free.
+
+
+def validate_migration_marker(data: Any) -> Dict[str, Any]:
+    """Validate a parsed migration marker against the strict v1 schema.
+
+    Returns the canonical ``{"version": 1, "legacy_runtime_import_complete":
+    true}`` dict. Both keys are required and no other keys are allowed.
+    Raises ``ValueError`` on any violation (wrong version, missing keys,
+    unknown keys, wrong types) so callers can fail closed. Errors are
+    VALUE-FREE: no marker-controlled value (e.g. a wrong ``version``) and
+    no unknown key NAME is ever included — only fixed schema key names and
+    structural/type-level diagnostics.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"migration marker root must be an object, got {type(data).__name__}"
+        )
+    version = data.get("version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        # Type-level diagnostic only: the marker-controlled value is
+        # never echoed back.
+        raise ValueError(
+            "migration marker version must be an integer "
+            f"(expected {MIGRATION_MARKER_VERSION})"
+        )
+    if version != MIGRATION_MARKER_VERSION:
+        # Value-free: a malformed marker-controlled version must never
+        # appear in the error text.
+        raise ValueError(
+            "unsupported migration marker version "
+            f"(expected {MIGRATION_MARKER_VERSION})"
+        )
+    # Unknown keys are counted, never named: marker-controlled key names
+    # must not flow into validation errors. Deliberately does NOT delegate
+    # to _reject_unknown_keys, which formats the raw key names.
+    extra_keys = set(data.keys()) - {"version", "legacy_runtime_import_complete"}
+    if extra_keys:
+        raise ValueError(
+            f"migration marker: {len(extra_keys)} unknown key(s) present"
+        )
+    if "legacy_runtime_import_complete" not in data:
+        raise ValueError(
+            "migration marker must contain 'legacy_runtime_import_complete'"
+        )
+    if data["legacy_runtime_import_complete"] is not True:
+        raise ValueError(
+            "'legacy_runtime_import_complete' must be exactly true"
+        )
+    return {
+        "version": MIGRATION_MARKER_VERSION,
+        "legacy_runtime_import_complete": True,
+    }
+
+
+def serialize_migration_marker() -> str:
+    """Render the canonical migration-marker JSON as one line."""
+    state = {
+        "version": MIGRATION_MARKER_VERSION,
+        "legacy_runtime_import_complete": True,
+    }
+    return json.dumps(state, separators=(",", ":"), ensure_ascii=False)
+
+
+def validate_command_allowlist_migration_marker_from_text(text: str) -> Dict[str, Any]:
+    """Parse and validate a migration marker from raw text.
+
+    Canonical single validation entry point for the marker. Raises
+    ``ValueError`` on empty content, malformed JSON, or any schema violation.
+    Errors are value-free: no marker-controlled value or unknown key name is
+    ever included (malformed-JSON errors carry position info only).
+    """
+    if not text or not text.strip():
+        raise ValueError("empty migration marker content")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid migration marker JSON: {exc}") from exc
+    return validate_migration_marker(data)
+
+
+# Alias matching the documented W2 workspace_sync import surface.
+validate_migration_marker_from_text = validate_command_allowlist_migration_marker_from_text
+
+
+def read_migration_marker(path: Path) -> Optional[Dict[str, Any]]:
+    """Read and validate the migration marker. ``None`` if the file is absent.
+
+    A present but malformed/unreadable marker raises ``ValueError`` so callers
+    fail closed before template overwrite. Errors are value-free.
+    """
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"cannot read migration marker {path}: {exc}") from exc
+    return validate_migration_marker_from_text(text)
+
+
+def finalize_migration_marker() -> None:
+    """Atomically write the one-time migration-completion marker under the lock.
+
+    Validates the existing marker if present (a malformed present marker is
+    fatal) and otherwise writes the canonical marker atomically. Called by
+    the init script only after every existing default/named profile has been
+    safely examined/migrated and BEFORE the template overwrite. A write
+    failure raises so init aborts. Errors are value-free.
+    """
+    marker_path = _migration_marker_path()
+    with SkillStateLock():
+        # Validate a present marker first; malformed/unreadable is fatal.
+        if marker_path.exists():
+            read_migration_marker(marker_path)
+            return
+        _atomic_write(marker_path, serialize_migration_marker() + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -1587,7 +1730,15 @@ def migrate_existing_command_allowlist_to_absent_sidecar(
     must NOT create an explicit-empty sidecar (presence is authoritative).
     Never overwrites an existing sidecar. Returns True if a sidecar was
     created.
+
+    If the one-time migration marker is present, legacy runtime import has
+    been finalized: this function is a no-op (returns False) so stale
+    runtime values can never resurrect a deliberately deleted sidecar. This
+    is the authoritative marker gate, independent of any caller-level guard.
     """
+    if read_migration_marker(_migration_marker_path()) is not None:
+        # Legacy import already finalized — never re-read stale runtime state.
+        return False
     if not config_path.exists():
         return False
     config = _load_yaml(config_path)
@@ -1707,13 +1858,16 @@ def _prevalidate_command_allowlist_sidecars_unlocked() -> None:
 
     Fail-closed pre-pass for an apply cycle: every present allowlist
     sidecar (default + every canonically named profile, including sidecars
-    whose profile config is currently absent) is fully validated BEFORE
-    any runtime config is written in that cycle, so a malformed sidecar
-    can never produce a partial apply. Must be called while holding
-    :class:`SkillStateLock`. Validation errors never include allowlist
-    contents. Non-canonical filenames are skipped (they cannot map to a
-    reconcilable profile).
+    whose profile config is currently absent) and the migration marker (if
+    present) is fully validated BEFORE any runtime config is written in that
+    cycle, so a malformed sidecar/marker can never produce a partial apply.
+    Must be called while holding :class:`SkillStateLock`. Validation errors
+    never include allowlist contents. Non-canonical filenames are skipped
+    (they cannot map to a reconcilable profile).
     """
+    marker = _migration_marker_path()
+    if marker.exists():
+        read_migration_marker(marker)  # raises on malformed/unreadable
     default_sidecar = _allowlist_default_sidecar_path()
     if default_sidecar.exists():
         read_command_allowlist_sidecar(default_sidecar)
@@ -1867,31 +2021,84 @@ def sync_and_apply(
 def _cli_migrate(args: argparse.Namespace) -> int:
     hermes_home = Path(args.hermes_home) if args.hermes_home else _workspace_root()
     config_path = Path(args.config_path) if args.config_path else hermes_home / "config.yaml"
-    # Toggle-key migration keeps the historical non-fatal behavior: a
-    # failure is warned about and migration continues.
+    # Toggle-key migration keeps the historical non-fatal behavior: ANY
+    # ordinary failure (including a sidecar-write OSError) is warned about
+    # and migration continues. KeyboardInterrupt/SystemExit are NOT caught.
     created = False
     try:
         created = migrate_existing_toggles_to_absent_sidecars(config_path, hermes_home)
-    except ValueError as exc:
+    except Exception as exc:  # noqa: BLE001 - ordinary toggle failures are non-fatal
         print(f"migrate: warning: toggle migration failed: {exc}", file=sys.stderr)
-    # Fail-closed: a command-allowlist migration failure must return
-    # nonzero so the init caller aborts BEFORE the template overwrite
-    # (the template copy would otherwise erase a non-empty pre-feature
-    # runtime allowlist). Error text never includes allowlist contents.
+    # Command-allowlist migration runs INDEPENDENTLY of the toggle path: a
+    # toggle failure must not mask a command-allowlist failure, and a
+    # command-allowlist-safe config with a toggle-only failure must not make
+    # startup unavailable.
+    #
+    # Fail-closed: a command-allowlist migration failure must return nonzero
+    # so the init caller aborts BEFORE the template overwrite (the template
+    # copy would otherwise erase a non-empty pre-feature runtime allowlist).
+    # Error text is sanitized/structural/value-free: it never includes
+    # allowlist contents or raw config/YAML content.
+    #
+    # If the one-time migration marker is present, legacy runtime import is
+    # already finalized: skip it for this profile (the shell gates the whole
+    # loop on marker status, but this keeps the CLI defensively correct).
     created_allowlist = False
     try:
-        created_allowlist = migrate_existing_command_allowlist_to_absent_sidecar(
-            config_path, hermes_home
-        )
+        if read_migration_marker(_migration_marker_path()) is not None:
+            created_allowlist = False
+        else:
+            created_allowlist = migrate_existing_command_allowlist_to_absent_sidecar(
+                config_path, hermes_home
+            )
     except ValueError as exc:
         print(
             f"migrate: error: command-allowlist migration failed: {exc}",
             file=sys.stderr,
         )
         return 1
+    except Exception as exc:  # noqa: BLE001 - ordinary failure is fatal, value-free
+        print(
+            f"migrate: error: command-allowlist migration failed: "
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return 1
     print(
         f"migrate: {'created' if (created or created_allowlist) else 'no-op'} {config_path}"
     )
+    return 0
+
+
+def _cli_marker_present(args: argparse.Namespace) -> int:
+    """Exit 0 if the one-time migration marker is present and valid.
+
+    A malformed/unreadable present marker is fatal (exit 2) so the init
+    script fails closed before template overwrite. Exit 1 means the marker
+    is absent (legacy runtime import still pending).
+    """
+    try:
+        present = read_migration_marker(_migration_marker_path()) is not None
+    except ValueError as exc:
+        print(f"marker-present: error: {exc}", file=sys.stderr)
+        return 2
+    return 0 if present else 1
+
+
+def _cli_finalize_migration_marker(args: argparse.Namespace) -> int:
+    """Write/validate the one-time migration-completion marker (fatal on error)."""
+    try:
+        finalize_migration_marker()
+    except ValueError as exc:
+        print(f"finalize-migration-marker: error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        # A marker write failure must be a clean fatal (nonzero) so the
+        # init caller aborts BEFORE the template overwrite; never leak
+        # allowlist contents (the marker holds none).
+        print(f"finalize-migration-marker: error: {exc}", file=sys.stderr)
+        return 2
+    print(f"finalize-migration-marker: {'created' if _migration_marker_path().exists() else 'present'}")
     return 0
 
 
@@ -2050,6 +2257,18 @@ def build_cli() -> argparse.ArgumentParser:
     p_migrate.add_argument("--hermes-home", default=None)
     p_migrate.add_argument("--config-path", default=None)
     p_migrate.set_defaults(func=_cli_migrate)
+
+    p_marker_present = sub.add_parser(
+        "marker-present",
+        help="Exit 0 if the migration marker is present+valid; 1 absent; 2 malformed.",
+    )
+    p_marker_present.set_defaults(func=_cli_marker_present)
+
+    p_finalize = sub.add_parser(
+        "finalize-migration-marker",
+        help="Write/validate the one-time migration marker (init pre-overwrite).",
+    )
+    p_finalize.set_defaults(func=_cli_finalize_migration_marker)
 
     p_apply = sub.add_parser(
         "apply",
