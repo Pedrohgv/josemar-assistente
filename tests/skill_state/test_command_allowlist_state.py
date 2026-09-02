@@ -2339,6 +2339,31 @@ class AllowlistInitFailClosedTests(unittest.TestCase):
         return_pos = body.find("return 1", fatal_pos)
         self.assertGreater(return_pos, 0)
 
+    def test_marker_present_does_not_return_before_migrate_invocations(self) -> None:
+        # R2 contract: a valid present marker is logged but must NOT return
+        # early from migrate_existing_toggles — the default/named profile
+        # helper migrate invocations must still run so legacy skill-toggle
+        # migration is not bypassed (the helper independently self-gates the
+        # legacy command-allowlist import on the marker).
+        body = self._function_body("migrate_existing_toggles")
+        marker_set_pos = body.find("marker_present=1")
+        first_migrate_pos = body.find('"$JOSEMAR_SKILL_STATE" migrate')
+        self.assertGreater(marker_set_pos, 0)
+        self.assertGreater(first_migrate_pos, marker_set_pos)
+        between = body[marker_set_pos:first_migrate_pos]
+        self.assertNotIn("return 0", between)
+
+    def test_finalize_gated_on_initially_absent_marker(self) -> None:
+        # R2 contract: finalize-migration-marker runs only when the marker
+        # was initially absent (an initially present marker stays untouched)
+        # and after every required default/named profile migrate invocation
+        # succeeded (any failure already returned nonzero before this gate).
+        body = self._function_body("migrate_existing_toggles")
+        gate_pos = body.find('if [ "$marker_present" -eq 0 ]')
+        finalize_pos = body.find("finalize-migration-marker")
+        self.assertGreater(gate_pos, 0)
+        self.assertGreater(finalize_pos, gate_pos)
+
     def test_apply_helper_missing_fails_closed_when_state_present(self) -> None:
         body = self._function_body("apply_sidecars_and_policy")
         self.assertIn("command_allowlist_state_present", body)
@@ -2726,6 +2751,72 @@ echo "APPLY_CONTINUED"
             )
             # The marker is still present (validated, not rewritten).
             self.assertTrue((marker_dir / "migration-v1.json").exists())
+
+    def test_marker_present_still_projects_legacy_toggles_without_allowlist_import(
+        self,
+    ) -> None:
+        # R2 regression: a valid present marker must be logged but must NOT
+        # return early from migrate_existing_toggles — the per-profile
+        # helper migrate invocations still run so legacy skill toggles are
+        # projected into absent sidecars, while the helper's own marker gate
+        # keeps stale non-empty runtime allowlist values from being imported
+        # (R1 resurrection guard preserved) and the initially-present marker
+        # is preserved untouched.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            workspace.mkdir()
+            # Legacy default toggle config plus a stale non-empty runtime
+            # allowlist; no toggle or allowlist sidecars exist yet.
+            (workspace / "config.yaml").write_text(
+                "skills:\n  disabled: ['legacy-d']\n"
+                "command_allowlist: ['stale-default']\n",
+                encoding="utf-8",
+            )
+            profile_home = workspace / "profiles" / "coder"
+            profile_home.mkdir(parents=True)
+            (profile_home / "config.yaml").write_text(
+                "skills:\n  disabled: ['legacy-c']\n"
+                "command_allowlist: ['stale-coder']\n",
+                encoding="utf-8",
+            )
+            marker_dir = workspace / "hermes" / "command-allowlist"
+            marker_dir.mkdir(parents=True)
+            marker = marker_dir / "migration-v1.json"
+            marker_text = '{"version":1,"legacy_runtime_import_complete":true}\n'
+            marker.write_text(marker_text, encoding="utf-8")
+
+            template = Path(tmp) / "template.yaml"
+            template.write_text("model:\n  default: template\n", encoding="utf-8")
+            wrapper = self._write_migrate_wrapper(
+                tmp, workspace=workspace, helper_path=str(HELPER_PATH),
+                source_config=template,
+            )
+            proc = subprocess.run(
+                ["sh", str(wrapper)], capture_output=True, text=True, check=False
+            )
+            # Init succeeds and reaches the template overwrite.
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("TEMPLATE_COPIED", proc.stdout)
+
+            # Both legacy toggle configs were projected into absent sidecars
+            # (this is what the old early return used to bypass).
+            default_toggles = (
+                workspace / "hermes" / "skill-toggles" / "default.json"
+            )
+            coder_toggles = (
+                workspace / "hermes" / "skill-toggles" / "profiles" / "coder.json"
+            )
+            self.assertTrue(default_toggles.exists(), proc.stdout)
+            self.assertTrue(coder_toggles.exists(), proc.stdout)
+            self.assertIn("legacy-d", default_toggles.read_text(encoding="utf-8"))
+            self.assertIn("legacy-c", coder_toggles.read_text(encoding="utf-8"))
+
+            # No allowlist sidecar was imported from the stale runtime values.
+            self.assertFalse((marker_dir / "default.json").exists())
+            self.assertFalse((marker_dir / "profiles" / "coder.json").exists())
+
+            # The initially-present marker is preserved byte-for-byte.
+            self.assertEqual(marker.read_text(encoding="utf-8"), marker_text)
 
     def test_malformed_marker_is_fatal_before_template_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

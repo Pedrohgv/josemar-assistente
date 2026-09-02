@@ -130,14 +130,17 @@ migrate_existing_toggles() {
     fi
 
     log "Migrating existing skill toggles + command allowlist into sidecars (pre template overwrite)"
-    # The one-time migration marker is monotonic. When present, legacy
-    # runtime import has already been finalized: validate it and skip all
-    # runtime allowlist import for every profile (stale runtime values must
-    # never resurrect a deliberately deleted sidecar). When absent, run the
-    # per-profile migration below. marker-present exits 2 on a malformed/
-    # unreadable present marker (fatal). NOTE: the exit status must be
-    # captured via "|| marker_rc=$?" — inside "if ! cmd; then", "$?" is
-    # always 0 and the rc==2 fatal branch could never fire.
+    # The one-time migration marker is monotonic. marker-present exits 2 on
+    # a malformed/unreadable present marker (fatal). A valid present marker
+    # is logged but must NOT return early: the per-profile migrate
+    # invocations below still run on every pass because the helper performs
+    # legacy skill-toggle migration FIRST and independently self-gates the
+    # legacy command-allowlist import on the marker — so stale runtime
+    # values can never resurrect a deliberately deleted sidecar while
+    # legacy toggles are still projected into absent sidecars. NOTE: the
+    # exit status must be captured via "|| marker_rc=$?" — inside
+    # "if ! cmd; then", "$?" is always 0 and the rc==2 fatal branch could
+    # never fire.
     marker_present=0
     marker_rc=0
     WORKSPACE_DIR="$WORKSPACE_DIR" "$JOSEMAR_STATE_PYTHON" "$JOSEMAR_SKILL_STATE" marker-present >/dev/null 2>&1 || marker_rc=$?
@@ -147,13 +150,9 @@ migrate_existing_toggles() {
     fi
     if [ "$marker_rc" -eq 0 ]; then
         marker_present=1
+        log "Migration marker present; skipping legacy runtime command-allowlist import for all profiles (toggle migration still runs)"
     fi
     # marker_rc == 1 (or any other nonzero) -> marker absent; proceed.
-
-    if [ "$marker_present" -eq 1 ]; then
-        log "Migration marker present; skipping legacy runtime command-allowlist import for all profiles"
-        return 0
-    fi
 
     if ! WORKSPACE_DIR="$WORKSPACE_DIR" "$JOSEMAR_STATE_PYTHON" "$JOSEMAR_SKILL_STATE" migrate \
             --hermes-home "$HERMES_HOME" --config-path "$RUNTIME_CONFIG"; then
@@ -175,14 +174,19 @@ migrate_existing_toggles() {
         done
     fi
 
-    # Finalize the one-time migration-completion marker ONLY after every
-    # default/named profile has been safely examined/migrated and BEFORE the
-    # template overwrite. A marker write/validation failure is fatal: the
-    # pre-feature runtime allowlist must never be erased by the template copy
-    # without first finalizing the migration boundary.
-    if ! WORKSPACE_DIR="$WORKSPACE_DIR" "$JOSEMAR_STATE_PYTHON" "$JOSEMAR_SKILL_STATE" finalize-migration-marker; then
-        log "ERROR: migration marker finalization failed; refusing to overwrite runtime config (pre-feature command-allowlist state would be lost)"
-        return 1
+    # Finalize the one-time migration-completion marker ONLY when it was
+    # initially absent AND every default/named profile above has been safely
+    # examined/migrated (any helper failure already returned nonzero), all
+    # BEFORE the template overwrite. A marker write/validation failure is
+    # fatal: the pre-feature runtime allowlist must never be erased by the
+    # template copy without first finalizing the migration boundary. An
+    # initially present marker was already validated above and is left
+    # exactly as-is.
+    if [ "$marker_present" -eq 0 ]; then
+        if ! WORKSPACE_DIR="$WORKSPACE_DIR" "$JOSEMAR_STATE_PYTHON" "$JOSEMAR_SKILL_STATE" finalize-migration-marker; then
+            log "ERROR: migration marker finalization failed; refusing to overwrite runtime config (pre-feature command-allowlist state would be lost)"
+            return 1
+        fi
     fi
 }
 

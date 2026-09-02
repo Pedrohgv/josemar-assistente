@@ -59,6 +59,7 @@ from typing import Any
 
 from tests.runtime.workspace_sync_fixture import (
     GitEnvIsolation,
+    REMOTE_GIT_EMAIL,
     WorkspaceRepo,
 )
 
@@ -288,6 +289,13 @@ class _CommandAllowlistSyncTest(GitEnvIsolation, unittest.TestCase):
         _run = subprocess.run
         _run(["git", "clone", "-q", self.repo.remote, clone_dir], check=True,
              capture_output=True, text=True)
+        # Configure clone-local identity before committing: GitEnvIsolation
+        # strips global GIT_* identity and CI has no global identity, so the
+        # commit would otherwise fail. Mirror the fixture convention.
+        _run(["git", "-C", clone_dir, "config", "user.email", REMOTE_GIT_EMAIL],
+             check=True, capture_output=True, text=True)
+        _run(["git", "-C", clone_dir, "config", "user.name", "Remote Author"],
+             check=True, capture_output=True, text=True)
         _run(["git", "-C", clone_dir, "rm", "-q", relative_path], check=True,
              capture_output=True, text=True)
         _run(["git", "-C", clone_dir, "commit", "-qm", "remote deletes marker"],
@@ -1001,6 +1009,19 @@ class MarkerMonotonicityBoundaryTests(_CommandAllowlistSyncTest):
         # Local marker retained; no merge occurred.
         self.assertTrue(self._marker_path().exists())
         self.assertTrue(self._head_has(FAMILY_MARKER))
+
+    def test_remote_deletion_commit_author_email_is_remote(self) -> None:
+        """The remote-authored deletion commit must carry the fixture's
+        REMOTE_GIT_EMAIL author, so a host-global git identity cannot mask
+        a regression in the remote-advance helper."""
+        self._advance_remote_deleting(FAMILY_MARKER)
+        self.repo.git(["fetch", "origin"])
+
+        proc = self.repo.git_check(
+            ["log", "-1", "--format=%ae", "origin/main"]
+        )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertEqual(REMOTE_GIT_EMAIL, proc.stdout.strip())
 
     def test_sidecar_deletion_still_allowed_while_marker_present(self) -> None:
         """Normal allowlist-sidecar deletion is unaffected by the marker:
