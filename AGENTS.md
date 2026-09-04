@@ -10,10 +10,10 @@ Purpose: root guidance for AI assistants working with Josemar Assistente. Keep t
 
 ## Repository Overview
 
-Josemar Assistente is a self-hosted AI assistant built on Hermes, running in Docker with Telegram integration.
+Josemar Assistente is a self-hosted AI assistant built on Hermes, running in Docker. Its primary supported interactive client is Hermes Desktop, connecting remotely to the Hermes gateway/dashboard REST/WebSocket interface; Telegram remains a supported secondary channel.
 
 Core architecture:
-- Hermes gateway runtime (dashboard/API/Telegram/cron/skills)
+- Hermes gateway runtime (dashboard/API runtime/control interfaces serving the primary Hermes Desktop client, Telegram as a supported secondary channel, cron, skills)
 - two-scope skills (repo-owned `skills-factory/` + user-owned `agent-state/skills/`)
 - Git-backed state sync (`scripts/workspace_sync.py`)
 - Obsidian vault operations through native gbrain plus the bounded TaskNotes MCP exception
@@ -71,7 +71,7 @@ Safety and operational invariants may be repeated intentionally so they are visi
 
 ## Pinned Dependency Upgrades
 
-Hermes, gbrain, Mnemosyne, Bun, container images, and selected helper tools are pinned, and Josemar carries local compatibility patches around some upstream components. Treat upgrades as compatibility changes, not isolated version bumps: verify the upstream release/ref, re-check local patches and runtime/config contracts, inspect affected runbooks/tests, and run the relevant focused and Docker/Compose validation before considering the upgrade complete.
+Hermes, gbrain, Mnemosyne, Bun, container images, and selected helper tools are pinned, and Josemar carries local compatibility patches around some upstream components. Treat upgrades as compatibility changes, not isolated version bumps: verify the upstream release/ref, re-check local patches and runtime/config contracts, assess Hermes Desktop↔gateway compatibility and any other affected supported interaction surfaces (including Telegram), inspect affected runbooks/tests, and run the relevant focused and Docker/Compose validation before considering the upgrade complete.
 
 ## Agent State Repo Rules
 

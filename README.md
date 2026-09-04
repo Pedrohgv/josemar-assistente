@@ -1,6 +1,6 @@
 # Josemar Assistente
 
-Self-hosted Hermes assistant infrastructure with Telegram/dashboard access, Git-backed private agent state, a curated Obsidian/gbrain knowledge vault, encrypted recovery, and optional memory/browser/ML services.
+Self-hosted Hermes assistant infrastructure whose primary supported interactive client is Hermes Desktop, connecting remotely to the gateway/dashboard REST/WebSocket interface (Telegram remains a supported secondary channel), with Git-backed private agent state, a curated Obsidian/gbrain knowledge vault, encrypted recovery, and optional memory/browser/ML services.
 
 This repository is the public platform layer. User-specific identity, memories, private workflows, and user-owned skills live in a separate private `agent-state` repository.
 
@@ -8,7 +8,7 @@ For the documentation map and guidance on what to load for a particular subsyste
 
 ## What this repository provides
 
-- **Hermes gateway runtime** with dashboard/API/Telegram integration.
+- **Hermes gateway runtime** whose dashboard/API runtime/control interfaces serve the primary Hermes Desktop client, with Telegram as a supported secondary channel.
 - **Two-scope skills**: repo-owned platform skills in `skills-factory/` and user-owned skills in the private state repo.
 - **Git-backed agent state** under `/opt/data`, synchronized only for allowlisted paths.
 - **Curated Obsidian/gbrain vault** with a safe public agent-facing wrapper and shared single-writer coordination.
@@ -24,10 +24,10 @@ For the documentation map and guidance on what to load for a particular subsyste
 
 ```mermaid
 flowchart LR
-  User[User] --> Telegram[Telegram Bot]
-  User --> Dashboard[Hermes Dashboard]
-  Telegram --> Gateway[Hermes Gateway]
-  Dashboard --> Gateway
+  User[User] --> Desktop[Hermes Desktop]
+  User --> Telegram[Telegram Bot]
+  Desktop --> Gateway[Hermes Gateway<br/>dashboard/API runtime/control interfaces]
+  Telegram --> Gateway
 
   Gateway --> Agent[Josemar Agent]
   Agent --> Models[LLM Providers]
