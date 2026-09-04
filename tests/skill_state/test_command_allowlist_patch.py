@@ -1,7 +1,7 @@
 """Contract tests for the issue #151 W2 command-allowlist runtime patch.
 
 This suite tests ``scripts/patch-hermes-command-allowlist.py``, which routes
-the pinned Hermes v2026.8.18 runtime command allowlist through the W1
+the pinned Hermes v2026.8.31 runtime command allowlist through the W1
 stateful sidecar helpers:
 
   1. ``tools.approval.save_permanent_allowlist`` -> the W1 SET helper
@@ -47,7 +47,7 @@ DOCKERFILE = REPO_ROOT / "Dockerfile.hermes"
 DUMP_DIR = REPO_ROOT / "dump_folder" / "command-allowlist-patch-contract"
 
 # Pinned upstream commit (must match the patcher's named constant + docstring).
-PINNED_SHA = "e624e9fde561e1add9388384012b295fde669ade"
+PINNED_SHA = "29112bef099274229cadff79cdff7bf7b99c4b77"
 
 
 def load_patch_module() -> Any:
@@ -187,7 +187,7 @@ class PatchSourceContractTests(unittest.TestCase):
 
     def test_patch_docstring_pins_upstream_sha(self) -> None:
         self.assertIn(PINNED_SHA, self.text)
-        self.assertIn("e624e9fde561e1add9388384012b295fde669ade", self.text)
+        self.assertIn("29112bef099274229cadff79cdff7bf7b99c4b77", self.text)
 
     def test_patch_uses_package_relative_import(self) -> None:
         # The helper must be imported as ``hermes_cli.josemar_skill_state``.
@@ -365,14 +365,59 @@ class DockerfileContractTests(unittest.TestCase):
         self.assertIn("patch-hermes-browser-routing.py", self.src)
 
 
-class PiiAllowlistContractTests(unittest.TestCase):
-    """The pinned SHA numeric run in the new patcher is file-scoped in
-    .pii-allowlist (provenance, not a phone number)."""
+class PinnedShaPiiGuardContractTests(unittest.TestCase):
+    """The pinned SHA must never trip the pre-commit PII guard.
 
-    def test_pii_allowlist_scopes_new_patcher(self) -> None:
-        allowlist = (REPO_ROOT / ".pii-allowlist").read_text(encoding="utf-8")
-        self.assertIn("scripts/patch-hermes-command-allowlist", allowlist)
-        self.assertIn("e624e9fde561e1add9388[3]84012b295fde669ade", allowlist)
+    pre-commit runs ``scripts/pii_guard.py --staged --fail-on medium``. The
+    previous v2026.8.18 pin contained a 10-digit numeric run that pii_guard
+    reads as a phone number and needed an explicit file-scoped
+    ``.pii-allowlist`` exception. The v2026.8.31 pin has no such numeric run
+    (its longest digit run is 9 digits), so no allowlist entry is needed.
+    This tripwire fails if a future pinned SHA reintroduces a guard finding,
+    forcing an explicit allowlist decision instead of a silently blocked
+    commit.
+    """
+
+    def test_pinned_sha_produces_no_pii_guard_findings(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "pii_guard_tripwire", REPO_ROOT / "scripts" / "pii_guard.py"
+        )
+        assert spec is not None and spec.loader is not None
+        guard = importlib.util.module_from_spec(spec)
+        # Register before exec: pii_guard's @dataclass processing resolves
+        # the module through sys.modules.
+        sys.modules[spec.name] = guard
+        try:
+            spec.loader.exec_module(guard)
+        finally:
+            sys.modules.pop(spec.name, None)
+        # The exact provenance-bearing line shapes carried in the patcher and
+        # in this test file (added lines, as the guard sees them in a diff).
+        provenance_lines = (
+            (
+                "scripts/patch-hermes-command-allowlist.py",
+                f'PINNED_UPSTREAM_SHA = "{PINNED_SHA}"',
+            ),
+            (
+                "scripts/patch-hermes-command-allowlist.py",
+                f"Pinned source identity: nousresearch/hermes-agent:v2026.8.31, commit\n"
+                f"``{PINNED_SHA}``. This matches the pinned",
+            ),
+            (
+                "tests/skill_state/test_command_allowlist_patch.py",
+                f'PINNED_SHA = "{PINNED_SHA}"',
+            ),
+        )
+        for file_path, line_text in provenance_lines:
+            findings = guard._collect_findings([(file_path, 1, line_text)])
+            with self.subTest(file_path=file_path):
+                self.assertEqual(
+                    findings,
+                    [],
+                    f"pinned SHA provenance trips pii_guard in {file_path}: "
+                    f"{findings}; add an explicit .pii-allowlist exception or "
+                    "re-check the pin",
+                )
 
 
 if __name__ == "__main__":

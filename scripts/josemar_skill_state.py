@@ -1658,7 +1658,7 @@ def _native_save_config(
 ) -> None:
     """Invoke the upstream ``save_config`` from ``hermes_cli.config``.
 
-    Pinned upstream signature (Hermes v2026.8.18)::
+    Pinned upstream signature (Hermes v2026.8.31)::
 
         save_config(config, *, strip_defaults=True,
                     preserve_keys: Optional[Set[Tuple[str, ...]]] = None,

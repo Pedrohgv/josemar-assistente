@@ -960,11 +960,11 @@ class HermesUpgradeContractTests(unittest.TestCase):
         self.assertEqual(approvals["cron_mode"], "deny")
         self.assertEqual(approvals["deny"], [])
 
-    def test_patch_docstring_names_v2026_8_18(self) -> None:
+    def test_patch_docstring_names_v2026_8_31(self) -> None:
         """Build-time patch docstring names the new Hermes version and not the old one."""
         text = PATCH_PATH.read_text(encoding="utf-8")
-        self.assertIn("Hermes v2026.8.18", text)
-        self.assertNotIn("Hermes v2026.7.7.2", text)
+        self.assertIn("Hermes v2026.8.31", text)
+        self.assertNotIn("Hermes v2026.8.18", text)
 
 
 # ---------------------------------------------------------------------------

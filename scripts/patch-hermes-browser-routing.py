@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Patch pinned Hermes v2026.8.18 for the Josemar connected-browser route
+"""Patch pinned Hermes v2026.8.31 for the Josemar connected-browser route
 (issue #136, revision 2).
 
-Pinned source identity: nousresearch/hermes-agent:v2026.8.18, commit
-``e624e9fde561e1add9388384012b295fde669ade``.
+Pinned source identity: nousresearch/hermes-agent:v2026.8.31, commit
+``29112bef099274229cadff79cdff7bf7b99c4b77``.
 
 Revision 2 replaces revision 1 in full. The revision-1 ``use_connected_browser``
 flag on ``browser_exec`` is REMOVED — upstream ``browser_exec`` is left
