@@ -65,6 +65,15 @@ class ComposeContractTests(unittest.TestCase):
         self.assertIn("- obsidian-vault:/opt/data/obsidian", block)
         self.assertNotIn("VAULT_GATEWAY", block)
 
+    def test_hermes_healthcheck_uses_version_flag(self) -> None:
+        # Hermes v0.21 (base image v2026.8.31) removed the `version` CLI
+        # subcommand; only the `--version` flag remains. The health probe
+        # must be exactly the flag form or the container can never pass
+        # `compose up --wait` (issue #156).
+        block = service_block(self.text, "hermes")
+        self.assertIn('test: ["CMD", "hermes", "--version"]', block)
+        self.assertNotIn('"CMD", "hermes", "version"', block)
+
     def test_aux_ml_shared_volume_is_read_only(self) -> None:
         block = service_block(self.text, "aux-ml")
         self.assertIn("- aux-ml-shared:/shared:ro", block)

@@ -1734,7 +1734,7 @@ jobs:
 
           echo "Confirming Hermes provider/policy via hermes_cli.config.load_config()..."
           # The hermes cont-init script (00-josemar-setup) runs AFTER the
-          # container's cheap healthcheck (hermes version) passes, so the
+          # container's cheap healthcheck (hermes --version) passes, so the
           # Mnemosyne config may not be written yet when this step starts.
           # Poll up to 60s (12 x 5s) for the init to write memory.provider and
           # the pilot policy, then fail with the last error.
