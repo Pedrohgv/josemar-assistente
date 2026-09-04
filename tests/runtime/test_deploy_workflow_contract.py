@@ -107,7 +107,7 @@ DOCKERFILE = REPO_ROOT / "Dockerfile.hermes"
 
 RCLONE_DIGEST = "rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548"
 
-REVIEWED_HERMES_BASE_IMAGE = "nousresearch/hermes-agent:v2026.8.18"
+REVIEWED_HERMES_BASE_IMAGE = "nousresearch/hermes-agent:v2026.8.31"
 
 LEGACY_MIGRATION_STEP_NAME = (
     "Migrate legacy rclone active config out of Mnemosyne backup state volume"

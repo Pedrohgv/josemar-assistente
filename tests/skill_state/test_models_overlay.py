@@ -2197,12 +2197,12 @@ class FallbackPositionalMergeTests(unittest.TestCase):
 # order. Hardcoded literal on purpose: never dynamically discovered.
 EXPECTED_AUXILIARY_TASKS = (
     "vision",
-    "web_extract",
     "compression",
     "skills_hub",
     "approval",
     "mcp",
     "title_generation",
+    "review",
     "triage_specifier",
     "kanban_decomposer",
     "profile_describer",
@@ -2212,7 +2212,7 @@ EXPECTED_AUXILIARY_TASKS = (
 NEW_AUXILIARY_TASKS = tuple(t for t in EXPECTED_AUXILIARY_TASKS if t != "vision")
 
 # Reviewed production Hermes base image pin (Dockerfile.hermes ARG).
-EXPECTED_HERMES_BASE_IMAGE = "nousresearch/hermes-agent:v2026.8.18"
+EXPECTED_HERMES_BASE_IMAGE = "nousresearch/hermes-agent:v2026.8.31"
 
 
 class AuxiliaryAllowlistTests(unittest.TestCase):
@@ -2224,6 +2224,17 @@ class AuxiliaryAllowlistTests(unittest.TestCase):
     def test_allowlist_matches_reviewed_order_exactly(self) -> None:
         """Exact order + contents (tuple equality is order-sensitive)."""
         self.assertEqual(self.m.ALLOWED_AUXILIARY_TASKS, EXPECTED_AUXILIARY_TASKS)
+
+    def test_v2026_8_31_web_extract_replaced_by_review_after_title_generation(self) -> None:
+        """v2026.8.31 re-review regression: the retired ``web_extract`` task
+        is gone and ``review`` is allowlisted directly after
+        ``title_generation`` (upstream dashboard order). Guards against
+        re-adding ``web_extract`` or misplacing ``review`` independently of
+        the shared fixture tuple."""
+        tasks = self.m.ALLOWED_AUXILIARY_TASKS
+        self.assertNotIn("web_extract", tasks)
+        self.assertIn("review", tasks)
+        self.assertEqual(tasks.index("review"), tasks.index("title_generation") + 1)
 
     def test_accepts_each_allowlisted_task(self) -> None:
         """Table-driven acceptance across all 11 task IDs."""
@@ -2372,11 +2383,11 @@ class AuxiliaryNewTasksDeepMergeTests(unittest.TestCase):
         config = {}
         models = {
             "version": 1,
-            "auxiliary": {"web_extract": {"provider": "p", "model": "m"}},
+            "auxiliary": {"review": {"provider": "p", "model": "m"}},
         }
         self.m.apply_models_to_config(config, models)
         self.assertEqual(
-            config["auxiliary"]["web_extract"], {"provider": "p", "model": "m"}
+            config["auxiliary"]["review"], {"provider": "p", "model": "m"}
         )
 
 

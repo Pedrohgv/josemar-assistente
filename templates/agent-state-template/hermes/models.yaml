@@ -11,9 +11,9 @@ version: 1
 #   fallback_providers[].{provider, model} ordered fallback list
 #   auxiliary.<task>.{provider, model}   per-task model routing; <task> is
 #                                        exactly one of (upstream dashboard
-#                                        order): vision, web_extract,
-#                                        compression, skills_hub, approval,
-#                                        mcp, title_generation,
+#                                        order): vision, compression,
+#                                        skills_hub, approval, mcp,
+#                                        title_generation, review,
 #                                        triage_specifier, kanban_decomposer,
 #                                        profile_describer, curator
 #   cron.{model, model_provider}          fleet cron defaults (blank = inherit default)
@@ -61,9 +61,6 @@ auxiliary:
   vision:
     provider: ollama-cloud
     model: kimi-k2.7-code
-  web_extract:
-    provider: auto
-    model: ""
   compression:
     provider: auto
     model: ""
@@ -77,6 +74,9 @@ auxiliary:
     provider: auto
     model: ""
   title_generation:
+    provider: auto
+    model: ""
+  review:
     provider: auto
     model: ""
   triage_specifier:

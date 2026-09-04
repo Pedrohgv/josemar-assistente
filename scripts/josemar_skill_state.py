@@ -154,18 +154,18 @@ MODELS_SCHEMA_VERSION = 1
 MODELS_SIDECAR_NAME = "models.yaml"
 # Allowlisted auxiliary task names, in deterministic upstream dashboard
 # order. Pinned to the reviewed Hermes base image
-# (nousresearch/hermes-agent:v2026.8.18); extending this set requires an
+# (nousresearch/hermes-agent:v2026.8.31); extending this set requires an
 # upstream review. A fast tripwire test
 # (tests/skill_state/test_models_overlay.py) fails if either the image pin
 # or this exact list drifts.
 ALLOWED_AUXILIARY_TASKS: Tuple[str, ...] = (
     "vision",
-    "web_extract",
     "compression",
     "skills_hub",
     "approval",
     "mcp",
     "title_generation",
+    "review",
     "triage_specifier",
     "kanban_decomposer",
     "profile_describer",
