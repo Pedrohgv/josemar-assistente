@@ -1,5 +1,5 @@
 """Opt-in Docker runtime gate: Hermes Desktop Remote gateway compatibility
-for the Hermes v0.21.0 candidate (issue #156 W3).
+for the Hermes v0.21.0 candidate (issue #156 W3, revision 2 R1).
 
 Skipped by default. Enable with:
 
@@ -10,68 +10,84 @@ or:
 
   make test-hermes-desktop-gateway-compat
 
+This gate is the PRODUCTION-EQUIVALENT gated-dashboard protocol proof: the
+dashboard is explicitly enabled on a NON-loopback container bind
+(``HERMES_DASHBOARD_HOST=0.0.0.0``, ``HERMES_DASHBOARD_INSECURE=0``), which
+engages the v0.21 dashboard auth gate with the bundled synthetic-credential
+basic provider. The legacy static session token still exists (ComposeRuntime
+requires it for interpolation) but is proven INERT: REST calls carrying it
+are rejected and a ``?token=`` WebSocket upgrade never reaches
+``gateway.ready``. Every accepted credential follows the production shape:
+password login -> private cookie jar -> single-use 30s ``?ticket=`` WS
+upgrades, minted fresh per connection.
+
 WHAT IT PROVES (each phase against the real candidate image built by this
 test's own Compose project):
 
   1. Public status/readiness: ``/api/health`` and ``/api/status`` answer
-     without any token and report the exact candidate version (0.21.0).
-  2. Auth rejection: a wrong REST session token gets HTTP 401 on a gated
-     endpoint, and a wrong WebSocket token gets the ``/api/ws`` upgrade
-     rejected (v0.21 loopback token mode; ``HERMES_DASHBOARD_INSECURE`` is
-     explicitly pinned to "0" because it no longer bypasses v0.21 auth).
-  3. Auth acceptance: the valid REST ``X-Hermes-Session-Token`` header and
-     the valid WS ``?token=`` query credential (with loopback Origin) are
-     accepted; the WS speaks newline-delimited JSON-RPC and emits
-     ``gateway.ready`` on accept.
-  4. Profile surface: ``/api/profiles`` lists exactly ONE profile — the
-     public display name ``Josemar`` with ``is_default`` true and the
-     canonical base HERMES_HOME path — and no duplicate ``default`` row;
-     REST session rows keep stamping the canonical ``default`` profile.
-  5. Session lifecycle over WS: ``session.create`` returns the live
-     ``session_id`` plus the durable ``stored_session_id``; the session is
-     NOT durable before its first prompt (REST list must not contain it).
-  6. Streamed REAL-agent turn: ``prompt.submit`` (after ``session.create``)
-     with a deterministic prompt drives the normal v0.21 real-agent path —
-     the session pins ``model``/``provider`` resolving to a disposable
-     ``custom_providers`` OpenAI-compatible entry (target-supported safe
-     seam) whose base_url is a loopback fake provider started INSIDE the
-     container as ``hermes`` (no external network, no real credentials).
-     The turn returns ``{"status": "streaming"}`` and emits
-     ``message.start``, >= 1 streamed ``message.delta``, and the terminal
-     settled ``message.complete`` with status ``complete`` and the fake's
-     deterministic assistant content. Turn settlement is judged ONLY by
-     ``message.complete``, never ``session.info``. The mock's request log
-     proves the agent actually hit the loopback fake over
-     ``chat/completions``.
-  7. Durable transcript BEFORE restart: ``/api/sessions/<stored>/messages``
-     contains the deterministic user turn and the deterministic assistant
-     turn (the normal real-agent persistence path via the agent's
-     ``_persist_session`` contract), and the session row appears in
-     ``/api/sessions``.
-  8. Reconnect: a fresh WS connection ``session.resume``es the session by
-     its stored id and gets the transcript back (live history).
-  9. Restart durability: the container is stopped and restarted while the
-     disposable named volume is preserved; after the dashboard is ready
-     again, the session row (id/title/profile stamp) persists, the REST
-     messages endpoint STILL contains the deterministic user + assistant
-     transcript, and WS ``session.resume`` returns that same history.
+     without credentials and report the exact candidate version (0.21.0)
+     with ``auth_required: true``; ``/api/status`` advertises the ``basic``
+     auth provider.
+  2. Basic discovery: public ``/api/auth/providers`` advertises
+     ``{name: "basic", supports_password: true}``.
+  3. Gate enforcement: a protected REST endpoint rejects BOTH the
+     no-credential request AND the static session token (header and bearer
+     forms, HTTP 401); a ``?token=`` WebSocket upgrade never reaches
+     ``gateway.ready``.
+  4. Wrong password: ``POST /auth/password-login`` with a wrong password is
+     rejected with the generic 401.
+  5. Basic login + cookie session: the valid synthetic username/password
+     pair logs in, the private 0600 cookie jar inside the disposable
+     hermes-data volume persists the session, ``/api/auth/me`` reports
+     ``provider: "basic"``, cookie-authenticated ``/api/profiles`` and
+     ``/api/sessions`` succeed, and ``/api/profiles`` lists exactly ONE
+     profile — the public display name ``Josemar`` over the canonical base
+     HERMES_HOME with ``is_default`` true and no duplicate ``default`` row.
+  6. Streamed REAL-agent turn over a fresh ticket: ``POST
+     /api/auth/ws-ticket`` mints a 30s single-use ticket; the ``?ticket=``
+     WS upgrade reaches ``gateway.ready``; ``session.create`` returns the
+     live ``session_id`` plus the durable ``stored_session_id`` and the
+     session is NOT durable before its first prompt; ``prompt.submit``
+     drives the normal real-agent path over a disposable loopback
+     ``custom_providers`` OpenAI-compatible fake (no external network, no
+     real credentials); the turn emits ``message.start``, streamed
+     ``message.delta`` frames, and the terminal settled
+     ``message.complete`` with the fake's deterministic content
+     (settlement judged ONLY by ``message.complete``, never
+     ``session.info``); the mock's request log proves the agent hit the
+     loopback ``chat/completions`` endpoint; the durable transcript is in
+     REST ``/api/sessions/<stored>/messages`` (deterministic user + assistant
+     turns).
+  7. Reconnect: a NEW ticket minted from the SAME cookie session reconnects
+     and ``session.resume`` returns the durable transcript.
+  8. Real recreation: ``runtime.recreate("hermes")`` (compose
+     ``up -d --force-recreate --no-build``) replaces the container while
+     preserving the disposable volume; only the disposable provider runtime
+     config is re-applied and the in-container fake restarted.
+  9. Session survives recreation WITHOUT a new login: the pre-recreation
+     cookie jar still authenticates ``/api/auth/me`` (provider basic —
+     stateless HMAC sessions with the unchanged synthetic secret survive
+     container recreation), the REST transcript persists, and a NEW
+     post-recreate ticket reconnects and ``session.resume`` returns the
+     same durable transcript.
 
 The fake provider and its config wiring are disposable test-local state:
 the provider entry is appended to the RUNTIME config file inside the
-disposable volume (never a tracked file) and re-applied after the restart
-because the container init re-materializes the runtime config from the
-template on every start; the fake provider script lives on the disposable
-volume and is restarted after the container restart before the resume.
+disposable volume (never a tracked file) and re-applied after the
+recreation because the container init re-materializes the runtime config
+from the template on every start; the fake provider script lives on the
+disposable volume and is restarted after the recreation.
 
 ISOLATION: ``ComposeRuntime`` + the test-isolation overlay replace the
 repo's agent-state/credentials bind mounts with disposable empty dirs; all
-dashboard credentials are synthetic (ComposeRuntime-generated); Telegram,
-workspace sync, and hosted-provider credentials are blanked; the dashboard
-binds container-loopback (127.0.0.1) and every protocol client and the fake
+dashboard credentials are synthetic values (basic username/password/secret
+and the inert static session token); Telegram, workspace sync, and
+hosted-provider credentials are blanked; the protocol clients and the fake
 provider run INSIDE the candidate container as the ``hermes`` runtime user
 using the image's own Hermes venv (which upstream's ISO harness uses for
 ``websockets``), so no host port is ever used and no new host-side Python
-package is needed.
+package is needed. Credentials, cookies, and tickets are never printed;
+diagnostics carry statuses, ids, and deterministic markers only.
 
 Cleanup is unconditional for project state: ``ComposeRuntime.down`` runs
 ``docker compose down -v --remove-orphans`` for the disposable project
@@ -105,16 +121,28 @@ DOCKER_GATE_ENV_VAR = "RUN_DOCKER_TESTS"
 MODULE_GATE_ENV_VAR = "RUN_HERMES_DESKTOP_GATEWAY_COMPAT_TESTS"
 
 # ---------------------------------------------------------------------------
-# Pinned v0.21 token-mode protocol surface exercised by the in-container
+# Pinned v0.21 gated-dashboard protocol surface exercised by the in-container
 # client (structurally asserted by the fast suite; proven live by the gate).
 # ---------------------------------------------------------------------------
 EXPECTED_CANDIDATE_VERSION = "0.21.0"
 WS_PATH = "/api/ws"
 WS_TOKEN_QUERY_PARAM = "token"
+WS_TICKET_QUERY_PARAM = "ticket"
 REST_SESSION_TOKEN_HEADER = "X-Hermes-Session-Token"
+AUTH_PROVIDERS_ROUTE = "/api/auth/providers"
+PASSWORD_LOGIN_ROUTE = "/auth/password-login"
+AUTH_ME_ROUTE = "/api/auth/me"
+WS_TICKET_ROUTE = "/api/auth/ws-ticket"
+BASIC_PROVIDER_NAME = "basic"
+EXPECTED_TICKET_TTL_SECONDS = 30
 PUBLIC_PROFILE_DISPLAY_NAME = "Josemar"
 CANONICAL_DEFAULT_PROFILE = "default"
 EXPECTED_BASE_HERMES_HOME = "/opt/data"
+
+# Synthetic gated-dashboard credentials (test-only; never real secrets).
+BASIC_USERNAME = "w3gate-admin"
+BASIC_PASSWORD = "w3gate-synthetic-password"
+BASIC_SECRET = "w3gate-synthetic-secret-alpha-bravo-charlie"
 
 # Host-publish port pins only (mirrors the other runtime gates so the
 # disposable stack cannot collide with dev/production listeners). The
@@ -124,6 +152,10 @@ API_SERVER_PORT = "18643"
 
 SESSION_TITLE = "w3-desktop-gateway-compat"
 SESSION_SOURCE = "w3-desktop-gateway-compat"
+
+# Private 0600 cookie jar inside the disposable hermes-data volume: written
+# by the login phase, reused (no new login) after the real recreation.
+COOKIE_JAR_PATH = "/opt/data/.w3-gate/cookies.txt"
 
 # ---------------------------------------------------------------------------
 # Disposable loopback fake OpenAI-compatible provider (test-local seam).
@@ -143,7 +175,7 @@ FAKE_PROVIDER_MARKER = "W3-FAKE-PROVIDER-OK"
 FAKE_PROVIDER_PROMPT = "W3 deterministic provider turn: reply with your fixed content."
 RUNTIME_CONFIG_PATH = "/opt/data/config.yaml"
 
-IN_CONTAINER_CLIENT_PATH = "/tmp/w3_compat_client.py"
+IN_CONTAINER_CLIENT_PATH = "/opt/data/.w3-gate/w3_compat_client.py"
 
 CONFIG_PROVIDER_BLOCK = (
     "\n# W3 disposable test-only provider (issue #156; loopback fake, no real\n"
@@ -201,8 +233,8 @@ PROVIDER_RESOLUTION_PROBE = (
 )
 
 # Prove the agent actually hit the loopback fake (request log on the
-# disposable volume; the log contains only request paths, stream flags, and
-# POST markers — never credentials or environment).
+# disposable volume; the log contains only request paths and stream flags —
+# never credentials or environment).
 MOCK_EVIDENCE_PROBE = (
     "test -f " + FAKE_PROVIDER_LOG_PATH + " && "
     "grep -c 'post stream=True' " + FAKE_PROVIDER_LOG_PATH + " && "
@@ -315,22 +347,39 @@ FakeProviderServer(("127.0.0.1", PORT), Handler).serve_forever()
 # ---------------------------------------------------------------------------
 # The in-container protocol client. Self-contained stdlib + the Hermes venv's
 # websockets package (the same interpreter upstream's ISO harness uses).
-# Modes: rest-auth / ws-auth / turn / resume-live / post-restart.
+# Gated mode only: password login -> private 0600 cookie jar -> fresh 30s
+# single-use ?ticket= per WebSocket connection. The legacy static session
+# token appears ONLY in inertness probes and is never an accepted credential.
+#
+# Modes: rest-auth / turn / resume-live / post-restart.
 # Each prints a final `W3-<MODE>-OK {json evidence}` line on success.
 # ---------------------------------------------------------------------------
 W3_CLIENT_SOURCE = r'''
-"""W3 Desktop Remote gateway protocol client (in-container, hermes venv)."""
+"""W3 Desktop Remote gateway protocol client (in-container, hermes venv).
+
+Gated mode: password login -> private 0600 cookie jar -> fresh single-use
+?ticket= per WS connection. Static session tokens are probe-only."""
 
 import asyncio
+import http.cookiejar
 import json
+import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 REST_SESSION_TOKEN_HEADER = "X-Hermes-Session-Token"
 WS_PATH = "/api/ws"
 WS_TOKEN_QUERY_PARAM = "token"
+WS_TICKET_QUERY_PARAM = "ticket"
+AUTH_PROVIDERS_ROUTE = "/api/auth/providers"
+PASSWORD_LOGIN_ROUTE = "/auth/password-login"
+AUTH_ME_ROUTE = "/api/auth/me"
+WS_TICKET_ROUTE = "/api/auth/ws-ticket"
+BASIC_PROVIDER_NAME = "basic"
+EXPECTED_TICKET_TTL_SECONDS = 30
 
 EXPECTED_VERSION = "0.21.0"
 PUBLIC_PROFILE = "Josemar"
@@ -340,20 +389,49 @@ SESSION_TITLE = "w3-desktop-gateway-compat"
 SESSION_SOURCE = "w3-desktop-gateway-compat"
 FAKE_PROVIDER_MARKER = "W3-FAKE-PROVIDER-OK"
 
+PORT = 0  # set from argv in main()
 
-def rest(port, path, token=None, timeout=30):
-    req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path))
-    if token is not None:
-        req.add_header(REST_SESSION_TOKEN_HEADER, token)
+
+def make_jar(jar_path=None):
+    if jar_path:
+        return http.cookiejar.MozillaCookieJar(jar_path)
+    return http.cookiejar.CookieJar()
+
+
+def load_jar(jar_path):
+    jar = make_jar(jar_path)
+    jar.load(ignore_discard=True, ignore_expires=True)
+    return jar
+
+
+def save_jar(jar, jar_path):
+    os.makedirs(os.path.dirname(jar_path), mode=0o700, exist_ok=True)
+    jar.save(ignore_discard=True, ignore_expires=True)
+    os.chmod(jar_path, 0o600)
+
+
+def make_opener(jar):
+    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+
+
+def request_json(opener, method, path, body=None, extra_headers=None, timeout=30):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request("http://127.0.0.1:%d%s" % (PORT, path), data=data)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    if extra_headers:
+        for key, value in extra_headers.items():
+            req.add_header(key, value)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, json.loads(resp.read().decode())
+        with opener.open(req, timeout=timeout) as resp:
+            raw = resp.read().decode()
+            return resp.status, (json.loads(raw) if raw else {})
     except urllib.error.HTTPError as exc:
         try:
-            body = json.loads(exc.read().decode() or "{}")
+            parsed = json.loads(exc.read().decode() or "{}")
         except Exception:
-            body = {}
-        return exc.code, body
+            parsed = {}
+        return exc.code, parsed
 
 
 def message_text(message):
@@ -363,20 +441,45 @@ def message_text(message):
     return json.dumps(content)
 
 
+def mint_ticket(opener):
+    """Mint one fresh 30s single-use WS ticket (never printed)."""
+    status, body = request_json(opener, "POST", WS_TICKET_ROUTE, body={})
+    assert status == 200, ("ws-ticket status", status)
+    assert body.get("ttl_seconds") == EXPECTED_TICKET_TTL_SECONDS, ("ttl", body)
+    ticket = body.get("ticket")
+    assert isinstance(ticket, str) and len(ticket) > 10, ("ticket shape", body)
+    return ticket
+
+
+def assert_transcript(messages, prompt):
+    user_texts = [message_text(m) for m in messages if m.get("role") == "user"]
+    assistant_texts = [message_text(m) for m in messages if m.get("role") == "assistant"]
+    assert any(prompt in text for text in user_texts), (
+        "deterministic user turn missing", user_texts[:2],
+    )
+    assert any(FAKE_PROVIDER_MARKER in text for text in assistant_texts), (
+        "deterministic assistant turn missing", assistant_texts[:2],
+    )
+
+
 class GatewayWS:
     """Newline-delimited JSON-RPC over the candidate's /api/ws.
 
-    Every received frame is appended to ``self.frames``; lookups scan by
-    index so a turn thread racing the RPC response (message.start can be
-    written before the prompt.submit response) is never lost.
+    ``query_name``/``query_value`` is the WS credential: gated mode accepts
+    a fresh single-use ``?ticket=`` minted from the cookie session; the
+    legacy ``?token=`` form is probe-only and must never reach ready. Every
+    received frame is appended to ``self.frames``; lookups scan by index so
+    a turn thread racing the RPC response (message.start can be written
+    before the prompt.submit response) is never lost.
     """
 
-    def __init__(self, port, token):
+    def __init__(self, port, query_name, query_value):
         from websockets.asyncio.client import connect  # noqa: PLC0415
 
         self._connect_factory = connect
         self.url = "ws://127.0.0.1:%d%s?%s=%s" % (
-            port, WS_PATH, WS_TOKEN_QUERY_PARAM, token,
+            port, WS_PATH, query_name,
+            urllib.parse.quote(query_value, safe=""),
         )
         self.origin = "http://127.0.0.1:%d" % port
         self.ws = None
@@ -439,15 +542,6 @@ class GatewayWS:
                 raise TimeoutError("ws scan timeout after %ss" % timeout)
             await self._pump(remaining)
 
-    async def wait_event(self, start, types, timeout):
-        def pred(frame):
-            if frame.get("method") != "event":
-                return False
-            return (not types) or (frame.get("params") or {}).get("type") in types
-
-        _, frame = await self.scan(start, pred, timeout)
-        return (frame.get("params") or {}).get("type")
-
     async def rpc(self, start, method, params, timeout=45):
         self._id += 1
         rid = "w3-%d" % self._id
@@ -463,10 +557,9 @@ class GatewayWS:
         return response
 
 
-async def ws_probe_reject(port, token):
-    """A wrong token must not yield a working /api/ws connection."""
-    bad = GatewayWS(port, token + "-deliberately-wrong")
-    evidence = {"rejected": False}
+async def ws_probe_never_reaches_ready(port, query_name, query_value):
+    """The given WS credential must not yield a working gateway connection."""
+    bad = GatewayWS(port, query_name, query_value)
     try:
         await bad.connect(timeout=15)
     except Exception as exc:
@@ -479,53 +572,122 @@ async def ws_probe_reject(port, token):
         close_frame = getattr(exc, "rcvd", None)
         if close_frame is not None:
             code = getattr(close_frame, "code", code)
-        evidence = {
-            "rejected": True,
-            "how": type(exc).__name__,
-            "code": code,
-        }
-        return evidence
+        return {"rejected": True, "how": type(exc).__name__, "code": code}
     try:
         # Connected at TCP level: the server must still not admit the
-        # client — either close (4401) or never emit gateway.ready.
+        # client — either close or never emit gateway.ready. The exact
+        # close code is deliberately not asserted.
         try:
-            await bad.wait_event(0, ["gateway.ready"], timeout=5)
-            evidence["how"] = "gateway.ready emitted on bad token"
+            await bad.scan(
+                0,
+                lambda f: f.get("method") == "event"
+                and (f.get("params") or {}).get("type") == "gateway.ready",
+                timeout=5,
+            )
+            return {"rejected": False, "how": "gateway.ready emitted"}
         except TimeoutError:
-            evidence["rejected"] = True
-            evidence["how"] = "no gateway.ready within 5s"
+            return {"rejected": True, "how": "no gateway.ready within 5s"}
         except Exception as exc:
-            evidence["rejected"] = True
-            evidence["how"] = "closed: %s" % type(exc).__name__
-        return evidence
+            return {"rejected": True, "how": "closed: %s" % type(exc).__name__}
     finally:
         await bad.close()
 
 
-def mode_rest_auth(port, token):
+def mode_rest_auth(port, static_token, username, password, jar_path):
     evidence = {}
-    status, body = rest(port, "/api/health")
+    bare = make_opener(make_jar())
+
+    # 1. Public status/readiness: gated mode engaged, exact candidate version.
+    status, body = request_json(bare, "GET", "/api/health")
     assert status == 200, ("health status", status, body)
     assert body.get("ok") is True, ("health ok", body)
     assert body.get("version") == EXPECTED_VERSION, ("health version", body)
-    assert body.get("auth_required") is False, ("health auth_required", body)
-    evidence["health"] = {"version": body.get("version"), "auth_required": body.get("auth_required")}
+    assert body.get("auth_required") is True, ("health auth_required", body)
+    evidence["health"] = {
+        "version": body.get("version"),
+        "auth_required": body.get("auth_required"),
+    }
 
-    status, body = rest(port, "/api/status")
+    status, body = request_json(bare, "GET", "/api/status")
     assert status == 200, ("status status", status)
     assert body.get("version") == EXPECTED_VERSION, ("status version", body)
-    evidence["status_version"] = body.get("version")
+    assert body.get("auth_required") is True, ("status auth_required", body)
+    assert BASIC_PROVIDER_NAME in (body.get("auth_providers") or []), (
+        "status auth_providers", body.get("auth_providers"),
+    )
+    evidence["status_auth_providers"] = body.get("auth_providers")
 
-    # Wrong REST token must be rejected on a gated endpoint.
-    status, body = rest(port, "/api/sessions?limit=10", token="definitely-not-the-token")
-    assert status == 401, ("bad token status", status, body)
+    # 2. Basic discovery: password capability publicly advertised.
+    status, body = request_json(bare, "GET", AUTH_PROVIDERS_ROUTE)
+    assert status == 200, ("providers status", status, body)
+    providers = body.get("providers") or []
+    basic = next(
+        (p for p in providers if p.get("name") == BASIC_PROVIDER_NAME), None
+    )
+    assert basic is not None, ("basic provider missing", providers)
+    assert basic.get("supports_password") is True, ("supports_password", basic)
+    evidence["auth_providers"] = [
+        {"name": p.get("name"), "supports_password": p.get("supports_password")}
+        for p in providers
+    ]
 
-    # Valid REST header must authenticate.
-    status, body = rest(port, "/api/sessions?limit=100", token=token)
-    assert status == 200, ("sessions status", status, body)
+    # 3. Gate enforcement: protected REST rejects no-credential AND the
+    # static session token (header and bearer forms).
+    status, body = request_json(bare, "GET", "/api/sessions?limit=10")
+    assert status == 401, ("no-credential status", status, body)
+    assert body.get("error") == "unauthenticated", ("401 envelope", body)
+    status, body = request_json(
+        bare, "GET", "/api/sessions?limit=10",
+        extra_headers={REST_SESSION_TOKEN_HEADER: static_token},
+    )
+    assert status == 401, ("static token header status", status, body)
+    status, body = request_json(
+        bare, "GET", "/api/sessions?limit=10",
+        extra_headers={"Authorization": "Bearer %s" % static_token},
+    )
+    assert status == 401, ("static token bearer status", status, body)
+    evidence["static_token_rest_inert"] = True
+
+    # Static-token WS upgrade never reaches ready (close code not asserted).
+    ws_probe = asyncio.run(
+        ws_probe_never_reaches_ready(port, WS_TOKEN_QUERY_PARAM, static_token)
+    )
+    assert ws_probe.get("rejected") is True, ("static token WS reached ready", ws_probe)
+    evidence["static_token_ws_inert"] = ws_probe
+
+    # 4. Wrong password: generic rejection (credential material not printed).
+    wrong_status, wrong_body = request_json(
+        make_opener(make_jar()), "POST", PASSWORD_LOGIN_ROUTE,
+        body={"provider": BASIC_PROVIDER_NAME, "username": username,
+              "password": password + "-deliberately-wrong", "next": "/"},
+    )
+    assert wrong_status == 401, ("wrong password status", wrong_status)
+    assert wrong_body.get("detail"), ("generic detail", wrong_body)
+    evidence["wrong_password_rejected"] = True
+
+    # 5. Valid basic login -> private 0600 cookie jar -> authenticated REST.
+    jar = make_jar(jar_path)
+    opener = make_opener(jar)
+    status, body = request_json(
+        opener, "POST", PASSWORD_LOGIN_ROUTE,
+        body={"provider": BASIC_PROVIDER_NAME, "username": username,
+              "password": password, "next": "/"},
+    )
+    assert status == 200, ("login status", status, body)
+    assert body.get("ok") is True, ("login ok", body)
+    save_jar(jar, jar_path)
+    evidence["login_ok"] = True
+
+    status, body = request_json(opener, "GET", AUTH_ME_ROUTE)
+    assert status == 200, ("auth me status", status, body)
+    assert body.get("provider") == BASIC_PROVIDER_NAME, ("auth me provider", body)
+    evidence["auth_me_provider"] = body.get("provider")
+
+    status, body = request_json(opener, "GET", "/api/sessions?limit=100")
+    assert status == 200, ("cookie sessions status", status, body)
     assert isinstance(body.get("sessions"), list), ("sessions shape", body)
 
-    status, body = rest(port, "/api/profiles", token=token)
+    status, body = request_json(opener, "GET", "/api/profiles")
     assert status == 200, ("profiles status", status, body)
     profiles = body.get("profiles") or []
     assert len(profiles) == 1, ("expected exactly one profile", profiles)
@@ -544,25 +706,14 @@ def mode_rest_auth(port, token):
     print("W3-REST-AUTH-OK " + json.dumps(evidence))
 
 
-async def mode_ws_auth(port, token):
+async def mode_turn(port, jar_path, prompt, model, provider):
     evidence = {}
-    bad = await ws_probe_reject(port, token)
-    assert bad.get("rejected") is True, ("bad WS token accepted", bad)
-    evidence["bad_token"] = bad
+    opener = make_opener(load_jar(jar_path))
 
-    good = GatewayWS(port, token)
-    await good.connect()
-    try:
-        ready_type = await good.wait_event(0, ["gateway.ready"], timeout=20)
-        evidence["gateway_ready"] = ready_type
-    finally:
-        await good.close()
-    print("W3-WS-AUTH-OK " + json.dumps(evidence))
-
-
-async def mode_turn(port, token, prompt, model, provider):
-    evidence = {}
-    client = GatewayWS(port, token)
+    # Fresh single-use ticket minted from the cookie session, immediately
+    # traded for the WS upgrade.
+    ticket = mint_ticket(opener)
+    client = GatewayWS(port, WS_TICKET_QUERY_PARAM, ticket)
     await client.connect()
     try:
         ready_index, _ = await client.scan(
@@ -594,7 +745,9 @@ async def mode_turn(port, token, prompt, model, provider):
         evidence["stored_session_id"] = stored_key
 
         # A created session is NOT durable before its first prompt.
-        status, body = rest(port, "/api/sessions?limit=100", token=token)
+        status, body = request_json(
+            opener, "GET", "/api/sessions?limit=100",
+        )
         assert status == 200, ("pre-prompt sessions status", status)
         ids = [row.get("id") for row in body.get("sessions") or []]
         assert stored_key not in ids, ("row existed before first prompt", ids)
@@ -657,9 +810,9 @@ async def mode_turn(port, token, prompt, model, provider):
         evidence["complete_status"] = complete.get("status")
         evidence["final_text_prefix"] = final_text[:64]
 
-        # Durable transcript BEFORE restart (real-agent persistence path):
+        # Durable transcript BEFORE recreation (real-agent persistence path):
         # the user turn and the assistant turn must both be present.
-        status, body = rest(port, "/api/sessions?limit=100", token=token)
+        status, body = request_json(opener, "GET", "/api/sessions?limit=100")
         assert status == 200, ("post-turn sessions status", status)
         row = next(
             (r for r in body.get("sessions") or [] if r.get("id") == stored_key), None
@@ -667,22 +820,13 @@ async def mode_turn(port, token, prompt, model, provider):
         assert row is not None, "session row missing after first prompt"
         evidence["row_profile"] = row.get("profile")
 
-        mstatus, mbody = rest(port, "/api/sessions/%s/messages" % stored_key, token=token)
+        mstatus, mbody = request_json(
+            opener, "GET", "/api/sessions/%s/messages" % stored_key,
+        )
         assert mstatus == 200, ("messages status", mstatus, mbody)
         assert mbody.get("session_id") == stored_key, ("messages session_id", mbody)
         messages = mbody.get("messages") or []
-        user_texts = [
-            message_text(m) for m in messages if m.get("role") == "user"
-        ]
-        assistant_texts = [
-            message_text(m) for m in messages if m.get("role") == "assistant"
-        ]
-        assert any(prompt in text for text in user_texts), (
-            "deterministic user turn not persisted", user_texts[:2],
-        )
-        assert any(FAKE_PROVIDER_MARKER in text for text in assistant_texts), (
-            "deterministic assistant turn not persisted", assistant_texts[:2],
-        )
+        assert_transcript(messages, prompt)
         evidence["rest_message_count"] = len(messages)
         evidence["persisted_user_turn"] = True
         evidence["persisted_assistant_turn"] = True
@@ -692,9 +836,13 @@ async def mode_turn(port, token, prompt, model, provider):
     return evidence
 
 
-async def mode_resume_live(port, token, stored_key):
+async def mode_resume_live(port, jar_path, stored_key):
     evidence = {}
-    client = GatewayWS(port, token)
+    opener = make_opener(load_jar(jar_path))
+
+    # Phase 7: a NEW ticket from the SAME cookie session.
+    ticket = mint_ticket(opener)
+    client = GatewayWS(port, WS_TICKET_QUERY_PARAM, ticket)
     await client.connect()
     try:
         ready_index, _ = await client.scan(
@@ -710,7 +858,7 @@ async def mode_resume_live(port, token, stored_key):
         assert result.get("resumed") == stored_key, ("resume", resumed)
         messages_text = json.dumps(result.get("messages") or [])
         assert FAKE_PROVIDER_MARKER in messages_text, (
-            "live resume lost the streamed transcript",
+            "live resume lost the durable transcript",
             messages_text[:300],
         )
         evidence["resumed"] = result.get("resumed")
@@ -720,14 +868,24 @@ async def mode_resume_live(port, token, stored_key):
     print("W3-RESUME-LIVE-OK " + json.dumps(evidence))
 
 
-async def mode_post_restart(port, token, stored_key, prompt):
+async def mode_post_restart(port, jar_path, stored_key, prompt):
     evidence = {}
-    status, body = rest(port, "/api/sessions?limit=100", token=token)
-    assert status == 200, ("post-restart sessions status", status)
+    # Phase 9: the PRE-RECREATION cookie jar still authenticates without a
+    # new password login (stateless HMAC session, stable synthetic secret).
+    opener = make_opener(load_jar(jar_path))
+    status, body = request_json(opener, "GET", AUTH_ME_ROUTE)
+    assert status == 200, ("post-recreate auth me status", status, body)
+    assert body.get("provider") == BASIC_PROVIDER_NAME, (
+        "post-recreate auth me provider", body,
+    )
+    evidence["auth_me_provider"] = body.get("provider")
+
+    status, body = request_json(opener, "GET", "/api/sessions?limit=100")
+    assert status == 200, ("post-recreation sessions status", status)
     row = next(
         (r for r in body.get("sessions") or [] if r.get("id") == stored_key), None
     )
-    assert row is not None, "session row did not persist across restart"
+    assert row is not None, "session row did not persist across recreation"
     assert row.get("title") == SESSION_TITLE, ("durable title", row.get("title"))
     assert row.get("profile") == CANONICAL_DEFAULT, (
         "canonical default profile stamp", row.get("profile"),
@@ -739,26 +897,19 @@ async def mode_post_restart(port, token, stored_key, prompt):
         "is_default_profile": row.get("is_default_profile"),
     }
 
-    # The persisted transcript must survive the real restart.
-    mstatus, mbody = rest(port, "/api/sessions/%s/messages" % stored_key, token=token)
-    assert mstatus == 200, ("post-restart messages status", mstatus, mbody)
+    # The persisted transcript must survive the real recreation.
+    mstatus, mbody = request_json(
+        opener, "GET", "/api/sessions/%s/messages" % stored_key,
+    )
+    assert mstatus == 200, ("post-recreation messages status", mstatus, mbody)
     assert mbody.get("session_id") == stored_key, ("messages session_id", mbody)
     messages = mbody.get("messages") or []
-    user_texts = [
-        message_text(m) for m in messages if m.get("role") == "user"
-    ]
-    assistant_texts = [
-        message_text(m) for m in messages if m.get("role") == "assistant"
-    ]
-    assert any(prompt in text for text in user_texts), (
-        "user turn lost across restart", user_texts[:2],
-    )
-    assert any(FAKE_PROVIDER_MARKER in text for text in assistant_texts), (
-        "assistant turn lost across restart", assistant_texts[:2],
-    )
+    assert_transcript(messages, prompt)
     evidence["rest_message_count"] = len(messages)
 
-    client = GatewayWS(port, token)
+    # NEW post-recreate ticket; reconnect; same durable transcript on resume.
+    ticket = mint_ticket(opener)
+    client = GatewayWS(port, WS_TICKET_QUERY_PARAM, ticket)
     await client.connect()
     try:
         ready_index, _ = await client.scan(
@@ -771,14 +922,14 @@ async def mode_post_restart(port, token, stored_key, prompt):
             timeout=90,
         )
         result = resumed.get("result") or {}
-        assert result.get("resumed") == stored_key, ("post-restart resume", resumed)
+        assert result.get("resumed") == stored_key, ("post-recreate resume", resumed)
         assert result.get("session_key") == stored_key, (
             "resume session_key", result,
         )
         assert result.get("status") == "idle", ("resume status", result)
         messages_text = json.dumps(result.get("messages") or [])
         assert FAKE_PROVIDER_MARKER in messages_text, (
-            "post-restart resume lost the durable transcript",
+            "post-recreate resume lost the durable transcript",
             messages_text[:300],
         )
         evidence["resumed"] = result.get("resumed")
@@ -789,20 +940,17 @@ async def mode_post_restart(port, token, stored_key, prompt):
 
 
 def main():
+    global PORT
+    PORT = int(sys.argv[2])
     mode = sys.argv[1]
-    port = int(sys.argv[2])
-    token = sys.argv[3]
-    extra = sys.argv[4:]
     if mode == "rest-auth":
-        mode_rest_auth(port, token)
-    elif mode == "ws-auth":
-        asyncio.run(mode_ws_auth(port, token))
+        mode_rest_auth(PORT, sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6])
     elif mode == "turn":
-        asyncio.run(mode_turn(port, token, extra[0], extra[1], extra[2]))
+        asyncio.run(mode_turn(PORT, sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]))
     elif mode == "resume-live":
-        asyncio.run(mode_resume_live(port, token, extra[0]))
+        asyncio.run(mode_resume_live(PORT, sys.argv[3], sys.argv[4]))
     elif mode == "post-restart":
-        asyncio.run(mode_post_restart(port, token, extra[0], extra[1]))
+        asyncio.run(mode_post_restart(PORT, sys.argv[3], sys.argv[4], sys.argv[5]))
     else:
         raise AssertionError("unknown mode: %s" % mode)
 
@@ -819,9 +967,10 @@ def _module_source() -> str:
 
 class HermesDesktopGatewayCompatContractTests(unittest.TestCase):
     """Fast structural suite (no Docker): pins the gate wiring, the exact
-    v0.21 token-mode protocol constants, and the loopback/credential-free
-    fake-provider seam. Runs on ordinary ``make test`` so discovery stays
-    guarded even if the runtime class is refactored."""
+    v0.21 gated basic/cookie/ticket protocol constants, the recreation
+    lifecycle, and the loopback/credential-free fake-provider seam. Runs on
+    ordinary ``make test`` so discovery stays guarded even if the runtime
+    class is refactored."""
 
     def test_gate_variables_are_the_documented_env_names(self) -> None:
         self.assertEqual(DOCKER_GATE_ENV_VAR, "RUN_DOCKER_TESTS")
@@ -847,16 +996,58 @@ class HermesDesktopGatewayCompatContractTests(unittest.TestCase):
         self.assertIn("docker_available()", setUp_source)
         self.assertIn("skipTest(", setUp_source)
 
-    def test_protocol_constants_match_v021_token_mode(self) -> None:
-        self.assertEqual(WS_PATH, "/api/ws")
-        self.assertEqual(WS_TOKEN_QUERY_PARAM, "token")
-        self.assertEqual(REST_SESSION_TOKEN_HEADER, "X-Hermes-Session-Token")
+    def test_protocol_constants_match_v021_gated_mode(self) -> None:
+        self.assertEqual(AUTH_PROVIDERS_ROUTE, "/api/auth/providers")
+        self.assertEqual(PASSWORD_LOGIN_ROUTE, "/auth/password-login")
+        self.assertEqual(AUTH_ME_ROUTE, "/api/auth/me")
+        self.assertEqual(WS_TICKET_ROUTE, "/api/auth/ws-ticket")
+        self.assertEqual(BASIC_PROVIDER_NAME, "basic")
+        self.assertEqual(EXPECTED_TICKET_TTL_SECONDS, 30)
         self.assertEqual(EXPECTED_CANDIDATE_VERSION, "0.21.0")
+        self.assertEqual(WS_TICKET_QUERY_PARAM, "ticket")
         self.assertEqual(PUBLIC_PROFILE_DISPLAY_NAME, "Josemar")
         self.assertEqual(CANONICAL_DEFAULT_PROFILE, "default")
         self.assertEqual(EXPECTED_BASE_HERMES_HOME, "/opt/data")
-        self.assertIn(WS_PATH, W3_CLIENT_SOURCE)
-        self.assertIn(REST_SESSION_TOKEN_HEADER, W3_CLIENT_SOURCE)
+        for needle in (
+            PASSWORD_LOGIN_ROUTE, AUTH_PROVIDERS_ROUTE, AUTH_ME_ROUTE,
+            WS_TICKET_ROUTE, "gateway.ready",
+        ):
+            self.assertIn(needle, W3_CLIENT_SOURCE)
+
+    def test_gated_design_replaces_static_token_acceptance(self) -> None:
+        """Token-mode is NOT the acceptance protocol: the static session
+        token appears only in inertness probes; every accepted WS credential
+        is a freshly minted ?ticket= from the cookie session; the lifecycle
+        uses a real force-recreate and a private 0600 cookie jar."""
+        source = _module_source()
+        client = W3_CLIENT_SOURCE
+        # Accepted WS credentials are tickets, minted fresh per connection.
+        self.assertEqual(client.count("GatewayWS(port, WS_TICKET_QUERY_PARAM, ticket)"), 3)
+        # The static token is constructed exactly once — the inertness probe
+        # (the WS credential itself is a GatewayWS constructor parameter, so
+        # the token never appears as a hard-coded accepted credential).
+        self.assertEqual(
+            client.count("ws_probe_never_reaches_ready(port, WS_TOKEN_QUERY_PARAM"), 1
+        )
+        self.assertIn("async def ws_probe_never_reaches_ready(port, query_name, query_value)", client)
+        # Cookie jar: private 0600 file inside the disposable volume,
+        # reused after recreation without a new login.
+        self.assertIn("os.chmod(jar_path, 0o600)", client)
+        self.assertEqual(COOKIE_JAR_PATH, "/opt/data/.w3-gate/cookies.txt")
+        self.assertIn("load_jar(jar_path)", client)
+        # Real recreation lifecycle (force-recreate, no build, volumes kept).
+        self.assertIn('self.runtime.recreate("hermes")', source)
+        # Gated bind: explicitly non-loopback inside the container.
+        setUp_source = inspect.getsource(HermesDesktopGatewayCompatTests.setUp)
+        self.assertIn('"HERMES_DASHBOARD_HOST"', setUp_source)
+        self.assertIn('"0.0.0.0"', setUp_source)
+        self.assertIn('"HERMES_DASHBOARD_INSECURE"', setUp_source)
+        self.assertIn('"HERMES_DASHBOARD"', setUp_source)
+        # Synthetic basic credentials are explicit, never host-derived.
+        self.assertIn("BASIC_USERNAME", setUp_source)
+        self.assertIn("BASIC_PASSWORD", setUp_source)
+        self.assertIn("BASIC_SECRET", setUp_source)
+        self.assertGreaterEqual(len(BASIC_SECRET), 16)
 
     def test_fake_provider_seam_is_loopback_and_credential_free(self) -> None:
         # The provider seam is target-supported `custom_providers` config with
@@ -883,10 +1074,7 @@ class HermesDesktopGatewayCompatContractTests(unittest.TestCase):
         source = _module_source()
         self.assertIn("ComposeRuntime()", source)
         self.assertIn("addCleanup(self.runtime.down)", source)
-        self.assertIn('"HERMES_DASHBOARD_HOST"', source)
-        self.assertIn('"127.0.0.1"', source)
-        self.assertIn('"HERMES_DASHBOARD_INSECURE"', source)
-        self.assertIn('"HERMES_DASHBOARD"', source)
+        self.assertIn("addCleanup(self._stop_fake_provider)", source)
         # The provider entry is applied to the RUNTIME config only (test-local
         # state on the disposable volume) and proven through the real
         # hermes_cli resolution path before the turn.
@@ -898,10 +1086,12 @@ class HermesDesktopGatewayCompatContractTests(unittest.TestCase):
 
 class HermesDesktopGatewayCompatTests(unittest.TestCase):
     """Opt-in Docker gate: builds the real v0.21 candidate image via this
-    test's disposable Compose project and proves the Desktop Remote
-    token-auth REST/WS/session/stream/persist/restart protocol inside the
-    container as the hermes runtime user, driving the normal real-agent
-    persistence path through a disposable loopback OpenAI-compatible fake."""
+    test's disposable Compose project and proves the PRODUCTION-EQUIVALENT
+    gated Desktop Remote protocol (basic login -> private cookie jar ->
+    single-use WS tickets) inside the container as the hermes runtime user,
+    driving the normal real-agent persistence path through a disposable
+    loopback OpenAI-compatible fake, including transcript + cookie-session
+    durability across a real force-recreate."""
 
     def setUp(self) -> None:
         if os.getenv(DOCKER_GATE_ENV_VAR) != "1":
@@ -914,20 +1104,25 @@ class HermesDesktopGatewayCompatTests(unittest.TestCase):
         if not docker_available():
             self.skipTest("docker CLI is not available")
         self.runtime = ComposeRuntime()
-        # Explicitly enable the dashboard, keep it container-loopback, and
-        # pin host-publish ports away from dev/production listeners.
-        # HERMES_DASHBOARD_INSECURE is pinned to "0" on purpose: v0.21 no
-        # longer lets it bypass dashboard auth, and this gate must never
-        # depend on it — the loopback bind itself keeps token mode active.
+        # PRODUCTION-EQUIVALENT gated dashboard: explicitly enabled on a
+        # non-loopback container bind so the v0.21 auth gate engages with the
+        # bundled basic provider (synthetic credentials only). INSECURE is
+        # pinned to "0" — it does not bypass auth and must never be relied on.
+        # The static session token still exists (compose interpolation needs
+        # it) and is proven INERT by the gate itself.
         self.runtime.env["HERMES_DASHBOARD"] = "1"
-        self.runtime.env["HERMES_DASHBOARD_HOST"] = "127.0.0.1"
+        self.runtime.env["HERMES_DASHBOARD_HOST"] = "0.0.0.0"
         self.runtime.env["HERMES_DASHBOARD_INSECURE"] = "0"
+        self.runtime.env["HERMES_DASHBOARD_BASIC_AUTH_USERNAME"] = BASIC_USERNAME
+        self.runtime.env["HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"] = BASIC_PASSWORD
+        self.runtime.env["HERMES_DASHBOARD_BASIC_AUTH_SECRET"] = BASIC_SECRET
         self.runtime.env["HERMES_DASHBOARD_PORT"] = DASHBOARD_PORT
         self.runtime.env["HERMES_DASHBOARD_BIND_IP"] = "127.0.0.1"
         self.runtime.env["HERMES_API_SERVER_PORT"] = API_SERVER_PORT
         self.runtime.env["HERMES_API_SERVER_BIND_IP"] = "127.0.0.1"
-        # The session token is the synthetic ComposeRuntime-generated value.
-        self.session_token = self.runtime.env["HERMES_DASHBOARD_SESSION_TOKEN"]
+        # The static session token is the synthetic ComposeRuntime-generated
+        # value; the gate proves it is inert in gated mode.
+        self.static_session_token = self.runtime.env["HERMES_DASHBOARD_SESSION_TOKEN"]
         self._client_shipped = False
         self._mock_started = False
         self.addCleanup(self.runtime.down)
@@ -953,7 +1148,11 @@ class HermesDesktopGatewayCompatTests(unittest.TestCase):
 
     def _ship_payload(self, name: str, source: str, target_path: str) -> None:
         encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
-        self._hermes_exec(f"echo {encoded} | base64 -d > {target_path}")
+        directory = os.path.dirname(target_path)
+        self._hermes_exec(
+            f"mkdir -p {shlex.quote(directory)} && "
+            f"echo {encoded} | base64 -d > {shlex.quote(target_path)}"
+        )
 
     def _ship_client(self) -> None:
         if self._client_shipped:
@@ -1048,9 +1247,10 @@ class HermesDesktopGatewayCompatTests(unittest.TestCase):
         """Ship (once) and run the in-container client; return evidence.
 
         Client output is always persisted under the gitignored dump dir so
-        failures leave real evidence behind."""
+        failures leave real evidence behind. Arguments are positional and
+        quoted; credentials/cookies/tickets are never printed by the client."""
         self._ship_client()
-        argv = " ".join(shlex.quote(part) for part in (mode, DASHBOARD_PORT, self.session_token) + args)
+        argv = " ".join(shlex.quote(part) for part in (mode, DASHBOARD_PORT) + args)
         proc = self._hermes_exec(
             f"/opt/hermes/.venv/bin/python3 {IN_CONTAINER_CLIENT_PATH} {argv}",
             timeout=timeout,
@@ -1076,21 +1276,17 @@ class HermesDesktopGatewayCompatTests(unittest.TestCase):
             if stderr:
                 handle.write("\n--- stderr ---\n" + stderr)
 
-    def _restart_hermes_preserving_state(self) -> None:
-        """Stop and restart the hermes service; the disposable named volume
-        is preserved (only ComposeRuntime.down removes project volumes)."""
-        self.runtime.stop("hermes", timeout=300)
-        self.runtime.start("hermes", timeout=600)
-
     # -- the gate -------------------------------------------------------------
 
     def test_v021_desktop_gateway_compat_lifecycle(self) -> None:
-        """Full Desktop Remote token-auth lifecycle against the built
-        candidate image: public status/readiness + version, token rejection
-        and acceptance (REST + WS), profile surface, streamed REAL-agent
-        turn over the disposable loopback provider with durable persisted
-        transcript, reconnect rediscovers the session, and persisted
-        transcript + resume across a real container restart."""
+        """Full gated Desktop Remote lifecycle against the built candidate
+        image: public status/readiness + version with the gate engaged,
+        basic discovery, static-token inertness (REST + WS), wrong-password
+        rejection, basic login with a private 0600 cookie jar, fresh
+        single-use ticket WS upgrades, streamed REAL-agent turn over the
+        disposable loopback provider with durable persisted transcript,
+        reconnect resume, and cookie-session + transcript durability across
+        a real force-recreate."""
         # Build the real candidate image and start the isolated stack.
         self.runtime.up("hermes", timeout=1800)
         self.runtime.wait_until_hermes_writable(timeout=180)
@@ -1102,15 +1298,25 @@ class HermesDesktopGatewayCompatTests(unittest.TestCase):
         self._assert_provider_resolves()
         self._start_fake_provider()
 
-        # 1+2+3+4: public status/readiness/version, bad/good REST + WS auth,
-        # and the public-profile surface.
-        self._run_client("rest-auth", timeout=180)
-        self._run_client("ws-auth", timeout=120)
+        # Phases 1-5: public status/readiness with the gate engaged, basic
+        # discovery, static-token inertness (REST + WS), wrong-password
+        # rejection, basic login -> private 0600 cookie jar, authenticated
+        # REST, public Josemar over canonical default.
+        self._run_client(
+            "rest-auth",
+            self.static_session_token,
+            BASIC_USERNAME,
+            BASIC_PASSWORD,
+            COOKIE_JAR_PATH,
+            timeout=240,
+        )
 
-        # 5+6+7: session create (not durable pre-prompt), streamed REAL-agent
-        # turn over the loopback fake, durable user+assistant transcript.
+        # Phase 6: fresh ticket -> gateway.ready -> session create (not
+        # durable pre-prompt) -> streamed REAL-agent turn over the loopback
+        # fake -> durable user+assistant transcript.
         turn_evidence = self._run_client(
             "turn",
+            COOKIE_JAR_PATH,
             FAKE_PROVIDER_PROMPT,
             FAKE_PROVIDER_MODEL,
             FAKE_PROVIDER_NAME,
@@ -1119,22 +1325,25 @@ class HermesDesktopGatewayCompatTests(unittest.TestCase):
         stored_key = turn_evidence["stored_session_id"]
         self._assert_mock_hit()
 
-        # 8: disconnect/reconnect — a fresh WS connection rediscovers the
-        # session by its stored id and receives the transcript.
-        self._run_client("resume-live", stored_key, timeout=180)
+        # Phase 7: a NEW ticket from the SAME cookie session; reconnect and
+        # resume the durable transcript.
+        self._run_client("resume-live", COOKIE_JAR_PATH, stored_key, timeout=180)
 
-        # 9: real gateway/container restart preserving the disposable
-        # volume; re-apply the test-local provider state (the container init
-        # re-materializes the runtime config from the template) and restart
-        # the in-container fake; then durable row + REST transcript + WS
-        # resume history.
-        self._restart_hermes_preserving_state()
+        # Phase 8: REAL recreation (compose up -d --force-recreate --no-build;
+        # disposable volume preserved), then only the disposable provider
+        # runtime config is re-applied and the fake restarted.
+        self.runtime.recreate("hermes", timeout=600)
         self.runtime.wait_until_hermes_writable(timeout=180)
         self._wait_dashboard_ready()
         self._apply_provider_config()
         self._start_fake_provider()
+
+        # Phase 9: pre-recreation cookie jar still authenticates /api/auth/me
+        # without a new login; durable transcript via REST; NEW post-recreate
+        # ticket reconnects and session.resume returns the same transcript.
         post_evidence = self._run_client(
-            "post-restart", stored_key, FAKE_PROVIDER_PROMPT, timeout=240,
+            "post-restart", COOKIE_JAR_PATH, stored_key,
+            FAKE_PROVIDER_PROMPT, timeout=240,
         )
         self.assertEqual(post_evidence["row"]["id"], stored_key)
         self.assertEqual(post_evidence["row"]["title"], SESSION_TITLE)

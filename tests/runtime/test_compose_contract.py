@@ -74,6 +74,22 @@ class ComposeContractTests(unittest.TestCase):
         self.assertIn('test: ["CMD", "hermes", "--version"]', block)
         self.assertNotIn('"CMD", "hermes", "version"', block)
 
+    def test_static_session_token_interpolation_wording_is_loopback_legacy(self) -> None:
+        # Revision 2 (issue #156): the static session token stays REQUIRED
+        # via Compose :? interpolation (loopback/legacy dashboard
+        # compatibility), but its error wording must not present it as the
+        # production non-loopback Desktop Remote credential — that path
+        # authenticates via the basic password login (gated REST/WS reject
+        # the static token).
+        block = service_block(self.text, "hermes")
+        self.assertIn(
+            "HERMES_DASHBOARD_SESSION_TOKEN=${HERMES_DASHBOARD_SESSION_TOKEN:?",
+            block,
+        )
+        self.assertIn("loopback/legacy dashboard compatibility", block)
+        self.assertIn("NOT the production non-loopback Desktop Remote credential", block)
+        self.assertNotIn("for Hermes Desktop REST/WebSocket access", block)
+
     def test_aux_ml_shared_volume_is_read_only(self) -> None:
         block = service_block(self.text, "aux-ml")
         self.assertIn("- aux-ml-shared:/shared:ro", block)

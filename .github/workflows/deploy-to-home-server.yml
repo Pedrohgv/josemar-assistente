@@ -504,8 +504,12 @@ jobs:
             exit 1
           fi
 
+          # Static token: still REQUIRED for Compose interpolation and
+          # loopback/legacy dashboard compatibility, but it is NOT the
+          # production non-loopback Desktop Remote credential (gated REST/WS
+          # reject it; Desktop authenticates via the basic password login).
           if [ -z "$HERMES_DASHBOARD_SESSION_TOKEN" ]; then
-            echo "ERROR: HERMES_DASHBOARD_SESSION_TOKEN secret is required for Hermes Desktop dashboard access"
+            echo "ERROR: HERMES_DASHBOARD_SESSION_TOKEN secret is required (loopback/legacy dashboard compatibility; not the production non-loopback Desktop Remote credential)"
             exit 1
           fi
 
