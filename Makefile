@@ -1,5 +1,6 @@
 .PHONY: test test-runtime test-aux-runtime verify docs-check \
 	test-browser-routing-runtime \
+	test-hermes-desktop-gateway-compat \
 	test-vault-recovery test-vault-recovery-portability test-vault-recovery-round-trip \
 	test-vault-recovery-dr-drill \
 	test-mnemosyne-retrieval test-mnemosyne-retrieval-smoke test-mnemosyne-retrieval-tei-smoke \
@@ -45,6 +46,25 @@ test-aux-runtime:
 test-browser-routing-runtime:
 	RUN_DOCKER_TESTS=1 RUN_BROWSER_ROUTING_RUNTIME_TESTS=1 \
 	python3 -m unittest tests.runtime.test_browser_routing_runtime -v
+
+# Hermes Desktop Remote gateway compat gate (issue #156 W3, revision 2):
+# builds the real v0.21 candidate image via the test's own disposable
+# Compose project and proves the production-equivalent gated-dashboard
+# protocol inside the container as the hermes runtime user: public
+# status/readiness with auth_required true and `basic` provider discovery,
+# static session-token inertness (rejected by gated REST/WS), wrong-password
+# rejection, password login -> private cookie jar -> fresh single-use
+# ws-ticket per WebSocket connection, a streamed real-agent turn over a
+# disposable loopback OpenAI-compatible fake provider with a deterministic
+# persisted user + assistant transcript, fresh-ticket reconnect resume, and
+# a real force-recreate proving cookie reuse without a new login plus
+# durable transcript resume on a disposable volume. Skipped unless both
+# RUN_DOCKER_TESTS=1 and RUN_HERMES_DESKTOP_GATEWAY_COMPAT_TESTS=1 are set
+# (the target supplies both); the fast structural suite in the same module
+# runs on ordinary `make test`.
+test-hermes-desktop-gateway-compat:
+	RUN_DOCKER_TESTS=1 RUN_HERMES_DESKTOP_GATEWAY_COMPAT_TESTS=1 \
+	python3 -m unittest tests.runtime.test_hermes_desktop_gateway_compat -v
 
 # Vault-recovery Phase 1: fast unit/contract suite (no Docker).
 test-vault-recovery:

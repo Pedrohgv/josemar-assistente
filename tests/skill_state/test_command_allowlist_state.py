@@ -13,7 +13,7 @@ Contract under test:
   keys, and empty/non-string entries are rejected. Canonical
   serialization is sorted and deduped.
 - Runtime projection is the ROOT-LEVEL ``config["command_allowlist"]``
-  key (pinned Hermes v2026.8.18), never ``skills.command_allowlist``.
+  key (pinned Hermes v2026.8.31), never ``skills.command_allowlist``.
 - Presence semantics: an explicit ``[]`` is authoritative (runtime
   ``command_allowlist`` stays durably empty) while an ABSENT sidecar
   removes the runtime key.
@@ -1679,14 +1679,14 @@ class ClearCommandAllowlistStatefulTests(WorkspaceTestCase):
 
 
 # ---------------------------------------------------------------------------
-# Native-save wrapper contract (pinned v2026.8.18 preserve_keys pass-through)
+# Native-save wrapper contract (pinned v2026.8.31 preserve_keys pass-through)
 # ---------------------------------------------------------------------------
 
 
 class NativeSaveWrapperContractTests(unittest.TestCase):
     """_native_save_config forwards preserve_keys to the pinned upstream.
 
-    Pinned upstream signature (Hermes v2026.8.18)::
+    Pinned upstream signature (Hermes v2026.8.31)::
 
         save_config(config, *, strip_defaults=True,
                     preserve_keys: Optional[Set[Tuple[str, ...]]] = None,

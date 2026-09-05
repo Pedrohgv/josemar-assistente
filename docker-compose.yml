@@ -56,7 +56,7 @@ services:
       context: .
       dockerfile: Dockerfile.hermes
       args:
-        HERMES_BASE_IMAGE: ${HERMES_BASE_IMAGE:-nousresearch/hermes-agent:v2026.8.18}
+        HERMES_BASE_IMAGE: ${HERMES_BASE_IMAGE:-nousresearch/hermes-agent:v2026.8.31}
         GOGCLI_REF: ${GOGCLI_REF:-e88964a1b1a46483fbc6a55ecbf2192ff522f2ea}
     container_name: ${JOSEMAR_CONTAINER_PREFIX:-josemar}-hermes
     restart: unless-stopped
@@ -86,7 +86,7 @@ services:
       - HERMES_DASHBOARD_PORT=${HERMES_DASHBOARD_PORT:-9119}
       - HERMES_DASHBOARD_INSECURE=${HERMES_DASHBOARD_INSECURE:-0}
       - HERMES_DASHBOARD_TUI=${HERMES_DASHBOARD_TUI:-1}
-      - HERMES_DASHBOARD_SESSION_TOKEN=${HERMES_DASHBOARD_SESSION_TOKEN:?Set HERMES_DASHBOARD_SESSION_TOKEN for Hermes Desktop REST/WebSocket access}
+      - HERMES_DASHBOARD_SESSION_TOKEN=${HERMES_DASHBOARD_SESSION_TOKEN:?Set HERMES_DASHBOARD_SESSION_TOKEN (static token for loopback/legacy dashboard compatibility only; NOT the production non-loopback Desktop Remote credential — Desktop authenticates via the basic password login)}
       - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:?Set HERMES_DASHBOARD_BASIC_AUTH_USERNAME for dashboard login}
       - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:?Set HERMES_DASHBOARD_BASIC_AUTH_PASSWORD for dashboard login}
       - HERMES_DASHBOARD_BASIC_AUTH_SECRET=${HERMES_DASHBOARD_BASIC_AUTH_SECRET:?Set HERMES_DASHBOARD_BASIC_AUTH_SECRET for dashboard sessions}
@@ -158,7 +158,7 @@ services:
     networks:
       - josemar-network
     healthcheck:
-      test: ["CMD", "hermes", "version"]
+      test: ["CMD", "hermes", "--version"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -108,7 +108,12 @@ MARKER_TAB_URL = "data:text/html,<title>JC-MARKER-TAB</title>"
 # --remote-debugging-address and rejects non-IP Host headers, so the fixture
 # runs a tiny stdlib TCP forwarder that binds 0.0.0.0:9222 inside its own
 # container, forwards to Chrome's loopback CDP, and rewrites the Host header
-# to 127.0.0.1:9222. This is NOT a launcher-fidelity claim: the fixture
+# to 127.0.0.1:9222. The forwarder is deliberately bounded (concurrency cap,
+# header and idle timeouts, unconditional socket close on every exit path)
+# and the fixture container is started with a raised nofile ulimit, so
+# sustained connection churn can never exhaust the forwarder's file
+# descriptors (EMFILE at accept()). This is NOT a launcher-fidelity claim:
+# the fixture
 # mirrors the launcher's CDP port and its no-`--remote-allow-origins` posture
 # only. Container-required deviations (documented): --no-sandbox
 # (unprivileged container), --user-data-dir=/tmp/fixture-profile (disposable
@@ -154,36 +159,79 @@ CHROME_PID=$!
 python3 - <<'PY'
 import socket, select, threading
 
+# Bounded forwarder. The naive thread-per-connection version could
+# accumulate file descriptors under load (a header read with no timeout,
+# threads pinned forever by silent clients, no guaranteed close on error
+# paths) and eventually hit the container's nofile soft limit (EMFILE at
+# accept()). Bounds:
+#   - at most MAX_CONNECTIONS concurrent proxied connections; excess
+#     connections are closed immediately at accept (probes are sequential
+#     in this gate, so the cap can only engage under a pathological leak);
+#   - a client that connects but never completes a request header is
+#     dropped after HEADER_TIMEOUT seconds;
+#   - a proxied pair with zero traffic for IDLE_TIMEOUT seconds is reaped
+#     (every CLI invocation here is bounded by its own shorter timeout);
+#   - both sockets of a pair are always closed exactly once, on every exit
+#     path, including upstream-connect failure.
+MAX_CONNECTIONS = 256
+HEADER_TIMEOUT = 15
+IDLE_TIMEOUT = 600
+live = [0]
+live_lock = threading.Lock()
+
 def handle(c):
-    up = socket.create_connection(("localhost", 9222))
-    data = b""
-    while b"\r\n\r\n" not in data:
-        chunk = c.recv(65536)
-        if not chunk:
-            break
-        data += chunk
-    head, _, rest = data.partition(b"\r\n\r\n")
-    out = []
-    for ln in head.split(b"\r\n"):
-        if ln.lower().startswith(b"host:"):
-            out.append(b"Host: 127.0.0.1:9222")
-        else:
-            out.append(ln)
-    up.sendall(b"\r\n".join(out) + b"\r\n\r\n" + rest)
-    while True:
-        r, _, _ = select.select([c, up], [], [], 1.0)
-        if not r:
-            continue
-        for s in r:
-            try:
-                d = s.recv(65536)
-            except Exception:
-                d = b""
-            if not d:
-                c.close()
-                up.close()
-                return
-            (up if s is c else c).sendall(d)
+    up = None
+    try:
+        c.settimeout(HEADER_TIMEOUT)
+        up = socket.create_connection(("localhost", 9222), timeout=10)
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = c.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        if not data:
+            return
+        head, _, rest = data.partition(b"\r\n\r\n")
+        out = []
+        for ln in head.split(b"\r\n"):
+            if ln.lower().startswith(b"host:"):
+                out.append(b"Host: 127.0.0.1:9222")
+            else:
+                out.append(ln)
+        # Relay phase: no socket timeout (a healthy WebSocket may idle);
+        # reap only after a long zero-traffic period.
+        c.settimeout(None)
+        up.settimeout(None)
+        up.sendall(b"\r\n".join(out) + b"\r\n\r\n" + rest)
+        idle = 0.0
+        while True:
+            r, _, _ = select.select([c, up], [], [], 1.0)
+            if not r:
+                idle += 1.0
+                if idle >= IDLE_TIMEOUT:
+                    return
+                continue
+            idle = 0.0
+            for s in r:
+                try:
+                    d = s.recv(65536)
+                except Exception:
+                    d = b""
+                if not d:
+                    return
+                (up if s is c else c).sendall(d)
+    except Exception:
+        return
+    finally:
+        for s in (c, up):
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        with live_lock:
+            live[0] -= 1
 
 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -192,6 +240,15 @@ srv.listen(50)
 print("FIXTURE-FORWARDER-READY", flush=True)
 while True:
     c, _ = srv.accept()
+    with live_lock:
+        if live[0] >= MAX_CONNECTIONS:
+            # Shed excess load instead of leaking another pair of fds.
+            try:
+                c.close()
+            except Exception:
+                pass
+            continue
+        live[0] += 1
     threading.Thread(target=handle, args=(c,), daemon=True).start()
 PY
 '''
@@ -871,14 +928,35 @@ class BrowserRoutingRuntimeTests(unittest.TestCase):
         )
         return int(proc.stdout.strip() or "0")
 
-    def _wait_runtime_config(self, timeout: int = 90) -> None:
+    def _wait_runtime_config(self, timeout: int = 180) -> None:
+        """Wait until /opt/data/config.yaml EXISTS and is WRITABLE by the
+        hermes runtime user.
+
+        Existence alone is not a sufficient readiness condition for the
+        runtime-config mutations below (_swap_connected_cdp /
+        _swap_connected_cdp_to): docker-hermes-init.sh materializes the file
+        mid-init as root:root (template cp+mv) and only chowns
+        $HERMES_HOME to HERMES_UID at the very end of cont-init, after
+        apply-all and the cron installers. A write in that window fails with
+        PermissionError. This probe runs entirely as the hermes user (via
+        _run), so `test -w` is the exact access(W_OK) check the later
+        mutation performs — the direct equivalent of the sibling suites'
+        "Josemar Hermes setup complete" log-marker wait (the final init
+        line, emitted right after that chown), without parsing logs.
+        """
         deadline = time.monotonic() + timeout
+        probe = ("test -f /opt/data/config.yaml"
+                 " && test -w /opt/data/config.yaml && echo READY")
         while time.monotonic() < deadline:
-            proc = self._run("test -f /opt/data/config.yaml && echo READY", check=False, timeout=30)
+            proc = self._run(probe, check=False, timeout=30)
             if proc.returncode == 0 and "READY" in proc.stdout:
                 return
             time.sleep(2)
-        self.fail("/opt/data/config.yaml never materialized in the runtime config")
+        self.fail(
+            "/opt/data/config.yaml never became an existing, hermes-writable "
+            f"runtime config within {timeout}s (the init template copy owns "
+            "it root:root until the final chown)"
+        )
 
     def _assert_gateway_liveness(self) -> None:
         ps = self.runtime.run("ps", "-q", "hermes", check=True, timeout=60)
@@ -911,8 +989,15 @@ class BrowserRoutingRuntimeTests(unittest.TestCase):
         if img.returncode != 0 or not img.stdout.strip():
             self.fail(f"could not resolve the built hermes image id: {img.stderr[-500:]}")
         net = f"{self.runtime.project}_josemar-network"
+        # Raise the fixture's per-process nofile ceiling (this daemon's
+        # container default is a 1024 soft limit) so the bounded forwarder
+        # cannot EMFILE under sustained connection churn. Single-value form
+        # sets soft=hard=2048; combined with the forwarder's 256-connection
+        # cap (~520 fds worst case) descriptor exhaustion is structurally
+        # unreachable. Test-only: the fixture container is disposable.
         proc = subprocess.run(
             ["docker", "run", "-d", "--name", name, "--network", net,
+             "--ulimit", "nofile=2048",
              "--entrypoint", "sh", img.stdout.strip(), "-c", FIXTURE_CMD],
             capture_output=True, text=True, check=False, timeout=120,
         )

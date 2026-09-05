@@ -416,7 +416,7 @@ print("VECTOR_ROWS=%d" % vector_rows)
             )
             self.assertEqual(up.returncode, 0, up.stdout + up.stderr)
             self._assert_no_published_ports()
-            # Compose's healthcheck is intentionally cheap (hermes version),
+            # Compose's healthcheck is intentionally cheap (hermes --version),
             # so wait for the init hook's actual config activation boundary.
             self._wait_for_activation()
 

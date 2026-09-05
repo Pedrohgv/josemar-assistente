@@ -107,7 +107,7 @@ DOCKERFILE = REPO_ROOT / "Dockerfile.hermes"
 
 RCLONE_DIGEST = "rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548"
 
-REVIEWED_HERMES_BASE_IMAGE = "nousresearch/hermes-agent:v2026.8.18"
+REVIEWED_HERMES_BASE_IMAGE = "nousresearch/hermes-agent:v2026.8.31"
 
 LEGACY_MIGRATION_STEP_NAME = (
     "Migrate legacy rclone active config out of Mnemosyne backup state volume"
@@ -2174,6 +2174,46 @@ class DocsContractTests(unittest.TestCase):
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertNotIn("no deployment workflow changes", readme.lower())
         self.assertNotIn("NO deployment workflow changes", readme)
+
+
+class DashboardAuthWordingContractTests(unittest.TestCase):
+    """Static-token wording contract (issue #156 revision 2, W4 alignment).
+
+    The deploy validation must keep REQUIRING
+    `HERMES_DASHBOARD_SESSION_TOKEN` unchanged, but its error wording must
+    present it as loopback/legacy dashboard compatibility only — never as
+    the production non-loopback Hermes Desktop Remote credential (the gated
+    REST/WS path rejects the static token; Desktop authenticates via the
+    bundled `basic` provider password login).
+    """
+
+    def setUp(self) -> None:
+        assert yaml is not None, "PyYAML is required for these contract tests"
+        workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        # The dashboard auth secrets are validated (and written to .env) in
+        # the "Create .env file" step, not the variables-only validation step.
+        self.create_env = _step_text(workflow, "Create .env file")
+
+    def test_static_token_still_required_and_shape_validated(self) -> None:
+        # Validation unchanged: non-empty requirement plus the URL-safe
+        # minimum-length shape check.
+        self.assertIn('if [ -z "$HERMES_DASHBOARD_SESSION_TOKEN" ]; then', self.create_env)
+        self.assertIn(
+            '[[ ! "$HERMES_DASHBOARD_SESSION_TOKEN" =~ ^[A-Za-z0-9._~-]{32,}$ ]]',
+            self.create_env,
+        )
+
+    def test_static_token_error_wording_is_loopback_legacy_scoped(self) -> None:
+        self.assertIn("loopback/legacy dashboard compatibility", self.create_env)
+        self.assertIn(
+            "not the production non-loopback Desktop Remote credential",
+            self.create_env,
+        )
+        # The retired claims must not come back.
+        self.assertNotIn(
+            "required for Hermes Desktop dashboard access", self.create_env
+        )
+        self.assertNotIn("for Hermes Desktop REST/WebSocket access", self.create_env)
 
 
 if __name__ == "__main__":

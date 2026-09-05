@@ -293,6 +293,115 @@ gitignored `dump_folder/browser-routing-runtime/`; teardown is unconditional
 (`docker compose down -v --remove-orphans` plus `docker rm -f` for the
 fixture).
 
+### Hermes Desktop Remote gateway compat gate (issue #156 W3, revision 2)
+
+An opt-in Docker gate that builds the real Hermes v0.21.0 candidate image
+from the production `Dockerfile.hermes` through its OWN disposable Compose
+project (`ComposeRuntime` + the test-isolation overlay) and proves the
+production-equivalent gated-dashboard protocol against the running
+candidate. The dashboard is explicitly enabled on a NON-loopback container
+bind (`HERMES_DASHBOARD_HOST=0.0.0.0`, `HERMES_DASHBOARD_INSECURE=0`),
+which engages the v0.21 dashboard auth gate with the bundled
+synthetic-credential `basic` provider. The protocol client is a small
+stdlib + `websockets` script executed INSIDE the candidate container as
+the `hermes` runtime user using the image's own Hermes venv (the same
+interpreter upstream's ISO certify harness uses), so no host port is
+consumed and no new host-side Python package is required.
+
+Auth-model proof (each phase against the live candidate):
+
+- Public status/readiness: `/api/health` and `/api/status` answer without
+  credentials and report the exact candidate version (`0.21.0`) with
+  `auth_required: true`; `/api/status` advertises the `basic` auth
+  provider, and public `/api/auth/providers` advertises
+  `{name: "basic", supports_password: true}` (basic provider discovery).
+- Static token inertness: the static `HERMES_DASHBOARD_SESSION_TOKEN`
+  (still required by Compose interpolation for loopback/legacy
+  compatibility) is NOT the credential for the gated non-loopback path —
+  a protected REST endpoint rejects BOTH the no-credential request AND
+  the static token (header and bearer forms, HTTP 401), and a `?token=`
+  WebSocket upgrade never reaches `gateway.ready`.
+- Wrong password: `POST /auth/password-login` with a wrong password is
+  rejected with the generic 401.
+- Password -> private cookie jar -> fresh single-use ticket: the valid
+  synthetic username/password pair logs in; the private 0600 cookie jar
+  inside the disposable hermes-data volume persists the session;
+  `/api/auth/me` reports `provider: "basic"`; cookie-authenticated
+  `/api/profiles` and `/api/sessions` succeed, and `/api/profiles` lists
+  exactly ONE profile — the public display name `Josemar` over the
+  canonical base HERMES_HOME with `is_default` true and no duplicate
+  canonical `default` row. Each WebSocket connection mints a FRESH 30s
+  single-use ticket from `POST /api/auth/ws-ticket`; the `?ticket=`
+  upgrade reaches `gateway.ready`.
+- Streamed REAL-agent turn over a fresh ticket: `session.create` returns
+  the live `session_id` plus the durable `stored_session_id`, and the
+  session is NOT durable before its first prompt; `prompt.submit` drives
+  the NORMAL real-agent path over a disposable loopback
+  `custom_providers` OpenAI-compatible fake (no external network, no
+  real credentials). The turn returns `{"status": "streaming"}` and
+  emits `message.start`, streamed `message.delta` frames, and the
+  terminal settled `message.complete` with the fake's deterministic
+  assistant content; settlement is judged ONLY by `message.complete`,
+  never `session.info`; the fake's request log proves the agent hit the
+  loopback `chat/completions` endpoint; the durable transcript is proven
+  via REST `/api/sessions/<stored>/messages` (deterministic user +
+  assistant turns).
+- Fresh-ticket reconnect: a NEW ticket minted from the SAME cookie
+  session reconnects and `session.resume` returns the durable transcript.
+- Real force-recreate with cookie reuse and durable resume:
+  `runtime.recreate("hermes")` (compose `up -d --force-recreate
+  --no-build`) replaces the container while preserving the disposable
+  volume; only the disposable provider runtime config is re-applied and
+  the in-container fake restarted. WITHOUT a new login, the
+  pre-recreation cookie jar still authenticates `/api/auth/me` (stateless
+  HMAC sessions signed with the unchanged synthetic secret survive
+  recreation), the REST transcript persists, and a NEW post-recreate
+  ticket reconnects and `session.resume` returns the same durable
+  transcript.
+
+The provider seam is disposable test-local state: the `custom_providers`
+entry is appended to the RUNTIME config file on the disposable volume
+(never a tracked file) and re-applied after the recreation because the
+container init re-materializes the runtime config from the template on
+every start; the fake provider script also lives on the disposable volume
+and is restarted after the recreation. The real `hermes_cli` resolution
+path is proven (`_get_named_custom_provider`) before the turn.
+
+Opt-in synthetic isolation: gated on `RUN_DOCKER_TESTS=1` AND
+`RUN_HERMES_DESKTOP_GATEWAY_COMPAT_TESTS=1`; all dashboard credentials are
+synthetic values (basic username/password/secret plus the inert static
+session token still required for Compose interpolation); Telegram,
+workspace sync, and hosted-provider credentials are blanked; the
+dashboard is explicitly enabled with `HERMES_DASHBOARD_INSECURE=0` on the
+NON-loopback container bind, which engages the v0.21 auth gate with the
+bundled `basic` provider; no production state, secrets, or volumes are
+mounted, and the fake provider binds container loopback only with a
+synthetic throwaway key (no external calls, no real credentials).
+Credentials, cookies, and tickets are never printed; diagnostics carry
+statuses, ids, and deterministic markers only. Client and mock evidence
+lands only under the gitignored
+`dump_folder/hermes-desktop-gateway-compat/`; cleanup is unconditional
+(`docker compose down -v --remove-orphans`, disposable-mount cleanup, and
+the in-container fake provider killed before teardown).
+
+A fast structural suite in the same module
+(`HermesDesktopGatewayCompatContractTests`) runs on ordinary `make test`
+and pins the gate wiring (both env gates consulted before Docker), the
+exact v0.21 gated basic/cookie/ticket protocol constants, the recreation
+lifecycle, and the loopback/credential-free fake-provider seam without
+Docker.
+
+```bash
+make test-hermes-desktop-gateway-compat
+```
+
+Or directly:
+
+```bash
+RUN_DOCKER_TESTS=1 RUN_HERMES_DESKTOP_GATEWAY_COMPAT_TESTS=1 \
+  python3 -m unittest tests.runtime.test_hermes_desktop_gateway_compat -v
+```
+
 ## Mnemosyne Portuguese Retrieval Quality Gate (Phase 3)
 
 A three-tier harness validates Portuguese vector retrieval quality for the

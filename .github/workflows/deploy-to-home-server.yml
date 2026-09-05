@@ -68,8 +68,8 @@ jobs:
           # auxiliary allowlist must be re-reviewed against that release.
           # Empty is allowed: Compose then uses its repo-authored default.
           # Local/development override stays outside this production gate.
-          if [ -n "$HERMES_BASE_IMAGE" ] && [ "$HERMES_BASE_IMAGE" != "nousresearch/hermes-agent:v2026.8.18" ]; then
-            echo "ERROR: HERMES_BASE_IMAGE must be empty (repo-authored Compose default) or exactly 'nousresearch/hermes-agent:v2026.8.18' (got: $HERMES_BASE_IMAGE)"
+          if [ -n "$HERMES_BASE_IMAGE" ] && [ "$HERMES_BASE_IMAGE" != "nousresearch/hermes-agent:v2026.8.31" ]; then
+            echo "ERROR: HERMES_BASE_IMAGE must be empty (repo-authored Compose default) or exactly 'nousresearch/hermes-agent:v2026.8.31' (got: $HERMES_BASE_IMAGE)"
             echo "       Base-image upgrades change the reviewed pin contract TOGETHER: the Dockerfile.hermes ARG pin, the docker-compose.yml Compose default build arg, and the reviewed tripwire (EXPECTED_HERMES_BASE_IMAGE in tests/skill_state/test_models_overlay.py); update all three and re-review the auxiliary allowlist against the new release before setting this variable."
             exit 1
           fi
@@ -504,8 +504,12 @@ jobs:
             exit 1
           fi
 
+          # Static token: still REQUIRED for Compose interpolation and
+          # loopback/legacy dashboard compatibility, but it is NOT the
+          # production non-loopback Desktop Remote credential (gated REST/WS
+          # reject it; Desktop authenticates via the basic password login).
           if [ -z "$HERMES_DASHBOARD_SESSION_TOKEN" ]; then
-            echo "ERROR: HERMES_DASHBOARD_SESSION_TOKEN secret is required for Hermes Desktop dashboard access"
+            echo "ERROR: HERMES_DASHBOARD_SESSION_TOKEN secret is required (loopback/legacy dashboard compatibility; not the production non-loopback Desktop Remote credential)"
             exit 1
           fi
 
@@ -1734,7 +1738,7 @@ jobs:
 
           echo "Confirming Hermes provider/policy via hermes_cli.config.load_config()..."
           # The hermes cont-init script (00-josemar-setup) runs AFTER the
-          # container's cheap healthcheck (hermes version) passes, so the
+          # container's cheap healthcheck (hermes --version) passes, so the
           # Mnemosyne config may not be written yet when this step starts.
           # Poll up to 60s (12 x 5s) for the init to write memory.provider and
           # the pilot policy, then fail with the last error.

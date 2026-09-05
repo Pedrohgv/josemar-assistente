@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Patch pinned Hermes v2026.8.18 to route the runtime command allowlist
+"""Patch pinned Hermes v2026.8.31 to route the runtime command allowlist
 through the Josemar stateful sidecar helpers (issue #151, W2).
 
-Pinned source identity: nousresearch/hermes-agent:v2026.8.18, commit
-``e624e9fde561e1add9388384012b295fde669ade``. This matches the pinned
+Pinned source identity: nousresearch/hermes-agent:v2026.8.31, commit
+``29112bef099274229cadff79cdff7bf7b99c4b77``. This matches the pinned
 source used by the existing Josemar patchers (patch-hermes-skills-config.py,
 patch-hermes-browser-routing.py). If this commit string no longer matches the
-pinned upstream source, the docstring/allowlist pin-drift tripwire test and
-the fail-loud anchors below will both fail the build.
+pinned upstream source, the pin-identity tripwire assertion in
+tests/skill_state/test_command_allowlist_patch.py and the fail-loud anchors
+below will both fail the build.
 
-Hermes v2026.8.18 persists the runtime command allowlist directly to
+Hermes v2026.8.31 persists the runtime command allowlist directly to
 ``config.yaml``. Josemar tracks only canonical JSON sidecars under
 ``/opt/data/hermes/command-allowlist/`` (the full ``config.yaml`` is
 sensitive and deliberately untracked), so the CLI ``hermes config set/unset
@@ -79,7 +80,7 @@ CONFIG_PATH = Path("/opt/hermes/hermes_cli/config.py")
 
 # Pinned upstream commit. Kept here as a named constant so the contract tests
 # can assert it against the patcher (docstring pin-drift tripwire).
-PINNED_UPSTREAM_SHA = "e624e9fde561e1add9388384012b295fde669ade"
+PINNED_UPSTREAM_SHA = "29112bef099274229cadff79cdff7bf7b99c4b77"
 
 # The root-level exact key this patch intercepts (never a dotted/sub-key path).
 ALLOWLIST_KEY = "command_allowlist"

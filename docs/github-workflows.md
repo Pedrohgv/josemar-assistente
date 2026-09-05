@@ -38,9 +38,9 @@ When adding, deleting, or renaming a workflow, update this index and `.github/wo
 | `GOG_KEYRING_PASSWORD` | No | Optional gog keyring passphrase |
 | `TS_AUTHKEY` | No | Optional unattended Tailscale login |
 | `HERMES_API_SERVER_KEY` | No | Required when `HERMES_API_SERVER_ENABLED=true` |
-| `HERMES_DASHBOARD_SESSION_TOKEN` | Yes | Dashboard session token used by Hermes Desktop for REST/WebSocket access |
-| `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` | Yes | Browser dashboard Basic Auth password |
-| `HERMES_DASHBOARD_BASIC_AUTH_SECRET` | Yes | Stable dashboard session signing secret |
+| `HERMES_DASHBOARD_SESSION_TOKEN` | Yes | Static token required by Compose interpolation for loopback/legacy dashboard compatibility; NOT the production non-loopback Desktop Remote credential (gated REST/WS reject it) |
+| `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` | Yes | Gated Desktop/browser password-login credential (bundled `basic` provider); establishes the persistent cookie session |
+| `HERMES_DASHBOARD_BASIC_AUTH_SECRET` | Yes | Stable session signing secret; preserves cookie sessions across container recreate/restart |
 | `BROWSER_TUNNEL_AUTHORIZED_KEY` | No | Required when `BROWSER_CONTROL_ENABLED=true`; single-line SSH public key for the reverse-tunnel sidecar |
 
 Never document secret values. A workflow change that adds/removes/renames a secret or changes when it is required must update this table and any affected setup/runbook documentation in the same PR.

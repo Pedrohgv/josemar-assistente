@@ -419,6 +419,16 @@ class BrowserRoutingPatchSourceContractTests(unittest.TestCase):
         self.assertEqual(module.BROWSER_USE_CLI_PATH.name, "browser_use_cli.py")
         self.assertEqual(module.MODEL_TOOLS_PATH.name, "model_tools.py")
 
+    def test_patch_docstring_pins_v2026_8_31_provenance(self) -> None:
+        # Issue #156 W4 reconciliation: the patcher docstring must pin the
+        # exact current provenance — Hermes v2026.8.31 and the pinned
+        # upstream commit SHA. (The retired v2026.8.18 pin carried a
+        # 10-digit numeric run that needed a .pii-allowlist exception;
+        # this pin has no such run, so no exception is needed.)
+        docstring = self.text.split('"""', 2)[1]
+        self.assertIn("Hermes v2026.8.31", docstring)
+        self.assertIn("29112bef099274229cadff79cdff7bf7b99c4b77", docstring)
+
     def test_patch_uses_fail_loud_replace_once(self) -> None:
         self.assertIn("def replace_once", self.text)
         self.assertIn("raise RuntimeError", self.text)

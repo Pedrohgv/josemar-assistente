@@ -117,9 +117,9 @@ multiplexing.
   - `fallback_providers[].{provider, model}` — ordered fallback list
   - `auxiliary.<task>.{provider, model}` — per-task model routing for exactly
     the 11 allowlisted auxiliary tasks (upstream dashboard order): `vision`,
-    `web_extract`, `compression`, `skills_hub`, `approval`, `mcp`,
-    `title_generation`, `triage_specifier`, `kanban_decomposer`,
-    `profile_describer`, `curator`
+    `compression`, `skills_hub`, `approval`, `mcp`, `title_generation`,
+    `review`, `triage_specifier`, `kanban_decomposer`, `profile_describer`,
+    `curator`
   - `cron.{model, model_provider}` — fleet cron defaults (blank = inherit default)
   Individual cron job overrides stay in `cron/jobs.json` (per-job
   `model`/`provider` fields) and are NOT duplicated here.
